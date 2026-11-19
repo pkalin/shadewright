@@ -229,7 +229,7 @@ func TestMinimizeCollected(t *testing.T) {
 // replaceFromFunc is ReplaceFrom with from fixed, in the shape of Replace.
 func (r *Redactor) replaceFromFunc(from int) func(string, func(kind, text string) string, func(string) string) string {
 	return func(s string, repl func(kind, text string) string, between func(string) string) string {
-		return r.ReplaceFrom(s, from, repl, between)
+		return r.ReplaceFrom(s, from, nil, repl, between)
 	}
 }
 

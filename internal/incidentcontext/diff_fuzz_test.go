@@ -274,18 +274,15 @@ func mainExcerpt(rec *redacttest.Recorder, data []byte, keep int) (string, bool)
 	return rec.Wrap(released.String)(strings.ToValidUTF8(text, "?")), truncated
 }
 
-// knownBuildFailures are the known failing inputs of FuzzDiffBuild.
-var knownBuildFailures = map[string]redacttest.KnownFailure{
-	string(seedBuildReasonColon): {Property: "P1",
-		Reason: "a waiting reason with a key word behind a fullwidth colon: the context shows the message the release hid"},
-	foundBuildExplicitKey: {Property: "P1",
-		Reason: "an incident symptom whose secret value runs on into a YAML explicit key \"? password\": the value on the next line is shown"},
-}
+// knownBuildFailures are the known failing inputs of FuzzDiffBuild: none since each section is decided once on
+// the values as they were read (#845, fifteenth decision).
+var knownBuildFailures = map[string]redacttest.KnownFailure{}
 
 // foundBuildExplicitKey was found by FuzzDiffBuild in its first five minute run (#845, fifteenth decision),
 // minimised: the incident symptom "{aws_secret_access_key: <probe>}? password" and its next line ": <probe>". The release
-// before ended the first value at "}" and read "? password" as the key of the next line; the rule now hides
-// "? password" as part of the first value, and the value of the next line stays.
+// before ended the first value at "}" and read "? password" as the key of the next line; the rule hides
+// "? password" as part of the first value, and the release's reading of the summary, run on the text the rule
+// had already replaced, no longer saw the key.
 const foundBuildExplicitKey = "19X\xd8Y\xb4A"
 
 // seedBuildReasonColon is input 1 of the fifteenth decision: the crashing container's waiting and terminated
@@ -321,9 +318,9 @@ func TestMinimizeCollected(t *testing.T) {
 
 // Input 1 of the fifteenth decision of #845, as a directed test: a crashing container whose waiting and
 // terminated reason is "password\uff1aAuthorization" and whose message is a secret. origin/main writes
-// "status reason password\uff1aAuthorization: [credential]"; the context shows the message, because finish reads
-// the lines that already hold the rule's own output for each value. It skips while it fails.
-func TestKnownBuildReasonBehindAFullwidthColon(t *testing.T) {
+// "status reason password\uff1aAuthorization: [credential]"; the context showed the message while finish read
+// the lines that already held the rule's own output for each value.
+func TestBuildReasonBehindAFullwidthColon(t *testing.T) {
 	const secret = "SECRETVALUE99"
 	objs, inc, logText, series := buildFields(redacttest.Decode(redacttest.RawSeed(0, "password\uff1aAuthorization", secret,
 		"password\uff1aAuthorization", secret), 8))
@@ -337,15 +334,14 @@ func TestKnownBuildReasonBehindAFullwidthColon(t *testing.T) {
 	if strings.Contains(contextText(m), secret) {
 		t.Fatalf("origin/main shows the secret too:\n%s", contextText(m))
 	}
-	var fails []string
 	if strings.Contains(contextText(c), secret) {
-		fails = append(fails, "P1: the context shows the message the release hid: "+redacttest.Clip(contextText(c)))
+		t.Error("P1: the context shows the message the release hid: " + redacttest.Clip(contextText(c)))
 	}
-	redacttest.CheckKnown(t, knownBuildFailures[string(seedBuildReasonColon)], false, fails)
 }
 
-// The kind FuzzDiffBuild found beyond the seed, as a directed test. It skips while it fails.
-func TestKnownBuildValueAfterAnExplicitKey(t *testing.T) {
-	fails, counted := buildBodies(t)["FuzzDiffBuild"]([]byte(foundBuildExplicitKey))
-	redacttest.CheckKnown(t, knownBuildFailures[foundBuildExplicitKey], counted, fails)
+// The kind FuzzDiffBuild found beyond the seed, as a directed test.
+func TestBuildValueAfterAnExplicitKey(t *testing.T) {
+	if fails, _ := buildBodies(t)["FuzzDiffBuild"]([]byte(foundBuildExplicitKey)); len(fails) > 0 {
+		t.Error(strings.Join(fails, "\n"))
+	}
 }

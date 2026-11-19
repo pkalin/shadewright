@@ -348,7 +348,7 @@ func TestCancelledAfterLastSourceReturnsAnError(t *testing.T) {
 func TestValueStaysOnOneLine(t *testing.T) {
 	b := newBuilder(t, reader(t), sources{}, func(c *Config) { c.Redactor = canary{} })
 	in := "a\nb\rc\vd\fe\u0085f\u2028g\u2029h\ti"
-	if got := b.value(in); got != "a b c d e f g h i" {
+	if got := b.shown(in); got != "a b c d e f g h i" {
 		t.Fatalf("value(%q) = %q", in, got)
 	}
 }

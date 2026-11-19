@@ -2166,7 +2166,7 @@ fc5f53c7aa51da7f	explicit key	k0	get_pod_logs
 1a572ff3e44a2ee7	forms combined	k1	get_resource
 1a572ff3e44a2ee7	forms combined	k2	get_resource
 1a572ff3e44a2ee7	forms combined	k3	get_resource
-1aa17e941ba9a078	forms combined	k2	get_pod_logs,get_resource,list_events
+1aa17e941ba9a078	forms combined	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 1aabebf95b187fc0	forms combined	k1	get_resource
 1aabebf95b187fc0	forms combined	k2	get_resource
 1ade84989f4113f0	forms combined	k1	get_resource
@@ -2564,7 +2564,7 @@ fc5f53c7aa51da7f	explicit key	k0	get_pod_logs
 312c2979ef34910d	forms combined	k3	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 312c3c66c84a2fb5	forms combined	k2	get_resource,list_events
 31600734b3776228	forms combined	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
-3166fa91bb7d2f88	forms combined	k2	get_pod_logs,get_resource,list_events
+3166fa91bb7d2f88	forms combined	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 316ea17ffa2aae8e	forms combined	k0	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 316ea17ffa2aae8e	forms combined	k1	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 316ea17ffa2aae8e	forms combined	k2	get_resource,list_events
@@ -2967,7 +2967,7 @@ fc5f53c7aa51da7f	explicit key	k0	get_pod_logs
 4928eead7f3887a9	forms combined	k1	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 4928eead7f3887a9	forms combined	k2	get_resource,list_events
 4928eead7f3887a9	forms combined	k3	get_resource,list_events
-49373760251350e3	forms combined	k2	get_pod_logs,get_resource,list_events
+49373760251350e3	forms combined	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 4953ce7c683d99f7	forms combined	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 49792a61bb27a753	forms combined	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 497fb491f21d922a	forms combined	k0	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
@@ -3331,7 +3331,7 @@ fc5f53c7aa51da7f	explicit key	k0	get_pod_logs
 5b9d68cfe3b64823	forms combined	k1	get_resource,list_events
 5b9d68cfe3b64823	forms combined	k2	get_resource,list_events
 5b9d68cfe3b64823	forms combined	k3	get_resource,list_events
-5ba235899ecc2c4a	forms combined	k2	get_pod_logs,get_resource,list_events
+5ba235899ecc2c4a	forms combined	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 5bcfd0abfb60f055	forms combined	k1	get_resource
 5bcfd0abfb60f055	forms combined	k2	get_resource
 5bcfd0abfb60f055	forms combined	k3	get_resource
@@ -3600,7 +3600,7 @@ fc5f53c7aa51da7f	explicit key	k0	get_pod_logs
 6b2f4ba3c620aa3b	forms combined	k1	get_resource,list_events
 6b2f4ba3c620aa3b	forms combined	k2	get_resource,list_events
 6b2f4ba3c620aa3b	forms combined	k3	get_resource,list_events
-6b4ff0a9838e76b1	forms combined	k2	get_pod_logs,get_resource,list_events
+6b4ff0a9838e76b1	forms combined	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 6b5ea0f47b4d0082	forms combined	k0	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 6b5ea0f47b4d0082	forms combined	k1	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 6b5ea0f47b4d0082	forms combined	k2	get_resource,list_events
@@ -4227,11 +4227,12 @@ fc5f53c7aa51da7f	explicit key	k0	get_pod_logs
 929881c3a8de36e6	forms combined	k1	get_resource,list_events
 929881c3a8de36e6	forms combined	k2	get_resource,list_events
 929881c3a8de36e6	forms combined	k3	get_resource,list_events
+92ad971872a740ea	forms combined	k2	kube.Excerpt
 92dafd07aba05a2d	forms combined	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 9338c92b1c064b85	forms combined	k1	get_resource,list_events
 9338c92b1c064b85	forms combined	k2	get_resource
 9338c92b1c064b85	forms combined	k3	get_resource
-9342bb17fc1beb5a	forms combined	k2	get_pod_logs,get_resource,list_events
+9342bb17fc1beb5a	forms combined	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 934626bbb98814de	forms combined	k1	get_resource,list_events
 934626bbb98814de	forms combined	k2	get_resource,list_events
 9350df3ec7a1e154	forms combined	k1	get_resource
@@ -4348,6 +4349,7 @@ fc5f53c7aa51da7f	explicit key	k0	get_pod_logs
 99a3088fc70a8528	forms combined	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 99a3088fc70a8528	forms combined	k3	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 99a3088fc70a8528	forms combined	k4	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
+99a742c898b1f1e1	forms combined	k2	kube.Excerpt
 99a9402aaa1c10bb	forms combined	k1	get_resource,list_events
 99a9402aaa1c10bb	forms combined	k2	get_resource,list_events
 99a9402aaa1c10bb	forms combined	k3	get_resource,list_events
@@ -4503,7 +4505,7 @@ a3c662587e029dbf	forms combined	k0	get_pod_logs,get_resource,incidentcontext.Val
 a3c662587e029dbf	forms combined	k1	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 a3c662587e029dbf	forms combined	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 a3c662587e029dbf	forms combined	k3	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
-a3ca1c4a0b6618c7	forms combined	k2	get_pod_logs,get_resource,list_events
+a3ca1c4a0b6618c7	forms combined	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 a3d529a496f3b66c	forms combined	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 a3d529a496f3b66c	forms combined	k3	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 a3d529a496f3b66c	forms combined	k4	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
@@ -5683,7 +5685,7 @@ ed3b251005da694f	forms combined	k1	get_pod_logs,get_resource,get_resource of the
 ed4ab35d9a4689cf	forms combined	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 ed4ab35d9a4689cf	forms combined	k3	get_resource
 ed4ab35d9a4689cf	forms combined	k4	get_resource
-ed9f79de105b5ad7	forms combined	k2	get_pod_logs,get_resource,list_events
+ed9f79de105b5ad7	forms combined	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 eda0623dea66c90b	forms combined	k2	get_resource,list_events
 edadf43b3d365dc6	forms combined	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 edc9dc6c88ed004c	forms combined	k1	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
@@ -5922,13 +5924,13 @@ fad112f42782396b	forms combined	k3	get_pod_logs,get_resource,incidentcontext.Val
 fb4a2d3970f8a466	forms combined	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 fb4a2d3970f8a466	forms combined	k3	get_resource,list_events
 fb4a2d3970f8a466	forms combined	k4	get_resource,list_events
-fbaa359e54cfc9ac	forms combined	k2	get_pod_logs,get_resource,list_events
+fbaa359e54cfc9ac	forms combined	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 fbecc031ffc7b808	forms combined	k1	get_resource,list_events
 fbecc031ffc7b808	forms combined	k2	get_resource,list_events
 fc000351f0dd1238	forms combined	k1	get_resource,list_events
 fc000351f0dd1238	forms combined	k2	get_resource,list_events
 fc000351f0dd1238	forms combined	k3	get_resource,list_events
-fc6892aa076dc7ad	forms combined	k2	get_pod_logs,get_resource,list_events
+fc6892aa076dc7ad	forms combined	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 fc788469b8a77bf9	forms combined	k1	get_resource
 fc788469b8a77bf9	forms combined	k2	get_resource
 fc788469b8a77bf9	forms combined	k3	get_resource
@@ -9839,9 +9841,9 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 0ebf2cfcf1b40066	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 0edfbabe951e477a	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 0f0b3e4a059c1ae2	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-0f327cf312722456	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+0f327cf312722456	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 0f8f59d2e1318281	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-0f9fcaa448fe2d2b	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+0f9fcaa448fe2d2b	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 0fbfbb47cb029f53	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 11ff8398639e8bf6	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 1256a2c9b50ff3f7	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -9852,7 +9854,7 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 14c7f346f37c5688	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 14dc2b98af1e3cc7	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 1517b0318782fa2b	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-176d154c5daf7492	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+176d154c5daf7492	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 18bac2d1233ca05c	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 1a6be679cac4c7f8	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 1ab34ae1cf8469d8	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -9867,6 +9869,7 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 22ebc15904365e8e	key and value in two strings	k2	get_resource,list_events
 23623689607acfab	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 24ace95313bb586e	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
+2529845a6063f104	key and value in two strings	k2	kube.Excerpt
 25a8520110bea726	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 25a8520110bea726	key and value in two strings	k2	get_resource
 25eb3510483d6ce7	key and value in two strings	k2	get_resource,list_events
@@ -9880,12 +9883,13 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 2f70f5224b9b0d4c	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 2f7244318ecc2f39	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 303974f9be9fdea3	key and value in two strings	k2	get_resource,list_events
+30bbb86479052e97	key and value in two strings	k2	kube.Excerpt
 318123fa476278da	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 31dccc986524db33	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-33052286a04aa801	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+33052286a04aa801	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 33d5075cf03193b3	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 341d38375e6ce610	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-348ab09f2c635522	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+348ab09f2c635522	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 34b3e52ec6acea59	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 35b9128a349e5aac	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 36fbfa174ccb0c5e	key and value in two strings	k2	get_resource,list_events
@@ -9893,7 +9897,7 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 38f02d4dd618334c	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 38f02d4dd618334c	key and value in two strings	k2	get_resource
 38f1b6ef7449a77f	key and value in two strings	k2	get_resource,list_events
-3af2fbe2cb96f2bb	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+3af2fbe2cb96f2bb	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 3c0b70b4c8579889	key and value in two strings	k2	get_resource,list_events
 3c790da407890db6	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 3d19a39d977874fd	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -9908,6 +9912,7 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 3fb172f1cbd8e35d	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 40392afa13277211	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 43905d790fbc0a66	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
+439f7d7579b65d03	key and value in two strings	k2	kube.Excerpt
 43dc79a35de2d0d4	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 43dc79a35de2d0d4	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 44cdca58b48810aa	key and value in two strings	k2	get_resource,list_events
@@ -9917,10 +9922,10 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 472a092644ae3bf4	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 476de7fc13836efa	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 4789229f62df69fd	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-480b70b318f76769	key and value in two strings	k2	get_pod_logs,get_resource,list_events
-499b52325dad7d39	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+480b70b318f76769	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
+499b52325dad7d39	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 4a76c3b337bd570d	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-4b8aaf8dd97bc5e6	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+4b8aaf8dd97bc5e6	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 4c295e55a8e71f49	key and value in two strings	k2	get_resource,list_events
 4c34d23d8da41159	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 4c81138b6e3a2379	key and value in two strings	k2	get_resource,list_events
@@ -9941,14 +9946,14 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 53bb99104bda93ba	key and value in two strings	k1	get_resource of the strings
 54a3c57991b621df	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 5541b33ea192e5e5	key and value in two strings	k2	get_resource,list_events
-56b12e2844cdd8c0	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+56b12e2844cdd8c0	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 56b6046a11dc73e4	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 577c631c807b4d8d	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 59320514e89ec7f8	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 5ae8723cbeab46ac	key and value in two strings	k2	get_resource,list_events
 5af53637f6c25c32	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 5b47d0d536dfe1f7	key and value in two strings	k2	get_resource,list_events
-5b7ae64ffdc23f91	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+5b7ae64ffdc23f91	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 5d3ebcec25774f4b	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 5d64de6c4331f769	key and value in two strings	k2	get_resource,list_events
 5d6af677c746c8b4	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -9959,13 +9964,13 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 5ffc7833fe58e3a6	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 601d4b0a72b84535	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 62e510e72d633758	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-631224c938c090a1	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+631224c938c090a1	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 64969ee7b9810627	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 6505ebf5f5a5d8ef	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 65b4fe791eeac2f4	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 66655643a8577308	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 66655643a8577308	key and value in two strings	k2	get_resource
-6677b3b00256be6d	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+6677b3b00256be6d	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 66ca40c9fdb218de	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 67272057542fd8c9	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 67acd92c29a46b20	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -9977,7 +9982,7 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 6c7a7cb31b44e8b3	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 6ca3bd59edb24b56	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 6d666bd9e917f020	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-6e3863f1044c0cf7	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+6e3863f1044c0cf7	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 6eb7b229a52b7f93	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 6f1de95e541d2bdd	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 70537ab50bdbadef	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -9989,6 +9994,7 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 72a21e5aa33e67d6	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 72a21e5aa33e67d6	key and value in two strings	k2	get_resource
 732de24a5d77f45d	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
+74b5091b713a1cc8	key and value in two strings	k2	kube.Excerpt
 75e216008d563b38	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 776d7066263c611e	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 77e349de6d754c58	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -10001,7 +10007,7 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 7ba1c5f8bdc25f7d	key and value in two strings	k2	get_resource
 7bcc39d5b37aeda9	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 7bcc39d5b37aeda9	key and value in two strings	k2	get_resource
-7c56868e6a7cbcac	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+7c56868e6a7cbcac	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 7e0762adc93d9d1c	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 7e1a7f8ff5b5227b	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 806ad786e59921fc	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -10032,10 +10038,10 @@ ffa9f83fb0a9e230	indentation of other characters	k2	get_pod_logs,get_resource,in
 911b09c0d2810b52	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 9205a039980fece3	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 92970228e3e2421c	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-92fd2c6a5e682b07	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+92fd2c6a5e682b07	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 932afe8f68cb5ac9	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 93ab5e6195b88c8e	key and value in two strings	k2	get_resource,list_events
-9402454304422635	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+9402454304422635	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 95e1a50ab9f7ca8b	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 96373f6bf2b5bf46	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 968d5356d4acb065	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -10074,7 +10080,7 @@ a9137cedc21424b2	key and value in two strings	k1	get_pod_logs,get_resource,get_r
 a95f844a1974e382	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 a97cd484a427a716	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 a98ff53550c31713	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-aac51d04a251df53	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+aac51d04a251df53	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 aad474f0d906792f	key and value in two strings	k2	get_resource,list_events
 ab4f342c2c08f41a	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 abdd99ba36275a36	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -10082,6 +10088,7 @@ acfe7da4ccd383e3	key and value in two strings	k2	get_pod_logs,get_resource,incid
 ada5a1ecf8eaafb6	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 adce00de7b92aab4	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 ae87de23a22f08a5	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
+aea459ee8546d1b6	key and value in two strings	k2	kube.Excerpt
 afc3afd0a5cf0d94	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 b039523301bb90d4	key and value in two strings	k2	get_resource,list_events
 b13e5e2ff96b079c	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -10100,16 +10107,17 @@ b52e866bb756107a	key and value in two strings	k1	get_pod_logs,get_resource,get_r
 b5a6087f8c04fca6	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 b6cd550138289359	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 b6fd6fb62373ce3a	key and value in two strings	k2	get_resource,list_events
+b7c728ddc5294c2a	key and value in two strings	k2	kube.Excerpt
 b8ef768dce08bd9c	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-b97da0ee51325554	key and value in two strings	k2	get_pod_logs,get_resource,list_events
-b9d8a00352c3e296	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+b97da0ee51325554	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
+b9d8a00352c3e296	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 bacf580a6d6fdf0f	key and value in two strings	k2	get_resource,list_events
 bad496639b208253	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 bb2c753fe767c7a2	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 bb3dfd13b4b6b8f4	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 bba015ce35eb8385	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 bbcf5cbf2bd3ba2c	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-bc39f498bbb65012	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+bc39f498bbb65012	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 bc80e1e631177bd0	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 bc8c3bb758f528b8	key and value in two strings	k2	get_resource,list_events
 bd0b24041afc654d	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -10140,13 +10148,15 @@ d17521d53dc2cd02	key and value in two strings	k2	get_pod_logs,get_resource,incid
 d1a5d53666d55748	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 d1f90fe559ffef5c	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 d1f90fe559ffef5c	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
-d205f8bfa5b4b185	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+d205f8bfa5b4b185	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 d25d22dea85d99ed	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 d37f63274db501b5	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 d3ba20cf7bc41a1f	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 d4d14b979180e9c9	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 d4df245e5fa47586	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 d5873b9372adcce4	key and value in two strings	k2	get_resource,list_events
+d5bd83e051708929	key and value in two strings	k2	kube.Excerpt
+d663e9ed1461ed31	key and value in two strings	k2	kube.Excerpt
 d6a7750a82252ab6	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 d6c2153f525088eb	key and value in two strings	k1	get_resource of the strings
 d76afd201126f4f2	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -10155,7 +10165,7 @@ d7b659c448da3012	key and value in two strings	k2	get_pod_logs,get_resource,incid
 d7e6c8ffd54b744c	key and value in two strings	k2	get_resource,list_events
 d80a15656ef46663	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 da87ef2a656d1d60	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
-db68c588b7d0f536	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+db68c588b7d0f536	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 dc77080099ba506e	key and value in two strings	k2	get_resource,list_events
 dc838a6abb551bef	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 dd2b17fe324c9592	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -10164,6 +10174,7 @@ dd63b93c8fc9bccf	key and value in two strings	k1	get_pod_logs,get_resource,get_r
 dd63b93c8fc9bccf	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 dda9ead1151a50fa	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 ddad2b620095921d	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
+de514d45186874ed	key and value in two strings	k2	kube.Excerpt
 de86b2cb6bffc31f	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 df678e10358ce9f2	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 e1911fbd86dce8a3	key and value in two strings	k2	get_resource,list_events
@@ -10180,7 +10191,7 @@ e87d772fdd3de6c9	key and value in two strings	k1	get_pod_logs,get_resource,get_r
 e9122c9c7b8b2008	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 e9635dcf9e49d947	key and value in two strings	k2	get_pod_logs,get_resource,incidentcontext.Value,kube.Excerpt,list_events
 ecb0173258e1ff64	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
-ed5cb763cdcb381f	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+ed5cb763cdcb381f	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 edd8b0b9e9d05436	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 ee523a5b6c291d94	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 ee772d569b5bc19e	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -10200,10 +10211,10 @@ f653dc714bc99232	key and value in two strings	k1	get_pod_logs,get_resource,get_r
 f65eb547019c63c7	key and value in two strings	k2	get_resource,list_events
 f766b2a5e6b22736	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 f7a554339754c586	key and value in two strings	k2	get_resource,list_events
-f899bb6084a1b71d	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+f899bb6084a1b71d	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 f9290defb8cec333	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 f92af8431ce02c4d	key and value in two strings	k1	get_resource of the strings
-fa8e61a0517da7b7	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+fa8e61a0517da7b7	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 fabc6ed7002da1c0	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 faf27b2b46c94038	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 fb33ab4667841f7b	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
@@ -10211,7 +10222,7 @@ fd3dabfd84f87a9a	key and value in two strings	k1	get_pod_logs,get_resource,get_r
 fd4b78c749d0b341	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 fd80d48b1bf29456	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 fdac71eaf10d7d5b	key and value in two strings	k2	get_resource,list_events
-fe56d76fc3bb707d	key and value in two strings	k2	get_pod_logs,get_resource,list_events
+fe56d76fc3bb707d	key and value in two strings	k2	get_pod_logs,get_resource,kube.Excerpt,list_events
 ff25784aea4b6293	key and value in two strings	k1	get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,kube.Excerpt,list_events
 ff94fb370a629a69	key and value in two strings	k2	get_resource,list_events
 00aa1309d6aa2a6f	key with format characters or a colon look-alike	k2	get_resource

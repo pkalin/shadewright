@@ -381,7 +381,7 @@ func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string
 		}
 		return f(max(from-start, 0))
 	}
-	text := r.ReplaceFrom(string(data), from,
+	text := r.ReplaceFrom(string(data), from, providers.LeadingContinuation,
 		func(kind, m string) string {
 			return part(len(m), func(skip int) string {
 				if skip == 0 {

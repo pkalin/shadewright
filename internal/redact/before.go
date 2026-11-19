@@ -262,9 +262,11 @@ func (r *Redactor) releasedString(s string, twice bool, cut func(string) int) []
 
 // releasedExcerpt returns what the release before hid in a log as the log source read it (s) when it kept the
 // bytes from from on: it redacted all of s (Replace), wrote what the cut kept (a match the cut runs through as
-// the marker of its part kept), made that valid UTF-8 and redacted it again (String). nil when r has no such
-// reading.
-func (r *Redactor) releasedExcerpt(s string, from int) []span {
+// the marker of its part kept), made that valid UTF-8 and redacted it again (String). With drop not nil, also
+// what it hid where the reader of that excerpt dropped its first drop(text) bytes and redacted the rest as
+// incidentcontext.Redact did, twice (RenderLog, then get_pod_logs fitting the text again), each time on the text
+// with that release's markers in place (#845, fifteenth decision). nil when r has no such reading.
+func (r *Redactor) releasedExcerpt(s string, from int, drop func(string) int) []span {
 	x := r.releasedReading()
 	if x == nil {
 		return nil
@@ -287,7 +289,11 @@ func (r *Redactor) releasedExcerpt(s string, from int) []span {
 		pos = f.End
 	}
 	tb.copy(t, pos, len(s))
-	x.pass(validTrace(tb.trace()))
+	ex := x.pass(validTrace(tb.trace()))
+	if drop != nil {
+		d := min(max(drop(ex.text), 0), len(ex.text))
+		x.redact(x.redact(trace{text: ex.text[d:], lo: ex.lo[d:], hi: ex.hi[d:]}))
+	}
 	return x.hidden
 }
 
@@ -306,7 +312,23 @@ func StringTwice(s string, cut func(string) int) string { return defaultRedactor
 
 // ReplaceFrom is Replace for a log the log source cuts to the bytes from from on, where the release before
 // redacted all of s, kept that part and redacted it again (releasedExcerpt): the matches are those of Replace
-// and what that release hid, and repl and between are called as Replace calls them, over all of s.
-func (r *Redactor) ReplaceFrom(s string, from int, repl func(kind, text string) string, between func(string) string) string {
-	return r.replaceSpans(s, settle(s, append(r.ruleMatches(s), r.releasedExcerpt(s, from)...)), repl, between)
+// and what that release hid, and repl and between are called as Replace calls them, over all of s. With drop not
+// nil the matches also hold what that release hid downstream of the log source, on its own excerpt: the reader
+// dropped the first drop(text) bytes of the excerpt and redacted the rest twice over (incidentcontext.RenderLog
+// and get_pod_logs), so that what it hid there is decided on s as it was read, never on text this package's
+// rules already replaced (#845, fifteenth decision).
+func (r *Redactor) ReplaceFrom(s string, from int, drop func(string) int, repl func(kind, text string) string,
+	between func(string) string) string {
+	return r.replaceSpans(s, settle(s, append(r.ruleMatches(s), r.releasedExcerpt(s, from, drop)...)), repl, between)
+}
+
+// ReleasedText returns s as the release before wrote it where it redacted a text, made it valid UTF-8 and
+// redacted it again (incidentcontext.Redact then), with that release's markers, or s when r has no such reading.
+// It decides nothing: a caller orders lines the way that release ordered them (the series lines of a metrics
+// block, sorted by their text as written), so that the reading of that release reads them in its order.
+func (r *Redactor) ReleasedText(s string) string {
+	if r.before == nil {
+		return s
+	}
+	return r.before.String(strings.ToValidUTF8(r.before.String(s), "?"))
 }

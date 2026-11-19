@@ -58,10 +58,11 @@ limitations under the License.
 // the window, or a StatefulSet whose current and update revisions differ). Historical membership (for example
 // kube_pod_owner) is not read.
 //
-// Redaction and cuts: every piece of text goes through the [Redactor] before anything is cut. Each value from
-// the cluster is redacted on its own and the summary, status and metrics sections are redacted again as a
-// whole once assembled; a log block's header and its excerpt are redacted whole, the excerpt again whatever the
-// source did. So no cut can split a secret before the redactor sees it or drop the key line that marks the next
+// Redaction and cuts: every piece of text goes through the [Redactor] before anything is cut. The summary,
+// status, metrics and policy sections are written as pieces, the text the builder writes and each value from the
+// cluster as it was read, and decided once on those pieces (redact.Redactor.PiecesWithin, #845); a redactor
+// that cannot decide on pieces redacts each value on its own and the section again once assembled. A log
+// block's header and its excerpt are redacted whole, the excerpt again whatever the source did. So no cut can split a secret before the redactor sees it or drop the key line that marks the next
 // lines as a secret. After that, the builder only removes whole lines of redacted text, which cannot reveal
 // anything that was not already there; the fixed labels and availability values are code, never cluster data,
 // and the error text of a failed source never enters a block. A value longer than 1 KiB once redacted is left

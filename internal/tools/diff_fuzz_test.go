@@ -241,13 +241,13 @@ func TestMinimizeCollected(t *testing.T) {
 var knownToolFailures = map[string]map[string]redacttest.KnownFailure{
 	"FuzzDiffGetResource": {string(seedGetResourceAtTheLimit): {Property: "P4",
 		Reason: "two labels told apart after the fit push the JSON of get_resource past its bound"}},
-	"FuzzDiffGetPodLogs": {foundPodLogsAfterAWideColon: {Property: "P1",
-		Reason: "get_pod_logs shows a value behind a key, format characters and a fullwidth colon that the release before hid"}},
 }
 
 // foundPodLogsAfterAWideColon was found by FuzzDiffGetPodLogs in its first five minute run (#845, fifteenth
 // decision), minimised: a log excerpt (knob 0xd0: kube.Excerpt on both sides, end of the last line missing) where
-// a probe after a key, format characters and a fullwidth colon is hidden by the release before and shown now.
+// a probe after a key, format characters and a fullwidth colon was hidden by the release before, at a pass it
+// made on its own excerpt after the log source, and shown while that pass read the excerpt this package's rules
+// had already replaced.
 const foundPodLogsAfterAWideColon = "\xc5\xd0s\xc51\xa75\x86\xbfPB\xb7ib\xaad\x0f8\\\xc3;\x8d\xacj\x0e01"
 
 // seedGetResourceAtTheLimit is input 3 of the fifteenth decision: a pod with the labels 10.0.0.1 and 10.0.0.2
@@ -535,8 +535,9 @@ func TestKnownGetResourceLabelsDecidedAlikeAtTheLimit(t *testing.T) {
 		answerFails(NameGetResource, r, m.rec, mainText))
 }
 
-// The kind FuzzDiffGetPodLogs found beyond the seeds, as a directed test. It skips while it fails.
-func TestKnownPodLogsValueAfterAWideColon(t *testing.T) {
-	fails, counted := toolBodies(diffSet(t))["FuzzDiffGetPodLogs"]([]byte(foundPodLogsAfterAWideColon))
-	redacttest.CheckKnown(t, knownToolFailures["FuzzDiffGetPodLogs"][foundPodLogsAfterAWideColon], counted, fails)
+// The kind FuzzDiffGetPodLogs found beyond the seeds, as a directed test.
+func TestPodLogsValueAfterAWideColon(t *testing.T) {
+	if fails, _ := toolBodies(diffSet(t))["FuzzDiffGetPodLogs"]([]byte(foundPodLogsAfterAWideColon)); len(fails) > 0 {
+		t.Error(strings.Join(fails, "\n"))
+	}
 }

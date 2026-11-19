@@ -444,7 +444,7 @@ func (m *hmWorld) goneShape(gone map[string]bool, about string, all bool) bool {
 			if !m.carriesOwn(cr.HeadSHA, who) {
 				continue
 			}
-			if x := m.get(who); x != nil && !(who == hmPred && handedOff(x)) {
+			if x := m.get(who); x != nil && (who != hmPred || !handedOff(x)) {
 				// A live request on the pull request, unless it is the predecessor that ended HandedOff: the pull
 				// request was then the replacement's alone.
 				return false

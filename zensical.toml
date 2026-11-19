@@ -17,6 +17,15 @@ nav = [
     { "Home" = "index.md" },
     { "What it is and is not" = "overview.md" },
   ] },
+  { "How it works" = [
+    { "The whole flow" = "how-it-works/index.md" },
+    { "Incidents" = "how-it-works/incidents.md" },
+    { "Diagnosis" = "how-it-works/diagnosis.md" },
+    { "Policy" = "how-it-works/policy.md" },
+    { "The pull request" = "how-it-works/pull-request.md" },
+    { "Verification" = "how-it-works/verification.md" },
+    { "The safety model" = "how-it-works/safety.md" },
+  ] },
   { "Get started" = [
     { "Get started" = "getting-started.md" },
     { "Install in observe-only mode" = "install.md" },

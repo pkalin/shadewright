@@ -125,8 +125,8 @@ test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
 	@# about 1 MiB (internal/providers/logs/kube/racesample_test.go): run both packages again without it, so
 	@# that no test is selected by name and a renamed one cannot drop out. The
 	@# linearity tests count redaction work only in a build with the tag redactwork (internal/redact/work_counted.go,
-	@# no counter in the product build), so this run and the log excerpt's package get it.
-	go test -timeout 20m -tags redactwork ./internal/redact ./internal/providers/logs/kube
+	@# no counter in the product build), so this run, the log excerpt's package and the context builder's get it.
+	go test -timeout 20m -tags redactwork ./internal/redact ./internal/providers/logs/kube ./internal/incidentcontext
 	@# The time bound of the wide mapping refusal is checked only without -race (internal/gitops/patch/race_test.go).
 	go test -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
 

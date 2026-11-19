@@ -207,8 +207,9 @@ type releasedTexter interface {
 
 // releasedKey returns f as the release before #845 wrote it: each value redacted by that release and shown
 // ([Value]), the text the builder writes as it is. With a redactor that has no such reading, each value as that
-// redactor writes it alone, as before.
-func (b *Builder) releasedKey(f frag) string {
+// redactor writes it alone, as before. written holds the values already written, by their text, so that a value
+// repeated in the lines of one answer is read once.
+func (b *Builder) releasedKey(f frag, written map[string]string) string {
 	red := Twice(b.redactor)
 	if rt, ok := b.redactor.(releasedTexter); ok {
 		red = rt.ReleasedText
@@ -216,7 +217,12 @@ func (b *Builder) releasedKey(f frag) string {
 	var s strings.Builder
 	for _, p := range f {
 		if p.Data {
-			s.WriteString(Value(red, p.Text))
+			v, ok := written[p.Text]
+			if !ok {
+				v = Value(red, p.Text)
+				written[p.Text] = v
+			}
+			s.WriteString(v)
 		} else {
 			s.WriteString(p.Text)
 		}

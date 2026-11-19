@@ -1,0 +1,20 @@
+# User pages that do not pass the writing rules yet (see AGENTS.md, Docs and decisions).
+# One repo-relative path per line. The list only shrinks: the docs check fails on a path that passes or does not exist.
+docs/concepts.md
+docs/data-handling.md
+docs/emergency.md
+docs/evaluation.md
+docs/faq.md
+docs/getting-started.md
+docs/how-to/check-install.md
+docs/how-to/check-status.md
+docs/how-to/clear-resolved-incidents.md
+docs/how-to/qualify-openai-compatible.md
+docs/how-to/turn-on-reviewer-hints.md
+docs/identity-rotation.md
+docs/install.md
+docs/lab-oom-acceptance.md
+docs/lab-oom-hint.md
+docs/request-lifecycle.md
+docs/upgrade-uninstall.md
+docs/use.md

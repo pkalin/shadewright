@@ -1994,7 +1994,9 @@ func (r *RemediationRequestReconciler) refuseOrWait(ctx context.Context, rr *rem
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		res.RequeueAfter = r.withinWaits(rr, max(res.RequeueAfter, waited.RequeueAfter))
+		if res.RequeueAfter, err = r.withinWaits(ctx, rr, max(res.RequeueAfter, waited.RequeueAfter)); err != nil {
+			return reconcile.Result{}, err
+		}
 		return res, nil
 	}
 	return waited, nil

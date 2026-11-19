@@ -495,7 +495,11 @@ func (r *RemediationRequestReconciler) clearGitReadRetry(ctx context.Context, ke
 		return 0, nil
 	}
 	const none = time.Duration(1<<63 - 1)
-	if left := r.withinWaits(rr, none); left < none {
+	left, err := r.withinWaits(ctx, rr, none)
+	if err != nil {
+		return 0, err
+	}
+	if left < none {
 		return left, nil
 	}
 	return 0, nil

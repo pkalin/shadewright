@@ -72,7 +72,7 @@ import (
 //   - lift: the first reconcile after the pause is lifted, with no write made to fail, ends every wait that passed
 //     meanwhile (time paused counts against every wait; MergeCheck and MergeContent end there after their last
 //     read), and, with reads working and no write made to fail, a stopped holder whose pull request is closed holds
-//     no lock within three reconciles (liftSettleSteps);
+//     no lock within three reconciles after it stopped (liftSettleSteps);
 //   - requeue: a reconcile that leaves a stopped request holding its lock, without an error, asks to run again at a
 //     time (seventh decision, point 3);
 //   - waits (not while paused): every entry of status.gitWaits has not passed the end of its kind by more than one
@@ -102,8 +102,8 @@ import (
 //     whose wait for a read is open: that lock waits for a read of the branch (tenth decision, point 3, and the
 //     eleventh, point 2);
 //   - lock: the lock is never released while a pull request of the request is open, nor on a merge the status does
-//     not record, checked at the moment of the release (a merge into a branch the plan's change was not for, seen
-//     only after the settings moved, is recorded as released aside), and a lock once released never comes back
+//     not record, checked at the moment of the release (a pull request merged or open on a branch the plan's change
+//     was not for, seen only after the settings moved, is recorded as released aside), and a lock once released never comes back
 //     while the request does not hold it;
 //   - ending: a reconcile that starts with a RequestDeadline or HandoffGrace wait past its end calls the Git host
 //     nothing before its first status write: the end decides from recorded state alone (fifth decision of 2026-11-18
@@ -299,7 +299,7 @@ type modelWorld struct {
 	startAt                      time.Time
 	// released: the request's lock was seen released; recorded: the request's merge was seen recorded.
 	released, recorded bool
-	// releasedAside: at the release the pull request was merged into a branch that delivered nothing.
+	// releasedAside: at the release the pull request was merged, or open, on a branch that delivered nothing.
 	releasedAside bool
 	// handoff: the request is a replacement recovering a handoff; the pull request is its predecessor's, which
 	// holds the lock on it, so the lock properties about the request's own pull request do not apply.
@@ -349,7 +349,9 @@ type modelWorld struct {
 type pauseSpan struct{ from, to time.Time }
 
 // liftSettleSteps is how many reconciles after a lift, with reads working, a stopped holder whose pull request is
-// closed may keep the lock: the end the lift lets through (an expiry, a cancel), then the look that settles it.
+// closed may keep the lock, counted from the first reconcile that starts with it stopped (the end the lift lets
+// through, an expiry or a confirmation that the pull request is gone, is not counted): the close, then the look that
+// settles it.
 const liftSettleSteps = 3
 
 // modelStart is how a run of the model begins: drawn from the seed (drawStart), or given by a scripted test.
@@ -1800,8 +1802,8 @@ func (m *modelWorld) endedBefore(c *metav1.Condition) bool {
 
 // pauseProperties checks the properties of the pause (see the top of this file): while paused, no call to the Git
 // host and no phase change; at the first reconcile after the lift (lifted), no wait past its end at the start of that
-// reconcile stands; and liftSettleSteps reconciles after the lift a stopped holder whose pull request is closed holds
-// no lock, unless a read or a write was made to fail since the lift (seventh decision of 2026-11-18 on #771, point 3:
+// reconcile stands; and liftSettleSteps reconciles after the lift, counted from the reconcile that starts with the
+// request stopped, a stopped holder whose pull request is closed holds no lock, unless a read or a write was made to fail since the lift (seventh decision of 2026-11-18 on #771, point 3:
 // settlement may take more than one reconcile, each with a time to run again, property "requeue").
 func (m *modelWorld) pauseProperties(before, live *api.RemediationRequest, paused, lifted bool, startedAt time.Time,
 	faulted bool) {
@@ -1830,7 +1832,13 @@ func (m *modelWorld) pauseProperties(before, live *api.RemediationRequest, pause
 		m.afterLift = -1
 		return
 	}
-	m.afterLift++
+	if !progresses(before) {
+		// Counted from the stop, not from the lift: the end the lift lets through (an expiry, a confirmation that the
+		// pull request is gone) may take reconciles of its own, and only then does the settlement start (seventh
+		// decision of 2026-11-18 on #771, point 3: settlement may take more than one reconcile, each with a time to run
+		// again).
+		m.afterLift++
+	}
 	cr, found := m.pr()
 	if m.afterLift >= liftSettleSteps && m.repo == nil && !m.handoff && found && !m.deleted &&
 		cr.State == providers.ChangeRequestClosed && holdsLock(live) && !progresses(live) &&
@@ -1904,7 +1912,12 @@ func (m *modelWorld) lockProperties(live *api.RemediationRequest) {
 			m.released = true
 			// A pull request merged into a branch that delivered nothing at the release (a third base) is not the
 			// request's merge, whatever the settings name later.
-			m.releasedAside = found && cr.State == providers.ChangeRequestMerged && !m.delivers(live, cr)
+			// So is one open there at the release: the settlement reads the recorded and the configured target
+			// branch only ("on both the recorded target branch and the configured target branch when they differ",
+			// 6-reconciliation.md, one place settles the target lock), so a pull request moved by hand to a third base
+			// does not keep the lock, and its later merge there is not the request's merge either.
+			m.releasedAside = found && (cr.State == providers.ChangeRequestMerged || cr.State == providers.ChangeRequestOpen) &&
+				!m.delivers(live, cr)
 		}
 	} else if m.released && holdsLock(live) {
 		m.fatalf("lock back: the lock was released and is held again (phase %s)", live.Status.Phase)

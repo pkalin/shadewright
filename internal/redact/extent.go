@@ -19,6 +19,7 @@ package redact
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // The extent rule (#708). After a secret key name or flag, a value that opens a group (a quote, "[", "{",
@@ -136,6 +137,14 @@ func groupEnd(s string, pos, limit, ctx, keyPos int, shell bool) (int, bool) {
 	return groupScanEnd(groupScan{s: s, limit: limit, ctx: ctx, shell: shell}, pos, keyPos)
 }
 
+// groupEndKey is groupEnd of a shell word in text of level 0, and also reports whether a quoted string met a line
+// end, where the end depends on the key at keyPos (or on there being one).
+func groupEndKey(s string, pos, limit, keyPos int) (int, bool, bool) {
+	var used bool
+	end, ok := groupScanEnd(groupScan{s: s, limit: limit, shell: true, keyUsed: &used}, pos, keyPos)
+	return end, ok, used
+}
+
 // groupScanEnd is groupEnd with the scanner g, whose props field says whether a YAML node property opens a
 // scalar inside an array or object (bracketSpan).
 func groupScanEnd(g groupScan, pos, keyPos int) (int, bool) {
@@ -143,6 +152,9 @@ func groupScanEnd(g groupScan, pos, keyPos int) (int, bool) {
 	keyCol := -1
 	for i := pos; i < limit; i++ {
 		tick(1)
+		if s[i] == '\n' && g.quote != 0 && g.keyUsed != nil {
+			*g.keyUsed = true
+		}
 		if s[i] == '\n' && g.quote != 0 && keyPos != noKey {
 			if keyCol < 0 {
 				keyCol = lineColumn(s, keyPos)
@@ -197,6 +209,8 @@ type groupScan struct {
 	// being read; afterProp whether one ended with a blank and nothing else of the scalar was read yet, so a
 	// quote still opens a string ("[!!str \"a]b\"]", #769).
 	props, inProp, afterProp bool
+	// keyUsed, when set, is set to true when a quoted string meets a line end, where the key decides (groupEndKey).
+	keyUsed *bool
 }
 
 // shellText reports whether the byte read now is shell text: inside "$(" or backticks, or in a group that
@@ -408,19 +422,29 @@ func opensGroup(s string, pos int) bool {
 // ends it otherwise ("[\"abc\"], next"). last is true when the word ends with a quoted group, so its closing
 // quote is at end-1. ok is false when the first group does not close. keyPos is as in groupEnd. With wide
 // false an escaped punctuation byte and a comma end the word, as on main before #769 (keyValueSpans).
-func shellWordEnd(s string, pos, limit, keyPos int, flag, wide bool) (end int, last bool, ok bool) {
+func shellWordEnd(s string, pos, limit, keyPos int, flag, wide bool, w *wordMemo) (end int, last bool, ok bool) {
 	end, ok = groupEnd(s, pos, limit, 0, keyPos, true)
 	if !ok {
 		return 0, false, false
 	}
 	last = s[pos] == '"' || s[pos] == '\''
+	sc := &wordScan{limit: limit, flag: flag, wide: wide, dep: -1}
+	defer func() { w.record(sc) }()
 	for end < limit {
 		tick(1)
+		sc.add(end, last)
+		if to, toLast, ok := w.resume(end, limit, flag, wide); ok {
+			end, last = to, toLast
+			continue
+		}
 		c := s[end]
 		if opensGroup(s, end) {
-			e, closed := groupEnd(s, end, limit, 0, keyPos, true)
+			e, closed, usedKey := groupEndKey(s, end, limit, keyPos)
 			if !closed {
 				break
+			}
+			if usedKey {
+				sc.dependent()
 			}
 			last = c == '"' || c == '\''
 			end = e
@@ -444,13 +468,124 @@ func shellWordEnd(s string, pos, limit, keyPos int, flag, wide bool) (end int, l
 			}
 			break
 		}
-		if isSpace(c) || strings.IndexByte(wordStops, c) >= 0 && (c != ',' || !flag && (!wide || fieldAfterComma(s, end, limit))) {
+		if wordStopsAt(s, end, limit, flag, wide, sc) {
 			break
 		}
 		last = false
 		end++
 	}
+	if end >= limit {
+		sc.add(end, last)
+	}
 	return end, last, true
+}
+
+// wordStopsAt reports whether the plain byte at i ends the shell word: whitespace, or one of wordStops, a comma
+// only when no flag comes before the word and, with wide, when it starts the next field (fieldAfterComma). A
+// comma decided on bytes up to limit marks the step of sc as dependent on the limit.
+func wordStopsAt(s string, i, limit int, flag, wide bool, sc *wordScan) bool {
+	c := s[i]
+	if isSpace(c) || strings.IndexByte(wordStops, c) >= 0 && c != ',' {
+		return true
+	}
+	if c != ',' || flag {
+		return false
+	}
+	if !wide {
+		return true
+	}
+	field, reached := fieldAfterComma(s, i, limit)
+	if reached {
+		sc.dependent()
+	}
+	return field
+}
+
+// The shell words of one text (#845, fifteenth decision, P3). Every secret key in a long run of glued words
+// ("TOKEN=\"a\",b,TOKEN=\"a\",b,...") reads its value as the shell word to its end, up to maxValueExtent
+// bytes, and each later key starts inside the word an earlier key read: without a memory of those reads the
+// work is the number of keys times maxValueExtent. A wordMemo keeps, for each word read in one pass of a rule
+// over one text, the states its loop went through, and a later read that reaches one of them goes on from the
+// first state whose step depended on the earlier read's limit (or a key column), since every step before it
+// reads the same bytes and decides the same with the later, larger limit. The result is the same as without
+// the memory (TestShellWordEndMemoMatches).
+
+// wordMemo is the memory of the shell words read in one pass of a rule over one text; nil keeps none.
+type wordMemo struct {
+	at map[wordState]wordRef
+	// resumed counts the reads that went on from a state of an earlier one, for the tests.
+	resumed int
+}
+
+// wordState is a state of shellWordEnd's loop, with the parameters the steps after it depend on.
+type wordState struct {
+	pos        int
+	flag, wide bool
+}
+
+// wordRef is a state of the read scan, by its index in it.
+type wordRef struct {
+	scan *wordScan
+	i    int
+}
+
+// wordScan is one read of shellWordEnd: its limit and parameters, the states of its loop in order (the last one
+// where it stopped, at a break or at its limit), and the index of the first state whose step went on in a way that
+// depended on the limit or the key (dep, -1 while none did). A read with a larger limit goes on from there, or
+// from the last state, whose step it takes again.
+type wordScan struct {
+	limit      int
+	flag, wide bool
+	pos        []int
+	last       []bool
+	dep        int
+}
+
+func (sc *wordScan) add(pos int, last bool) {
+	sc.pos = append(sc.pos, pos)
+	sc.last = append(sc.last, last)
+}
+
+// dependent marks the step from the latest state as one that depended on the limit or the key.
+func (sc *wordScan) dependent() {
+	if sc.dep < 0 {
+		sc.dep = len(sc.pos) - 1
+	}
+}
+
+// resume returns the state a read with limit, flag and wide at pos may go on from: the first dependent state
+// (or the last state) of an earlier read that went through pos with a limit no larger, when that is past pos.
+func (w *wordMemo) resume(pos, limit int, flag, wide bool) (int, bool, bool) {
+	if w == nil {
+		return 0, false, false
+	}
+	r, ok := w.at[wordState{pos: pos, flag: flag, wide: wide}]
+	if !ok || r.scan.limit > limit {
+		return 0, false, false
+	}
+	to := r.scan.pos[r.scan.dep]
+	if to <= pos {
+		return 0, false, false
+	}
+	w.resumed++
+	return to, r.scan.last[r.scan.dep], true
+}
+
+// record keeps the states of sc before its first dependent one.
+func (w *wordMemo) record(sc *wordScan) {
+	if w == nil || len(sc.pos) == 0 {
+		return
+	}
+	if sc.dep < 0 {
+		sc.dep = len(sc.pos) - 1
+	}
+	if w.at == nil {
+		w.at = map[wordState]wordRef{}
+	}
+	for i := range sc.dep {
+		tick(1)
+		w.at[wordState{pos: sc.pos[i], flag: sc.flag, wide: sc.wide}] = wordRef{scan: sc, i: i}
+	}
 }
 
 // fieldAfterComma reports whether the comma at i, glued to a shell word after a key name, starts the next
@@ -458,28 +593,54 @@ func shellWordEnd(s string, pos, limit, keyPos int, flag, wide bool) (end int, l
 // quote or a separator, by a secret key name the key rules match on their own, with blanks, "=", ":" or ":="
 // after it ("password=\"abc\",DB_PASSWORD= \"x y\"", whose value is then redacted as on main), or by a name
 // and "=" or ":" ("password=\"abc\",user=bob", ",next: x"). Any other name and "=" followed by whitespace, the
-// end or another "=" is base64 padding, not a field ("\"a\",abc=").
-func fieldAfterComma(s string, i, limit int) bool {
+// end or another "=" is base64 padding, not a field ("\"a\",abc="). reached is whether it read up to limit, so
+// that a larger limit could decide otherwise.
+func fieldAfterComma(s string, i, limit int) (field, reached bool) {
 	j := i + 1
-	if j >= limit || isSpace(s[j]) || strings.IndexByte("\"'`,;|&<>(){}[]", s[j]) >= 0 {
-		return true
+	if j >= limit {
+		return true, true
 	}
-	if commaSecretKey.MatchString(counted(s[j:limit])) {
-		return true
+	if isSpace(s[j]) || strings.IndexByte("\"'`,;|&<>(){}[]", s[j]) >= 0 {
+		return true, false
 	}
 	for j < limit && (isAlnum(s[j]) || strings.IndexByte("_.-", s[j]) >= 0) {
 		tick(1)
 		j++
 	}
+	// commaSecretKey reads a run of key name characters (with the Kelvin sign and the long s, which its
+	// case-insensitive match folds to "k" and "s"), the blanks after it and one byte more: it is matched on that
+	// much of the text only, so each comma costs what follows it up to its next field, not the rest of the text
+	// (#845, fifteenth decision, P3).
+	k := j
+	for k < limit {
+		tick(1)
+		if isAlnum(s[k]) || strings.IndexByte("_.-", s[k]) >= 0 {
+			k++
+			continue
+		}
+		if r, n := utf8.DecodeRuneInString(s[k:limit]); r == '\u212a' || r == '\u017f' {
+			k += n
+			continue
+		}
+		break
+	}
+	for k < limit && (s[k] == ' ' || s[k] == '\t') {
+		tick(1)
+		k++
+	}
+	reached = k+utf8.UTFMax >= limit
+	if commaSecretKey.MatchString(counted(s[i+1 : min(k+1, limit)])) {
+		return true, reached
+	}
 	switch {
 	case j == i+1 || j >= limit:
-		return false
+		return false, reached
 	case s[j] == ':':
-		return true
+		return true, reached
 	case s[j] == '=':
-		return j+1 < limit && !isSpace(s[j+1]) && s[j+1] != '='
+		return j+1 < limit && !isSpace(s[j+1]) && s[j+1] != '=', reached
 	}
-	return false
+	return false, reached
 }
 
 // commaSecretKey is a secret key name at the start of the text after a comma, followed by what the key rules
@@ -584,8 +745,8 @@ func unclosedQuoteEnd(s string, pos int) int {
 // quoted piece, or the word's end; for one that opens with "$(" or a backtick, the whole word. ok is false
 // when the first group does not close within maxValueExtent. keyPos is as in groupEnd, flag and wide as in
 // shellWordEnd.
-func quotedWordSpan(s string, pos, keyPos int, flag, wide bool) (int, int, bool) {
-	end, last, ok := shellWordEnd(s, pos, extentLimit(s, pos), keyPos, flag, wide)
+func quotedWordSpan(s string, pos, keyPos int, flag, wide bool, w *wordMemo) (int, int, bool) {
+	end, last, ok := shellWordEnd(s, pos, extentLimit(s, pos), keyPos, flag, wide, w)
 	if !ok {
 		return 0, 0, false
 	}

@@ -45,17 +45,7 @@ import (
 const diffWorkSlack = 64 << 10
 
 // knownDiffFailures are the known failing inputs of the targets of this package, by target and input bytes.
-var knownDiffFailures = map[string]map[string]redacttest.KnownFailure{
-	"FuzzDiffStrings": {string(seedTokenRepeatGrammar): {Property: "P3",
-		Reason: `TOKEN="a",b, repeated to the size limit: Strings, which reads the strings joined, costs about 1,382 own steps per byte`}},
-	"FuzzDiffString": {string(seedStringTokenRepeat): {Property: "P3",
-		Reason: `one format character after 1,024 repeats of TOKEN="a",b, costs about 1,205 own steps per byte`}},
-}
-
-// Seeds of the known failures of #845 (fifteenth decision), also in testdata/fuzz.
-var (
-	seedStringTokenRepeat = redacttest.RawSeed(0, strings.Repeat(`TOKEN="a",b,`, 1024)+"\nx\u200b")
-)
+var knownDiffFailures = map[string]map[string]redacttest.KnownFailure{}
 
 // checkDiff ends a fuzz input of target ([redacttest.Check]).
 func checkDiff(t *testing.T, target string, data []byte, counted bool, fails []string) {
@@ -287,23 +277,47 @@ func TestStringsHidesTheLineAfterAPrivateKeyHeader(t *testing.T) {
 	}
 }
 
-// One format character after 1,024 repeats of TOKEN="a",b, makes String add more than ownWorkPerByte per byte
-// to the release's reading (#845, fifteenth decision, input 4).
-func TestKnownStringWorkAfterRepeatedTokens(t *testing.T) {
+// One format character after 1,024 repeats of TOKEN="a",b, made String add more than ownWorkPerByte per byte
+// to the release's reading (#845, fifteenth decision, input 4): each key read its value as the shell word to its
+// end, maxValueExtent bytes, again.
+func TestStringWorkAfterRepeatedTokens(t *testing.T) {
 	in := strings.Repeat(`TOKEN="a",b,`, 1024) + "\nx\u200b"
-	total, release, counted := measureWork(func() { String(in) })
-	redacttest.CheckKnown(t, knownDiffFailures["FuzzDiffString"][string(seedStringTokenRepeat)], counted,
-		workFails("String", total, release, len(in)))
+	checkOwnWork(t, "String", in, func() { String(in) })
+}
+
+// Strings of seed 4 in the grammar (TOKEN="a",b, repeated to the size limit), which reads the strings joined, cost
+// about 1,382 own steps per byte.
+func TestStringsWorkAfterRepeatedTokens(t *testing.T) {
+	fails, counted := diffStrings(seedTokenRepeatGrammar)
+	if !counted {
+		t.Skip("redaction work is counted only with the build tag redactwork")
+	}
+	for _, f := range fails {
+		t.Error(f)
+	}
+}
+
+// checkOwnWork fails when f, the redaction of in by what, adds more than ownWorkPerByte per byte of in to the
+// release's reading. It skips without the counter (the build tag redactwork).
+func checkOwnWork(t *testing.T, what, in string, f func()) {
+	t.Helper()
+	total, release, counted := measureWork(f)
+	if !counted {
+		t.Skip("redaction work is counted only with the build tag redactwork")
+	}
+	for _, fail := range workFails(what, total, release, len(in)) {
+		t.Error(fail)
+	}
 }
 
 // Found by FuzzDiffStringTwice and FuzzDiffString (#845, fifteenth decision, the first runs of the fuzzer): the
 // unit TOKEN="a",b, with a look-alike colon (U+02D0) after it, repeated. Both String and the reading of the
 // release before grow with the square of the input here (own work 2,789, 10,782 and 42,568 steps per byte at
-// 64, 128 and 256 repeats; the release's reading 1,442, 5,588 and 22,072), far past seed 4's 1,205.
-func TestKnownStringWorkOnTokensWithALookAlikeColon(t *testing.T) {
-	in := strings.Repeat("TOKEN=\"a\",b,\u02d0", 128)
-	total, release, counted := measureWork(func() { String(in) })
-	redacttest.CheckKnown(t, redacttest.KnownFailure{Property: "P3",
-		Reason: `TOKEN="a",b, and a look-alike colon, repeated: work grows with the square of the input`}, counted,
-		workFails("String", total, release, len(in)))
+// 64, 128 and 256 repeats; the release's reading 1,442, 5,588 and 22,072), far past seed 4's 1,205. With the
+// memory of the shell words read (wordMemo) the rule's own work is about 70 steps per byte at any size.
+func TestStringWorkOnTokensWithALookAlikeColon(t *testing.T) {
+	for _, n := range []int{128, 512, 2048} {
+		in := strings.Repeat("TOKEN=\"a\",b,\u02d0", n)
+		checkOwnWork(t, "String", in, func() { String(in) })
+	}
 }

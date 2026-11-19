@@ -35,8 +35,9 @@ import (
 const oldestPod = "cache-0"
 
 const (
-	newRevision = "cache-7b9c"
-	blockedPod  = "cache-1"
+	newRevision     = "cache-7b9c"
+	cacheCurrentRev = "cache-6d4f"
+	blockedPod      = "cache-1"
 )
 
 var applied = time.Date(2026, 11, 8, 10, 36, 0, 0, time.UTC)
@@ -52,7 +53,7 @@ func cacheStatefulSet() *appsv1.StatefulSet {
 		},
 		Status: appsv1.StatefulSetStatus{
 			ObservedGeneration: 3, Replicas: 2, ReadyReplicas: 1, CurrentReplicas: 2, UpdatedReplicas: 0,
-			CurrentRevision: "cache-6d4f", UpdateRevision: newRevision,
+			CurrentRevision: cacheCurrentRev, UpdateRevision: newRevision,
 		},
 	}
 }
@@ -418,5 +419,106 @@ func TestStatefulSetMessageCapsRevisionNames(t *testing.T) {
 	}
 	if len(res.Message) > 2000 {
 		t.Errorf("message is %d bytes", len(res.Message))
+	}
+}
+
+// labStatefulSet is the lab's statefulset-partition scenario of #894: partition 1, cache-0 Ready below the
+// partition on the current revision, cache-1 not Ready on a third revision, so the status counts one pod on the
+// current revision and none on the update revision.
+func labStatefulSet() *appsv1.StatefulSet {
+	ss := cacheStatefulSet()
+	ss.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateStatefulSetStrategy{Partition: ptr.To[int32](1)}
+	ss.Status = appsv1.StatefulSetStatus{ObservedGeneration: 3, Replicas: 2, ReadyReplicas: 1, CurrentReplicas: 1,
+		UpdatedReplicas: 0, CurrentRevision: "cache-bcbf8498", UpdateRevision: "cache-5d766948d"}
+	return ss
+}
+
+// TestOldRevisionNamedOnlyWhenTheStatusProvesIt (#894): the StatefulSet status says how many pods run the current
+// and the update revision, never which pod runs which. A message names the current revision as the old revision
+// of the pods it infers by ordinal only when every pod not on the update revision is counted on the current one;
+// otherwise it names no old revision and says that the status does not tell. Deployments and OnDelete never name
+// one.
+func TestOldRevisionNamedOnlyWhenTheStatusProvesIt(t *testing.T) {
+	type check struct {
+		obj        client.Object
+		at         time.Time
+		reason     string
+		named      string   // a revision the message must name as the old one, "" for none
+		notNamed   string   // a revision the message must not carry at all
+		mustAlso   []string // further text the message must carry
+		mustAvoid  []string // text the message must not carry
+		wantOldPod []string
+	}
+	stuck := applied.Add(DefaultDeadline)
+	threeRevisions := func() *appsv1.StatefulSet { // no partition: one pod on the current, one on a third revision
+		ss := cacheStatefulSet()
+		ss.Status.CurrentReplicas = 1
+		return ss
+	}
+	partitionedThird := func() *appsv1.StatefulSet { // complete as the partition asks, cache-0 on a third revision
+		ss := cacheStatefulSet()
+		ss.Spec.Replicas = ptr.To[int32](3)
+		ss.Spec.UpdateStrategy.RollingUpdate = &appsv1.RollingUpdateStatefulSetStrategy{Partition: ptr.To[int32](2)}
+		ss.Status.Replicas, ss.Status.UpdatedReplicas, ss.Status.ReadyReplicas, ss.Status.CurrentReplicas = 3, 1, 3, 1
+		return ss
+	}
+	partitionedProven := func() *appsv1.StatefulSet {
+		ss := partitionedThird()
+		ss.Status.CurrentReplicas = 2
+		return ss
+	}
+	onDelete := func() *appsv1.StatefulSet {
+		ss := cacheStatefulSet()
+		ss.Spec.UpdateStrategy.Type = appsv1.OnDeleteStatefulSetStrategyType
+		ss.Status.CurrentReplicas = 1
+		return ss
+	}
+	d := deployment3()
+	d.Status.UpdatedReplicas = 1
+	unknown := "the StatefulSet status does not say which"
+	cases := map[string]check{
+		"lab: partition, cache-1 on a third revision": {obj: labStatefulSet(), at: stuck, reason: ReasonRolloutStuck,
+			notNamed: "cache-bcbf8498", wantOldPod: []string{blockedPod},
+			mustAlso: []string{blockedPod, "inferred by ordinal", unknown, "1 of 2 pods on neither",
+				strconv.Quote("cache-5d766948d")}},
+		"no partition, a third revision": {obj: threeRevisions(), at: stuck, reason: ReasonRolloutStuck,
+			notNamed: cacheCurrentRev, wantOldPod: []string{blockedPod, oldestPod}, mustAlso: []string{unknown}},
+		"no partition, every old pod counted on the current revision": {obj: cacheStatefulSet(), at: stuck,
+			reason: ReasonRolloutStuck, named: cacheCurrentRev, wantOldPod: []string{blockedPod, oldestPod},
+			mustAlso: []string{"inferred by ordinal"}, mustAvoid: []string{unknown}},
+		"partitioned complete, a third revision below the partition": {obj: partitionedThird(), at: applied,
+			reason: ReasonRolloutPartitioned, notNamed: cacheCurrentRev, wantOldPod: []string{blockedPod, oldestPod},
+			mustAlso: []string{blockedPod + ", " + oldestPod, unknown}},
+		"partitioned complete, the old pods counted on the current revision": {obj: partitionedProven(), at: applied,
+			reason: ReasonRolloutPartitioned, named: cacheCurrentRev, wantOldPod: []string{blockedPod, oldestPod},
+			mustAvoid: []string{unknown}},
+		"on delete":  {obj: onDelete(), at: stuck, reason: ReasonRolloutStuck, notNamed: cacheCurrentRev},
+		"deployment": {obj: d, at: stuck, reason: ReasonRolloutStuck, mustAvoid: []string{"old revision \""}},
+	}
+	for name, tc := range cases {
+		res, err := Evaluate(tc.obj, "", applied, tc.at, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if res.Reason != tc.reason || !slices.Equal(res.OldPods, tc.wantOldPod) {
+			t.Errorf("%s: got %s %v, want %s %v", name, res.Reason, res.OldPods, tc.reason, tc.wantOldPod)
+		}
+		if tc.named != "" && !strings.Contains(res.Message, "old revision "+strconv.Quote(tc.named)) {
+			t.Errorf("%s: message %q does not name the proven old revision %q", name, res.Message, tc.named)
+		}
+		if tc.notNamed != "" && strings.Contains(res.Message, tc.notNamed) {
+			t.Errorf("%s: message %q names revision %q, which the status does not prove for those pods", name,
+				res.Message, tc.notNamed)
+		}
+		for _, s := range tc.mustAlso {
+			if !strings.Contains(res.Message, s) {
+				t.Errorf("%s: message %q lacks %q", name, res.Message, s)
+			}
+		}
+		for _, s := range tc.mustAvoid {
+			if strings.Contains(res.Message, s) {
+				t.Errorf("%s: message %q carries %q", name, res.Message, s)
+			}
+		}
 	}
 }

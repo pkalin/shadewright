@@ -57,8 +57,10 @@ import (
 //     TargetBranchChanged, or the refusal's reason when the Git host refuses for good), and the next read that
 //     works removes it; on the configured branch only a merge that counts (retargetedMergeCounts) does. As on the look at any recorded pull request, nothing bounds the retries in time: only the
 //     shared Git-read retry helper paces them at the poll interval or the host's longer delay;
-//   - anything else (open, closed, gone, another head, a merge into a third branch): errTargetBranchChanged,
-//     handled as before: the request stops NeedsIntervention with TargetBranchChanged.
+//   - with spec.cancel set, open on a third base where a person moved it (changeElsewhere, #892): errOpenElsewhere,
+//     and the cancel ends Cancelled saying so; closed or gone: errClosed, and the cancel ends Cancelled;
+//   - anything else (open, closed, gone, open on a third base, another head, a merge into a third branch):
+//     errTargetBranchChanged, handled as before: the request stops NeedsIntervention with TargetBranchChanged.
 //
 // The merge is recorded whenever it happens (decision of 2026-11-16): a request stopped that way keeps the target
 // lock while its pull request is open on either branch, and the look that settles the lock (checkHeld, every
@@ -103,6 +105,19 @@ func (r *RemediationRequestReconciler) watchBranchChanged(ctx context.Context,
 		return fmt.Errorf("%w: %w", errBranchChangedUnread, v.err)
 	case v.state == changeMerged && v.pr.Number == pr.Number && v.pr.HeadSHA == pr.HeadSHA:
 		return r.recordMergeSeen(ctx, rr, v.pr)
+	case cancelRequested(rr) && v.state == changeElsewhere && v.pr.BaseBranch == string(repo.TargetBranch):
+		// Moved to the target branch the settings name now: open there, it keeps the cancel watch, as the cancel's
+		// look decides (cancelLook).
+		return errTargetBranchChanged
+	case cancelRequested(rr) && v.state == changeElsewhere:
+		// The request's own pull request, read by its number, is open on a third base, where a person moved it
+		// (fourth decision of 2026-11-19 on #892): the cancel ends Cancelled saying so (prOpenElsewhere), and nothing
+		// says it is closed or closes it.
+		return fmt.Errorf("%w: %w", errOpenElsewhere, errTargetBranchChanged)
+	case cancelRequested(rr) && v.state == changeMergedElsewhere:
+		// Merged into a base a person moved it to: the cancel stops as the watch of an unchanged target branch does,
+		// with the merge named (stopMergedElsewhere), never as found closed.
+		return r.stopMergedElsewhere(ctx, rr, v.pr)
 	case cancelRequested(rr) && (v.state == changeClosed || v.state == changeGone):
 		// A cancel settles like any other stop (fifth decision of 2026-11-18 on #771): the pull request, closed or
 		// confirmed gone, cannot merge, so the cancel ends the request Cancelled (cancelOpen with prClosed).

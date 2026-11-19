@@ -265,6 +265,8 @@ func keepCancelReason(rr *remediationv1alpha1.RemediationRequest, reason, found 
 //     recordCancelledOpen, or with the release when the pull request is found closed or gone).
 //   - not this request's any more (no marker, or the request gone or replaced): nothing is closed, and the read after
 //     heldRecheckInterval settles the lock by the usual rule.
+//   - open on a base a person moved it to (#892): nothing is closed there, and the read after heldRecheckInterval
+//     keeps the lock while it is open (TargetHeld).
 //   - a step of the Git host that failed (the token, the read, the close, a refusal included): condition
 //     PullRequestNotClosed says which and why, with a Warning Event when it is set or its reason changes, and the
 //     lock is kept. A refusal is tried again after heldRecheckInterval, any other failure after the delay the host
@@ -296,6 +298,11 @@ func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *r
 		return reconcile.Result{RequeueAfter: stepDelay}, nil
 	case errors.Is(err, freshness.ErrPaused):
 		return r.waitWhilePaused(ctx, rr)
+	case errors.Is(err, errOpenElsewhere):
+		// Open on a base a person moved it to (#892): nothing is closed there. The lock's recheck keeps the lock
+		// while it is open, and TargetHeld says where.
+		log.Info("Closed nothing for a cancelled RemediationRequest: its pull request is open on another base branch")
+		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
 	case errors.Is(err, errChangeRequestNotOurs):
 		// Looked at again on the lock's recheck, as any open pull request of the branch: never at once, since the
 		// same read would find it again.

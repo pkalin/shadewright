@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
@@ -37,7 +38,8 @@ import (
 // Which instance of a container the log section reads (#943). The properties:
 //
 //   - P1: for a container whose current instance has terminated, the context holds that instance's lines.
-//   - P3: when one instance's read gives no lines, the other is tried; each excerpt's header names its
+//   - P3: when one instance's read answers without lines, the other is tried; a read that failed is not
+//     followed by another (one call per container while the source fails); each excerpt's header names its
 //     instance, and when no read gave lines the block names each instance tried and why, in fixed words.
 //   - P4: at most two reads per container, asking for no more bytes in all than its share of the bound.
 //   - P5: each read without lines counts once under its reason.
@@ -260,8 +262,9 @@ func TestPreviousWithoutLinesFallsBackToTheCurrent(t *testing.T) {
 // crashingNow is the web fixture's CrashLoopBackOff container.
 func crashingNow(p *corev1.Pod) *corev1.Pod { return crashing(p, "exited") }
 
-// P3: when neither instance gives lines, one block names both instances and each reason, in fixed words; a
-// read the identity is refused is a failed source, an instance the node no longer holds is not.
+// P3: when neither instance gives lines, one block names each instance read and its reason, in fixed words; a
+// read the identity is refused is a failed source and is not followed by a read of the other instance, an
+// instance the node no longer holds is not a failure and is.
 func TestNoInstanceGivesLines(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -269,18 +272,21 @@ func TestNoInstanceGivesLines(t *testing.T) {
 		note    string
 		reason  int
 		failure bool
+		reads   int
 	}{
-		{"collected", fmt.Errorf("logs request: %w", providers.ErrLogGone), logGone, reasonLogGone, false},
-		{"forbidden", fmt.Errorf("logs request: %w", providers.ErrForbidden), logForbidden, reasonForbidden, true},
+		{"collected", fmt.Errorf("logs request: %w", providers.ErrLogGone), logGone, reasonLogGone, false, 2},
+		{"forbidden", fmt.Errorf("logs request: %w", providers.ErrForbidden), logForbidden, reasonForbidden, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := &instanceLogs{currentErr: tc.err, previousErr: tc.err}
 			before := reasons()
 			c := buildWith(t, exited, l)
 			logs := one(t, c, SectionLogs)
-			want := "pod web-abc-1 container app, current instance\n" + tc.note + "\n" +
-				"pod web-abc-1 container app, previous instance\n" + tc.note + "\n"
-			if logs.Text != want || logs.Data() != nil {
+			want := "pod web-abc-1 container app, current instance\n" + tc.note + "\n"
+			if tc.reads == 2 {
+				want += "pod web-abc-1 container app, previous instance\n" + tc.note + "\n"
+			}
+			if len(l.asked) != tc.reads || logs.Text != want || logs.Data() != nil {
 				t.Errorf("block %q, want %q", logs.Text, want)
 			}
 			if got := slices.Contains(c.FailedSources, SectionLogs); got != tc.failure ||
@@ -288,7 +294,7 @@ func TestNoInstanceGivesLines(t *testing.T) {
 				t.Errorf("failed %v, availability %q, want failure %v", c.FailedSources, logs.Availability, tc.failure)
 			}
 			checkBounded(t, c, l)
-			checkCounted(t, before, map[int]float64{tc.reason: 2})
+			checkCounted(t, before, map[int]float64{tc.reason: float64(tc.reads)})
 		})
 	}
 }
@@ -312,4 +318,41 @@ func TestLogReadsMetricIsBounded(t *testing.T) {
 	}
 	metricguard.Check(t, metrics.Registry, want)
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), want)
+}
+
+// A log source that fails costs one read per container: a failed read is not followed by a read of the
+// other instance, so a hanging source cannot use up the build deadline and take the metrics with it.
+func TestFailedLogReadIsNotReadAgain(t *testing.T) {
+	src := webSources()
+	var mu sync.Mutex
+	var logReads, metricReads int
+	b := newBuilder(t, reader(t, webObjects()...), src, func(c *Config) {
+		c.SourceTimeout = 400 * time.Millisecond
+		c.BuildTimeout = 700 * time.Millisecond
+		c.Logs = logFunc(func(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
+			mu.Lock()
+			logReads++
+			mu.Unlock()
+			<-ctx.Done()
+			return providers.LogExcerpt{}, ctx.Err()
+		})
+		c.Metrics = metricsFunc(func(ctx context.Context, q providers.MetricsQuery) (providers.MetricsResult, error) {
+			mu.Lock()
+			metricReads++
+			mu.Unlock()
+			return src.metrics.Query(ctx, q)
+		})
+	})
+	c := build(t, b, incident(deploymentRef()))
+	mu.Lock()
+	defer mu.Unlock()
+	if logReads != 1 || metricReads == 0 {
+		t.Errorf("%d log reads, %d metric reads: want 1 log read and the metrics read", logReads, metricReads)
+	}
+	if got := sectionNames(c.FailedSources); strings.Join(got, ",") != string(SectionLogs) {
+		t.Errorf("failed sources %v, want the log excerpt only", got)
+	}
+	if logs := one(t, c, SectionLogs); logs.Availability != CouldNotFetch || strings.Count(logs.Text, "instance\n") != 1 {
+		t.Errorf("block %q, availability %q: want one failed read", logs.Text, logs.Availability)
+	}
 }

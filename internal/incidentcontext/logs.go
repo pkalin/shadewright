@@ -140,8 +140,11 @@ func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, 
 }
 
 // pickBlocks reads the logs of one container in at most two reads, within budget bytes in all: the instance
-// [logPicks] chose first, then the other instance when the first gave no lines, or, after the excerpt of a
-// terminated current instance, the previous instance when at least minSecondRead bytes are left. Each excerpt
+// [logPicks] chose first, then the other instance when the first answered without lines (collected, refused
+// for that instance, pod not found or empty), or, after the excerpt of a terminated current instance, the
+// previous instance when at least minSecondRead bytes are left. A read that failed (the source failed, timed
+// out, refused the identity or answered oversized) is not followed by a second one: a failing source costs
+// one call per container. Each excerpt
 // is a block whose header names its instance. A read that gave no lines leaves its header lines (the instance
 // and the fixed reason) before the first excerpt, or, when no read gave lines, a block of those lines alone,
 // marked [CouldNotFetch] when a read failed. It reports whether the log source failed: a read failed and none
@@ -190,8 +193,13 @@ func (b *Builder) pickBlocks(ctx context.Context, pick logPick, since time.Durat
 		logf.FromContext(ctx).Info("Read no log lines of a container instance for the incident context",
 			"namespace", pick.namespace, "pod", pick.pod, "container", pick.container,
 			"instance", instanceName(previous), "reason", reason)
-		readFailed = readFailed || v.Read == LogReadFailed || v.Read == LogReadOversized
 		notes.WriteString(blk.Text)
+		if v.Read == LogReadFailed || v.Read == LogReadOversized {
+			// The source failed, not the instance: a second read of it would cost another timeout and could
+			// use up the build deadline that the metrics and policy sections need.
+			readFailed = true
+			break
+		}
 	}
 	if len(out) == 0 {
 		blk := Block{Section: SectionLogs, Provenance: ProvenanceLogExcerpt, Availability: Available, Text: notes.String()}

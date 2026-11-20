@@ -29,8 +29,9 @@ limitations under the License.
 //     each labelled as the template's or the pod's (during a rollout they differ); for a KEDA ScaledObject
 //     subject, the allow-listed fields of that one object, read with one get (ADR-0036), and the object itself
 //     as [Context.ScaledObject] for the analysis loop to decide from;
-//   - log excerpt: at most two excerpts from a [providers.LogSource], of the containers that look most
-//     relevant (a terminated previous instance first, then a waiting or unready container);
+//   - log excerpt: excerpts from a [providers.LogSource] of at most two containers, those that look most
+//     relevant (a terminated instance first, then a waiting or unready container), at most two excerpts
+//     (one per instance) within each container's equal share of the bound;
 //   - metrics: the approved metric templates for the target's pods from a [providers.MetricsSource];
 //   - Git: always "not available" for now: the analyzer has no Git identity (invariant 6, #373);
 //   - policy bounds (#493): for each catalog action that can change the subject, the bounds of the

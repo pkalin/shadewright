@@ -21,6 +21,7 @@ nav = [
     { "The whole flow" = "how-it-works/index.md" },
     { "Incidents" = "how-it-works/incidents.md" },
     { "Diagnosis" = "how-it-works/diagnosis.md" },
+    { "Working with models" = "how-it-works/models.md" },
     { "Policy" = "how-it-works/policy.md" },
     { "The pull request" = "how-it-works/pull-request.md" },
     { "Verification" = "how-it-works/verification.md" },

@@ -10,9 +10,11 @@ roleRef:
   kind: ClusterRole
   name: {{ include "shadewright.resourceName" (dict "suffix" "metrics-auth-role" "context" $) }}
 subjects:
+{{- if include "shadewright.executorEnabled" . }}
 - kind: ServiceAccount
   name: {{ include "shadewright.resourceName" (dict "suffix" "executor" "context" $) }}
   namespace: {{ .Release.Namespace }}
+{{- end }}
 - kind: ServiceAccount
   name: {{ include "shadewright.resourceName" (dict "suffix" "analyzer" "context" $) }}
   namespace: {{ .Release.Namespace }}

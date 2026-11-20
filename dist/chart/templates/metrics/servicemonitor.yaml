@@ -23,11 +23,14 @@ executor.metricsTLS, analyzer.metricsTLS and verifier.metricsTLS) and the Servic
 {{- if not $tls.serverName }}
 {{- fail "metrics.serviceMonitor.tls.enabled needs metrics.serviceMonitor.tls.serverName" }}
 {{- end }}
-{{- if not (and $.Values.executor.metricsTLS.secretName $.Values.analyzer.metricsTLS.secretName (or $.Values.verifier.metricsTLS.secretName (not (include "shadewright.verifierEnabled" $)))) }}
-{{- fail "metrics.serviceMonitor.tls.enabled needs executor.metricsTLS.secretName, analyzer.metricsTLS.secretName and, when the verifier is deployed, verifier.metricsTLS.secretName: a component without its certificate serves a self-signed one the CA does not verify" }}
+{{- if not (and (or $.Values.executor.metricsTLS.secretName (not (include "shadewright.executorEnabled" $))) $.Values.analyzer.metricsTLS.secretName (or $.Values.verifier.metricsTLS.secretName (not (include "shadewright.verifierEnabled" $)))) }}
+{{- fail "metrics.serviceMonitor.tls.enabled needs analyzer.metricsTLS.secretName and, when the executor is deployed, executor.metricsTLS.secretName and, when the verifier is deployed, verifier.metricsTLS.secretName: a component without its certificate serves a self-signed one the CA does not verify" }}
 {{- end }}
 {{- end }}
-{{- $components := list "executor" "analyzer" }}
+{{- $components := list "analyzer" }}
+{{- if include "shadewright.executorEnabled" $ }}
+{{- $components = prepend $components "executor" }}
+{{- end }}
 {{- if include "shadewright.verifierEnabled" $ }}
 {{- $components = append $components "verifier" }}
 {{- end }}

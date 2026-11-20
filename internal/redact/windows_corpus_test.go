@@ -111,7 +111,7 @@ func TestWindowedFindsWhatTheExpressionFinds(t *testing.T) {
 	exprs := windowExprs(t)
 	windowedOnes := 0
 	for name, re := range exprs {
-		if !newWindowed(re).whole {
+		if !newWindowed(nil, re).whole {
 			windowedOnes++
 		}
 		_ = name
@@ -127,8 +127,8 @@ func TestWindowedFindsWhatTheExpressionFinds(t *testing.T) {
 			t.Parallel()
 			s := windowText(rand.New(rand.NewPCG(873, uint64(i)))) // #nosec G404 G115 -- reproducible generated texts; i is below 160
 			for name, re := range exprs {
-				w := newWindowed(re)
-				if got, want := w.findAll(s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
+				w := newWindowed(nil, re)
+				if got, want := w.findAll(nil, s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
 					t.Errorf("%s (%q): windows found %v, the whole text %v in %q", name, re.String(), got, want, s)
 				}
 			}
@@ -153,8 +153,8 @@ func TestWindowedEdges(t *testing.T) {
 				}
 				s := before + run + after + ": v\n" + strings.Repeat(before+run+after+"\n", windowMinText/len(run)+1) + run
 				for name, re := range exprs {
-					w := newWindowed(re)
-					if got, want := w.findAll(s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
+					w := newWindowed(nil, re)
+					if got, want := w.findAll(nil, s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
 						t.Errorf("%s around %q and %q: windows found %v, the whole text %v", name, before, after, got, want)
 					}
 				}
@@ -178,10 +178,10 @@ func TestWindowedSharedAcrossTexts(t *testing.T) {
 		}
 		texts = append(texts, run+tail)
 		for name, re := range exprs {
-			w := newWindowed(re)
+			w := newWindowed(nil, re)
 			ids := &windowIDs{}
 			for _, s := range texts {
-				if got, want := w.findAllWith(s, ids), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
+				if got, want := w.findAllWith(nil, s, ids), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
 					t.Errorf("%s on %.80q after the texts before: windows found %v, the whole text %v", name, s, got, want)
 				}
 			}
@@ -202,14 +202,14 @@ func TestWindowedReadsARepeatedRunOnce(t *testing.T) {
 	answer := b.String()
 	keyRules := 0
 	for name, re := range windowExprs(t) {
-		w := newWindowed(re)
-		if w.whole || w.alpha.in('\ufe55') || w.later.in('{') {
+		w := newWindowed(nil, re)
+		if w.whole || w.alpha.in(nil, '\ufe55') || w.later.in(nil, '{') {
 			continue
 		}
 		keyRules++
 		bytesRead := 0
 		w.onRead = func(n int) { bytesRead += n }
-		w.findAll(answer)
+		w.findAll(nil, answer)
 		if bytesRead > 2*len(label)+windowMinText {
 			t.Errorf("%s: the windowed reading of eight copies read %d bytes with the expression, over twice the %d of one",
 				name, bytesRead, len(label))
@@ -237,13 +237,13 @@ func TestWindowedLeadOfAStartCharacter(t *testing.T) {
 		}
 	}
 	for _, re := range exprs {
-		w := newWindowed(re)
+		w := newWindowed(nil, re)
 		if w.whole {
 			t.Fatalf("%s is read whole", re)
 		}
 		ids := &windowIDs{}
 		for _, s := range texts {
-			if got, want := w.findAllWith(s, ids), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
+			if got, want := w.findAllWith(nil, s, ids), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
 				t.Errorf("%s on %.40q (%d bytes): windows found %v, the whole text %v", re, s, len(s), got, want)
 			}
 		}
@@ -303,13 +303,13 @@ func TestWindowedChunksFindWhatTheExpressionFinds(t *testing.T) {
 			t.Parallel()
 			label, answer := chunkText(rand.New(rand.NewPCG(8733, uint64(i)))) // #nosec G404 G115 -- reproducible generated texts; i is below 160
 			for name, re := range exprs {
-				w := newWindowed(re)
+				w := newWindowed(nil, re)
 				ids := &windowIDs{}
 				for _, s := range []string{label, answer, answer + label} {
-					if got, want := w.findAllWith(s, ids), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
+					if got, want := w.findAllWith(nil, s, ids), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
 						t.Errorf("%s (%q) on %d bytes: windows found %v, the whole text %v in %q", name, re.String(), len(s), got, want, s)
 					}
-					if got, want := w.findAll(s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
+					if got, want := w.findAll(nil, s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
 						t.Errorf("%s (%q) alone on %d bytes: windows found %v, the whole text %v", name, re.String(), len(s), got, want)
 					}
 				}
@@ -332,22 +332,22 @@ func TestWindowedReadsARepeatedLabelOfShortWindowsOnce(t *testing.T) {
 	answer := b.String()
 	read := 0
 	for name, re := range windowExprs(t) {
-		w := newWindowed(re)
-		if w.whole || slices.ContainsFunc(longRuns(answer, []*windowed{w})[0], func(r longRun) bool { return r.end-r.start > len(label) }) {
+		w := newWindowed(nil, re)
+		if w.whole || slices.ContainsFunc(longRuns(nil, answer, []*windowed{w})[0], func(r longRun) bool { return r.end-r.start > len(label) }) {
 			continue
 		}
 		read++
 		bytesRead := 0
 		w.onRead = func(n int) { bytesRead += n }
-		w.findAll(answer)
+		w.findAll(nil, answer)
 		if bytesRead > 2*len(label)+windowMinText {
 			t.Errorf("%s: eight copies of a label of short windows read %d bytes with the expression, over twice the %d of one",
 				name, bytesRead, len(label))
 		}
 		bytesRead = 0
 		ids := &windowIDs{}
-		w.findAllWith(label, ids)
-		w.findAllWith(answer, ids)
+		w.findAllWith(nil, label, ids)
+		w.findAllWith(nil, answer, ids)
 		if bytesRead > 2*len(label)+windowMinText {
 			t.Errorf("%s: the label alone and then eight copies read %d bytes with the expression, over twice the %d of one",
 				name, bytesRead, len(label))

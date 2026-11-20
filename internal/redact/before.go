@@ -23,6 +23,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/redact/released"
+
+	"github.com/pkalin/shadewright/internal/redact/meter"
 )
 
 // The reading of the release before (#845, thirteenth decision of 2026-11-18). The redactor of the release
@@ -48,10 +50,10 @@ type trace struct {
 }
 
 // traceOf returns s, which starts at byte at of the text decided on, as a trace of itself.
-func traceOf(s string, at int) trace {
+func traceOf(wm *meter.Meter, s string, at int) trace {
 	t := trace{text: s, lo: make([]int32, len(s)), hi: make([]int32, len(s))}
 	for i := range len(s) {
-		tick(1)
+		tick(wm, 1)
 		t.lo[i], t.hi[i] = int32(at+i), int32(at+i+1) // #nosec G115 -- a text is far below 2 GiB
 	}
 	return t
@@ -64,22 +66,24 @@ type traceBuilder struct {
 }
 
 // add writes s, every byte of which stands for [lo, hi).
-func (tb *traceBuilder) add(s string, lo, hi int32) {
+func (tb *traceBuilder) add(wm *meter.Meter, s string, lo, hi int32) {
 	tb.b.WriteString(s)
 	for range len(s) {
-		tick(1)
+		tick(wm, 1)
 		tb.lo, tb.hi = append(tb.lo, lo), append(tb.hi, hi)
 	}
 }
 
 // copy writes the bytes [from, to) of t with what they stand for.
-func (tb *traceBuilder) copy(t trace, from, to int) {
-	tick(to - from)
+func (tb *traceBuilder) copy(wm *meter.Meter, t trace, from, to int) {
+	tick(wm, to-from)
 	tb.b.WriteString(t.text[from:to])
 	tb.lo, tb.hi = append(tb.lo, t.lo[from:to]...), append(tb.hi, t.hi[from:to]...)
 }
 
-func (tb *traceBuilder) trace() trace { return trace{text: tb.b.String(), lo: tb.lo, hi: tb.hi} }
+func (tb *traceBuilder) trace(_ *meter.Meter) trace {
+	return trace{text: tb.b.String(), lo: tb.lo, hi: tb.hi}
+}
 
 // releasedReading applies the redactor of the release before and collects what its passes hide, as spans of
 // the text decided on. The callers widen those spans to whole characters (onRunes) before they return them: that
@@ -99,7 +103,7 @@ type releasedReading struct {
 
 // releasedReading returns a reading with the redactor of the release before that has r's extra patterns, or
 // nil when r has none (a redactor made of some of the rules only, in a test).
-func (r *Redactor) releasedReading() *releasedReading {
+func (r *Redactor) releasedReading(_ *meter.Meter) *releasedReading {
 	if r.before == nil {
 		return nil
 	}
@@ -108,16 +112,16 @@ func (r *Redactor) releasedReading() *releasedReading {
 
 // pass is one call of String of the release before on t: the spans it finds are hidden, and the text it returns
 // has its markers in place.
-func (x *releasedReading) pass(t trace) trace {
+func (x *releasedReading) pass(wm *meter.Meter, t trace) trace {
 	found, ok := x.read[t.text]
 	if !ok {
-		found = x.r.Spans(t.text)
+		found = x.r.SpansWithin(wm, t.text)
 		if x.read == nil {
 			x.read = make(map[string][]released.Span)
 		}
 		x.read[t.text] = found
 	} else {
-		tick(len(t.text)) // the lookup hashes the text
+		tick(wm, len(t.text)) // the lookup hashes the text
 	}
 	if len(found) == 0 {
 		return t
@@ -125,53 +129,55 @@ func (x *releasedReading) pass(t trace) trace {
 	var tb traceBuilder
 	pos := 0
 	for _, f := range found {
-		tick(1)
-		tb.copy(t, pos, f.Start)
+		tick(wm, 1)
+		tb.copy(wm, t, pos, f.Start)
 		lo, hi := t.lo[f.Start], t.hi[f.End-1]
 		if hi > lo {
 			x.hidden = append(x.hidden, span{start: int(lo), end: int(hi), kind: f.Kind, rule: x.rule})
 		}
-		tb.add(released.Marker(f.Kind, f.End-f.Start), lo, hi)
+		tb.add(wm, released.MarkerWithin(wm, f.Kind, f.End-f.Start), lo, hi)
 		pos = f.End
 	}
-	tb.copy(t, pos, len(t.text))
-	return tb.trace()
+	tb.copy(wm, t, pos, len(t.text))
+	return tb.trace(wm)
 }
 
 // redact is incidentcontext.Redact of the release before on t: String, the result made valid UTF-8 (each
 // invalid run becomes one "?"), and String again.
-func (x *releasedReading) redact(t trace) trace { return x.pass(validTrace(x.pass(t))) }
+func (x *releasedReading) redact(wm *meter.Meter, t trace) trace {
+	return x.pass(wm, validTrace(wm, x.pass(wm, t)))
+}
 
 // validTrace is strings.ToValidUTF8(t, "?") on a trace: each run of invalid bytes becomes one "?" that stands
 // for the whole run.
-func validTrace(t trace) trace {
-	tick(len(t.text))
+func validTrace(wm *meter.Meter, t trace) trace {
+	tick(wm, len(t.text))
 	if utf8.ValidString(t.text) {
 		return t
 	}
 	var tb traceBuilder
 	pos := 0
 	for i := 0; i < len(t.text); {
-		tick(1)
+		tick(wm, 1)
 		c, size := utf8.DecodeRuneInString(t.text[i:])
 		if c != utf8.RuneError || size != 1 {
 			i += size
 			continue
 		}
-		tb.copy(t, pos, i)
+		tb.copy(wm, t, pos, i)
 		j := i + 1
 		for j < len(t.text) {
-			tick(1)
+			tick(wm, 1)
 			if c, size := utf8.DecodeRuneInString(t.text[j:]); c != utf8.RuneError || size != 1 {
 				break
 			}
 			j++
 		}
-		tb.add("?", t.lo[i], t.hi[j-1])
+		tb.add(wm, "?", t.lo[i], t.hi[j-1])
 		i, pos = j, j
 	}
-	tb.copy(t, pos, len(t.text))
-	return tb.trace()
+	tb.copy(wm, t, pos, len(t.text))
+	return tb.trace(wm)
 }
 
 // maxShownBytes is incidentcontext's bound of a value on a line (maxValueBytes): a longer value, once redacted,
@@ -181,42 +187,42 @@ const maxShownBytes = 1024
 // shownTrace is the rest of incidentcontext.Value of the release before on a value it redacted: a value longer
 // than maxShownBytes is left out whole and replaced by a note of its size, which stands for all of it; a
 // control character, U+2028 and U+2029 become a space. t is valid UTF-8.
-func shownTrace(t trace) trace {
+func shownTrace(wm *meter.Meter, t trace) trace {
 	if len(t.text) > maxShownBytes {
 		var tb traceBuilder
-		tb.add("("+strconv.Itoa(len(t.text))+" bytes left out)", t.lo[0], t.hi[len(t.text)-1])
-		return tb.trace()
+		tb.add(wm, "("+strconv.Itoa(len(t.text))+" bytes left out)", t.lo[0], t.hi[len(t.text)-1])
+		return tb.trace(wm)
 	}
 	var tb traceBuilder
 	pos := 0
 	for i := 0; i < len(t.text); {
-		tick(1)
+		tick(wm, 1)
 		c, size := utf8.DecodeRuneInString(t.text[i:])
 		if unicode.IsControl(c) || c == ' ' || c == ' ' {
-			tb.copy(t, pos, i)
-			tb.add(" ", t.lo[i], t.hi[i+size-1])
+			tb.copy(wm, t, pos, i)
+			tb.add(wm, " ", t.lo[i], t.hi[i+size-1])
 			pos = i + size
 		}
 		i += size
 	}
-	tb.copy(t, pos, len(t.text))
-	return tb.trace()
+	tb.copy(wm, t, pos, len(t.text))
+	return tb.trace(wm)
 }
 
 // jsonTrace writes t as the content of a JSON string, as encoding/json does without HTML escapes (writeUnit),
 // each character's escape standing for the character.
-func jsonTrace(t trace) trace {
+func jsonTrace(wm *meter.Meter, t trace) trace {
 	var tb traceBuilder
 	var unit strings.Builder
 	for i := 0; i < len(t.text); {
-		tick(1)
+		tick(wm, 1)
 		c, size := utf8.DecodeRuneInString(t.text[i:])
 		unit.Reset()
-		writeUnit(&unit, JSON, t.text[i:i+size], c, size)
-		tb.add(unit.String(), t.lo[i], t.hi[i+size-1])
+		writeUnit(wm, &unit, JSON, t.text[i:i+size], c, size)
+		tb.add(wm, unit.String(), t.lo[i], t.hi[i+size-1])
 		i += size
 	}
-	return tb.trace()
+	return tb.trace(wm)
 }
 
 // releasedPieces returns what the release before hid in the answer the pieces make, as spans of the pieces'
@@ -225,8 +231,8 @@ func jsonTrace(t trace) trace {
 // answer (a value on a line as incidentcontext.Value showed it, a value in JSON as encoding/json wrote it), and
 // redacted the whole answer the same way before they cut it. A map key also loses what that release hid in the
 // same text as a value. nil when r has no such reading.
-func (r *Redactor) releasedPieces(ps []Piece) []span {
-	x := r.releasedReading()
+func (r *Redactor) releasedPieces(wm *meter.Meter, ps []Piece) []span {
+	x := r.releasedReading(wm)
 	if x == nil {
 		return nil
 	}
@@ -234,30 +240,30 @@ func (r *Redactor) releasedPieces(ps []Piece) []span {
 	var read strings.Builder
 	off := 0
 	for _, p := range ps {
-		tick(1)
+		tick(wm, 1)
 		read.WriteString(p.Text)
-		t := traceOf(p.Text, off)
+		t := traceOf(wm, p.Text, off)
 		if p.Data {
 			if !p.MapKey {
-				t = x.redact(t)
+				t = x.redact(wm, t)
 			} else {
 				// That release wrote a map key as it was, but the same text as a value it redacted alone: what it
 				// hides there is hidden in the key too, which keeps its text for the passes over the answer
 				// (#845, fifteenth decision: a label key and a condition reason of one object, one text).
-				x.redact(t)
+				x.redact(wm, t)
 			}
 			switch p.Form {
 			case Line:
-				t = shownTrace(t)
+				t = shownTrace(wm, t)
 			case JSON:
-				t = jsonTrace(t)
+				t = jsonTrace(wm, t)
 			}
 		}
-		tb.copy(t, 0, len(t.text))
+		tb.copy(wm, t, 0, len(t.text))
 		off += len(p.Text)
 	}
-	x.redact(tb.trace())
-	return onRunes(read.String(), x.hidden)
+	x.redact(wm, tb.trace(wm))
+	return onRunes(wm, read.String(), x.hidden)
 }
 
 // releasedString returns what the release before hid in s, as spans of s: one call of its String when twice
@@ -266,21 +272,21 @@ func (r *Redactor) releasedPieces(ps []Piece) []span {
 // cut is not nil, then kept the part of that text from cut(text) on and redacted that part the same way (a log
 // excerpt at get_pod_logs, which RenderLog cut to its newest lines and FitLog redacted again). nil when r has no
 // such reading.
-func (r *Redactor) releasedString(s string, twice bool, cut func(string) int) []span {
-	x := r.releasedReading()
+func (r *Redactor) releasedString(wm *meter.Meter, s string, twice bool, cut func(string) int) []span {
+	x := r.releasedReading(wm)
 	if x == nil {
 		return nil
 	}
 	if !twice {
-		x.pass(traceOf(s, 0))
-		return onRunes(s, x.hidden)
+		x.pass(wm, traceOf(wm, s, 0))
+		return onRunes(wm, s, x.hidden)
 	}
-	t := x.redact(traceOf(s, 0))
+	t := x.redact(wm, traceOf(wm, s, 0))
 	if cut != nil {
 		from := min(max(cut(t.text), 0), len(t.text))
-		x.redact(trace{text: t.text[from:], lo: t.lo[from:], hi: t.hi[from:]})
+		x.redact(wm, trace{text: t.text[from:], lo: t.lo[from:], hi: t.hi[from:]})
 	}
-	return onRunes(s, x.hidden)
+	return onRunes(wm, s, x.hidden)
 }
 
 // releasedExcerpt returns what the release before hid in a log as the log source read it (s) when it kept the
@@ -289,17 +295,17 @@ func (r *Redactor) releasedString(s string, twice bool, cut func(string) int) []
 // what it hid where the reader of that excerpt dropped its first drop(text) bytes and redacted the rest as
 // incidentcontext.Redact did, twice (RenderLog, then get_pod_logs fitting the text again), each time on the text
 // with that release's markers in place (#845, fifteenth decision). nil when r has no such reading.
-func (r *Redactor) releasedExcerpt(s string, from int, drop func(string) int) []span {
-	x := r.releasedReading()
+func (r *Redactor) releasedExcerpt(wm *meter.Meter, s string, from int, drop func(string) int) []span {
+	x := r.releasedReading(wm)
 	if x == nil {
 		return nil
 	}
 	from = min(max(from, 0), len(s))
-	t := traceOf(s, 0)
+	t := traceOf(wm, s, 0)
 	var tb traceBuilder
 	pos := from
-	for _, f := range x.r.Spans(s) {
-		tick(1)
+	for _, f := range x.r.SpansWithin(wm, s) {
+		tick(wm, 1)
 		if f.End > f.Start {
 			x.hidden = append(x.hidden, span{start: f.Start, end: f.End, kind: f.Kind, rule: x.rule})
 		}
@@ -307,17 +313,17 @@ func (r *Redactor) releasedExcerpt(s string, from int, drop func(string) int) []
 			continue
 		}
 		start := max(f.Start, from)
-		tb.copy(t, pos, start)
-		tb.add(released.Marker(f.Kind, f.End-start), int32(start), int32(f.End)) // #nosec G115 -- a text is far below 2 GiB
+		tb.copy(wm, t, pos, start)
+		tb.add(wm, released.MarkerWithin(wm, f.Kind, f.End-start), int32(start), int32(f.End)) // #nosec G115 -- a text is far below 2 GiB
 		pos = f.End
 	}
-	tb.copy(t, pos, len(s))
-	ex := x.pass(validTrace(tb.trace()))
+	tb.copy(wm, t, pos, len(s))
+	ex := x.pass(wm, validTrace(wm, tb.trace(wm)))
 	if drop != nil {
 		d := min(max(drop(ex.text), 0), len(ex.text))
-		x.redact(x.redact(trace{text: ex.text[d:], lo: ex.lo[d:], hi: ex.hi[d:]}))
+		x.redact(wm, x.redact(wm, trace{text: ex.text[d:], lo: ex.lo[d:], hi: ex.hi[d:]}))
 	}
-	return onRunes(s, x.hidden)
+	return onRunes(wm, s, x.hidden)
 }
 
 // StringTwice is String for a text the release before redacted, made valid UTF-8 and redacted again
@@ -327,7 +333,12 @@ func (r *Redactor) releasedExcerpt(s string, from int, drop func(string) int) []
 // redacted that part the same way: RenderLog for a log excerpt that get_pod_logs fitted again (#845, thirteenth
 // decision of 2026-11-18).
 func (r *Redactor) StringTwice(s string, cut func(string) int) string {
-	return render(s, settle(s, append(r.ruleMatches(s), r.releasedString(s, true, cut)...)))
+	return meteredString(len(s), func(wm *meter.Meter) string { return r.stringTwice(wm, s, cut) })
+}
+
+// stringTwice is StringTwice on the budget wm.
+func (r *Redactor) stringTwice(wm *meter.Meter, s string, cut func(string) int) string {
+	return render(wm, s, settle(wm, s, append(r.ruleMatches(wm, s), r.releasedString(wm, s, true, cut)...)))
 }
 
 // StringTwice is the package's StringTwice with the built-in rules.
@@ -342,7 +353,13 @@ func StringTwice(s string, cut func(string) int) string { return defaultRedactor
 // rules already replaced (#845, fifteenth decision).
 func (r *Redactor) ReplaceFrom(s string, from int, drop func(string) int, repl func(kind, text string) string,
 	between func(string) string) string {
-	return r.replaceSpans(s, settle(s, append(r.ruleMatches(s), r.releasedExcerpt(s, from, drop)...)), repl, between)
+	spans, ok := metered(len(s), func(wm *meter.Meter) []span {
+		return settle(wm, s, append(r.ruleMatches(wm, s), r.releasedExcerpt(wm, s, from, drop)...))
+	})
+	if !ok {
+		return Withheld
+	}
+	return r.replaceSpans(unstopped(), s, spans, repl, between)
 }
 
 // ReleasedText returns s as the release before wrote it where it redacted a text, made it valid UTF-8 and
@@ -353,5 +370,7 @@ func (r *Redactor) ReleasedText(s string) string {
 	if r.before == nil {
 		return s
 	}
-	return r.before.String(strings.ToValidUTF8(r.before.String(s), "?"))
+	return meteredString(len(s), func(wm *meter.Meter) string {
+		return r.before.StringWithin(wm, strings.ToValidUTF8(r.before.StringWithin(wm, s), "?"))
+	})
 }

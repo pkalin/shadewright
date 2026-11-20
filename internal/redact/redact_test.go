@@ -1300,7 +1300,7 @@ func TestSlashSplitKeyEndingInAWordIsRedacted(t *testing.T) {
 		k := seededKey(seed)
 		out := String("rotated " + k + " today")
 		for _, p := range keyParts(k) {
-			if strings.Contains(out, p) && !pathWord(p) {
+			if strings.Contains(out, p) && !pathWord(nil, p) {
 				t.Errorf("seed %d: part %q of the key kept:\n in: %s\nout: %s", seed, p, k, out)
 			}
 		}
@@ -1409,7 +1409,7 @@ func TestKnownLeaksAfterAKeyNameAreRedacted(t *testing.T) {
 	)
 	for _, f := range keyNameForms {
 		for _, v := range values {
-			if f.opaqueOnly && !opaqueToken(v.key) {
+			if f.opaqueOnly && !opaqueToken(nil, v.key) {
 				continue // the blank form takes only an opaque key (TestKeyNameKnownLeaks)
 			}
 			for _, before := range []string{f.before, f.probe} {
@@ -1444,7 +1444,7 @@ func TestSeededKeysAfterAKeyNameAreRedacted(t *testing.T) {
 		f := keyNameForms[seed%uint64(len(keyNameForms))]
 		k := seededKey(seed)
 		o := &outs[i]
-		o.notOpaque = f.opaqueOnly && !opaqueToken(k)
+		o.notOpaque = f.opaqueOnly && !opaqueToken(nil, k)
 		o.out, o.ok = redactedAfterKeyName(f.before, k, f.after)
 		o.whole = !o.ok && strings.Contains(o.out, k)
 	})

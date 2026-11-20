@@ -458,7 +458,7 @@ func TestCanonCorpusIsByConstruction(t *testing.T) {
 // byte for byte.
 func canonStringLeaksOf(c canonCase) []CanonLeak {
 	red := make([]bool, len(c.in))
-	for _, sp := range defaultRedactor.spans(c.in) {
+	for _, sp := range defaultRedactor.spans(nil, c.in) {
 		for i := sp.start; i < sp.end; i++ {
 			red[i] = true
 		}
@@ -539,7 +539,7 @@ func TestCanonCorpusStillRedactsWhatMainRedacted(t *testing.T) {
 		if !want[row.Hash] {
 			continue
 		}
-		now := defaultRedactor.spans(c.in)
+		now := defaultRedactor.spans(nil, c.in)
 		for _, sp := range row.Spans {
 			for i := sp[0]; i < sp[1]; i++ {
 				if !coveredBy([2]int{i, i + 1}, now) {

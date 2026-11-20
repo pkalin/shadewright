@@ -20,6 +20,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/redact/meter"
 )
 
 // The extent rule (#708). After a secret key name or flag, a value that opens a group (a quote, "[", "{",
@@ -61,9 +63,9 @@ const noKey = -1
 
 // lineColumn returns the column of pos on its line, reading back at most maxValueExtent bytes; when the line
 // starts further back it returns maxValueExtent, so no line is indented deeper.
-func lineColumn(s string, pos int) int {
+func lineColumn(wm *meter.Meter, s string, pos int) int {
 	from := max(0, pos-maxValueExtent)
-	i := lastIndexByte(s[from:pos], '\n')
+	i := lastIndexByte(wm, s[from:pos], '\n')
 	if i < 0 {
 		if from > 0 {
 			return maxValueExtent
@@ -75,15 +77,15 @@ func lineColumn(s string, pos int) int {
 
 // lineIndent returns the number of blanks that start the line holding pos, read back at most maxValueExtent
 // bytes; when the line starts further back it returns maxValueExtent.
-func lineIndent(s string, pos int) int {
-	col := lineColumn(s, pos)
+func lineIndent(wm *meter.Meter, s string, pos int) int {
+	col := lineColumn(wm, s, pos)
 	if col >= maxValueExtent {
 		return maxValueExtent
 	}
 	start := pos - col
 	t := start
 	for t < pos && (s[t] == ' ' || s[t] == '\t') {
-		tick(1)
+		tick(wm, 1)
 		t++
 	}
 	return t - start
@@ -91,27 +93,27 @@ func lineIndent(s string, pos int) int {
 
 // indentedBeyond reports whether the line that starts at pos, read up to limit, is blank or indented by more
 // than col blanks.
-func indentedBeyond(s string, pos, limit, col int) bool {
+func indentedBeyond(wm *meter.Meter, s string, pos, limit, col int) bool {
 	t := pos
 	for t < limit && (s[t] == ' ' || s[t] == '\t') {
-		tick(1)
+		tick(wm, 1)
 		t++
 	}
 	return t >= limit || s[t] == '\n' || s[t] == '\r' || t-pos > col
 }
 
 // extentLimit returns the index the extent rule reads up to from pos.
-func extentLimit(s string, pos int) int {
+func extentLimit(_ *meter.Meter, s string, pos int) int {
 	return min(len(s), pos+maxValueExtent)
 }
 
 // quoteLevel returns the escape level of a double quote preceded by run backslashes: the lowest zero bit of
 // run (0 for a plain quote or one after an escaped backslash, 1 for "\"", 2 for "\\\"", as escapedQuotedSpan
 // reads it).
-func quoteLevel(run int) int {
+func quoteLevel(wm *meter.Meter, run int) int {
 	j := 0
 	for run&(1<<j) != 0 {
-		tick(1)
+		tick(wm, 1)
 		j++
 	}
 	return j
@@ -133,33 +135,33 @@ func quoteLevel(run int) int {
 // backslash before "(", ")", "$" or a backtick. Elsewhere (a JSON or YAML quoted string, an array, an object)
 // the text is literal, a quoted string ends at its closing quote, and inside an array or object a quote opens
 // a string only at the start of a scalar (after "[", "{", "," or ":"), so "horse'battery" is plain text.
-func groupEnd(s string, pos, limit, ctx, keyPos int, shell bool) (int, bool) {
-	return groupScanEnd(groupScan{s: s, limit: limit, ctx: ctx, shell: shell}, pos, keyPos)
+func groupEnd(wm *meter.Meter, s string, pos, limit, ctx, keyPos int, shell bool) (int, bool) {
+	return groupScanEnd(wm, groupScan{s: s, limit: limit, ctx: ctx, shell: shell}, pos, keyPos)
 }
 
 // groupScanEnd is groupEnd with the scanner g, whose props field says whether a YAML node property opens a
 // scalar inside an array or object (bracketSpan).
-func groupScanEnd(g groupScan, pos, keyPos int) (int, bool) {
+func groupScanEnd(wm *meter.Meter, g groupScan, pos, keyPos int) (int, bool) {
 	s, limit := g.s, g.limit
 	keyCol := -1
 	for i := pos; i < limit; i++ {
-		tick(1)
+		tick(wm, 1)
 		if s[i] == '\n' && g.quote != 0 && keyPos != noKey {
 			if keyCol < 0 {
-				keyCol = lineColumn(s, keyPos)
+				keyCol = lineColumn(wm, s, keyPos)
 			}
-			if !indentedBeyond(s, i+1, limit, keyCol) {
+			if !indentedBeyond(wm, s, i+1, limit, keyCol) {
 				return 0, false
 			}
 		}
 		var st scanStep
 		switch g.quote {
 		case '\'':
-			i, st = g.singleQuoted(i)
+			i, st = g.singleQuoted(wm, i)
 		case '"':
-			i, st = g.doubleQuoted(i)
+			i, st = g.doubleQuoted(wm, i)
 		default:
-			i, st = g.unquoted(i)
+			i, st = g.unquoted(wm, i)
 		}
 		switch st {
 		case scanClosed:
@@ -202,18 +204,18 @@ type groupScan struct {
 
 // shellText reports whether the byte read now is shell text: inside "$(" or backticks, or in a group that
 // is a shell word and holds no array or object.
-func (g *groupScan) shellText() bool {
-	return g.inShell() || g.depth == 0 && g.shell
+func (g *groupScan) shellText(wm *meter.Meter) bool {
+	return g.inShell(wm) || g.depth == 0 && g.shell
 }
 
 // scalarStart reports whether a quote read now inside an array or object opens a string: it does at the
 // start of a scalar only, after "[", "{", "," or ":" and blanks.
-func (g *groupScan) scalarStart() bool {
-	return g.shellText() || g.afterProp || strings.IndexByte("[{,:", g.prev) >= 0
+func (g *groupScan) scalarStart(wm *meter.Meter) bool {
+	return g.shellText(wm) || g.afterProp || strings.IndexByte("[{,:", g.prev) >= 0
 }
 
 // push opens a nested group whose closer is c, and reports false when that nests too deep.
-func (g *groupScan) push(c byte) scanStep {
+func (g *groupScan) push(_ *meter.Meter, c byte) scanStep {
 	if g.depth == len(g.stack) {
 		return scanFailed
 	}
@@ -224,8 +226,8 @@ func (g *groupScan) push(c byte) scanStep {
 
 // inShell reports whether the innermost open group is a command substitution ("$(", "(" inside it, or
 // backticks), where brackets and braces are plain text.
-func (g *groupScan) inShell() bool {
-	switch g.top() {
+func (g *groupScan) inShell(wm *meter.Meter) bool {
+	switch g.top(wm) {
 	case ')', substInQuotes, '`', backtickInQuotes:
 		return true
 	}
@@ -233,7 +235,7 @@ func (g *groupScan) inShell() bool {
 }
 
 // top returns the closer of the innermost open group, or 0.
-func (g *groupScan) top() byte {
+func (g *groupScan) top(_ *meter.Meter) byte {
 	if g.depth == 0 {
 		return 0
 	}
@@ -241,7 +243,7 @@ func (g *groupScan) top() byte {
 }
 
 // closeQuote ends the open quoted string; the group is closed when no bracket is open.
-func (g *groupScan) closeQuote() scanStep {
+func (g *groupScan) closeQuote(_ *meter.Meter) scanStep {
 	g.quote = 0
 	g.prev = '"'
 	if g.depth == 0 {
@@ -251,18 +253,18 @@ func (g *groupScan) closeQuote() scanStep {
 }
 
 // singleQuoted reads the byte at i inside a single-quoted string: only a single quote ends it, and a doubled one stays inside.
-func (g *groupScan) singleQuoted(i int) (int, scanStep) {
+func (g *groupScan) singleQuoted(wm *meter.Meter, i int) (int, scanStep) {
 	if g.s[i] != '\'' {
 		return i, scanGoOn
 	}
 	if i+1 < g.limit && g.s[i+1] == '\'' {
 		return i + 1, scanGoOn
 	}
-	return i, g.closeQuote()
+	return i, g.closeQuote(wm)
 }
 
 // doubleQuoted reads the byte at i inside a double-quoted string.
-func (g *groupScan) doubleQuoted(i int) (int, scanStep) {
+func (g *groupScan) doubleQuoted(wm *meter.Meter, i int) (int, scanStep) {
 	c := g.s[i]
 	switch {
 	case c == '\\':
@@ -272,17 +274,17 @@ func (g *groupScan) doubleQuoted(i int) (int, scanStep) {
 		// A command substitution inside double quotes: its text is read afresh, its own quotes included,
 		// and the string goes on after its ")".
 		g.quote, g.run = 0, 0
-		return i + 1, g.push(substInQuotes)
+		return i + 1, g.push(wm, substInQuotes)
 	case c == '`' && g.qShell && g.run%2 == 0 && g.qLevel == 0:
 		// A backtick substitution inside double quotes, read as "$(" above.
 		g.quote, g.run = 0, 0
-		return i, g.push(backtickInQuotes)
+		return i, g.push(wm, backtickInQuotes)
 	case c == '"':
-		j := quoteLevel(g.run)
+		j := quoteLevel(wm, g.run)
 		g.run = 0
 		switch {
 		case j == g.qLevel:
-			return i, g.closeQuote()
+			return i, g.closeQuote(wm)
 		case j < g.qLevel:
 			return i, scanFailed
 		}
@@ -294,12 +296,12 @@ func (g *groupScan) doubleQuoted(i int) (int, scanStep) {
 // unquoted reads the byte at i outside any quoted string, and records it as prev when it is no blank or
 // backslash and opens no string. It also follows the YAML node properties that open a scalar inside an array
 // or object (inProp, afterProp).
-func (g *groupScan) unquoted(i int) (int, scanStep) {
+func (g *groupScan) unquoted(wm *meter.Meter, i int) (int, scanStep) {
 	c := g.s[i]
-	startsProp := g.props && (c == '!' || c == '&') && g.run == 0 && g.depth > 0 && !g.inShell() && !g.inProp && g.scalarStart()
-	j, st := g.unquotedByte(i)
+	startsProp := g.props && (c == '!' || c == '&') && g.run == 0 && g.depth > 0 && !g.inShell(wm) && !g.inProp && g.scalarStart(wm)
+	j, st := g.unquotedByte(wm, i)
 	switch {
-	case isSpace(c):
+	case isSpace(wm, c):
 		if g.inProp {
 			g.inProp, g.afterProp = false, true
 		}
@@ -308,41 +310,41 @@ func (g *groupScan) unquoted(i int) (int, scanStep) {
 	case strings.IndexByte(",[]{}", c) >= 0 || !g.inProp:
 		g.inProp, g.afterProp = false, false
 	}
-	if g.quote == 0 && c != '\\' && !isSpace(c) {
+	if g.quote == 0 && c != '\\' && !isSpace(wm, c) {
 		g.prev = c
 	}
 	return j, st
 }
 
 // unquotedByte is unquoted without the record of prev.
-func (g *groupScan) unquotedByte(i int) (int, scanStep) {
+func (g *groupScan) unquotedByte(wm *meter.Meter, i int) (int, scanStep) {
 	c := g.s[i]
 	run := g.run
 	g.run = 0
 	switch {
 	case c == '\\':
 		g.run = run + 1
-	case run%2 == 1 && g.shellText() && strings.IndexByte("()$`", c) >= 0:
+	case run%2 == 1 && g.shellText(wm) && strings.IndexByte("()$`", c) >= 0:
 		// Escaped in a shell: plain text ("\)" does not close "$(").
 	case c == '"' || c == '\'' && run == 0:
-		return i, g.openQuote(c, run)
-	case (c == '[' || c == '{' || c == ']' || c == '}') && g.inShell():
+		return i, g.openQuote(wm, c, run)
+	case (c == '[' || c == '{' || c == ']' || c == '}') && g.inShell(wm):
 		// Plain text in a shell: "${x}", "a[1".
 	case c == '[':
-		return i, g.push(']')
+		return i, g.push(wm, ']')
 	case c == '{':
-		return i, g.push('}')
-	case c == '$' || c == '(' || c == '`' && g.top() != '`' || c == ')' && g.top() == substInQuotes:
+		return i, g.push(wm, '}')
+	case c == '$' || c == '(' || c == '`' && g.top(wm) != '`' || c == ')' && g.top(wm) == substInQuotes:
 		// Shell groups; outside a shell these bytes are plain text.
-		if j, st, ok := g.shellByte(i); ok {
+		if j, st, ok := g.shellByte(wm, i); ok {
 			return j, st
 		}
-	case g.depth > 0 && c == g.top():
+	case g.depth > 0 && c == g.top(wm):
 		g.depth--
 		if g.depth == 0 {
 			return i, scanClosed
 		}
-	case c == ']' || c == '}' || c == ')' && g.shellText():
+	case c == ']' || c == '}' || c == ')' && g.shellText(wm):
 		// A closer that does not match; outside a shell, "(" and ")" are plain text.
 		return i, scanFailed
 	}
@@ -352,18 +354,18 @@ func (g *groupScan) unquotedByte(i int) (int, scanStep) {
 // shellByte reads "$(", "(", ")" or a backtick at i that opens or closes a shell group: "$(" and a backtick in
 // shell text, "(" inside "$(", and the ")" or backtick that ends a substitution inside a double-quoted
 // string, which goes on. ok is false when the byte does none of these.
-func (g *groupScan) shellByte(i int) (int, scanStep, bool) {
+func (g *groupScan) shellByte(wm *meter.Meter, i int) (int, scanStep, bool) {
 	switch c := g.s[i]; {
-	case c == '$' && i+1 < g.limit && g.s[i+1] == '(' && g.shellText():
-		return i + 1, g.push(')'), true
-	case c == ')' && g.top() == substInQuotes, c == '`' && g.top() == backtickInQuotes:
+	case c == '$' && i+1 < g.limit && g.s[i+1] == '(' && g.shellText(wm):
+		return i + 1, g.push(wm, ')'), true
+	case c == ')' && g.top(wm) == substInQuotes, c == '`' && g.top(wm) == backtickInQuotes:
 		g.depth--
 		g.quote, g.qLevel, g.qShell = '"', 0, true
 		return i, scanGoOn, true
-	case c == '(' && g.inShell():
-		return i, g.push(')'), true
-	case c == '`' && g.top() != '`' && g.shellText():
-		return i, g.push('`'), true
+	case c == '(' && g.inShell(wm):
+		return i, g.push(wm, ')'), true
+	case c == '`' && g.top(wm) != '`' && g.shellText(wm):
+		return i, g.push(wm, '`'), true
 	}
 	return i, scanGoOn, false
 }
@@ -371,24 +373,24 @@ func (g *groupScan) shellByte(i int) (int, scanStep, bool) {
 // openQuote reads a quote outside any quoted string, preceded by run backslashes: a double quote escaped
 // less than the context ends an enclosing string, so the group fails; inside an array or object a quote
 // opens a string only at the start of a scalar; otherwise it opens one.
-func (g *groupScan) openQuote(c byte, run int) scanStep {
+func (g *groupScan) openQuote(wm *meter.Meter, c byte, run int) scanStep {
 	j := 0
 	if c == '"' {
-		j = quoteLevel(run)
+		j = quoteLevel(wm, run)
 		if j < g.ctx {
 			return scanFailed
 		}
 	}
-	if g.depth > 0 && !g.scalarStart() {
+	if g.depth > 0 && !g.scalarStart(wm) {
 		return scanGoOn
 	}
-	g.quote, g.qLevel, g.qShell = c, j, g.shellText()
+	g.quote, g.qLevel, g.qShell = c, j, g.shellText(wm)
 	return scanGoOn
 }
 
 // opensGroup reports whether a quoted group of groupEnd opens at pos: a plain quote, "$(" or a backtick.
 // Arrays and objects are read by bracketSpan.
-func opensGroup(s string, pos int) bool {
+func opensGroup(_ *meter.Meter, s string, pos int) bool {
 	if pos >= len(s) {
 		return false
 	}
@@ -409,17 +411,17 @@ func opensGroup(s string, pos int) bool {
 // ends it otherwise ("[\"abc\"], next"). last is true when the word ends with a quoted group, so its closing
 // quote is at end-1. ok is false when the first group does not close. keyPos is as in groupEnd. With wide
 // false an escaped punctuation byte and a comma end the word, as on main before #769 (keyValueSpans).
-func shellWordEnd(s string, pos, limit, keyPos int, flag, wide bool) (end int, last bool, ok bool) {
-	end, ok = groupEnd(s, pos, limit, 0, keyPos, true)
+func shellWordEnd(wm *meter.Meter, s string, pos, limit, keyPos int, flag, wide bool) (end int, last bool, ok bool) {
+	end, ok = groupEnd(wm, s, pos, limit, 0, keyPos, true)
 	if !ok {
 		return 0, false, false
 	}
 	last = s[pos] == '"' || s[pos] == '\''
 	for end < limit {
-		tick(1)
+		tick(wm, 1)
 		c := s[end]
-		if opensGroup(s, end) {
-			e, closed := groupEnd(s, end, limit, 0, keyPos, true)
+		if opensGroup(wm, s, end) {
+			e, closed := groupEnd(wm, s, end, limit, 0, keyPos, true)
 			if !closed {
 				break
 			}
@@ -435,17 +437,17 @@ func shellWordEnd(s string, pos, limit, keyPos int, flag, wide bool) (end int, l
 		if c == ')' || c == ']' || c == '}' {
 			j := end
 			for j < limit && (s[j] == ')' || s[j] == ']' || s[j] == '}') {
-				tick(1)
+				tick(wm, 1)
 				j++
 			}
-			if j < limit && !isSpace(s[j]) && strings.IndexByte(wordStops+"\"'`$", s[j]) < 0 {
+			if j < limit && !isSpace(wm, s[j]) && strings.IndexByte(wordStops+"\"'`$", s[j]) < 0 {
 				last = false
 				end = j
 				continue
 			}
 			break
 		}
-		if isSpace(c) || strings.IndexByte(wordStops, c) >= 0 && (c != ',' || !flag && (!wide || fieldAfterComma(s, end, limit))) {
+		if isSpace(wm, c) || strings.IndexByte(wordStops, c) >= 0 && (c != ',' || !flag && (!wide || fieldAfterComma(wm, s, end, limit))) {
 			break
 		}
 		last = false
@@ -460,16 +462,16 @@ func shellWordEnd(s string, pos, limit, keyPos int, flag, wide bool) (end int, l
 // after it ("password=\"abc\",DB_PASSWORD= \"x y\"", whose value is then redacted as on main), or by a name
 // and "=" or ":" ("password=\"abc\",user=bob", ",next: x"). Any other name and "=" followed by whitespace, the
 // end or another "=" is base64 padding, not a field ("\"a\",abc=").
-func fieldAfterComma(s string, i, limit int) bool {
+func fieldAfterComma(wm *meter.Meter, s string, i, limit int) bool {
 	j := i + 1
-	if j >= limit || isSpace(s[j]) || strings.IndexByte("\"'`,;|&<>(){}[]", s[j]) >= 0 {
+	if j >= limit || isSpace(wm, s[j]) || strings.IndexByte("\"'`,;|&<>(){}[]", s[j]) >= 0 {
 		return true
 	}
-	if commaSecretKey.MatchString(counted(s[j:commaKeyReach(s, j, limit)])) {
+	if commaSecretKey.MatchString(counted(wm, s[j:commaKeyReach(wm, s, j, limit)])) {
 		return true
 	}
-	for j < limit && (isAlnum(s[j]) || strings.IndexByte("_.-", s[j]) >= 0) {
-		tick(1)
+	for j < limit && (isAlnum(wm, s[j]) || strings.IndexByte("_.-", s[j]) >= 0) {
+		tick(wm, 1)
 		j++
 	}
 	switch {
@@ -478,7 +480,7 @@ func fieldAfterComma(s string, i, limit int) bool {
 	case s[j] == ':':
 		return true
 	case s[j] == '=':
-		return j+1 < limit && !isSpace(s[j+1]) && s[j+1] != '='
+		return j+1 < limit && !isSpace(wm, s[j+1]) && s[j+1] != '='
 	}
 	return false
 }
@@ -493,11 +495,11 @@ var commaSecretKey = regexp.MustCompile(`(?i)^(?:` + bareKeyExpr + `)(?:[ \t]*[:
 // "s"), the blanks after it, and one byte more for its separator. A match starts at j and cannot read past it, so
 // the expression decides the same on that text as on the rest of the value up to limit; handing it the rest made
 // the reading of every comma of a long value cost up to maxValueExtent steps (#873).
-func commaKeyReach(s string, j, limit int) int {
+func commaKeyReach(wm *meter.Meter, s string, j, limit int) int {
 	k := j
 	for k < limit {
-		tick(1)
-		if c := s[k]; isAlnum(c) || c == '_' || c == '.' || c == '-' {
+		tick(wm, 1)
+		if c := s[k]; isAlnum(wm, c) || c == '_' || c == '.' || c == '-' {
 			k++
 			continue
 		}
@@ -508,7 +510,7 @@ func commaKeyReach(s string, j, limit int) int {
 		k += size
 	}
 	for k < limit && (s[k] == ' ' || s[k] == '\t') {
-		tick(1)
+		tick(wm, 1)
 		k++
 	}
 	return min(k+1, limit)
@@ -521,54 +523,54 @@ func commaKeyReach(s string, j, limit int) int {
 // value in free text that meets a quote is often inside a JSON or logfmt string, whose fields after it stay
 // (tokenEnd). It returns pos when no group or escaped blank is glued to the text. With wide false any quote
 // ends it, as on main before #769 (keyValueSpans).
-func plainWordEnd(s string, pos, limit, keyPos int, wide bool) int {
+func plainWordEnd(wm *meter.Meter, s string, pos, limit, keyPos int, wide bool) int {
 	end, glued := pos, false
 	for end < limit {
-		tick(1)
+		tick(wm, 1)
 		c := s[end]
 		switch {
 		case c == '$' && end+1 < limit && s[end+1] == '(', c == '`':
-			e, ok := groupEnd(s, end, limit, 0, keyPos, true)
+			e, ok := groupEnd(wm, s, end, limit, 0, keyPos, true)
 			if !ok {
-				return wordEnd(pos, end, glued)
+				return wordEnd(wm, pos, end, glued)
 			}
 			end, glued = e, true
 		case c == '\\' && end+1 < limit && (s[end+1] == ' ' || s[end+1] == '\t'):
 			end, glued = end+2, true
-		case c == '\\' && end+1 < limit && !isSpace(s[end+1]) && s[end+1] != '"' && s[end+1] != '\'':
+		case c == '\\' && end+1 < limit && !isSpace(wm, s[end+1]) && s[end+1] != '"' && s[end+1] != '\'':
 			end += 2
 		case wide && (c == '"' || c == '\'') && end > pos:
-			e := gluedQuoteEnd(s, end, limit, keyPos)
+			e := gluedQuoteEnd(wm, s, end, limit, keyPos)
 			if e < 0 {
-				return wordEnd(pos, end, glued)
+				return wordEnd(wm, pos, end, glued)
 			}
 			end, glued = e, true
-		case isSpace(c), c == '"', c == '\'', c == '\\', strings.IndexByte(";|&<>()", c) >= 0:
-			return wordEnd(pos, end, glued)
+		case isSpace(wm, c), c == '"', c == '\'', c == '\\', strings.IndexByte(";|&<>()", c) >= 0:
+			return wordEnd(wm, pos, end, glued)
 		default:
 			end++
 		}
 	}
-	return wordEnd(pos, end, glued)
+	return wordEnd(wm, pos, end, glued)
 }
 
 // gluedQuoteEnd returns the end of a quoted piece that opens at q, glued to plain text before it ("ab\"c d\"",
 // #769), or -1 when the quote may close an enclosing JSON, YAML or logfmt string instead: the byte after it is
 // whitespace, the end of the input, a quote, a backslash or one of ",;:)]}", or the piece does not close on
 // its line within the bound.
-func gluedQuoteEnd(s string, q, limit, keyPos int) int {
-	if q+1 >= limit || isSpace(s[q+1]) || strings.IndexByte(",;:)]}\"'\\", s[q+1]) >= 0 {
+func gluedQuoteEnd(wm *meter.Meter, s string, q, limit, keyPos int) int {
+	if q+1 >= limit || isSpace(wm, s[q+1]) || strings.IndexByte(",;:)]}\"'\\", s[q+1]) >= 0 {
 		return -1
 	}
-	e, ok := groupEnd(s, q, limit, 0, keyPos, true)
-	if !ok || containsAny(s[q:e], "\r\n") {
+	e, ok := groupEnd(wm, s, q, limit, 0, keyPos, true)
+	if !ok || containsAny(wm, s[q:e], "\r\n") {
 		return -1
 	}
 	return e
 }
 
 // wordEnd returns end when glued, else pos.
-func wordEnd(pos, end int, glued bool) int {
+func wordEnd(_ *meter.Meter, pos, end int, glued bool) int {
 	if glued {
 		return end
 	}
@@ -588,20 +590,20 @@ const wordStops = ",;|&<>(){}[]\\"
 // trimmed, so the flag form redacts as much as "password: \"..." does; a blank and a dash on that line start
 // the next flag, which stays ("--token 'abc --region x"). A single quote with a double quote after it on the
 // line gives 0: it may sit inside a JSON string, whose fields after it stay.
-func unclosedQuoteEnd(s string, pos int) int {
-	end := lineItemEnd(s, pos)
-	if s[pos] == '\'' && indexByte(s[pos:end], '"') >= 0 {
+func unclosedQuoteEnd(wm *meter.Meter, s string, pos int) int {
+	end := lineItemEnd(wm, s, pos)
+	if s[pos] == '\'' && indexByte(wm, s[pos:end], '"') >= 0 {
 		return 0
 	}
 	for i := pos + 1; i+1 < end; i++ {
-		tick(1)
+		tick(wm, 1)
 		if (s[i] == ' ' || s[i] == '\t') && s[i+1] == '-' {
 			end = i
 			break
 		}
 	}
-	for end > pos && isSpace(s[end-1]) {
-		tick(1)
+	for end > pos && isSpace(wm, s[end-1]) {
+		tick(wm, 1)
 		end--
 	}
 	return end
@@ -612,8 +614,8 @@ func unclosedQuoteEnd(s string, pos int) int {
 // quoted piece, or the word's end; for one that opens with "$(" or a backtick, the whole word. ok is false
 // when the first group does not close within maxValueExtent. keyPos is as in groupEnd, flag and wide as in
 // shellWordEnd.
-func quotedWordSpan(s string, pos, keyPos int, flag, wide bool) (int, int, bool) {
-	end, last, ok := shellWordEnd(s, pos, extentLimit(s, pos), keyPos, flag, wide)
+func quotedWordSpan(wm *meter.Meter, s string, pos, keyPos int, flag, wide bool) (int, int, bool) {
+	end, last, ok := shellWordEnd(wm, s, pos, extentLimit(wm, s, pos), keyPos, flag, wide)
 	if !ok {
 		return 0, 0, false
 	}
@@ -631,18 +633,18 @@ func quotedWordSpan(s string, pos, keyPos int, flag, wide bool) (int, int, bool)
 // or escaped as JSON inside a string at escape level ctx), through its closing bracket. ok is false when it
 // does not close within maxValueExtent. With wide false a YAML node property opens no string, as on main
 // before #769 (keyValueSpans).
-func bracketSpan(s string, pos, ctx int, wide bool) (int, int, bool) {
+func bracketSpan(wm *meter.Meter, s string, pos, ctx int, wide bool) (int, int, bool) {
 	if pos >= len(s) || s[pos] != '[' && s[pos] != '{' {
 		return 0, 0, false
 	}
-	limit := extentLimit(s, pos)
+	limit := extentLimit(wm, s, pos)
 	// A quoted scalar behind a YAML node property is read as a string (#769) in a second scan; the value is
 	// the longer of the two scans that close, so it is never shorter than without the property rule.
-	end, ok := groupEnd(s, pos, limit, ctx, noKey, false)
+	end, ok := groupEnd(wm, s, pos, limit, ctx, noKey, false)
 	if !wide {
 		return pos, end, ok
 	}
-	if pe, pok := groupScanEnd(groupScan{s: s, limit: limit, ctx: ctx, props: true}, pos, noKey); pok {
+	if pe, pok := groupScanEnd(wm, groupScan{s: s, limit: limit, ctx: ctx, props: true}, pos, noKey); pok {
 		end, ok = max(end, pe), true
 	}
 	return pos, end, ok
@@ -652,13 +654,13 @@ func bracketSpan(s string, pos, ctx int, wide bool) (int, int, bool) {
 // whitespace after them that start at pos, or pos when none starts there. It reads at most maxValueExtent
 // bytes; a comment that does not end by then is not taken, nor are the comments after it, so an unclosed
 // "/*" does not extend the value.
-func commentEnd(s string, pos int) int {
-	limit := extentLimit(s, pos)
+func commentEnd(wm *meter.Meter, s string, pos int) int {
+	limit := extentLimit(wm, s, pos)
 	i := pos
 	for i+1 < limit && s[i] == '/' && (s[i+1] == '/' || s[i+1] == '*') {
-		tick(1)
+		tick(wm, 1)
 		if s[i+1] == '/' {
-			j := indexByte(s[i:limit], '\n')
+			j := indexByte(wm, s[i:limit], '\n')
 			if j < 0 {
 				if limit < len(s) {
 					return i
@@ -667,14 +669,14 @@ func commentEnd(s string, pos int) int {
 			}
 			i += j
 		} else {
-			j := index(s[i+2:limit], "*/")
+			j := index(wm, s[i+2:limit], "*/")
 			if j < 0 {
 				return i
 			}
 			i += j + 4
 		}
-		for i < limit && isSpace(s[i]) {
-			tick(1)
+		for i < limit && isSpace(wm, s[i]) {
+			tick(wm, 1)
 			i++
 		}
 	}
@@ -685,13 +687,13 @@ func commentEnd(s string, pos int) int {
 // "}", within maxValueExtent bytes, with the blanks before it trimmed. The item goes on over a line end to a
 // line indented deeper than the line it starts on, as a YAML flow scalar does; a blank line or any other line
 // ends it.
-func flowItemEnd(s string, pos int) int {
-	limit := extentLimit(s, pos)
+func flowItemEnd(wm *meter.Meter, s string, pos int) int {
+	limit := extentLimit(wm, s, pos)
 	indent := -1
 	end := pos
 	for {
-		tick(1)
-		i := indexAny(s[end:limit], ",]}\r\n")
+		tick(wm, 1)
+		i := indexAny(wm, s[end:limit], ",]}\r\n")
 		if i < 0 {
 			end = limit
 			break
@@ -705,11 +707,11 @@ func flowItemEnd(s string, pos int) int {
 			next++
 		}
 		if indent < 0 {
-			indent = lineIndent(s, pos)
+			indent = lineIndent(wm, s, pos)
 		}
 		t := next
 		for t < limit && (s[t] == ' ' || s[t] == '\t') {
-			tick(1)
+			tick(wm, 1)
 			t++
 		}
 		if t >= limit || s[t] == '\r' || s[t] == '\n' || t-next <= indent {
@@ -717,8 +719,8 @@ func flowItemEnd(s string, pos int) int {
 		}
 		end = t
 	}
-	for end > pos && isSpace(s[end-1]) {
-		tick(1)
+	for end > pos && isSpace(wm, s[end-1]) {
+		tick(wm, 1)
 		end--
 	}
 	return end
@@ -726,14 +728,14 @@ func flowItemEnd(s string, pos int) int {
 
 // lineItemEnd returns the end of a plain item of a YAML block sequence that starts at pos: the line end,
 // within maxValueExtent bytes, with the blanks before it trimmed.
-func lineItemEnd(s string, pos int) int {
-	limit := extentLimit(s, pos)
+func lineItemEnd(wm *meter.Meter, s string, pos int) int {
+	limit := extentLimit(wm, s, pos)
 	end := limit
-	if i := indexAny(s[pos:limit], "\r\n"); i >= 0 {
+	if i := indexAny(wm, s[pos:limit], "\r\n"); i >= 0 {
 		end = pos + i
 	}
-	for end > pos && isSpace(s[end-1]) {
-		tick(1)
+	for end > pos && isSpace(wm, s[end-1]) {
+		tick(wm, 1)
 		end--
 	}
 	return end
@@ -741,10 +743,10 @@ func lineItemEnd(s string, pos int) int {
 
 // inFlowSequence reports whether the flag that starts at flagStart is an item of a YAML flow sequence: "["
 // or "," right before it, after blanks.
-func inFlowSequence(s string, flagStart int) bool {
+func inFlowSequence(wm *meter.Meter, s string, flagStart int) bool {
 	i := flagStart
 	for i > 0 && flagStart-i < maxValueExtent && (s[i-1] == ' ' || s[i-1] == '\t') {
-		tick(1)
+		tick(wm, 1)
 		i--
 	}
 	return i > 0 && (s[i-1] == '[' || s[i-1] == ',')
@@ -752,22 +754,22 @@ func inFlowSequence(s string, flagStart int) bool {
 
 // nodeProperties returns the index after the YAML anchor ("&name") and tag ("!!str", "!x") tokens that start
 // at pos, at most two, and the blanks after each, when a value follows them on the same line; otherwise pos.
-func nodeProperties(s string, pos int) int {
+func nodeProperties(wm *meter.Meter, s string, pos int) int {
 	i := pos
 	for range 2 {
-		tick(1)
-		if i+1 >= len(s) || s[i] != '&' && s[i] != '!' || isSpace(s[i+1]) {
+		tick(wm, 1)
+		if i+1 >= len(s) || s[i] != '&' && s[i] != '!' || isSpace(wm, s[i+1]) {
 			break
 		}
-		limit := extentLimit(s, i)
+		limit := extentLimit(wm, s, i)
 		j := i + 1
-		for j < limit && !isSpace(s[j]) {
-			tick(1)
+		for j < limit && !isSpace(wm, s[j]) {
+			tick(wm, 1)
 			j++
 		}
 		k := j
 		for k < limit && (s[k] == ' ' || s[k] == '\t') {
-			tick(1)
+			tick(wm, 1)
 			k++
 		}
 		if k == j || k >= limit || s[k] == '\n' || s[k] == '\r' {
@@ -782,25 +784,25 @@ func nodeProperties(s string, pos int) int {
 // sequence: the following lines indented deeper than the item's dash, the first of which starts at col of
 // its line, up to the last non-blank one. With no content it is the indicator. It reads at most
 // maxValueExtent bytes; a longer block ends at that bound.
-func listBlockScalarSpan(s string, pos, col int) (int, int) {
-	limit := extentLimit(s, pos)
+func listBlockScalarSpan(wm *meter.Meter, s string, pos, col int) (int, int) {
+	limit := extentLimit(wm, s, pos)
 	i := pos
 	for i < limit && s[i] != '\n' {
-		tick(1)
+		tick(wm, 1)
 		i++
 	}
 	start, end := -1, -1
 	for i < limit && s[i] == '\n' {
-		tick(1)
+		tick(wm, 1)
 		ls := i + 1
 		t := ls
 		for t < limit && (s[t] == ' ' || s[t] == '\t') {
-			tick(1)
+			tick(wm, 1)
 			t++
 		}
 		le := t
 		for le < limit && s[le] != '\n' {
-			tick(1)
+			tick(wm, 1)
 			le++
 		}
 		text := le
@@ -820,7 +822,7 @@ func listBlockScalarSpan(s string, pos, col int) (int, int) {
 		end = text
 	}
 	if start < 0 {
-		return pos, tokenEnd(s, pos)
+		return pos, tokenEnd(wm, s, pos)
 	}
 	return start, end
 }

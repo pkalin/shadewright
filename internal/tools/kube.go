@@ -20,6 +20,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/internal/analyzer/refcheck"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // Kinds of the allow lists.
@@ -132,6 +134,10 @@ func (s *Set) getResource(ctx context.Context, a getResourceArgs, r *Result) err
 		return nil
 	}
 	text, leftOut, err := s.jsonAnswer(stripped, resourceBytes)
+	if errors.Is(err, providers.ErrWithheld) {
+		r.withhold()
+		return nil
+	}
 	if err != nil {
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
@@ -332,7 +338,11 @@ func (s *Set) listEvents(ctx context.Context, a listEventsArgs, r *Result) error
 		at = append(at, ans.value("note", e.Note))
 		ans.text("\n")
 	}
-	out, text := s.lines(&ans)
+	out, text, ok := s.lines(&ans)
+	if !ok {
+		r.withhold()
+		return nil
+	}
 	r.Text = text
 	for _, i := range at {
 		r.Values = append(r.Values, out[i])
@@ -419,7 +429,11 @@ func (s *Set) checkReference(ctx context.Context, a checkReferenceArgs, r *Resul
 			}
 		}
 	}
-	out, text := s.lines(&ans)
+	out, text, ok := s.lines(&ans)
+	if !ok {
+		r.withhold()
+		return nil
+	}
 	r.Text = text
 	for _, i := range at {
 		r.Values = append(r.Values, out[i])

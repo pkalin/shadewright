@@ -205,21 +205,21 @@ var runeReadings = []struct {
 	name string
 	of   func(s string) []span
 }{
-	{"rules", defaultRedactor.ruleMatches},
-	{"release, once", func(s string) []span { return defaultRedactor.releasedString(s, false, nil) }},
+	{"rules", func(s string) []span { return defaultRedactor.ruleMatches(nil, s) }},
+	{"release, once", func(s string) []span { return defaultRedactor.releasedString(nil, s, false, nil) }},
 	// Twice and cut holds what twice hides, and String is settle of the first two: neither is read again.
 	{"release, twice and cut", func(s string) []span {
-		return defaultRedactor.releasedString(s, true, func(t string) int { return len(t) / 3 })
+		return defaultRedactor.releasedString(nil, s, true, func(t string) int { return len(t) / 3 })
 	}},
 	{"release, excerpt", func(s string) []span {
-		return defaultRedactor.releasedExcerpt(s, len(s)/4, func(t string) int { return len(t) / 5 })
+		return defaultRedactor.releasedExcerpt(nil, s, len(s)/4, func(t string) int { return len(t) / 5 })
 	}},
 	{"release, pieces", func(s string) []span {
 		h := len(s) / 2
 		for h > 0 && !utf8.RuneStart(s[h]) {
 			h--
 		}
-		return defaultRedactor.releasedPieces([]Piece{{Text: s[:h], Data: true, Form: Line}, {Text: s[h:], Data: true, Form: JSON}})
+		return defaultRedactor.releasedPieces(nil, []Piece{{Text: s[:h], Data: true, Form: Line}, {Text: s[h:], Data: true, Form: JSON}})
 	}},
 }
 
@@ -253,7 +253,7 @@ func checkRunes(t *testing.T, name, in string, outputs bool) {
 				in[max(0, x.start-8):min(len(in), x.end+8)])
 		}
 	}
-	if bad := offBoundaries(in, defaultRedactor.spans(in)); len(bad) > 0 {
+	if bad := offBoundaries(in, defaultRedactor.spans(nil, in)); len(bad) > 0 {
 		t.Errorf("%s: String hides %d-%d, inside a character", name, bad[0].start, bad[0].end)
 	}
 	for _, e := range runeEntryOutputs {
@@ -299,7 +299,7 @@ func TestSpansOnRuneBoundariesMultiByteCorpus(t *testing.T) {
 			t.Fatalf("%s: the generator wrote invalid UTF-8", c.name)
 		}
 		checkRunes(t, c.name, c.in, true)
-		now := defaultRedactor.spans(c.in)
+		now := defaultRedactor.spans(nil, c.in)
 		red := make([]bool, len(c.in))
 		for _, sp := range now {
 			for i := sp.start; i < sp.end; i++ {
@@ -353,7 +353,7 @@ func TestOnRunesWidensToTheCharacter(t *testing.T) {
 		{[2]int{0, 12}, [2]int{0, 12}},
 	}
 	for _, c := range cases {
-		got := onRunes(s, []span{{start: c.in[0], end: c.in[1]}})[0]
+		got := onRunes(nil, s, []span{{start: c.in[0], end: c.in[1]}})[0]
 		if got.start != c.want[0] || got.end != c.want[1] {
 			t.Errorf("onRunes(%v) = %d-%d, want %v", c.in, got.start, got.end, c.want)
 		}

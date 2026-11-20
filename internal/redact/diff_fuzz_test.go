@@ -36,8 +36,13 @@ import (
 //	P1: every probe secret the redactor of the release before (package released) hid, applied as origin/main
 //	    applied it at that entry point, is hidden by the branch.
 //	P2: what String hides in the strings joined by line breaks, Strings hides in them apart (Strings only).
-//	P3: the work String adds to the release's reading is within ownWorkPerByte per byte, with a constant for
-//	    short inputs (only with -tags redactwork; without it the property is not checked).
+//	P3: the work of the entry point, the release's reading included, stays inside the budget of the entry
+//	    (budget.go, #873 decision of 2026-11-20), within one counting step (budgetOverrun) (only with -tags
+//	    redactwork; without it the property is not checked).
+//	P5: the output is the decision without a budget or the entry withheld whole (Withheld, the other strings
+//	    empty), never a part of it. A withheld entry shows nothing, so P1 holds of it without the release's
+//	    reading, which is then not run: on the inputs where its own work outgrows the text ("--token,}" repeated,
+//	    released.tokenEnd) that oracle alone would hold a fuzzing worker past its limit.
 //	P4: the output is valid UTF-8 when the input is, and nothing panics. Valid UTF-8 whatever the input is a
 //	    property of the tool results and the incident context (decided 2026-11-19): these entry points keep the
 //	    bytes they do not hide, invalid ones included, as the release's String does (released.String("a\xffb")
@@ -45,9 +50,6 @@ import (
 //
 // The inputs known to fail (knownDiffFailures) are seeds in testdata/fuzz: they skip, naming the property, until
 // the rule is fixed, and fail once they pass, so that the fix removes them.
-
-// diffWorkSlack is the work a short input may take beyond ownWorkPerByte per byte: the fixed cost of a call.
-const diffWorkSlack = 64 << 10
 
 // knownDiffFailures are the known failing inputs of the targets of this package, by target and input bytes.
 var knownDiffFailures = map[string]map[string]redacttest.KnownFailure{}
@@ -70,12 +72,26 @@ func leaks(rec *redacttest.Recorder, what, out string) []string {
 	return redacttest.LeakFails(rec, what, out)
 }
 
-// workFails returns the P3 failure for work of total steps, release of them the release's reading, on size
-// bytes.
-func workFails(what string, total, release int64, size int) []string {
-	if own := total - release; own > int64(ownWorkPerByte*size+diffWorkSlack) {
-		return []string{fmt.Sprintf("P3: %s adds %d steps to the release's reading on %d bytes (%.0f per byte), over %d per byte",
-			what, own, size, float64(own)/float64(max(size, 1)), ownWorkPerByte)}
+// workFails returns the P3 failure for work of total steps on an entry of size bytes.
+func workFails(what string, total, _ int64, size int) []string {
+	if limit := budgetOf(size) + budgetOverrun(size); total > limit {
+		return []string{fmt.Sprintf("P3: %s took %d steps on %d bytes (%.0f per byte), over its budget %d",
+			what, total, size, float64(total)/float64(max(size, 1)), budgetOf(size))}
+	}
+	return nil
+}
+
+// withheldFails returns the P5 failure when out, an entry point's output, holds Withheld but is not an entry
+// withheld whole.
+func withheldFails(what string, out []string) []string {
+	if PiecesWithheld(out) {
+		return nil
+	}
+	for _, s := range out {
+		if strings.Contains(s, Withheld) {
+			return []string{fmt.Sprintf("P5: %s returned the withheld marker with other text: %q", what,
+				redacttest.Clip(strings.Join(out, "|")))}
+		}
 	}
 	return nil
 }
@@ -106,6 +122,9 @@ var diffSeeds = [][]byte{
 	redacttest.RawSeed(1, "192.168.1.1--password", "\x01"),
 	seedPairsBeforeABlankLine, // TOKEN="a" repeated, a quote, a line end, 4,096 blanks, a quote and a fullwidth colon
 	{0xf1, 0, 242, 0, 7, 0},   // a run of one invalid byte and an "x", 3,150 times
+	// "--token,}" repeated to 36 KiB (#873): the release's reading reads each value to the end of the run
+	// (released.tokenEnd), about 4,500 steps per byte there, so the entry is withheld (P3, P5).
+	redacttest.RawSeed(0, strings.Repeat("--token,}", 4096)),
 }
 
 // seedPairsBeforeABlankLine is the input of TestStringWorkOnRepeatedPairsBeforeALongBlankLine in the grammar (the
@@ -139,12 +158,15 @@ func FuzzDiffString(f *testing.F) { fuzzDiff(f, "FuzzDiffString") }
 
 func diffString(data []byte) ([]string, bool) {
 	in := redacttest.Decode(data, 1).Joined("")
-	rec := redacttest.NewRecorder()
-	rec.Wrap(released.String)(in)
 	var out string
 	total, release, counted := measureWork(func() { out = String(in) })
-	fails := leaks(rec, "String", out)
-	fails = append(fails, workFails("String", total, release, len(in))...)
+	fails := workFails("String", total, release, len(in))
+	if fails = append(fails, withheldFails("String", []string{out})...); IsWithheld(out) {
+		return fails, counted
+	}
+	rec := redacttest.NewRecorder()
+	rec.Wrap(released.String)(in)
+	fails = append(fails, leaks(rec, "String", out)...)
 	fails = append(fails, utf8Fails("String", in, out)...)
 	return fails, counted
 }
@@ -155,12 +177,15 @@ func FuzzDiffStringTwice(f *testing.F) { fuzzDiff(f, "FuzzDiffStringTwice") }
 
 func diffStringTwice(data []byte) ([]string, bool) {
 	in := redacttest.Decode(data, 1).Joined("")
-	rec := redacttest.NewRecorder()
-	releasedTwice(rec)(in)
 	var out string
 	total, release, counted := measureWork(func() { out = StringTwice(in, nil) })
-	fails := leaks(rec, "StringTwice", out)
-	fails = append(fails, workFails("StringTwice", total, release, len(in))...)
+	fails := workFails("StringTwice", total, release, len(in))
+	if fails = append(fails, withheldFails("StringTwice", []string{out})...); IsWithheld(out) {
+		return fails, counted
+	}
+	rec := redacttest.NewRecorder()
+	releasedTwice(rec)(in)
+	fails = append(fails, leaks(rec, "StringTwice", out)...)
 	fails = append(fails, utf8Fails("StringTwice", in, out)...)
 	return fails, counted
 }
@@ -175,6 +200,15 @@ func diffStrings(data []byte) ([]string, bool) {
 	dec := redacttest.Decode(data, 6)
 	items := dec.Fields[:int(dec.Knob)%6+1]
 	joined := strings.Join(items, "\n")
+	var out []string
+	total, release, counted := measureWork(func() { out = Strings(items) })
+	fails := workFails("Strings", total, release, stringsSize(items))
+	if len(out) != len(items) {
+		fails = append(fails, fmt.Sprintf("P4: Strings returned %d strings for %d", len(out), len(items)))
+	}
+	if fails = append(fails, withheldFails("Strings", out)...); PiecesWithheld(out) {
+		return fails, counted
+	}
 	rec := redacttest.NewRecorder()
 	twice := releasedTwice(rec)
 	each := make([]string, len(items))
@@ -182,17 +216,11 @@ func diffStrings(data []byte) ([]string, bool) {
 		each[i] = twice(s)
 	}
 	twice(strings.Join(each, "\n"))
-	var out []string
-	total, release, counted := measureWork(func() { out = Strings(items) })
 	apart := strings.Join(out, "\n")
-	fails := leaks(rec, "Strings", apart)
-	if len(out) != len(items) {
-		fails = append(fails, fmt.Sprintf("P4: Strings returned %d strings for %d", len(out), len(items)))
-	}
+	fails = append(fails, leaks(rec, "Strings", apart)...)
 	if l := redacttest.Hiding(joined, String(joined)).Leaks(apart); len(l) > 0 {
 		fails = append(fails, redacttest.LeakLine("P2", "Strings shows what String of the strings joined hides", l, apart))
 	}
-	fails = append(fails, workFails("Strings", total, release, len(joined))...)
 	fails = append(fails, utf8Fails("Strings", joined, apart)...)
 	return fails, counted
 }
@@ -207,16 +235,19 @@ func diffReplaceFrom(data []byte) ([]string, bool) {
 	dec := redacttest.Decode(data, 1)
 	in := dec.Fields[0]
 	from := excerptFrom([]byte(in), 64*(int(dec.Knob)+1))
-	rec := redacttest.NewRecorder()
-	mainOut := released.String(strings.ToValidUTF8(excerptOf(in, from, released.Replace, released.Marker), "?"))
-	// What the release hid is what its excerpt does not show of the part it kept.
-	rec.Saw(in[from:], mainOut)
 	var out string
 	total, release, counted := measureWork(func() {
 		out = strings.ToValidUTF8(excerptOf(in, from, defaultRedactor.replaceFromFunc(from), Marker), "?")
 	})
-	fails := leaks(rec, "the excerpt", out)
-	fails = append(fails, workFails("ReplaceFrom", total, release, len(in))...)
+	fails := workFails("ReplaceFrom", total, release, len(in))
+	if fails = append(fails, withheldFails("the excerpt", []string{out})...); IsWithheld(out) {
+		return fails, counted
+	}
+	rec := redacttest.NewRecorder()
+	mainOut := released.String(strings.ToValidUTF8(excerptOf(in, from, released.Replace, released.Marker), "?"))
+	// What the release hid is what its excerpt does not show of the part it kept.
+	rec.Saw(in[from:], mainOut)
+	fails = append(fails, leaks(rec, "the excerpt", out)...)
 	fails = append(fails, utf8Fails("the excerpt", strings.ToValidUTF8(in, "?"), out)...)
 	return fails, counted
 }

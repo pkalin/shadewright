@@ -475,7 +475,7 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 		}
 		stored := redact.String(text)
 		switch {
-		case !hintClean(stored):
+		case redact.IsWithheld(stored) || !hintClean(stored):
 			refuse(remediationv1alpha1.HintRefusalNotRedactable)
 			continue
 		case len(stored) > remediationv1alpha1.MaxHintTextBytes:

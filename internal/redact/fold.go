@@ -22,6 +22,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/redact/meter"
 )
 
 // The folded view of a text (#845, second to fifth rounds): the text a reader sees, where the rules read the
@@ -74,7 +76,7 @@ var (
 )
 
 // foldMark returns what the character r folds to when it is one of foldEquals or foldArrows.
-func foldMark(r rune) (string, bool) {
+func foldMark(_ *meter.Meter, r rune) (string, bool) {
 	if r < 0x1400 {
 		return "", false
 	}
@@ -88,12 +90,12 @@ func foldMark(r rune) (string, bool) {
 }
 
 // foldMarkAt returns what the character at s[i] folds to when it is one of foldEquals or foldArrows.
-func foldMarkAt(s string, i int) (string, bool) {
+func foldMarkAt(wm *meter.Meter, s string, i int) (string, bool) {
 	if s[i] < utf8.RuneSelf {
 		return "", false
 	}
 	r, _ := utf8.DecodeRuneInString(s[i:])
-	return foldMark(r)
+	return foldMark(wm, r)
 }
 
 // foldedView is the folded view of a text: its text, and for each of its bytes the first byte of the original
@@ -104,26 +106,26 @@ type foldedView struct {
 }
 
 // isKeyByte reports whether c is a byte of a key name.
-func isKeyByte(c byte) bool {
+func isKeyByte(_ *meter.Meter, c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '-'
 }
 
 // foldView returns the folded view of s, and false when it is s itself: the glyph folds (foldWalk), then the
 // separator fold (sepWalk) on their result. A first pass of each only looks for something to fold, so a text
 // with nothing to fold costs one read of each and no allocation.
-func foldView(s string) (foldedView, bool) {
+func foldView(wm *meter.Meter, s string) (foldedView, bool) {
 	var g foldedView
-	glyphs := foldWalk(s, nil)
+	glyphs := foldWalk(wm, s, nil)
 	if glyphs {
-		g = newFoldBuilder(len(s)).build(func(emit func(text string, from, to int, copied bool)) {
-			foldWalk(s, func(text string, from, to int) { emit(text, from, to, to-from == len(text)) })
+		g = newFoldBuilder(wm, len(s)).build(wm, func(emit func(text string, from, to int, copied bool)) {
+			foldWalk(wm, s, func(text string, from, to int) { emit(text, from, to, to-from == len(text)) })
 		})
 	}
 	t := s
 	if glyphs {
 		t = g.text
 	}
-	if !sepWalk(t, nil) {
+	if !sepWalk(wm, t, nil) {
 		return g, glyphs
 	}
 	from := func(i int) int { return i }
@@ -132,14 +134,14 @@ func foldView(s string) (foldedView, bool) {
 		from = func(i int) int { return g.from[i] }
 		to = func(i int) int { return g.to[i] }
 	}
-	return newFoldBuilder(len(t)).build(func(emit func(text string, from, to int, copied bool)) {
-		sepWalk(t, func(text string, a, b int, copied bool) {
+	return newFoldBuilder(wm, len(t)).build(wm, func(emit func(text string, from, to int, copied bool)) {
+		sepWalk(wm, t, func(text string, a, b int, copied bool) {
 			if copied {
 				// Each byte stands for what its byte of the glyph fold stood for: a look-alike colon folded to
 				// ":" stands for all of its bytes, so a range that ends on it ends on a character boundary
 				// (#845, third decision of 2026-11-18).
 				for i := a; i < b; i++ {
-					tick(1)
+					tick(wm, 1)
 					emit(t[i:i+1], from(i), to(i), false)
 				}
 				return
@@ -156,7 +158,7 @@ type foldBuilder struct {
 }
 
 // newFoldBuilder returns a builder for a view of about n bytes.
-func newFoldBuilder(n int) *foldBuilder {
+func newFoldBuilder(_ *meter.Meter, n int) *foldBuilder {
 	fb := &foldBuilder{f: foldedView{from: make([]int, 0, n), to: make([]int, 0, n)}}
 	fb.b.Grow(n)
 	return fb
@@ -164,12 +166,12 @@ func newFoldBuilder(n int) *foldBuilder {
 
 // build calls walk with an emit function and returns the view of what it emitted: a piece copied from the
 // original (copied) maps each byte to its own, a folded piece maps each byte to all of from to to.
-func (fb *foldBuilder) build(walk func(emit func(text string, from, to int, copied bool))) foldedView {
+func (fb *foldBuilder) build(wm *meter.Meter, walk func(emit func(text string, from, to int, copied bool))) foldedView {
 	walk(func(text string, from, to int, copied bool) {
-		tick(1)
+		tick(wm, 1)
 		fb.b.WriteString(text)
 		for i := range len(text) {
-			tick(1)
+			tick(wm, 1)
 			if copied {
 				fb.f.from, fb.f.to = append(fb.f.from, from+i), append(fb.f.to, from+i+1)
 				continue
@@ -183,7 +185,7 @@ func (fb *foldBuilder) build(walk func(emit func(text string, from, to int, copi
 
 // foldWalk reads s line by line and calls emit for each piece of the folded view: its text and the range of s
 // it stands for. With emit nil it only reports, as soon as it finds one, whether anything folds.
-func foldWalk(s string, emit func(text string, from, to int)) bool {
+func foldWalk(wm *meter.Meter, s string, emit func(text string, from, to int)) bool {
 	changed := false
 	copyText := func(from, to int) {
 		if emit != nil && to > from {
@@ -192,43 +194,43 @@ func foldWalk(s string, emit func(text string, from, to int)) bool {
 	}
 	skipIndent := false
 	for pos := 0; pos < len(s); {
-		tick(1)
-		l := readLine(s, pos)
+		tick(wm, 1)
+		l := readLine(wm, s, pos)
 		pos = l.next
 		at := l.text
 		if !skipIndent {
 			copyText(l.start, l.text)
 		}
 		skipIndent = false
-		at += dashes(s[l.text:l.end])
+		at += dashes(wm, s[l.text:l.end])
 		copyText(l.text, at)
-		if at < l.end && s[at] == '?' && (at+1 == l.end || indentLen(s, at+1) > 0) && l.next < len(s) {
-			q := colOf(s, l.start, at)
-			n := readLine(s, l.next)
-			if !n.blank() && s[n.text] == ':' && n.ind == q {
+		if at < l.end && s[at] == '?' && (at+1 == l.end || indentLen(wm, s, at+1) > 0) && l.next < len(s) {
+			q := colOf(wm, s, l.start, at)
+			n := readLine(wm, s, l.next)
+			if !n.blank(wm) && s[n.text] == ':' && n.ind == q {
 				// An explicit key: "? key" and ":" below the "?" read as "key:".
 				changed = true
 				if emit == nil {
 					return true
 				}
 				key := at + 1
-				for key < l.end && indentLen(s, key) > 0 {
-					tick(1)
-					key += indentLen(s, key)
+				for key < l.end && indentLen(wm, s, key) > 0 {
+					tick(wm, 1)
+					key += indentLen(wm, s, key)
 				}
 				end := l.end
-				for end > key && lastIndentLen(s[:end], end) > 0 {
-					tick(1)
-					end -= lastIndentLen(s[:end], end)
+				for end > key && lastIndentLen(wm, s[:end], end) > 0 {
+					tick(wm, 1)
+					end -= lastIndentLen(wm, s[:end], end)
 				}
-				if foldChars(s, key, end, emit) {
+				if foldChars(wm, s, key, end, emit) {
 					changed = true
 				}
 				// The line break and the indentation before ":" fold away, onto the last byte of the key.
 				skipIndent = true
 				continue
 			}
-			if k, c, ok := explicitKeyBelow(s, at, l, q); ok {
+			if k, c, ok := explicitKeyBelow(wm, s, at, l, q); ok {
 				// A key below "?" or "? |": the header, the line breaks, the blank lines and the indentation
 				// before the key and before ":" fold away.
 				changed = true
@@ -236,16 +238,16 @@ func foldWalk(s string, emit func(text string, from, to int)) bool {
 					return true
 				}
 				end := k.end
-				for end > k.text && lastIndentLen(s[:end], end) > 0 {
-					tick(1)
-					end -= lastIndentLen(s[:end], end)
+				for end > k.text && lastIndentLen(wm, s[:end], end) > 0 {
+					tick(wm, 1)
+					end -= lastIndentLen(wm, s[:end], end)
 				}
-				foldChars(s, k.text, end, emit)
+				foldChars(wm, s, k.text, end, emit)
 				pos, skipIndent = c.start, true
 				continue
 			}
 		}
-		if foldChars(s, at, l.end, emit) {
+		if foldChars(wm, s, at, l.end, emit) {
 			changed = true
 			if emit == nil {
 				return true
@@ -264,20 +266,20 @@ var blockKeyHeader = regexp.MustCompile(`^(?:[|>][1-9+-]{0,2}(?:` + keySpaceExpr
 // written on the line below (k): "?" alone or with a block scalar header, then blank lines, one line of key
 // more indented than the "?", blank lines, and the line c that starts with ":" at column q. It reads only the
 // lines up to c.
-func explicitKeyBelow(s string, at int, l viewLine, q col) (k, c viewLine, ok bool) {
+func explicitKeyBelow(wm *meter.Meter, s string, at int, l viewLine, q col) (k, c viewLine, ok bool) {
 	h := at + 1
-	for h < l.end && indentLen(s, h) > 0 {
-		tick(1)
-		h += indentLen(s, h)
+	for h < l.end && indentLen(wm, s, h) > 0 {
+		tick(wm, 1)
+		h += indentLen(wm, s, h)
 	}
-	if !blockKeyHeader.MatchString(counted(s[h:l.end])) {
+	if !blockKeyHeader.MatchString(counted(wm, s[h:l.end])) {
 		return k, c, false
 	}
 	next := func(pos int) (viewLine, bool) {
 		for pos < len(s) {
-			tick(1)
-			n := readLine(s, pos)
-			if !n.blank() {
+			tick(wm, 1)
+			n := readLine(wm, s, pos)
+			if !n.blank(wm) {
 				return n, true
 			}
 			pos = n.next
@@ -285,7 +287,7 @@ func explicitKeyBelow(s string, at int, l viewLine, q col) (k, c viewLine, ok bo
 		return viewLine{}, false
 	}
 	k, found := next(l.next)
-	if !found || !k.ind.deeper(q) || s[k.text] == ':' || s[k.text] == '#' {
+	if !found || !k.ind.deeper(wm, q) || s[k.text] == ':' || s[k.text] == '#' {
 		return k, c, false
 	}
 	c, found = next(k.next)
@@ -297,7 +299,7 @@ func explicitKeyBelow(s string, at int, l viewLine, q col) (k, c viewLine, ok bo
 
 // foldChars emits s[from:to] with the invisible characters inside key names dropped and the colon look-alikes
 // folded to ":", and reports whether it folded anything. With emit nil it stops at the first fold.
-func foldChars(s string, from, to int, emit func(text string, from, to int)) bool {
+func foldChars(wm *meter.Meter, s string, from, to int, emit func(text string, from, to int)) bool {
 	changed := false
 	plain := from
 	flush := func(i int) {
@@ -306,14 +308,14 @@ func foldChars(s string, from, to int, emit func(text string, from, to int)) boo
 		}
 	}
 	for i := from; i < to; {
-		tick(1)
+		tick(wm, 1)
 		if s[i] < utf8.RuneSelf {
 			i++
 			continue
 		}
 		r, n := utf8.DecodeRuneInString(s[i:])
 		switch {
-		case isFoldColon(r):
+		case isFoldColon(wm, r):
 			changed = true
 			if emit == nil {
 				return true
@@ -321,27 +323,27 @@ func foldChars(s string, from, to int, emit func(text string, from, to int)) boo
 			flush(i)
 			emit(":", i, i+n)
 			plain = i + n
-		case foldMarkOf(r) != "":
+		case foldMarkOf(wm, r) != "":
 			changed = true
 			if emit == nil {
 				return true
 			}
 			flush(i)
-			emit(foldMarkOf(r), i, i+n)
+			emit(foldMarkOf(wm, r), i, i+n)
 			plain = i + n
-		case isInvisible(r) && i > from && isKeyByte(s[i-1]):
+		case isInvisible(wm, r) && i > from && isKeyByte(wm, s[i-1]):
 			// A run of invisible characters after a byte of a key name, before another, a separator, a quote or
 			// the end of the line.
 			j := i + n
 			for j < to {
-				tick(1)
+				tick(wm, 1)
 				r2, n2 := utf8.DecodeRuneInString(s[j:])
-				if !isInvisible(r2) {
+				if !isInvisible(wm, r2) {
 					break
 				}
 				j += n2
 			}
-			if j == to || isKeyByte(s[j]) || strings.IndexByte(`:="'`, s[j]) >= 0 || isFoldColonAt(s, j) || isFoldMarkAt(s, j) {
+			if j == to || isKeyByte(wm, s[j]) || strings.IndexByte(`:="'`, s[j]) >= 0 || isFoldColonAt(wm, s, j) || isFoldMarkAt(wm, s, j) {
 				changed = true
 				if emit == nil {
 					return true
@@ -358,27 +360,27 @@ func foldChars(s string, from, to int, emit func(text string, from, to int)) boo
 }
 
 // foldMarkOf returns what r folds to when it is one of foldEquals or foldArrows, or "".
-func foldMarkOf(r rune) string {
-	m, _ := foldMark(r)
+func foldMarkOf(wm *meter.Meter, r rune) string {
+	m, _ := foldMark(wm, r)
 	return m
 }
 
 // isFoldMarkAt reports whether the character at s[i] is one of foldEquals or foldArrows.
-func isFoldMarkAt(s string, i int) bool {
-	_, ok := foldMarkAt(s, i)
+func isFoldMarkAt(wm *meter.Meter, s string, i int) bool {
+	_, ok := foldMarkAt(wm, s, i)
 	return ok
 }
 
 // isFoldColon reports whether r is one of foldColons.
-func isFoldColon(r rune) bool { return r >= 0x2D0 && slices.Contains(foldColons, r) }
+func isFoldColon(_ *meter.Meter, r rune) bool { return r >= 0x2D0 && slices.Contains(foldColons, r) }
 
 // isFoldColonAt reports whether the character at s[i] is one of foldColons.
-func isFoldColonAt(s string, i int) bool {
+func isFoldColonAt(wm *meter.Meter, s string, i int) bool {
 	if s[i] < utf8.RuneSelf {
 		return false
 	}
 	r, _ := utf8.DecodeRuneInString(s[i:])
-	return isFoldColon(r)
+	return isFoldColon(wm, r)
 }
 
 // invisibleRanges are the invisible characters of the folded view, as sorted, merged ranges: every code point
@@ -394,7 +396,7 @@ var invisibleRanges = [][2]rune{
 }
 
 // isInvisible reports whether r is in invisibleRanges.
-func isInvisible(r rune) bool {
+func isInvisible(_ *meter.Meter, r rune) bool {
 	if r < invisibleRanges[0][0] {
 		return false
 	}
@@ -411,12 +413,12 @@ func isInvisible(r rune) bool {
 }
 
 // invisibleLen returns the length of the invisible character at s[i], or 0.
-func invisibleLen(s string, i int) int {
+func invisibleLen(wm *meter.Meter, s string, i int) int {
 	if s[i] < utf8.RuneSelf {
 		return 0
 	}
 	r, n := utf8.DecodeRuneInString(s[i:])
-	if isInvisible(r) {
+	if isInvisible(wm, r) {
 		return n
 	}
 	return 0
@@ -427,7 +429,7 @@ func invisibleLen(s string, i int) int {
 var sepKey = regexp.MustCompile(`(?i)` + bareKeyExpr + `(?:\\*["'])?`)
 
 // sepKeyWindows is sepKey read by windows (windows.go): a key repeated in a long text is read once.
-var sepKeyWindows = newWindowed(sepKey)
+var sepKeyWindows = newWindowed(nil, sepKey)
 
 // maxSepRun bounds the marks, controls and invisible characters of a separator run, so that a long run of
 // punctuation after a key is no separator (a heading underlined with "=" after "Password"). A key followed by a
@@ -445,7 +447,7 @@ type sepRun struct {
 
 // sepBlankLen returns the length of the blank at s[i], or 0: a space, a tab, or another Unicode space that is
 // no line break.
-func sepBlankLen(s string, i int) int {
+func sepBlankLen(_ *meter.Meter, s string, i int) int {
 	if c := s[i]; c == ' ' || c == '\t' {
 		return 1
 	} else if c < utf8.RuneSelf {
@@ -462,11 +464,11 @@ func sepBlankLen(s string, i int) int {
 // breaks (indentLen), invisible characters, ":" and its look-alikes, "=" and its look-alikes, "->" and "=>"
 // and the arrow characters (foldArrows), with at most maxSepRun of them that are no blanks (sepBlankLen). ok is
 // false when there is no mark in it, or when the run goes on past maxSepRun characters that are no blanks.
-func sepRunAt(s string, i int) (r sepRun, ok bool) {
+func sepRunAt(wm *meter.Meter, s string, i int) (r sepRun, ok bool) {
 	r.plain = true
 	j := i
 	for n := 0; j < len(s); {
-		tick(1)
+		tick(wm, 1)
 		k := 0
 		switch c := s[j]; {
 		case c == ':' || c == '=':
@@ -481,24 +483,24 @@ func sepRunAt(s string, i int) (r sepRun, ok bool) {
 		case c == ' ' || c == '\t':
 			j++
 			continue
-		case isFoldColonAt(s, j):
+		case isFoldColonAt(wm, s, j):
 			// A colon look-alike, read where the glyph folds have not run (a string of a sequence as written).
-			k, r.plain = charLen(s, j), false
+			k, r.plain = charLen(wm, s, j), false
 			r.marks += ":"
 		default:
-			if m, ok := foldMarkAt(s, j); ok {
+			if m, ok := foldMarkAt(wm, s, j); ok {
 				// A look-alike of "=" or an arrow character, read where the glyph folds have not run.
-				k, r.plain = charLen(s, j), false
+				k, r.plain = charLen(wm, s, j), false
 				r.marks += m
 				break
 			}
-			if b := sepBlankLen(s, j); b > 0 {
+			if b := sepBlankLen(wm, s, j); b > 0 {
 				j += b
 				r.plain = false
 				continue
 			}
-			if k = indentLen(s, j); k == 0 {
-				k = invisibleLen(s, j)
+			if k = indentLen(wm, s, j); k == 0 {
+				k = invisibleLen(wm, s, j)
 			}
 			if k == 0 {
 				r.end = j
@@ -518,7 +520,7 @@ func sepRunAt(s string, i int) (r sepRun, ok bool) {
 
 // foldsAsSeparator reports whether the separator fold rewrites the run r: it holds a mark, and it is not one
 // ":", "=" or ":=" between spaces and tabs.
-func (r sepRun) foldsAsSeparator() bool {
+func (r sepRun) foldsAsSeparator(_ *meter.Meter) bool {
 	return !r.plain || r.marks != ":" && r.marks != "=" && r.marks != ":="
 }
 
@@ -529,10 +531,10 @@ func (r sepRun) foldsAsSeparator() bool {
 // takes no value on that line and this key takes its own (#845, decision of 2026-11-18: the key before took
 // "password" as its value, and V was shown). With emit nil it only reports, as soon as it finds one, whether
 // anything folds.
-func sepWalk(s string, emit func(text string, from, to int, copied bool)) bool {
+func sepWalk(wm *meter.Meter, s string, emit func(text string, from, to int, copied bool)) bool {
 	changed, pos, prevRunEnd := false, 0, -1
-	for _, m := range sepKeyWindows.findAll(s) {
-		tick(1)
+	for _, m := range sepKeyWindows.findAll(wm, s) {
+		tick(wm, 1)
 		at := m[1]
 		if s[at-1] == '-' && at < len(s) && s[at] == '>' {
 			// The key took the dash of an arrow.
@@ -541,14 +543,14 @@ func sepWalk(s string, emit func(text string, from, to int, copied bool)) bool {
 		if at < pos {
 			continue
 		}
-		r, ok := sepRunAt(s, at)
+		r, ok := sepRunAt(wm, s, at)
 		if !ok {
 			prevRunEnd = -1
 			continue
 		}
 		// A plain run the rules read stays, unless an "=" follows a quoted key ("\"password\" = V"), which no
 		// rule reads.
-		fold := r.foldsAsSeparator() || r.marks != ":" && (s[at-1] == '"' || s[at-1] == '\'')
+		fold := r.foldsAsSeparator(wm) || r.marks != ":" && (s[at-1] == '"' || s[at-1] == '\'')
 		keyAt := m[0]
 		if keyAt > 0 && (s[keyAt-1] == '"' || s[keyAt-1] == '\'') {
 			keyAt--
@@ -565,7 +567,7 @@ func sepWalk(s string, emit func(text string, from, to int, copied bool)) bool {
 		if nested {
 			blanksAt := keyAt
 			for blanksAt > pos && (s[blanksAt-1] == ' ' || s[blanksAt-1] == '\t') {
-				tick(1)
+				tick(wm, 1)
 				blanksAt--
 			}
 			if blanksAt > pos {

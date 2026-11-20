@@ -62,7 +62,7 @@ func TestShellWordEndMemoMatches(t *testing.T) {
 		extent := 1 + rng.IntN(len(s))
 		for range 40 {
 			pos := rng.IntN(len(s))
-			if !opensGroup(s, pos) {
+			if !opensGroup(nil, s, pos) {
 				continue
 			}
 			limit := pos + 1 + rng.IntN(len(s)-pos)
@@ -74,9 +74,9 @@ func TestShellWordEndMemoMatches(t *testing.T) {
 				keyPos = rng.IntN(pos + 1)
 			}
 			flag, wide := rng.IntN(4) == 0, rng.IntN(3) > 0
-			wantEnd, wantLast, wantOK := shellWordEnd(s, pos, limit, keyPos, flag, wide, nil)
+			wantEnd, wantLast, wantOK := shellWordEnd(nil, s, pos, limit, keyPos, flag, wide, nil)
 			before := w.resumed
-			end, last, ok := shellWordEnd(s, pos, limit, keyPos, flag, wide, w)
+			end, last, ok := shellWordEnd(nil, s, pos, limit, keyPos, flag, wide, w)
 			calls++
 			if w.resumed > before {
 				reused++
@@ -96,13 +96,13 @@ func TestShellWordEndMemoMatches(t *testing.T) {
 // text up to limit.
 func oldFieldAfterComma(s string, i, limit int) bool {
 	j := i + 1
-	if j >= limit || isSpace(s[j]) || strings.IndexByte("\"'`,;|&<>(){}[]", s[j]) >= 0 {
+	if j >= limit || isSpace(nil, s[j]) || strings.IndexByte("\"'`,;|&<>(){}[]", s[j]) >= 0 {
 		return true
 	}
 	if oldCommaSecretKey.MatchString(s[j:limit]) {
 		return true
 	}
-	for j < limit && (isAlnum(s[j]) || strings.IndexByte("_.-", s[j]) >= 0) {
+	for j < limit && (isAlnum(nil, s[j]) || strings.IndexByte("_.-", s[j]) >= 0) {
 		j++
 	}
 	switch {
@@ -111,7 +111,7 @@ func oldFieldAfterComma(s string, i, limit int) bool {
 	case s[j] == ':':
 		return true
 	case s[j] == '=':
-		return j+1 < limit && !isSpace(s[j+1]) && s[j+1] != '='
+		return j+1 < limit && !isSpace(nil, s[j+1]) && s[j+1] != '='
 	}
 	return false
 }
@@ -144,12 +144,12 @@ func TestFieldAfterCommaMatchesMain(t *testing.T) {
 			}
 			for limit := i + 1; limit <= len(s); limit++ {
 				commas++
-				got, reached := fieldAfterComma(s, i, limit)
+				got, reached := fieldAfterComma(nil, s, i, limit)
 				if want := oldFieldAfterComma(s, i, limit); got != want {
 					t.Fatalf("fieldAfterComma(%q, %d, %d) = %v, origin/main %v", s, i, limit, got, want)
 				}
 				if !reached {
-					if all, _ := fieldAfterComma(s, i, len(s)); all != got {
+					if all, _ := fieldAfterComma(nil, s, i, len(s)); all != got {
 						t.Fatalf("fieldAfterComma(%q, %d, %d) = %v without reaching the limit, %v at the end of the text", s, i, limit, got, all)
 					}
 				}
@@ -168,8 +168,8 @@ func oldViewValueEnd(s string, keys []viewKeyAt, i, next int) int {
 	end := k.valueEnd
 	if k.word {
 		end = k.after
-		for end < k.valueEnd && indentLen(s, end) == 0 {
-			end += charLen(s, end)
+		for end < k.valueEnd && indentLen(nil, s, end) == 0 {
+			end += charLen(nil, s, end)
 		}
 	}
 	if next >= 0 && keys[next].m[0] < end {
@@ -190,7 +190,7 @@ func oldViewValueEnd(s string, keys []viewKeyAt, i, next int) int {
 			end = c
 		}
 	}
-	return valueTail(s, k.after, end, k.flow)
+	return valueTail(nil, s, k.after, end, k.flow)
 }
 
 // viewValueEnd, which reads a word only up to the next key that takes its value (#845, P3), ends every value of
@@ -232,7 +232,7 @@ func TestViewValueEndMatchesTheOldLogic(t *testing.T) {
 				if next >= len(keys) {
 					continue
 				}
-				if got, want := viewValueEnd(s, keys, i, next), oldViewValueEnd(s, keys, i, next); got != want {
+				if got, want := viewValueEnd(nil, s, keys, i, next), oldViewValueEnd(s, keys, i, next); got != want {
 					t.Fatalf("viewValueEnd(%q, %+v, %d, %d) = %d, the old logic %d", s, keys, i, next, got, want)
 				}
 			}
@@ -263,7 +263,7 @@ func TestTokenMemoMatches(t *testing.T) {
 			if tm.ok && tm.from <= pos && pos <= tm.end {
 				hits++
 			}
-			if got, want := tm.tokenEnd(s, pos), tokenEnd(s, pos); got != want {
+			if got, want := tm.tokenEnd(nil, s, pos), tokenEnd(nil, s, pos); got != want {
 				t.Fatalf("tokenEnd(%q, %d) through the memory = %d, alone %d", s, pos, got, want)
 			}
 		}
@@ -281,8 +281,8 @@ func TestShellWordEndMemoAtTheLimit(t *testing.T) {
 	s := `"x"'a''b'z`
 	w := &wordMemo{}
 	for _, limit := range []int{6, 7} {
-		wantEnd, wantLast, wantOK := shellWordEnd(s, 0, limit, noKey, false, true, nil)
-		end, last, ok := shellWordEnd(s, 0, limit, noKey, false, true, w)
+		wantEnd, wantLast, wantOK := shellWordEnd(nil, s, 0, limit, noKey, false, true, nil)
+		end, last, ok := shellWordEnd(nil, s, 0, limit, noKey, false, true, w)
 		if end != wantEnd || last != wantLast || ok != wantOK {
 			t.Errorf("limit %d: with the memory %d %v %v, without %d %v %v", limit, end, last, ok, wantEnd, wantLast, wantOK)
 		}
@@ -296,8 +296,8 @@ func TestShellWordEndMemoKeyColumn(t *testing.T) {
 	s := "x = \"a\"\"b\n  \"c d"
 	w := &wordMemo{}
 	for _, keyPos := range []int{noKey, 0, 1, 2, 3} {
-		wantEnd, wantLast, wantOK := shellWordEnd(s, 4, len(s), keyPos, false, true, nil)
-		end, last, ok := shellWordEnd(s, 4, len(s), keyPos, false, true, w)
+		wantEnd, wantLast, wantOK := shellWordEnd(nil, s, 4, len(s), keyPos, false, true, nil)
+		end, last, ok := shellWordEnd(nil, s, 4, len(s), keyPos, false, true, w)
 		if end != wantEnd || last != wantLast || ok != wantOK {
 			t.Errorf("key at %d: with the memory %d %v %v, without %d %v %v", keyPos, end, last, ok, wantEnd, wantLast, wantOK)
 		}

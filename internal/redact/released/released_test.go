@@ -17,9 +17,17 @@ limitations under the License.
 package released
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -28,6 +36,9 @@ import (
 // which made the work linear without changing the output (lines.go is new with it). What the code computes is
 // checked against that release's results by TestReleasedReproducesTheReleaseBefore (package redact), and against
 // the code before #873 (testdata/v052) by the tests of kept_test.go and TestReleasedSpansMatchKeptCopy.
+//
+// The work budget of #873 (decision of 2026-11-20) threads a meter through the same files, which changes their
+// bytes: the sums are of the files with it taken out (unmetered), printed by go/printer.
 func TestReleasedIsTheReleaseBefore(t *testing.T) {
 	for name, want := range map[string]string{
 		"redact.go": "f1c529161cef604df2e6d6741caa0d589fff7959969aef33981cbba97e81e031",
@@ -39,9 +50,109 @@ func TestReleasedIsTheReleaseBefore(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sum := sha256.Sum256(b)
+		sum := sha256.Sum256([]byte(unmetered(t, name, b)))
 		if got := hex.EncodeToString(sum[:]); got != want {
 			t.Errorf("%s changed: sha256 %s, want %s; the kept reading must not be edited", name, got, want)
 		}
 	}
+}
+
+// unmetered returns src, a file of this package, as Go source with the work budget of #873 (package meter, decision
+// of 2026-11-20) taken out: the parameter wm of every function and function type, the first argument (wm or nil)
+// of every call of a function or rule field that takes it, and the import of package meter. The budget was added
+// to the kept files by that change alone, so what is left is the release's code, printed by go/printer.
+// isWM reports whether p is the meter parameter: wm, or _ where the function does not use it.
+func isWM(p *ast.Field) bool {
+	if len(p.Names) != 1 {
+		return false
+	}
+	star, ok := p.Type.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := star.X.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Meter" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "meter" && (p.Names[0].Name == "wm" || p.Names[0].Name == "_")
+}
+
+func unmetered(t *testing.T, name string, src []byte) string {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, name, src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	takes := map[string]bool{"span": true, "spans": true, "spanLines": true, "spansLines": true}
+	dropWM := func(ft *ast.FuncType) bool {
+		if ft.Params == nil || len(ft.Params.List) == 0 {
+			return false
+		}
+		if !isWM(ft.Params.List[0]) {
+			return false
+		}
+		ft.Params.List = ft.Params.List[1:]
+		return true
+	}
+	// The functions of the package that take wm, declared in any of its files.
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		pf, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range pf.Decls {
+			if d, ok := d.(*ast.FuncDecl); ok && d.Type.Params != nil && len(d.Type.Params.List) > 0 {
+				if isWM(d.Type.Params.List[0]) {
+					takes[d.Name.Name] = true
+				}
+			}
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FuncType:
+			dropWM(x)
+		case *ast.CallExpr:
+			var callee string
+			switch fn := x.Fun.(type) {
+			case *ast.Ident:
+				callee = fn.Name
+			case *ast.SelectorExpr:
+				callee = fn.Sel.Name
+			}
+			if takes[callee] && len(x.Args) > 0 {
+				if id, ok := x.Args[0].(*ast.Ident); ok && (id.Name == "wm" || id.Name == "nil") {
+					x.Args = x.Args[1:]
+				}
+			}
+		}
+		return true
+	})
+	for _, d := range f.Decls {
+		if g, ok := d.(*ast.GenDecl); ok && g.Tok == token.IMPORT {
+			g.Specs = slices.DeleteFunc(g.Specs, func(s ast.Spec) bool {
+				return s.(*ast.ImportSpec).Path.Value == `"github.com/pkalin/shadewright/internal/redact/meter"`
+			})
+			if len(g.Specs) == 1 {
+				g.Lparen, g.Rparen = token.NoPos, token.NoPos
+			}
+		}
+	}
+	f.Imports = slices.DeleteFunc(f.Imports, func(s *ast.ImportSpec) bool {
+		return s.Path.Value == `"github.com/pkalin/shadewright/internal/redact/meter"`
+	})
+	var b bytes.Buffer
+	if err := format.Node(&b, fset, f); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
 }

@@ -98,7 +98,7 @@ func TestWriteCommaFieldsMainTable(t *testing.T) {
 	enc := json.NewEncoder(w)
 	for _, in := range commaFieldsCorpus(3000) {
 		c := mainRedaction{In: in, Out: String(in)}
-		for _, sp := range defaultRedactor.spans(in) {
+		for _, sp := range defaultRedactor.spans(nil, in) {
 			c.Spans = append(c.Spans, [2]int{sp.start, sp.end})
 		}
 		if err := enc.Encode(c); err != nil {
@@ -138,7 +138,7 @@ func TestCommaFieldsStillRedactWhatMainRedacted(t *testing.T) {
 		if len(c.Spans) > 0 {
 			redacted++
 		}
-		now := defaultRedactor.spans(c.In)
+		now := defaultRedactor.spans(nil, c.In)
 	spans:
 		for _, want := range c.Spans {
 			for i := want[0]; i < want[1]; i++ {

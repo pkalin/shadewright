@@ -351,7 +351,7 @@ func TestBlockFormsCorpusRedactsEverySecret(t *testing.T) {
 	failed := 0
 	byForm := map[string]int{}
 	for _, c := range cases {
-		leaked, lost := formLeaks(c, defaultRedactor.spans(c.in))
+		leaked, lost := formLeaks(c, defaultRedactor.spans(nil, c.in))
 		if len(leaked)+len(lost) == 0 {
 			continue
 		}
@@ -389,7 +389,7 @@ func TestWriteFormMainTable(t *testing.T) {
 	rows := make([]any, 0, len(corpus))
 	for _, c := range corpus {
 		row := formMainRow{Hash: formHash(c.in)}
-		for _, sp := range defaultRedactor.spans(c.in) {
+		for _, sp := range defaultRedactor.spans(nil, c.in) {
 			row.Spans = append(row.Spans, [2]int{sp.start, sp.end})
 		}
 		rows = append(rows, row)
@@ -472,7 +472,7 @@ func TestBlockFormsStillRedactWhatMainRedacted(t *testing.T) {
 			t.Fatalf("%s line %d does not match its generator: regenerate it from the commit it names", formMainTable, i+1)
 		}
 		in := gen[i].in
-		red := formRedacted(in, defaultRedactor.spans(in))
+		red := formRedacted(in, defaultRedactor.spans(nil, in))
 		for _, want := range row.Spans {
 			for j := want[0]; j < want[1]; j++ {
 				if !red[j] {

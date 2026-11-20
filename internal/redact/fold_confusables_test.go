@@ -90,12 +90,12 @@ func TestFoldColonsAreTheConfusablesOfColon(t *testing.T) {
 		t.Errorf("the comment of foldColons names confusables.txt version %q, %s holds version %s", m, confusablesColon, version)
 	}
 	for _, r := range want {
-		if !isFoldColon(r) {
+		if !isFoldColon(nil, r) {
 			t.Errorf("isFoldColon(%U) = false", r)
 		}
 	}
 	for _, r := range []rune{':', 0x205D, 0x2254, 0x00B7, 0x003B} {
-		if isFoldColon(r) {
+		if isFoldColon(nil, r) {
 			t.Errorf("isFoldColon(%U) = true, it is not in the list", r)
 		}
 	}
@@ -167,12 +167,12 @@ func TestFoldMarksAreTheConfusablesOfEqualsAndArrows(t *testing.T) {
 		t.Errorf("the comment of foldEquals names confusables.txt version %q, %s holds version %s", m, confusablesEqualsArrows, version)
 	}
 	for r, want := range arrows {
-		if got, ok := foldMark(r); !ok || got != want {
+		if got, ok := foldMark(nil, r); !ok || got != want {
 			t.Errorf("foldMark(%U) = %q, %v, want %q", r, got, ok, want)
 		}
 	}
 	for _, r := range []rune{'=', '>', 0x2190, 0x21D0, 0x2261, 0x2260, 0x27F6} {
-		if _, ok := foldMark(r); ok {
+		if _, ok := foldMark(nil, r); ok {
 			t.Errorf("foldMark(%U) folds, it is not in the list", r)
 		}
 	}

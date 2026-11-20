@@ -283,7 +283,7 @@ func TestKnownAnswers(t *testing.T) {
 		b.WriteString(strings.Repeat(" ", depth+r.IntN(3)) + secret + "\n")
 		b.WriteString("tail: visible\n")
 		text := b.String()
-		for name, out := range map[string]string{"reading": String(text), "kept": render(text, toSpans(v052.Spans(text)))} {
+		for name, out := range map[string]string{"reading": String(text), "kept": render(nil, text, toSpans(v052.Spans(text)))} {
 			if strings.Contains(out, secret) || !strings.HasSuffix(out, "\ntail: visible\n") {
 				t.Fatalf("%s, staircase %d of depth %d: %q", name, i, depth, out)
 			}
@@ -292,7 +292,7 @@ func TestKnownAnswers(t *testing.T) {
 		text = "password=\"" + secret + "\"," + field
 		head, _, _ := strings.Cut(field, "=")
 		head, _, _ = strings.Cut(head, ":")
-		for name, out := range map[string]string{"reading": String(text), "kept": render(text, toSpans(v052.Spans(text)))} {
+		for name, out := range map[string]string{"reading": String(text), "kept": render(nil, text, toSpans(v052.Spans(text)))} {
 			if strings.Contains(out, secret) || !strings.Contains(out, ","+head) {
 				t.Fatalf("%s, fields %q: %q", name, text, out)
 			}
@@ -335,13 +335,13 @@ func checkCommaKeyReach(t *testing.T, r rune) {
 	t.Helper()
 	c := string(r)
 	inName := "x" + c + "password="
-	reads := commaKeyReach(inName, 0, len(inName)) == len(inName)
+	reads := commaKeyReach(nil, inName, 0, len(inName)) == len(inName)
 	if got := commaSecretKey.MatchString(inName); got != reads {
 		t.Errorf("U+%04X inside a key name: the expression matches %v, commaKeyReach reads past it %v", r, got, reads)
 	}
 	after := "password" + c + "="
 	sep := r == ' ' || r == '\t' || r == ':' || r == '='
-	reach := commaKeyReach(after, 0, len(after))
+	reach := commaKeyReach(nil, after, 0, len(after))
 	if got := commaSecretKey.MatchString(after); got != (sep || reach == len(after)) {
 		t.Errorf("U+%04X after a key name: the expression matches %v, commaKeyReach reads %d of %d bytes", r, got,
 			reach, len(after))
@@ -363,18 +363,18 @@ func TestLineIndexMatchesLineByLine(t *testing.T) {
 		if i%5 == 0 {
 			s = stairText(r, pick(r, stairLines), 5+r.IntN(40))
 		}
-		x := newLineIndex(s)
+		x := newLineIndex(nil, s)
 		for _, pos := range r.Perm(len(s) + 1) {
 			c := cols[r.IntN(len(cols))]
-			wantStart, wantEnd := indentedLines(s, pos, c)
-			start, end, first, last := x.indentedLines(pos, c)
+			wantStart, wantEnd := indentedLines(nil, s, pos, c)
+			start, end, first, last := x.indentedLines(nil, pos, c)
 			if start != wantStart || end != wantEnd {
 				t.Fatalf("indentedLines(%q, %d, %d) = %d, %d, the index %d, %d", s, pos, c, wantStart, wantEnd, start, end)
 			}
 			if start < 0 {
 				continue
 			}
-			if got, want := x.anyLooksLikeSecret(first, last), blockLooksLikeSecret(s, start, end); got != want {
+			if got, want := x.anyLooksLikeSecret(nil, first, last), blockLooksLikeSecret(nil, s, start, end); got != want {
 				t.Fatalf("blockLooksLikeSecret(%q, %d, %d) = %v, the index %v", s, start, end, want, got)
 			}
 		}

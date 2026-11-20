@@ -508,7 +508,7 @@ The policy is configuration, but the block is treated like the others: it is ren
 
 - available;
 - not available: not configured, Git today, or nothing of the target to read;
-- could not fetch: a configured source failed, or ran out of its 30-second call timeout or of the 2-minute deadline of the whole build, after which no further call is made. This covers a cluster read of the target or its pods, a log read, or any one metric template (the others are then shown and labelled incomplete).
+- could not fetch: a configured source failed, or ran out of its 30-second call timeout or of the 2-minute deadline of the whole build, after which no further call is made. This covers a cluster read of the target or its pods, a log read, or any one metric template (the others are then shown and labelled incomplete). A block whose text redaction withheld whole (its work budget ran out, or the text is longer than 4 MiB, [#873](https://github.com/pkalin/shadewright/issues/873)) is "could not fetch" too, labelled `withheld by redaction`, with a fixed text and nothing of the source; its section is a failed source.
 
 A log source that answers that the pod is gone or refuses the request (no previous instance, a container that has not started) gives "no logs", which is not a failure. A build whose own context is cancelled returns an error, not a context with a failed source.
 

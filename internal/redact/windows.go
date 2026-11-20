@@ -23,6 +23,8 @@ import (
 	"slices"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/redact/meter"
 )
 
 // The regular expressions of the rules cost far more per byte than the count of their work says on some texts:
@@ -62,7 +64,7 @@ type runeSet struct {
 }
 
 // newRuneSet returns the set of the ranges in pairs (pairs of a first and a last character).
-func newRuneSet(pairs []rune) runeSet {
+func newRuneSet(_ *meter.Meter, pairs []rune) runeSet {
 	var set runeSet
 	type rng struct{ lo, hi rune }
 	rs := make([]rng, 0, len(pairs)/2)
@@ -88,7 +90,7 @@ func newRuneSet(pairs []rune) runeSet {
 }
 
 // in reports whether r is in the set.
-func (set *runeSet) in(r rune) bool {
+func (set *runeSet) in(_ *meter.Meter, r rune) bool {
 	if r < utf8.RuneSelf {
 		return r >= 0 && set.ascii[r]
 	}
@@ -114,7 +116,7 @@ type windowed struct {
 }
 
 // newWindowed returns re with its alphabet and start characters.
-func newWindowed(re *regexp.Regexp) *windowed {
+func newWindowed(_ *meter.Meter, re *regexp.Regexp) *windowed {
 	w := &windowed{re: re, whole: true}
 	tree, err := syntax.Parse(re.String(), syntax.Perl)
 	if err != nil {
@@ -122,21 +124,21 @@ func newWindowed(re *regexp.Regexp) *windowed {
 	}
 	tree = tree.Simplify()
 	var all, later []rune
-	if minLen(tree) == 0 || !alphabet(tree, &all) || !laterAlphabet(tree, &later) {
+	if minLen(nil, tree) == 0 || !alphabet(nil, tree, &all) || !laterAlphabet(nil, tree, &later) {
 		return w
 	}
 	w.whole = false
-	w.alpha, w.later, w.begins = newRuneSet(all), newRuneSet(later), asserts(tree, syntax.OpBeginText, syntax.OpBeginLine)
+	w.alpha, w.later, w.begins = newRuneSet(nil, all), newRuneSet(nil, later), asserts(nil, tree, syntax.OpBeginText, syntax.OpBeginLine)
 	return w
 }
 
 // asserts reports whether re holds one of the assertions ops.
-func asserts(re *syntax.Regexp, ops ...syntax.Op) bool {
+func asserts(_ *meter.Meter, re *syntax.Regexp, ops ...syntax.Op) bool {
 	if slices.Contains(ops, re.Op) {
 		return true
 	}
 	for _, sub := range re.Sub {
-		if asserts(sub, ops...) {
+		if asserts(nil, sub, ops...) {
 			return true
 		}
 	}
@@ -144,26 +146,26 @@ func asserts(re *syntax.Regexp, ops ...syntax.Op) bool {
 }
 
 // minLen returns the fewest characters a match of re consumes.
-func minLen(re *syntax.Regexp) int {
+func minLen(_ *meter.Meter, re *syntax.Regexp) int {
 	switch re.Op {
 	case syntax.OpLiteral:
 		return len(re.Rune)
 	case syntax.OpCharClass, syntax.OpAnyChar, syntax.OpAnyCharNotNL:
 		return 1
 	case syntax.OpCapture, syntax.OpPlus:
-		return minLen(re.Sub[0])
+		return minLen(nil, re.Sub[0])
 	case syntax.OpRepeat:
-		return re.Min * minLen(re.Sub[0])
+		return re.Min * minLen(nil, re.Sub[0])
 	case syntax.OpConcat:
 		n := 0
 		for _, sub := range re.Sub {
-			n += minLen(sub)
+			n += minLen(nil, sub)
 		}
 		return n
 	case syntax.OpAlternate:
 		n := -1
 		for _, sub := range re.Sub {
-			if m := minLen(sub); n < 0 || m < n {
+			if m := minLen(nil, sub); n < 0 || m < n {
 				n = m
 			}
 		}
@@ -175,7 +177,7 @@ func minLen(re *syntax.Regexp) int {
 
 // literalRunes appends to pairs the characters a literal matches: each of its runes, with its case orbit
 // (unicode.SimpleFold) when it folds case, as the matcher takes them.
-func literalRunes(rs []rune, fold bool, pairs *[]rune) {
+func literalRunes(_ *meter.Meter, rs []rune, fold bool, pairs *[]rune) {
 	for _, r := range rs {
 		*pairs = append(*pairs, r, r)
 		if fold {
@@ -188,10 +190,10 @@ func literalRunes(rs []rune, fold bool, pairs *[]rune) {
 
 // alphabet appends to pairs the ranges of the characters a match of re can consume, and reports false when that
 // is every character.
-func alphabet(re *syntax.Regexp, pairs *[]rune) bool {
+func alphabet(wm *meter.Meter, re *syntax.Regexp, pairs *[]rune) bool {
 	switch re.Op {
 	case syntax.OpLiteral:
-		literalRunes(re.Rune, re.Flags&syntax.FoldCase != 0, pairs)
+		literalRunes(wm, re.Rune, re.Flags&syntax.FoldCase != 0, pairs)
 		return true
 	case syntax.OpCharClass:
 		*pairs = append(*pairs, re.Rune...)
@@ -200,7 +202,7 @@ func alphabet(re *syntax.Regexp, pairs *[]rune) bool {
 		return false
 	default:
 		for _, sub := range re.Sub {
-			if !alphabet(sub, pairs) {
+			if !alphabet(wm, sub, pairs) {
 				return false
 			}
 		}
@@ -210,39 +212,39 @@ func alphabet(re *syntax.Regexp, pairs *[]rune) bool {
 
 // laterAlphabet appends to pairs the ranges of the characters a match of re can hold at another place than its
 // first (more of them than that, never fewer), and reports false when that is every character.
-func laterAlphabet(re *syntax.Regexp, pairs *[]rune) bool {
+func laterAlphabet(wm *meter.Meter, re *syntax.Regexp, pairs *[]rune) bool {
 	switch re.Op {
 	case syntax.OpLiteral:
 		if len(re.Rune) > 1 {
-			literalRunes(re.Rune[1:], re.Flags&syntax.FoldCase != 0, pairs)
+			literalRunes(wm, re.Rune[1:], re.Flags&syntax.FoldCase != 0, pairs)
 		}
 		return true
 	case syntax.OpStar, syntax.OpPlus:
 		// A repeated part can follow itself: all of its characters may stand later.
-		return alphabet(re.Sub[0], pairs)
+		return alphabet(wm, re.Sub[0], pairs)
 	case syntax.OpRepeat:
 		if re.Max == 1 {
-			return laterAlphabet(re.Sub[0], pairs)
+			return laterAlphabet(wm, re.Sub[0], pairs)
 		}
-		return alphabet(re.Sub[0], pairs)
+		return alphabet(wm, re.Sub[0], pairs)
 	case syntax.OpConcat:
 		consumed := false
 		for _, sub := range re.Sub {
-			if !laterAlphabet(sub, pairs) {
+			if !laterAlphabet(wm, sub, pairs) {
 				return false
 			}
-			if consumed && !alphabet(sub, pairs) {
+			if consumed && !alphabet(wm, sub, pairs) {
 				return false
 			}
 			var own []rune
-			if alphabet(sub, &own); len(own) > 0 {
+			if alphabet(wm, sub, &own); len(own) > 0 {
 				consumed = true
 			}
 		}
 		return true
 	default: // a class or any character (one character, the first of itself), a capture, an alternation, a quest
 		for _, sub := range re.Sub {
-			if !laterAlphabet(sub, pairs) {
+			if !laterAlphabet(wm, sub, pairs) {
 				return false
 			}
 		}
@@ -285,7 +287,7 @@ const chunkMaxRun = 4 * windowMinRun
 
 // chunkCut reports whether a chunk may end at byte i of s: the chunkHashBytes bytes before i hash to one of 16
 // values, so chunks of short windows end about every 16th window once they are long enough.
-func chunkCut(s string, i int) bool {
+func chunkCut(_ *meter.Meter, s string, i int) bool {
 	var x uint64
 	for _, c := range []byte(s[max(0, i-chunkHashBytes):i]) {
 		x = x<<8 | uint64(c)
@@ -295,7 +297,7 @@ func chunkCut(s string, i int) bool {
 
 // longRuns returns, for each of the expressions ws (at most 64), the long windows and the chunks of shorter windows
 // of s, in order: one pass over s for all of them. An expression read whole gets none.
-func longRuns(s string, ws []*windowed) [][]longRun {
+func longRuns(wm *meter.Meter, s string, ws []*windowed) [][]longRun {
 	out := make([][]longRun, len(ws))
 	var alphaASCII, startASCII [utf8.RuneSelf]uint64
 	var all uint64
@@ -321,11 +323,11 @@ func longRuns(s string, ws []*windowed) [][]longRun {
 	starts := make([]int, len(ws))
 	prevs := make([]int, len(ws))
 	cuts := make([]bool, len(ws))
-	ch := newChunker(s, out)
+	ch := newChunker(wm, s, out)
 	var cur uint64
 	prev := 0 // the start of the character before i
 	for i := 0; i <= len(s); {
-		tick(1)
+		tick(wm, 1)
 		var m masks
 		size := 0
 		if i < len(s) {
@@ -337,9 +339,9 @@ func longRuns(s string, ws []*windowed) [][]longRun {
 				var ok bool
 				if m, ok = other[r]; !ok {
 					for k, w := range ws {
-						if all&(1<<k) != 0 && w.alpha.in(r) {
+						if all&(1<<k) != 0 && w.alpha.in(wm, r) {
 							m.alpha |= 1 << k
-							if !w.later.in(r) {
+							if !w.later.in(wm, r) {
 								m.start |= 1 << k
 							}
 						}
@@ -349,16 +351,16 @@ func longRuns(s string, ws []*windowed) [][]longRun {
 			}
 		}
 		if closing := (cur &^ m.alpha) | (cur & m.start); closing != 0 || m.alpha&^cur != 0 {
-			tick(1)
+			tick(wm, 1)
 			ch.cutHere = 0
 			for ; closing != 0; closing &= closing - 1 {
 				k := bits.TrailingZeros64(closing)
-				ch.closeWindow(k, longRun{prev: prevs[k], start: starts[k], end: i, next: i + size, last: prev, cut: cuts[k]})
+				ch.closeWindow(wm, k, longRun{prev: prevs[k], start: starts[k], end: i, next: i + size, last: prev, cut: cuts[k]})
 			}
 			for opening := m.alpha &^ (cur &^ m.start); opening != 0; opening &= opening - 1 {
 				k := bits.TrailingZeros64(opening)
 				starts[k], prevs[k], cuts[k] = i, prev, cur&(1<<k) != 0
-				ch.openWindow(k, i)
+				ch.openWindow(wm, k, i)
 			}
 			cur = m.alpha
 		}
@@ -368,7 +370,7 @@ func longRuns(s string, ws []*windowed) [][]longRun {
 		prev = i
 		i += size
 	}
-	ch.finish()
+	ch.finish(wm)
 	return out
 }
 
@@ -389,17 +391,17 @@ type chunker struct {
 }
 
 // newChunker returns a chunker of s that appends to out.
-func newChunker(s string, out [][]longRun) *chunker {
+func newChunker(wm *meter.Meter, s string, out [][]longRun) *chunker {
 	c := &chunker{s: s, out: out, chunks: make([]longRun, len(out)), first: make([]int, len(out))}
 	for k := range c.first {
-		tick(1)
+		tick(wm, 1)
 		c.first[k] = -1
 	}
 	return c
 }
 
 // emit gives expression k the long run r.
-func (c *chunker) emit(k int, r longRun) {
+func (c *chunker) emit(_ *meter.Meter, k int, r longRun) {
 	r.follows = c.first[k] == r.start
 	c.first[k] = -1
 	c.out[k] = append(c.out[k], r)
@@ -407,14 +409,14 @@ func (c *chunker) emit(k int, r longRun) {
 
 // closeWindow takes the window win of expression k, which ends here: a long window on its own (the chunk before it
 // ends at the window before), a short one into the chunk being gathered, which ends here when the text decides so.
-func (c *chunker) closeWindow(k int, win longRun) {
+func (c *chunker) closeWindow(wm *meter.Meter, k int, win longRun) {
 	bit := uint64(1) << k
 	if win.end-win.start >= windowMinRun {
 		if c.chunked&bit != 0 && c.chunks[k].end-c.chunks[k].start >= windowMinRun {
-			c.emit(k, c.chunks[k])
+			c.emit(wm, k, c.chunks[k])
 		}
 		c.chunked &^= bit
-		c.emit(k, win)
+		c.emit(wm, k, win)
 		return
 	}
 	if c.chunked&bit == 0 {
@@ -426,23 +428,23 @@ func (c *chunker) closeWindow(k int, win longRun) {
 		return
 	}
 	if c.cutHere == 0 {
-		tick(chunkHashBytes)
+		tick(wm, chunkHashBytes)
 		c.cutHere = 2
-		if chunkCut(c.s, win.end) {
+		if chunkCut(wm, c.s, win.end) {
 			c.cutHere = 1
 		}
 	}
 	if c.cutHere == 1 || win.end-c.chunks[k].start >= chunkMaxRun {
-		c.emit(k, c.chunks[k])
+		c.emit(wm, k, c.chunks[k])
 		c.chunked &^= bit
 	}
 }
 
 // openWindow notes a window of expression k that begins at i: the chunk being gathered ends before it when
 // windowMinRun bytes or more without a window stand between them.
-func (c *chunker) openWindow(k, i int) {
+func (c *chunker) openWindow(wm *meter.Meter, k, i int) {
 	if c.chunked&(1<<k) != 0 && i-c.chunks[k].end >= windowMinRun {
-		c.emit(k, c.chunks[k])
+		c.emit(wm, k, c.chunks[k])
 		c.chunked &^= 1 << k
 	}
 	if c.first[k] < 0 {
@@ -452,15 +454,15 @@ func (c *chunker) openWindow(k, i int) {
 
 // finish gives each expression the chunk it was gathering at the end of the text, when it is long enough or
 // windowMinRun bytes without a window follow it, and marks its last long run final when no window follows that.
-func (c *chunker) finish() {
+func (c *chunker) finish(wm *meter.Meter) {
 	for ; c.chunked != 0; c.chunked &= c.chunked - 1 {
 		k := bits.TrailingZeros64(c.chunked)
 		if c.chunks[k].end-c.chunks[k].start >= windowMinRun || len(c.s)-c.chunks[k].end >= windowMinRun {
-			c.emit(k, c.chunks[k])
+			c.emit(wm, k, c.chunks[k])
 		}
 	}
 	for k := range c.out {
-		tick(1)
+		tick(wm, 1)
 		if n := len(c.out[k]); n > 0 && c.first[k] < 0 {
 			c.out[k][n-1].final = true
 		}
@@ -494,10 +496,10 @@ type windowFound struct {
 }
 
 // newText starts the numbering of the windows of another text: the windows already read are kept.
-func (ids *windowIDs) newText() { clear(ids.at) }
+func (ids *windowIDs) newText(_ *meter.Meter) { clear(ids.at) }
 
 // of returns the number of the long window r of s, read with lead before it.
-func (ids *windowIDs) of(s string, r longRun, lead string) int {
+func (ids *windowIDs) of(wm *meter.Meter, s string, r longRun, lead string) int {
 	at := windowAt{r, lead}
 	if id, ok := ids.at[at]; ok {
 		return id
@@ -506,7 +508,7 @@ func (ids *windowIDs) of(s string, r longRun, lead string) int {
 		ids.at, ids.byText = map[windowAt]int{}, map[windowKey]int{}
 	}
 	key := windowKey{lead: lead, text: s[r.start:r.next]}
-	tick(len(key.lead) + len(key.text)) // the lookup hashes the text
+	tick(wm, len(key.lead)+len(key.text)) // the lookup hashes the text
 	id, ok := ids.byText[key]
 	if !ok {
 		id = len(ids.byText)
@@ -517,26 +519,26 @@ func (ids *windowIDs) of(s string, r longRun, lead string) int {
 }
 
 // findAll is w.re.FindAllStringSubmatchIndex(s, -1), with each distinct long window of s read once.
-func (w *windowed) findAll(s string) [][]int {
+func (w *windowed) findAll(wm *meter.Meter, s string) [][]int {
 	if w.whole || len(s) < windowMinText {
-		return w.readWhole(s)
+		return w.readWhole(wm, s)
 	}
-	return w.findAllIn(s, longRuns(s, []*windowed{w})[0], &windowIDs{})
+	return w.findAllIn(wm, s, longRuns(wm, s, []*windowed{w})[0], &windowIDs{})
 }
 
 // findAllWith is findAll on one of several texts read with ids, which keeps the windows read in the texts before:
 // the lines of a text, read one by one.
-func (w *windowed) findAllWith(s string, ids *windowIDs) [][]int {
+func (w *windowed) findAllWith(wm *meter.Meter, s string, ids *windowIDs) [][]int {
 	if w.whole || len(s) < windowMinText {
-		return w.readWhole(s)
+		return w.readWhole(wm, s)
 	}
-	ids.newText()
-	return w.findAllIn(s, longRuns(s, []*windowed{w})[0], ids)
+	ids.newText(wm)
+	return w.findAllIn(wm, s, longRuns(wm, s, []*windowed{w})[0], ids)
 }
 
 // leadClass is the character the assertions read the same as the character r before a window that begins with a
 // start character: a line break, a word character or neither.
-func leadClass(r rune) string {
+func leadClass(_ *meter.Meter, r rune) string {
 	switch {
 	case r == '\n':
 		return "\n"
@@ -549,17 +551,17 @@ func leadClass(r rune) string {
 
 // findAllIn is w.re.FindAllStringSubmatchIndex(s, -1), where runs are the long windows of s for w (longRuns) and
 // ids names the long windows of s (shared by the expressions read on s).
-func (w *windowed) findAllIn(s string, runs []longRun, ids *windowIDs) [][]int {
+func (w *windowed) findAllIn(wm *meter.Meter, s string, runs []longRun, ids *windowIDs) [][]int {
 	if len(runs) == 0 {
-		return w.readWhole(s)
+		return w.readWhole(wm, s)
 	}
 	var out [][]int
 	// keep appends the matches ms of a text read from byte at of s that start in [from, to) of s.
 	keep := func(ms [][]int, at, from, to int) {
 		for _, m := range ms {
-			tick(1)
+			tick(wm, 1)
 			if m[0]+at >= from && m[0]+at < to {
-				out = append(out, shifted(m, at))
+				out = append(out, shifted(wm, m, at))
 			}
 		}
 	}
@@ -567,7 +569,7 @@ func (w *windowed) findAllIn(s string, runs []longRun, ids *windowIDs) [][]int {
 		if w.onRead != nil {
 			w.onRead(len(t))
 		}
-		return w.re.FindAllStringSubmatchIndex(counted(t), -1)
+		return w.re.FindAllStringSubmatchIndex(counted(wm, t), -1)
 	}
 	// part reads the bytes [from, to) of s with the character before from (starting at lo) and the one at to.
 	part := func(lo, from, to int) {
@@ -583,14 +585,14 @@ func (w *windowed) findAllIn(s string, runs []longRun, ids *windowIDs) [][]int {
 	}
 	from, lo := 0, 0
 	for _, r := range runs {
-		tick(1)
+		tick(wm, 1)
 		if r.start > from && !r.follows {
 			part(lo, from, r.start)
 		}
 		lead := s[r.prev:r.start]
 		if r.cut {
 			c, _ := utf8.DecodeRuneInString(lead)
-			lead = leadClass(c)
+			lead = leadClass(wm, c)
 		}
 		if c, _ := utf8.DecodeRuneInString(lead); lead != "" && !w.begins && (c >= utf8.RuneSelf || !syntax.IsWordChar(c)) {
 			// Without ^ or \A, a character before the window that is no word character reads as the start of a
@@ -599,14 +601,14 @@ func (w *windowed) findAllIn(s string, runs []longRun, ids *windowIDs) [][]int {
 			// of a value alone.
 			lead = ""
 		}
-		id := ids.of(s, r, lead)
+		id := ids.of(wm, s, r, lead)
 		found, ok := ids.found[windowFound{w, id}]
 		if !ok {
 			n := len(lead)
 			for _, m := range read(lead + s[r.start:r.next]) {
-				tick(1)
+				tick(wm, 1)
 				if m[0] >= n && m[0] < n+r.end-r.start {
-					found = append(found, shifted(m, -n))
+					found = append(found, shifted(wm, m, -n))
 				}
 			}
 			ids.found[windowFound{w, id}] = found
@@ -621,15 +623,15 @@ func (w *windowed) findAllIn(s string, runs []longRun, ids *windowIDs) [][]int {
 }
 
 // readWhole is w.re.FindAllStringSubmatchIndex(s, -1), told to onRead like the parts of a windowed reading.
-func (w *windowed) readWhole(s string) [][]int {
+func (w *windowed) readWhole(wm *meter.Meter, s string) [][]int {
 	if w.onRead != nil {
 		w.onRead(len(s))
 	}
-	return w.re.FindAllStringSubmatchIndex(counted(s), -1)
+	return w.re.FindAllStringSubmatchIndex(counted(wm, s), -1)
 }
 
 // shifted returns the match m, found in a text that starts at byte by of another, as a match of the other.
-func shifted(m []int, by int) []int {
+func shifted(_ *meter.Meter, m []int, by int) []int {
 	out := make([]int, len(m))
 	for k, v := range m {
 		out[k] = v

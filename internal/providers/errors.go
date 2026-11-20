@@ -24,6 +24,10 @@ import (
 
 // Sentinel errors. Adapters wrap them (fmt.Errorf("...: %w", ErrNotFound)) so callers can use errors.Is.
 var (
+	// ErrWithheld means redaction withheld the answer whole: its work ran out of its budget, or the answer was
+	// longer than redaction reads (package redact, budget.go). Nothing of the answer is returned; a caller shows it
+	// as a source that failed.
+	ErrWithheld = errors.New("withheld by redaction")
 	// ErrNotFound means the object asked for does not exist.
 	ErrNotFound = errors.New("not found")
 	// ErrPathNotInTree means the adapter read the tree at the commit asked for and the path is not a regular

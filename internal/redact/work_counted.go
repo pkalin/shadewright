@@ -23,6 +23,8 @@ import (
 	"sync/atomic"
 
 	"github.com/pkalin/shadewright/internal/redact/released"
+
+	"github.com/pkalin/shadewright/internal/redact/meter"
 )
 
 // The count of [Work], built only with the tag redactwork, for the linearity tests (make test); the product
@@ -35,14 +37,33 @@ var (
 	releasedSteps atomic.Int64
 	// expressionSteps are the steps of steps that are bytes handed to a regular expression of this package.
 	expressionSteps atomic.Int64
+	// unmeteredSteps are the steps of steps that were counted on no budget (a nil meter.Meter): none inside an
+	// entry point, as TestEveryStepIsMetered shows.
+	unmeteredSteps atomic.Int64
 )
 
 // tick adds n to the count of work while [Work] counts: one turn of a scanning loop, or the bytes a library
 // call (an index, a regular expression) is given to scan.
-func tick(n int) {
+func tick(wm *meter.Meter, n int) {
 	if counting.Load() {
 		steps.Add(int64(n))
+		unmetered(wm, n)
 	}
+	wm.Spend(n)
+}
+
+// unmetered counts n steps that no budget counts, while [Work] counts.
+func unmetered(wm *meter.Meter, n int) {
+	if wm == nil {
+		unmeteredSteps.Add(int64(n))
+	}
+}
+
+// Unmetered runs f and returns the steps of redaction it took on no budget: work of an entry point that its
+// budget (package meter) does not see.
+func Unmetered(f func()) int64 {
+	_, _, _ = WorkOfExpressions(f)
+	return unmeteredSteps.Load()
 }
 
 // Work runs f and returns the steps of redaction it took. It exists only with the build tag redactwork. Calls
@@ -71,6 +92,7 @@ func WorkOfExpressions(f func()) (total, release, expressions int64) {
 	steps.Store(0)
 	releasedSteps.Store(0)
 	expressionSteps.Store(0)
+	unmeteredSteps.Store(0)
 	counting.Store(true)
 	defer counting.Store(false)
 	f()
@@ -78,18 +100,24 @@ func WorkOfExpressions(f func()) (total, release, expressions int64) {
 }
 
 // tickExpression counts n bytes handed to a regular expression of this package: in the total and on their own.
-func tickExpression(n int) {
+func tickExpression(wm *meter.Meter, n int) {
 	if counting.Load() {
 		steps.Add(int64(n))
 		expressionSteps.Add(int64(n))
+		unmetered(wm, n)
 	}
+	wm.Spend(n)
 }
 
 // tickReleased counts n steps of the reading of the release before: in the total and in its own count.
-func tickReleased(n int) {
+// It is called after the release's own tick spent the steps on its meter (metered false when it had none).
+func tickReleased(metered bool, n int) {
 	if counting.Load() {
 		steps.Add(int64(n))
 		releasedSteps.Add(int64(n))
+		if !metered {
+			unmeteredSteps.Add(int64(n))
+		}
 	}
 }
 

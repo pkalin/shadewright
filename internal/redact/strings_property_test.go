@@ -193,7 +193,7 @@ func TestStringsDecidesAsTheJoinedText(t *testing.T) {
 		o := &outs[c]
 		got := Strings(items)
 		for ji, j := range seqJoins(items) {
-			spans := defaultRedactor.spans(j.text)
+			spans := defaultRedactor.spans(nil, j.text)
 			for i, it := range items {
 				at := strings.Index(it, "Qz")
 				if at < 0 || !seqDecided(j, ji > 0, i, at, spans) {

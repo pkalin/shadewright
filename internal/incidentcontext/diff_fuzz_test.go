@@ -299,10 +299,29 @@ func FuzzDiffBuild(f *testing.F) {
 	})
 }
 
+// maxBuildField caps each field of an input of FuzzDiffBuild, in bytes: both builds of an input of 160 KiB (the
+// seed found-873-22905eb52eae1385, a label of 40 KiB repeated) took 4 s, and four times that with the fuzzer's
+// instrumentation, so a worker on the runner went past its 60 s limit (#873). The fields of eight at this cap still
+// fill every section; the work on long inputs is bounded by the redactor's budget and checked by the work tests
+// (TestBuildWorkOfARepeatedLabelOfShortWindows, package redact TestBudgetBoundsTheFourShapes), not here.
+const maxBuildField = 2 << 10
+
+// capFields cuts each field of in to maxBuildField bytes.
+func capFields(in redacttest.Input) redacttest.Input {
+	for i, f := range in.Fields {
+		if len(f) > maxBuildField {
+			in.Fields[i] = f[:maxBuildField]
+		}
+	}
+	return in
+}
+
 // buildBodies is the check of FuzzDiffBuild, for TestMinimizeCollected too.
 func buildBodies(t testing.TB) map[string]func([]byte) ([]string, bool) {
 	return map[string]func([]byte) ([]string, bool){
-		"FuzzDiffBuild": func(data []byte) ([]string, bool) { return buildDiff(t, redacttest.Decode(data, 8)), false },
+		"FuzzDiffBuild": func(data []byte) ([]string, bool) {
+			return buildDiff(t, capFields(redacttest.Decode(data, 8))), false
+		},
 	}
 }
 

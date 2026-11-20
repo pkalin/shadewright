@@ -34,6 +34,7 @@ import (
 
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // Bounds of get_pod_logs.
@@ -144,6 +145,10 @@ func (s *Set) podLogs(ctx context.Context, a podLogsArgs, r *Result) error {
 		r.Status = StatusNotAvailable
 	case incidentcontext.LogReadFailed, incidentcontext.LogReadOversized:
 		r.Status = StatusCouldNotFetch
+	case incidentcontext.LogReadWithheld:
+		// Nothing of the excerpt, not even its header with the names, is shown (#873).
+		r.withhold()
+		return nil
 	}
 	for _, m := range []struct {
 		on bool
@@ -315,7 +320,11 @@ func (s *Set) queryMetrics(ctx context.Context, t metricTemplate, a queryMetrics
 		ls = append(ls, line{from, len(ans.pieces)})
 		ans.text("\n")
 	}
-	out, text := s.lines(&ans)
+	out, text, ok := s.lines(&ans)
+	if !ok {
+		r.withhold()
+		return nil
+	}
 	r.Text = text
 	// A series line is the source's answer.
 	for _, l := range ls {
@@ -397,6 +406,11 @@ func (s *Set) deliveryStatus(ctx context.Context, a deliveryArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
+	if redact.IsWithheld(st.Message) {
+		// The source redacted the message whole before it bounded it, and redaction withheld it.
+		r.withhold()
+		return nil
+	}
 	// The answer is one text, decided once on the lines it returns (layout.go).
 	var ans answer
 	ans.text("delivery: " + deliveryState(st) + "\napplied revision: ")
@@ -404,7 +418,11 @@ func (s *Set) deliveryStatus(ctx context.Context, a deliveryArgs, r *Result) err
 	ans.text("\nready: " + strconv.FormatBool(st.Ready) + "\nmessage: ")
 	msg := ans.value("message", st.Message)
 	ans.text("\n")
-	out, text := s.lines(&ans)
+	out, text, ok := s.lines(&ans)
+	if !ok {
+		r.withhold()
+		return nil
+	}
 	r.Text, r.Values = text, []string{out[rev], out[msg]}
 	return nil
 }

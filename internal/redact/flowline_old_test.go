@@ -40,7 +40,7 @@ func flowCloseAt(s string, start, end int, opener byte) int {
 	// 2026-11-18: "{password: x" and n closing braces cost n*n/2 steps).
 	last, runEnd := -1, -1
 	for i := start; i < end; i++ {
-		tick(1)
+		tick(nil, 1)
 		switch c := s[i]; c {
 		case '[', '{':
 			inner = append(inner, c)
@@ -54,11 +54,11 @@ func flowCloseAt(s string, start, end int, opener byte) int {
 			}
 			j := max(i, runEnd)
 			for j < end && strings.IndexByte(`]})"'`, s[j]) >= 0 {
-				tick(1)
+				tick(nil, 1)
 				j++
 			}
 			runEnd = j
-			if j == end || indentLen(s, j) > 0 || strings.IndexByte(",;#", s[j]) >= 0 {
+			if j == end || indentLen(nil, s, j) > 0 || strings.IndexByte(",;#", s[j]) >= 0 {
 				last = i
 			}
 		}

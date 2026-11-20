@@ -96,7 +96,7 @@ type summaryWant struct {
 // wantSummary returns what the summary of inc is checked against, built by b from [unbounded].
 func wantSummary(t *testing.T, b *Builder, inc *remediationv1alpha1.Incident) summaryWant {
 	t.Helper()
-	vals, kind, namespace, typ, _, _ := b.summaryValues(inc)
+	vals, kind, namespace, typ, _, _, _ := b.summaryValues(inc)
 	return summaryWant{text: fullSummary(t, b, inc), plain: map[string]string{
 		"subject: ":     "subject: " + kind + " " + namespace + "/" + vals[cutName],
 		"reason: ":      "reason: " + vals[cutReason] + " (" + typ + ")",

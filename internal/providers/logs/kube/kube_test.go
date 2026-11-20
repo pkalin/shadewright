@@ -608,6 +608,16 @@ func TestExcerptIsRedacted(t *testing.T) {
 	}
 }
 
+// A log whose redaction is withheld whole returns no excerpt and providers.ErrWithheld, which the callers show as a
+// read that failed: "--token,}" repeated costs the reading of the release before more than the budget of
+// redaction (#873, decision of 2026-11-20).
+func TestWithheldExcerptIsAnError(t *testing.T) {
+	got, err := newLogServer(strings.Repeat("--token,}", 4096)+"\n").source(t).Logs(context.Background(), query())
+	if !errors.Is(err, providers.ErrWithheld) || got.Text != "" {
+		t.Fatalf("Logs = %q, %v; want no text and ErrWithheld", got.Text[:min(len(got.Text), 80)], err)
+	}
+}
+
 func TestInvalidUTF8IsReplaced(t *testing.T) {
 	got, err := newLogServer("bad \xff\xfe byte\n").source(t).Logs(context.Background(), query())
 	if err != nil {

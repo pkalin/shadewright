@@ -86,7 +86,7 @@ func TestWriteExtentMainTable(t *testing.T) {
 	enc := json.NewEncoder(w)
 	for _, in := range extentCorpus(4000) {
 		c := mainRedaction{In: in, Out: String(in)}
-		for _, sp := range defaultRedactor.spans(in) {
+		for _, sp := range defaultRedactor.spans(nil, in) {
 			c.Spans = append(c.Spans, [2]int{sp.start, sp.end})
 		}
 		if err := enc.Encode(c); err != nil {
@@ -126,7 +126,7 @@ func TestExtentStillRedactsWhatMainRedacted(t *testing.T) {
 		if len(c.Spans) > 0 {
 			redacted++
 		}
-		now := defaultRedactor.spans(c.In)
+		now := defaultRedactor.spans(nil, c.In)
 		for _, want := range c.Spans {
 			for i := want[0]; i < want[1]; i++ {
 				if !coveredBy([2]int{i, i + 1}, now) {
@@ -390,7 +390,7 @@ func TestExtentTakesTheKnownValue(t *testing.T) {
 	failed := 0
 	for _, k := range knownExtentCorpus(4000) {
 		in := k.b.String()
-		now := defaultRedactor.spans(in)
+		now := defaultRedactor.spans(nil, in)
 		bad := ""
 		for _, w := range k.secret {
 			for i := w[0]; i < w[1]; i++ {

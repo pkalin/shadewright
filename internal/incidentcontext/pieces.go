@@ -147,10 +147,14 @@ func (f frag) text() string {
 // text is not redacted again; with any other redactor each value is redacted and shown ([Value] with [Twice] of
 // r) and the assembled text is redacted again ([Redact]), as the release before #845 did. quotes is the number of
 // quotable values.
-func decide(r Redactor, ps frag, quotes int) (string, []string) {
+func decide(r Redactor, ps frag, quotes int) (text string, values []string, withheld bool) {
 	out := make([]string, len(ps))
 	if pr, ok := r.(pieceRedactor); ok {
-		for i, d := range decidedPieces(pr, ps) {
+		decided, withheld := decidedPieces(pr, ps)
+		if withheld {
+			return "", nil, true
+		}
+		for i, d := range decided {
 			out[i] = d.text
 		}
 	} else {
@@ -168,11 +172,14 @@ func decide(r Redactor, ps frag, quotes int) (string, []string) {
 			vs[p.quote-1] += out[i]
 		}
 	}
-	text := strings.Join(out, "")
+	text = strings.Join(out, "")
 	if _, ok := r.(pieceRedactor); !ok {
 		text = Redact(Twice(r), text)
+		if redact.IsWithheld(text) {
+			return "", nil, true
+		}
 	}
-	return text, vs
+	return text, vs, false
 }
 
 // decidedPiece is a piece as decided: its text, and whether it is a value from a source.
@@ -182,13 +189,17 @@ type decidedPiece struct {
 }
 
 // decidedPieces takes the one decision on ps with r and returns each piece as decided, a value shown on its line
-// ([Shown] of the decided value made valid UTF-8).
-func decidedPieces(r pieceRedactor, ps frag) []decidedPiece {
+// ([Shown] of the decided value made valid UTF-8), or withheld true when redaction withheld the pieces whole
+// (redact.PiecesWithheld): nothing of them is returned then.
+func decidedPieces(r pieceRedactor, ps frag) (pieces []decidedPiece, withheld bool) {
 	in := make([]redact.Piece, len(ps))
 	for i, p := range ps {
 		in[i] = p.Piece
 	}
 	decided := r.PiecesWithin(in, -1)
+	if redact.PiecesWithheld(decided) {
+		return nil, true
+	}
 	out := make([]decidedPiece, len(ps))
 	for i, p := range ps {
 		out[i] = decidedPiece{text: decided[i], data: p.Data}
@@ -196,7 +207,7 @@ func decidedPieces(r pieceRedactor, ps frag) []decidedPiece {
 			out[i].text = Shown(strings.ToValidUTF8(decided[i], "?"))
 		}
 	}
-	return out
+	return out, false
 }
 
 // releasedTexter is a [Redactor] that writes a text as the release before #845 wrote it (*redact.Redactor's

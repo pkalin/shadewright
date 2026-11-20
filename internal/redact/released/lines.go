@@ -19,6 +19,8 @@ package released
 import (
 	"math"
 	"strings"
+
+	"github.com/pkalin/shadewright/internal/redact/meter"
 )
 
 // lineIndex answers indentedLines and blockLooksLikeSecret for one text in logarithmic work per call (#873).
@@ -47,17 +49,17 @@ type lineIndex struct {
 const blankKey = math.MaxInt32
 
 // newLineIndex returns the index of s, built on first use.
-func newLineIndex(s string) *lineIndex { return &lineIndex{s: s} }
+func newLineIndex(_ *meter.Meter, s string) *lineIndex { return &lineIndex{s: s} }
 
 // usable reports whether x indexes s: it does when it was made for s and s fits the offsets of the index.
 // The callers hand on the text of the one call of spans they run in, so a nil index or another text only
 // happens for callers outside that call, which read the lines one by one as before.
-func (x *lineIndex) usable(s string) bool {
+func (x *lineIndex) usable(_ *meter.Meter, s string) bool {
 	return x != nil && len(x.s) == len(s) && len(s) < blankKey
 }
 
 // build reads the lines of the text once.
-func (x *lineIndex) build() {
+func (x *lineIndex) build(wm *meter.Meter) {
 	if x.built {
 		return
 	}
@@ -65,7 +67,7 @@ func (x *lineIndex) build() {
 	s := x.s
 	x.starts = append(x.starts, 0)
 	for from := 0; ; {
-		i := indexByte(s[from:], '\n')
+		i := indexByte(wm, s[from:], '\n')
 		if i < 0 {
 			break
 		}
@@ -79,15 +81,15 @@ func (x *lineIndex) build() {
 	}
 	x.tree = make([]int32, 2*x.size)
 	for i := range x.tree {
-		tick(1)
+		tick(wm, 1)
 		x.tree[i] = blankKey
 	}
 	for i := range n {
-		tick(1)
-		start, end := x.textBounds(i)
+		tick(wm, 1)
+		start, end := x.textBounds(wm, i)
 		col := int32(0)
 		for p := start; p < end && (s[p] == ' ' || s[p] == '\t'); p++ {
-			tick(1)
+			tick(wm, 1)
 			col++
 		}
 		if int(col) < end-start {
@@ -95,14 +97,14 @@ func (x *lineIndex) build() {
 		}
 	}
 	for i := x.size - 1; i > 0; i-- {
-		tick(1)
+		tick(wm, 1)
 		x.tree[i] = min(x.tree[2*i], x.tree[2*i+1])
 	}
 }
 
 // textBounds returns where line i starts and where it ends: before its "\n", and before one "\r" ahead of it
 // or at the end of the text (lineEnd).
-func (x *lineIndex) textBounds(i int) (int, int) {
+func (x *lineIndex) textBounds(_ *meter.Meter, i int) (int, int) {
 	start := int(x.starts[i])
 	end := len(x.s)
 	if i+1 < len(x.starts) {
@@ -115,17 +117,17 @@ func (x *lineIndex) textBounds(i int) (int, int) {
 }
 
 // firstAtMost returns the first line from line from on whose key is at most c, or the number of lines.
-func (x *lineIndex) firstAtMost(from, c int) int {
+func (x *lineIndex) firstAtMost(wm *meter.Meter, from, c int) int {
 	n := len(x.starts)
 	if from >= n {
 		return n
 	}
 	i := x.size + from
 	for {
-		tick(1)
+		tick(wm, 1)
 		if int(x.tree[i]) <= c {
 			for i < x.size {
-				tick(1)
+				tick(wm, 1)
 				if int(x.tree[2*i]) <= c {
 					i = 2 * i
 				} else {
@@ -135,7 +137,7 @@ func (x *lineIndex) firstAtMost(from, c int) int {
 			return i - x.size
 		}
 		for i > 1 && i&1 == 1 {
-			tick(1)
+			tick(wm, 1)
 			i >>= 1
 		}
 		if i == 1 {
@@ -146,16 +148,16 @@ func (x *lineIndex) firstAtMost(from, c int) int {
 }
 
 // lastAtMost returns the last line before line before whose key is at most c, or -1.
-func (x *lineIndex) lastAtMost(before, c int) int {
+func (x *lineIndex) lastAtMost(wm *meter.Meter, before, c int) int {
 	if before <= 0 {
 		return -1
 	}
 	i := x.size + before - 1
 	for {
-		tick(1)
+		tick(wm, 1)
 		if int(x.tree[i]) <= c {
 			for i < x.size {
-				tick(1)
+				tick(wm, 1)
 				if int(x.tree[2*i+1]) <= c {
 					i = 2*i + 1
 				} else {
@@ -165,7 +167,7 @@ func (x *lineIndex) lastAtMost(before, c int) int {
 			return i - x.size
 		}
 		for i > 1 && i&1 == 0 {
-			tick(1)
+			tick(wm, 1)
 			i >>= 1
 		}
 		if i == 1 {
@@ -176,10 +178,10 @@ func (x *lineIndex) lastAtMost(before, c int) int {
 }
 
 // lineAfter returns the line that starts at pos+1, where pos is at a "\n".
-func (x *lineIndex) lineAfter(pos int) int {
+func (x *lineIndex) lineAfter(wm *meter.Meter, pos int) int {
 	lo, hi := 0, len(x.starts)
 	for lo < hi {
-		tick(1)
+		tick(wm, 1)
 		mid := int(uint(lo+hi) >> 1)
 		if int(x.starts[mid]) <= pos {
 			lo = mid + 1
@@ -192,45 +194,45 @@ func (x *lineIndex) lineAfter(pos int) int {
 
 // indentedLines is indentedLines(s, pos, keyCol) on the indexed text, and the lines of the block it found:
 // first and last, or -1, -1 with no lines.
-func (x *lineIndex) indentedLines(pos, keyCol int) (start, end, first, last int) {
-	x.build()
+func (x *lineIndex) indentedLines(wm *meter.Meter, pos, keyCol int) (start, end, first, last int) {
+	x.build(wm)
 	s := x.s
 	// As nextBlockLine: carriage returns are skipped, and the block starts after a line feed.
 	for pos < len(s) && s[pos] == '\r' {
-		tick(1)
+		tick(wm, 1)
 		pos++
 	}
 	if pos >= len(s) || s[pos] != '\n' {
 		return -1, -1, -1, -1
 	}
-	from := x.lineAfter(pos)
-	stop := x.firstAtMost(from, min(keyCol, blankKey-1))
-	first = x.firstAtMost(from, blankKey-1)
+	from := x.lineAfter(wm, pos)
+	stop := x.firstAtMost(wm, from, min(keyCol, blankKey-1))
+	first = x.firstAtMost(wm, from, blankKey-1)
 	if first >= stop {
 		return -1, -1, -1, -1
 	}
-	last = x.lastAtMost(stop, blankKey-1)
-	start, _ = x.textBounds(first)
+	last = x.lastAtMost(wm, stop, blankKey-1)
+	start, _ = x.textBounds(wm, first)
 	start += int(x.tree[x.size+first])
-	_, end = x.textBounds(last)
+	_, end = x.textBounds(wm, last)
 	return start, end, first, last
 }
 
 // anyLooksLikeSecret is blockLooksLikeSecret on the block of lines first to last, as indentedLines found it:
 // whether the text of one of them, trimmed, looks like a secret. Each line is judged once per text.
-func (x *lineIndex) anyLooksLikeSecret(first, last int) bool {
+func (x *lineIndex) anyLooksLikeSecret(wm *meter.Meter, first, last int) bool {
 	if len(x.looks) == 0 {
 		x.looks = append(x.looks, 0)
 	}
 	for k := len(x.looks) - 1; k <= last; k++ {
-		tick(1)
+		tick(wm, 1)
 		start := int(x.starts[k])
 		end := len(x.s)
 		if k+1 < len(x.starts) {
 			end = int(x.starts[k+1]) - 1
 		}
 		n := x.looks[k]
-		if lineLooksLikeSecret(strings.Trim(counted(x.s[start:end]), " \t\r")) {
+		if lineLooksLikeSecret(wm, strings.Trim(counted(wm, x.s[start:end]), " \t\r")) {
 			n++
 		}
 		x.looks = append(x.looks, n)
@@ -239,10 +241,10 @@ func (x *lineIndex) anyLooksLikeSecret(first, last int) bool {
 }
 
 // indented returns indentedLines(s, pos, keyCol), from x when it indexes s.
-func (x *lineIndex) indented(s string, pos, keyCol int) (int, int) {
-	if !x.usable(s) {
-		return indentedLines(s, pos, keyCol)
+func (x *lineIndex) indented(wm *meter.Meter, s string, pos, keyCol int) (int, int) {
+	if !x.usable(wm, s) {
+		return indentedLines(wm, s, pos, keyCol)
 	}
-	start, end, _, _ := x.indentedLines(pos, keyCol)
+	start, end, _, _ := x.indentedLines(wm, pos, keyCol)
 	return start, end
 }

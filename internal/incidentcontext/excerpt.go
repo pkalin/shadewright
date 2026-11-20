@@ -24,6 +24,7 @@ import (
 	"unicode"
 
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // RedactFunc redacts text. Its output must never be longer than its input, as package redact guarantees.
@@ -96,6 +97,9 @@ const (
 	LogReadFailed
 	// LogReadOversized: the source answered more than twice what was asked for, and the text was not read.
 	LogReadOversized
+	// LogReadWithheld: redaction withheld the excerpt whole, in the source (providers.ErrWithheld) or here; nothing
+	// of it is shown.
+	LogReadWithheld
 )
 
 // LogView is one log excerpt rendered for a reader: header lines naming the container and its instance, then
@@ -140,6 +144,9 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 	case errors.Is(err, providers.ErrRejected):
 		v.Read = LogReadRejected
 		h.add("no logs: the source refused the request (no such container, it has not started, or it has no previous instance)")
+	case errors.Is(err, providers.ErrWithheld):
+		v.Read = LogReadWithheld
+		h.add("could not fetch: withheld by redaction")
 	case err != nil:
 		v.Read = LogReadFailed
 		h.add("could not fetch")
@@ -158,7 +165,11 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 	tw, ok := red.(twicer)
 	if !refit || !ok {
 		head, _ := keepHead(Redact(r, h.String()), budget)
-		tail, cut := keepTail(Redact(r, body), min(asked, budget-len(head)))
+		redacted := Redact(r, body)
+		if redact.IsWithheld(redacted) {
+			return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
+		}
+		tail, cut := keepTail(redacted, min(asked, budget-len(head)))
 		v.Text, v.HeadLen, v.Cut = head+tail, len(head), cut
 		return v
 	}
@@ -169,7 +180,11 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		kept, _ := keepTail(t, n)
 		return len(t) - len(kept)
 	}
-	tail, cut := keepTail(strings.ToValidUTF8(tw.StringTwice(body, newest), "?"), n)
+	redacted := tw.StringTwice(body, newest)
+	if redact.IsWithheld(redacted) {
+		return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
+	}
+	tail, cut := keepTail(strings.ToValidUTF8(redacted, "?"), n)
 	v.Text, v.HeadLen, v.Cut = head+tail, len(head), cut
 	return v
 }

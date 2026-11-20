@@ -194,6 +194,11 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 		after = instance{}
 	}
 	text, truncated := Excerpt(s.redactor, data, over, keep)
+	if redact.IsWithheld(text) {
+		// Redaction withheld the excerpt whole (its work budget ran out): nothing of the log is returned, and the
+		// caller shows the read as failed.
+		return providers.LogExcerpt{}, fmt.Errorf("the log excerpt: %w", providers.ErrWithheld)
+	}
 	return providers.LogExcerpt{
 		Text:              text,
 		Truncated:         truncated,
@@ -363,6 +368,8 @@ func fewerLines(data []byte) int64 {
 // about 710 more on that input before #873 and 28 since, and is linear since #873 (on lines each indented one
 // more than the last under a secret key it cost about 1,950 steps per byte at 1 MiB before, 36 now), so a read
 // costs at most a few seconds (TestExcerptWorkIsBoundedOnTheLargestInput, TestCanonStairWorkIsLinear in package redact).
+// Whatever the input, the decision stops at the work budget of package redact (#873): the excerpt is then
+// redact.Withheld, and [Source.Logs] returns providers.ErrWithheld instead.
 // It is the step [Source.Logs] takes after its reads, exported so that tests outside the package run the same
 // code.
 func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string, bool) {

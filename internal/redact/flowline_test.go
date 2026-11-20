@@ -68,7 +68,7 @@ func TestFlowLineMatchesTheOldReading(t *testing.T) {
 		s := b.String()
 		lo := rng.IntN(len(s) + 1)
 		hi := lo + rng.IntN(len(s)-lo+1)
-		fl := newFlowLine(s, lo, hi)
+		fl := newFlowLine(nil, s, lo, hi)
 		starts := make([]int, 1+rng.IntN(8))
 		for i := range starts {
 			starts[i] = lo + rng.IntN(hi-lo+1)
@@ -81,7 +81,7 @@ func TestFlowLineMatchesTheOldReading(t *testing.T) {
 		for _, start := range starts {
 			end := start + rng.IntN(hi-start+1)
 			for _, opener := range []byte{'[', '{'} {
-				if got, want := fl.closeAt(start, end, opener), flowCloseAt(s, start, end, opener); got != want {
+				if got, want := fl.closeAt(nil, start, end, opener), flowCloseAt(s, start, end, opener); got != want {
 					t.Fatalf("closeAt(%q, %d, %d, %d, %q) = %d, the old reading %d", s, lo, start, end, opener, got, want)
 				}
 			}
@@ -89,7 +89,7 @@ func TestFlowLineMatchesTheOldReading(t *testing.T) {
 			if c := plainKeyAfterComma.FindStringIndex(s[start:end]); c != nil {
 				want = start + c[0]
 			}
-			if got := fl.keyCommaAt(start, end); got != want {
+			if got := fl.keyCommaAt(nil, start, end); got != want {
 				t.Fatalf("keyCommaAt(%q, %d, %d, %d) = %d, the regular expression %d", s, lo, start, end, got, want)
 			}
 			if start < hi {
@@ -97,7 +97,7 @@ func TestFlowLineMatchesTheOldReading(t *testing.T) {
 				if c := strings.IndexByte(s[start:hi], ','); c >= 0 {
 					want = start + c
 				}
-				if got := fl.nextComma(start); (want < 0 && got != hi) || (want >= 0 && got != want) {
+				if got := fl.nextComma(nil, start); (want < 0 && got != hi) || (want >= 0 && got != want) {
 					t.Fatalf("nextComma(%q, %d) = %d, want %d", s, start, got, want)
 				}
 			}
@@ -114,7 +114,7 @@ func TestPiecesReadARepeatedValueOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	value := strings.Repeat("aws_secret_access_key", 256) + "\ufe55\ufeff\xbf\u200b"
-	alone := countWork(t, func() { r.ownSpans(value) })
+	alone := countWork(t, func() { r.ownSpans(nil, value) })
 	one := countWork(t, func() { r.PiecesWithin(seriesLinesOf(value, 1), -1) })
 	eight := countWork(t, func() { r.PiecesWithin(seriesLinesOf(value, 8), -1) })
 	if limit := 8*one - 6*alone; eight > limit {

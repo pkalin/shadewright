@@ -432,6 +432,15 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Expect(asks()).To(Equal(2), "the author is asked first, once per look")
 	})
 
+	It("refuses a hint redaction withholds whole as not redactable, never storing the marker (#873)", func() {
+		// "--token,}" repeated costs the reading of the release before more than the budget of redaction, so the
+		// hint redacts to redact.Withheld, which is short and clean but is not the hint.
+		withheld := byWriter("/shadewright reanalyze: " + strings.Repeat("--token,}", 2048))
+		poll()
+		Expect(refusals()).To(HaveKeyWithValue(withheld, remediationv1alpha1.HintRefusalNotRedactable))
+		Expect(fetch().Status.Hints).To(BeEmpty())
+	})
+
 	It("handles a comment once across restarts, also when it is returned again on the watermark", func() {
 		id := byWriter("/shadewright reanalyze: the sidecar")
 		readOnly := comment(providers.AuthorPerson, readerID, "reader", "/shadewright reanalyze: me too")

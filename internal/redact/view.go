@@ -21,6 +21,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/redact/meter"
 )
 
 // The canonical view of a text (#845). What to redact under a secret key with a block value is decided once,
@@ -45,13 +47,13 @@ import (
 type col struct{ n, w int }
 
 // deeper reports whether c lies to the right of k in either width.
-func (c col) deeper(k col) bool { return c.n > k.n || c.w > k.w }
+func (c col) deeper(_ *meter.Meter, k col) bool { return c.n > k.n || c.w > k.w }
 
 // atLeast reports whether c lies at k or to its right in either width.
-func (c col) atLeast(k col) bool { return c.n >= k.n || c.w >= k.w }
+func (c col) atLeast(_ *meter.Meter, k col) bool { return c.n >= k.n || c.w >= k.w }
 
 // step returns c advanced over one character whose first byte is ch.
-func (c col) step(ch byte) col {
+func (c col) step(_ *meter.Meter, ch byte) col {
 	if ch == '\t' {
 		return col{c.n + 1, (c.w/8 + 1) * 8}
 	}
@@ -60,7 +62,7 @@ func (c col) step(ch byte) col {
 
 // charLen returns the length of the character at s[i]: a valid UTF-8 sequence, or one byte that is not valid
 // UTF-8.
-func charLen(s string, i int) int {
+func charLen(_ *meter.Meter, s string, i int) int {
 	if s[i] < utf8.RuneSelf {
 		return 1
 	}
@@ -70,12 +72,12 @@ func charLen(s string, i int) int {
 
 // runeAround returns the start and end of the valid UTF-8 character of s that holds byte i past its first
 // byte, or i, i when i starts a character, is out of s or lies in bytes that are not valid UTF-8.
-func runeAround(s string, i int) (start, end int) {
+func runeAround(wm *meter.Meter, s string, i int) (start, end int) {
 	if i <= 0 || i >= len(s) || utf8.RuneStart(s[i]) {
 		return i, i
 	}
 	for j := i - 1; j >= 0 && j > i-utf8.UTFMax; j-- {
-		tick(1)
+		tick(wm, 1)
 		if !utf8.RuneStart(s[j]) {
 			continue
 		}
@@ -88,41 +90,41 @@ func runeAround(s string, i int) (start, end int) {
 }
 
 // runeFloor returns i, or the start of the character of s that i falls inside (runeAround).
-func runeFloor(s string, i int) int {
-	start, _ := runeAround(s, i)
+func runeFloor(wm *meter.Meter, s string, i int) int {
+	start, _ := runeAround(wm, s, i)
 	return start
 }
 
 // runeCeil returns i, or the end of the character of s that i falls inside (runeAround).
-func runeCeil(s string, i int) int {
-	_, end := runeAround(s, i)
+func runeCeil(wm *meter.Meter, s string, i int) int {
+	_, end := runeAround(wm, s, i)
 	return end
 }
 
 // onRunes widens each span to the characters of s it cuts: a span that starts or ends inside a valid UTF-8
 // character takes all of it, so a replacement never leaves part of a character behind (#845, P4). A span only
 // grows, so no byte a reading hid is shown.
-func onRunes(s string, spans []span) []span {
+func onRunes(wm *meter.Meter, s string, spans []span) []span {
 	for i := range spans {
-		tick(1)
-		spans[i].start, spans[i].end = runeFloor(s, spans[i].start), runeCeil(s, spans[i].end)
+		tick(wm, 1)
+		spans[i].start, spans[i].end = runeFloor(wm, s, spans[i].start), runeCeil(wm, s, spans[i].end)
 	}
 	return spans
 }
 
 // colOf returns the column of to on the line that starts at from.
-func colOf(s string, from, to int) col {
+func colOf(wm *meter.Meter, s string, from, to int) col {
 	var c col
 	for i := from; i < to; {
-		tick(1)
-		c = c.step(s[i])
-		i += charLen(s, i)
+		tick(wm, 1)
+		c = c.step(wm, s[i])
+		i += charLen(wm, s, i)
 	}
 	return c
 }
 
 // breakLen returns the length of the line break at s[i]: 2 for CRLF, 1 for LF or a lone CR, 0 otherwise.
-func breakLen(s string, i int) int {
+func breakLen(_ *meter.Meter, s string, i int) int {
 	switch s[i] {
 	case '\n':
 		return 1
@@ -136,7 +138,7 @@ func breakLen(s string, i int) int {
 }
 
 // indentLen returns the length of the indentation character at s[i], or 0 (a line break is none).
-func indentLen(s string, i int) int {
+func indentLen(_ *meter.Meter, s string, i int) int {
 	c := s[i]
 	if c == '\n' || c == '\r' {
 		return 0
@@ -155,18 +157,18 @@ func indentLen(s string, i int) int {
 }
 
 // trimIndent returns t without indentation characters at either end.
-func trimIndent(t string) string {
+func trimIndent(wm *meter.Meter, t string) string {
 	for len(t) > 0 {
-		tick(1)
-		n := indentLen(t, 0)
+		tick(wm, 1)
+		n := indentLen(wm, t, 0)
 		if n == 0 {
 			break
 		}
 		t = t[n:]
 	}
 	for len(t) > 0 {
-		tick(1)
-		n := lastIndentLen(t, len(t))
+		tick(wm, 1)
+		n := lastIndentLen(wm, t, len(t))
 		if n == 0 {
 			break
 		}
@@ -176,7 +178,7 @@ func trimIndent(t string) string {
 }
 
 // lastIndentLen returns the length of the indentation character that ends at s[:end], or 0.
-func lastIndentLen(s string, end int) int {
+func lastIndentLen(wm *meter.Meter, s string, end int) int {
 	r, n := utf8.DecodeLastRuneInString(s[:end])
 	if r == utf8.RuneError && n <= 1 {
 		if s[end-1] == '\n' || s[end-1] == '\r' {
@@ -184,7 +186,7 @@ func lastIndentLen(s string, end int) int {
 		}
 		return 1
 	}
-	if indentLen(s, end-n) == n {
+	if indentLen(wm, s, end-n) == n {
 		return n
 	}
 	return 0
@@ -198,27 +200,27 @@ type viewLine struct {
 }
 
 // blank reports whether the line holds only indentation.
-func (l viewLine) blank() bool { return l.text == l.end }
+func (l viewLine) blank(_ *meter.Meter) bool { return l.text == l.end }
 
 // readLine returns the line of the view that starts at pos.
-func readLine(s string, pos int) viewLine {
+func readLine(wm *meter.Meter, s string, pos int) viewLine {
 	l := viewLine{start: pos, text: pos}
 	for l.text < len(s) {
-		tick(1)
-		n := indentLen(s, l.text)
+		tick(wm, 1)
+		n := indentLen(wm, s, l.text)
 		if n == 0 {
 			break
 		}
-		l.ind = l.ind.step(s[l.text])
+		l.ind = l.ind.step(wm, s[l.text])
 		l.text += n
 	}
 	l.end = len(s)
-	if i := indexAny(s[l.text:], "\r\n"); i >= 0 {
+	if i := indexAny(wm, s[l.text:], "\r\n"); i >= 0 {
 		l.end = l.text + i
 	}
 	l.next = l.end
 	if l.end < len(s) {
-		l.next += breakLen(s, l.end)
+		l.next += breakLen(wm, s, l.end)
 	}
 	return l
 }
@@ -228,14 +230,14 @@ func readLine(s string, pos int) viewLine {
 // none. A comment line that pred does not take (a "#" at column 0 inside a block, #845) is read like a blank
 // line: the block goes on after it when a line pred takes follows, and its text is added to holes, which the
 // block keeps.
-func viewLines(s string, pos int, pred func(col) bool, holes *[][2]int) (start, end, next int) {
+func viewLines(wm *meter.Meter, s string, pos int, pred func(col) bool, holes *[][2]int) (start, end, next int) {
 	start, end, next = -1, -1, pos
 	var comments [][2]int
 	for pos < len(s) {
-		tick(1)
-		l := readLine(s, pos)
+		tick(wm, 1)
+		l := readLine(wm, s, pos)
 		pos = l.next
-		if l.blank() {
+		if l.blank(wm) {
 			continue
 		}
 		if !pred(l.ind) {
@@ -261,42 +263,42 @@ func viewLines(s string, pos int, pred func(col) bool, holes *[][2]int) (start, 
 // that is indented less than the key but not at column 0. It returns the start of the block's text, its end,
 // and the start of the line after it, or -1, -1, pos; the comment lines inside it that it keeps go to holes
 // (viewLines).
-func viewBlock(s string, pos int, key col, holes *[][2]int) (start, end, next int) {
+func viewBlock(wm *meter.Meter, s string, pos int, key col, holes *[][2]int) (start, end, next int) {
 	first := pos
 	for pos < len(s) {
-		tick(1)
-		l := readLine(s, pos)
-		if l.blank() {
+		tick(wm, 1)
+		l := readLine(wm, s, pos)
+		if l.blank(wm) {
 			pos = l.next
 			continue
 		}
-		if t := trimIndent(s[l.text:l.end]); l.ind.n != 0 || t != "---" && t != "..." {
+		if t := trimIndent(wm, s[l.text:l.end]); l.ind.n != 0 || t != "---" && t != "..." {
 			break
 		}
 		pos = l.next
 	}
-	if start, end, next := viewLines(s, pos, func(c col) bool { return c.deeper(key) }, holes); start >= 0 {
+	if start, end, next := viewLines(wm, s, pos, func(c col) bool { return c.deeper(wm, key) }, holes); start >= 0 {
 		return start, end, next
 	}
 	for p := pos; p < len(s); {
-		tick(1)
-		l := readLine(s, p)
+		tick(wm, 1)
+		l := readLine(wm, s, p)
 		p = l.next
-		if l.blank() {
+		if l.blank(wm) {
 			continue
 		}
-		if l.ind.n == 0 || l.ind.atLeast(key) && pos == first {
+		if l.ind.n == 0 || l.ind.atLeast(wm, key) && pos == first {
 			break
 		}
-		return viewLines(s, pos, func(c col) bool { return c.atLeast(l.ind) }, holes)
+		return viewLines(wm, s, pos, func(c col) bool { return c.atLeast(wm, l.ind) }, holes)
 	}
 	return -1, -1, first
 }
 
 // addHoles calls add for start to end without the holes, sorted ranges inside it.
-func addHoles(start, end int, holes [][2]int, add func(start, end int)) {
+func addHoles(wm *meter.Meter, start, end int, holes [][2]int, add func(start, end int)) {
 	for _, h := range holes {
-		tick(1)
+		tick(wm, 1)
 		add(start, h[0])
 		start = h[1]
 	}
@@ -305,11 +307,11 @@ func addHoles(start, end int, holes [][2]int, add func(start, end int)) {
 
 // viewLooksLikeSecret reports whether any line of the block s[start:end], or a word of one, looks like a secret
 // (wordsLookLikeSecret), each line read without its indentation.
-func viewLooksLikeSecret(s string, start, end int) bool {
+func viewLooksLikeSecret(wm *meter.Meter, s string, start, end int) bool {
 	for pos := start; pos < end; {
-		tick(1)
-		l := readLine(s, pos)
-		if wordsLookLikeSecret(trimIndent(s[l.text:min(l.end, end)])) {
+		tick(wm, 1)
+		l := readLine(wm, s, pos)
+		if wordsLookLikeSecret(wm, trimIndent(wm, s[l.text:min(l.end, end)])) {
 			return true
 		}
 		pos = l.next
@@ -322,7 +324,7 @@ func viewLooksLikeSecret(s string, start, end int) bool {
 var viewKey = regexp.MustCompile(`(?i)(` + secretKeyExpr + `)` + keySpaceExpr + `*:(?:` + keySpaceExpr + `*([|>][1-9+-]{0,2}))?`)
 
 // viewKeyWindows is viewKey read by windows (windows.go).
-var viewKeyWindows = newWindowed(viewKey)
+var viewKeyWindows = newWindowed(nil, viewKey)
 
 // neighbourKey matches a secret key of any form inside a value the block-value rule redacts: a key and ":"
 // or "=" (also in quotes, plain or escaped), or a secret-named flag. Its name (group 1, or group 2 for a flag)
@@ -354,19 +356,19 @@ type viewKeyAt struct {
 // of a block it redacts are skipped; the lines of a block it refuses are read for keys of their own, and a
 // bare short key on one of them refuses its block unread (no line of the outer block looks like a secret),
 // so each line is read a fixed number of times.
-func viewBlockSpans(s string, add func(start, end int)) {
+func viewBlockSpans(wm *meter.Meter, s string, add func(start, end int)) {
 	refused := -1
 	// The windows of the keys read on the lines before (windows.go): a long line repeated is read once.
 	ids := &windowIDs{}
 	for pos := 0; pos < len(s); {
-		tick(1)
-		l := readLine(s, pos)
+		tick(wm, 1)
+		l := readLine(wm, s, pos)
 		pos = l.next
-		if indexByte(s[l.text:l.end], ':') < 0 {
+		if indexByte(wm, s[l.text:l.end], ':') < 0 {
 			continue
 		}
-		viewEnvLine(s, l, add)
-		if e := viewKeyLine(s, l, refused, add, &refused, ids); e > pos {
+		viewEnvLine(wm, s, l, add)
+		if e := viewKeyLine(wm, s, l, refused, add, &refused, ids); e > pos {
 			pos = e
 		}
 	}
@@ -387,32 +389,32 @@ func viewBlockSpans(s string, add func(start, end int)) {
 //     the key stay. A closing bracket inside the value does not end it: brackets are followed to the line's
 //     end, not to the first that could close (#845).
 //   - Inside the value, the names of other secret keys stay (neighbourKey); everything else goes.
-func viewKeyLine(s string, l viewLine, refused int, add func(start, end int), refusedOut *int, ids *windowIDs) int {
-	ms := viewKeyWindows.findAllWith(s[l.text:l.end], ids)
+func viewKeyLine(wm *meter.Meter, s string, l viewLine, refused int, add func(start, end int), refusedOut *int, ids *windowIDs) int {
+	ms := viewKeyWindows.findAllWith(wm, s[l.text:l.end], ids)
 	if len(ms) == 0 {
 		return 0
 	}
-	ctx := newLineContext(s, l.start, l.end)
+	ctx := newLineContext(wm, s, l.start, l.end)
 	br := &bracketCursor{s: s, pos: l.start}
 	keys := make([]viewKeyAt, 0, len(ms))
 	for _, m := range ms {
-		tick(1)
+		tick(wm, 1)
 		for i := range m {
 			if m[i] >= 0 {
 				m[i] += l.text
 			}
 		}
-		keys = append(keys, readViewKey(s, l, ctx, br, m))
+		keys = append(keys, readViewKey(wm, s, l, ctx, br, m))
 	}
 	var holes [][2]int
-	bStart, bEnd, bNext, accepted := viewLineBlock(s, l, keys, refused, &holes)
+	bStart, bEnd, bNext, accepted := viewLineBlock(wm, s, l, keys, refused, &holes)
 	// nextTaking[i] is the first key after keys[i] in the same string that takes its own value, or -1: found
 	// once for the line, read back to front, so that no key looks through the keys after it (#845, decision of
 	// 2026-11-18: a line of n quoted keys made n*(n-1)/2 comparisons).
 	nextTaking := make([]int, len(keys))
 	lastTaking := map[int]int{}
 	for i := len(keys) - 1; i >= 0; i-- {
-		tick(1)
+		tick(wm, 1)
 		nextTaking[i] = -1
 		if j, ok := lastTaking[keys[i].strEnd]; ok {
 			nextTaking[i] = j
@@ -422,25 +424,25 @@ func viewKeyLine(s string, l viewLine, refused int, add func(start, end int), re
 		}
 	}
 	covered := -1
-	fl := newFlowLine(s, l.start, l.end)
+	fl := newFlowLine(wm, s, l.start, l.end)
 	for i, k := range keys {
-		tick(1)
+		tick(wm, 1)
 		if !k.block && !k.plain && !k.word || k.after > k.valueEnd || k.m[0] < covered {
 			continue
 		}
-		end := viewValueEndIn(fl, keys, i, nextTaking[i])
+		end := viewValueEndIn(wm, fl, keys, i, nextTaking[i])
 		// The keys inside this value are read with it, so a line of keys is read once.
 		covered = max(covered, end)
 		if k.after < end && (s[k.after] != '#' || !k.block || bStart < 0 || k.strEnd >= 0) &&
-			(!k.bare || wordsLookLikeSecret(s[k.after:end])) {
-			addAround(s, k.after, end, false, add)
+			(!k.bare || wordsLookLikeSecret(wm, s[k.after:end])) {
+			addAround(wm, s, k.after, end, false, add)
 		}
 	}
 	if bStart < 0 {
 		return 0
 	}
 	if accepted {
-		addHoles(bStart, bEnd, holes, func(start, end int) { addAround(s, start, end, true, add) })
+		addHoles(wm, bStart, bEnd, holes, func(start, end int) { addAround(wm, s, start, end, true, add) })
 		return bNext
 	}
 	*refusedOut = max(*refusedOut, bEnd)
@@ -450,13 +452,13 @@ func viewKeyLine(s string, l viewLine, refused int, add func(start, end int), re
 // readViewKey reads the key that the viewKey match m (offsets in s) holds on line l: the end of the quoted
 // string it stands in, the flow collections open before it, and whether its value is a block, a plain flow
 // value or one word (viewKeyLine).
-func readViewKey(s string, l viewLine, ctx *lineContext, br *bracketCursor, m []int) viewKeyAt {
+func readViewKey(wm *meter.Meter, s string, l viewLine, ctx *lineContext, br *bracketCursor, m []int) viewKeyAt {
 	k := viewKeyAt{m: m, strEnd: -1}
 	keyAt := m[2]
 	if q := s[keyAt]; (q == '"' || q == '\'') && s[m[3]-1] != q {
 		keyAt++
 	}
-	if k.strEnd = ctx.stringEnd(keyAt); k.strEnd >= 0 && k.strEnd < m[3] {
+	if k.strEnd = ctx.stringEnd(wm, keyAt); k.strEnd >= 0 && k.strEnd < m[3] {
 		// The quote that would close the string is the key's own: quotes inside a quoted string that are
 		// not escaped cannot be told apart, so the key is read as standing outside it.
 		k.strEnd = -1
@@ -465,32 +467,32 @@ func readViewKey(s string, l viewLine, ctx *lineContext, br *bracketCursor, m []
 	if k.strEnd >= 0 {
 		strStart = ctx.strs[ctx.si][0]
 	}
-	k.flow = br.at(keyAt, strStart)
+	k.flow = br.at(wm, keyAt, strStart)
 	k.valueEnd = l.end
 	if k.strEnd >= 0 {
 		k.valueEnd = k.strEnd
 	}
-	if keepReference(s, m) || sasRefused(s, m, true) {
+	if keepReference(wm, s, m) || sasRefused(wm, s, m, true) {
 		return k
 	}
-	k.bare = bareShortColon(s, m)
+	k.bare = bareShortColon(wm, s, m)
 	if m[4] >= 0 {
-		k.after, k.block = afterViewIndicator(s, m[5], k.valueEnd, k.strEnd >= 0)
-		if q := escapedQuoteAt(s, k.after, k.valueEnd); k.strEnd >= 0 && q > 0 && (k.block || k.after == m[5]) {
+		k.after, k.block = afterViewIndicator(wm, s, m[5], k.valueEnd, k.strEnd >= 0)
+		if q := escapedQuoteAt(wm, s, k.after, k.valueEnd); k.strEnd >= 0 && q > 0 && (k.block || k.after == m[5]) {
 			// An escaped quote ends an item of JSON escaped inside the string: the value ends there.
 			k.block, k.valueEnd = true, k.after
 		}
 	}
 	if !k.block && len(k.flow) > 0 {
 		// A plain value in a flow collection; a quoted value, an array or an object is the extent rule's.
-		k.after = plainValueStart(s, m, k.valueEnd)
+		k.after = plainValueStart(wm, s, m, k.valueEnd)
 		k.plain = k.after >= k.valueEnd || strings.IndexByte(`"'\[{`, s[k.after]) < 0
 	}
 	if !k.block && !k.plain && len(k.flow) == 0 && k.strEnd < 0 && (s[m[2]] == '"' || s[m[2]] == '\'') &&
 		s[m[3]] == ':' {
 		// A quoted key, its colon right after it, and a plain value in free text ("retry 'token': a]b"): the
 		// value is one word. With a blank before the colon it is prose ("volume \"secret-x\" : secret ...").
-		k.after = plainValueStart(s, m, k.valueEnd)
+		k.after = plainValueStart(wm, s, m, k.valueEnd)
 		k.word = k.after >= k.valueEnd || strings.IndexByte(`"'\[{`, s[k.after]) < 0
 	}
 	k.takes = (k.block || k.plain || k.word) && !k.bare
@@ -499,14 +501,14 @@ func readViewKey(s string, l viewLine, ctx *lineContext, br *bracketCursor, m []
 
 // plainValueStart returns where the value of the viewKey match m starts: after its colon, or after the
 // indicator in group 2 when there is one, past the indentation characters, at most at end.
-func plainValueStart(s string, m []int, end int) int {
+func plainValueStart(wm *meter.Meter, s string, m []int, end int) int {
 	i := m[1]
 	if m[4] >= 0 {
 		i = m[4]
 	}
-	for i < end && indentLen(s, i) > 0 {
-		tick(1)
-		i += indentLen(s, i)
+	for i < end && indentLen(wm, s, i) > 0 {
+		tick(wm, 1)
+		i += indentLen(wm, s, i)
 	}
 	return i
 }
@@ -515,11 +517,11 @@ func plainValueStart(s string, m []int, end int) int {
 // its start, end and the start of the line after it (bStart < 0 when there is none) and whether a key takes
 // it: any key that is no bare short key, or a bare one when the block looks like a secret. A line whose keys
 // are all bare short keys and that lies inside a block refused before it (up to refused) reads no block.
-func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int, holes *[][2]int) (bStart, bEnd, bNext int, accepted bool) {
+func viewLineBlock(wm *meter.Meter, s string, l viewLine, keys []viewKeyAt, refused int, holes *[][2]int) (bStart, bEnd, bNext int, accepted bool) {
 	bStart, bEnd = -1, -1
 	claim, allBare := -1, true
 	for i, k := range keys {
-		tick(1)
+		tick(wm, 1)
 		if k.block && k.strEnd < 0 {
 			if claim < 0 {
 				claim = i
@@ -531,19 +533,19 @@ func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int, holes *[
 		return bStart, bEnd, 0, false
 	}
 	key := l.ind
-	if firstKey := l.text + dashes(s[l.text:l.end]); keys[claim].m[2] == firstKey {
-		key = colOf(s, l.start, firstKey)
+	if firstKey := l.text + dashes(wm, s[l.text:l.end]); keys[claim].m[2] == firstKey {
+		key = colOf(wm, s, l.start, firstKey)
 	}
-	bStart, bEnd, bNext = viewBlock(s, l.next, key, holes)
+	bStart, bEnd, bNext = viewBlock(wm, s, l.next, key, holes)
 	if bStart < 0 {
 		return bStart, bEnd, bNext, false
 	}
-	countScan(bEnd - bStart)
+	countScan(wm, bEnd-bStart)
 	// The block is read for secrets at most once for the line, however many bare short keys claim it (#845,
 	// fourth round: each key read it again, quadratic in a line of many "pass: |").
 	looks, read := false, false
 	for _, k := range keys {
-		tick(1)
+		tick(wm, 1)
 		if !k.block || k.strEnd >= 0 {
 			continue
 		}
@@ -551,7 +553,7 @@ func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int, holes *[
 			return bStart, bEnd, bNext, true
 		}
 		if !read {
-			looks, read = viewLooksLikeSecret(s, bStart, bEnd), true
+			looks, read = viewLooksLikeSecret(wm, s, bStart, bEnd), true
 		}
 		if looks {
 			return bStart, bEnd, bNext, true
@@ -564,13 +566,13 @@ func viewLineBlock(s string, l viewLine, keys []viewKeyAt, refused int, holes *[
 // that takes its own value (keys[next], or none when next is -1), at a comma for a plain flow value, before a
 // comma and a plain key in a flow collection, at the last bracket that closes the innermost collection, without
 // its trailing separators.
-func viewValueEnd(s string, keys []viewKeyAt, i, next int) int {
-	return viewValueEndIn(newFlowLine(s, 0, len(s)), keys, i, next)
+func viewValueEnd(wm *meter.Meter, s string, keys []viewKeyAt, i, next int) int {
+	return viewValueEndIn(wm, newFlowLine(wm, s, 0, len(s)), keys, i, next)
 }
 
 // viewValueEndIn is viewValueEnd with the flow brackets and commas of the line read once for all its keys (fl,
 // the line the keys stand on), asked with the values of the keys in order.
-func viewValueEndIn(fl *flowLine, keys []viewKeyAt, i, next int) int {
+func viewValueEndIn(wm *meter.Meter, fl *flowLine, keys []viewKeyAt, i, next int) int {
 	s := fl.s
 	k := keys[i]
 	// The keys of a line are in the order of their matches, so a later key that takes its value starts after
@@ -584,9 +586,9 @@ func viewValueEndIn(fl *flowLine, keys []viewKeyAt, i, next int) int {
 		// A word ends at the first blank, read only up to the next key, so each key of a line with no blank reads
 		// its own part of it and not the rest of the line (#845, fifteenth decision, P3).
 		end = k.after
-		for end < limit && indentLen(s, end) == 0 {
-			tick(1)
-			end += charLen(s, end)
+		for end < limit && indentLen(wm, s, end) == 0 {
+			tick(wm, 1)
+			end += charLen(wm, s, end)
 		}
 		end = min(end, limit)
 	}
@@ -594,35 +596,35 @@ func viewValueEndIn(fl *flowLine, keys []viewKeyAt, i, next int) int {
 	case k.plain:
 		// A plain value in a flow collection ends at a comma, as the flow rule has it.
 		if k.after < end {
-			if c := fl.nextComma(k.after); c < end {
+			if c := fl.nextComma(wm, k.after); c < end {
 				end = c
 			}
 		}
 	case len(k.flow) > 0:
-		if c := fl.keyCommaAt(k.after, end); c >= 0 {
+		if c := fl.keyCommaAt(wm, k.after, end); c >= 0 {
 			end = c
 		}
 	}
 	if n := len(k.flow); n > 0 {
-		if c := fl.closeAt(k.after, end, k.flow[n-1]); c >= 0 {
+		if c := fl.closeAt(wm, k.after, end, k.flow[n-1]); c >= 0 {
 			end = c
 		}
 	}
-	return valueTail(s, k.after, end, k.flow)
+	return valueTail(wm, s, k.after, end, k.flow)
 }
 
 // afterViewIndicator returns where the text after a block indicator that ends at ie starts, past the blanks
 // after it, and whether a blank or the end of the value (valEnd) follows the indicator ("|x", "|#" and ">="
 // are no indicators). A blank is any indentation character of the view, or inside a quoted string an escaped
 // line break or tab.
-func afterViewIndicator(s string, ie, valEnd int, inStr bool) (int, bool) {
+func afterViewIndicator(wm *meter.Meter, s string, ie, valEnd int, inStr bool) (int, bool) {
 	if ie == valEnd {
 		return ie, true
 	}
 	i := ie
 	for i < valEnd {
-		tick(1)
-		n := indentLen(s, i)
+		tick(wm, 1)
+		n := indentLen(wm, s, i)
 		if n == 0 && s[i] == '\\' && inStr && i+1 < valEnd && strings.IndexByte("ntr", s[i+1]) >= 0 {
 			n = 2
 		}
@@ -635,10 +637,10 @@ func afterViewIndicator(s string, ie, valEnd int, inStr bool) (int, bool) {
 }
 
 // escapedQuoteAt returns the length of a run of backslashes and a double quote at s[i] before end, or 0.
-func escapedQuoteAt(s string, i, end int) int {
+func escapedQuoteAt(wm *meter.Meter, s string, i, end int) int {
 	j := i
 	for j < end && s[j] == '\\' {
-		tick(1)
+		tick(wm, 1)
 		j++
 	}
 	if j > i && j < end && s[j] == '"' {
@@ -649,15 +651,15 @@ func escapedQuoteAt(s string, i, end int) int {
 
 // valueTail returns the end of a value from start to end without the blanks and separators at its end and,
 // for a key inside flow collections (flow, innermost last), the closing brackets of those collections.
-func valueTail(s string, start, end int, flow []byte) int {
+func valueTail(wm *meter.Meter, s string, start, end int, flow []byte) int {
 	trim := func() {
 		for end > start {
-			tick(1)
+			tick(wm, 1)
 			if c := s[end-1]; c == ',' || c == ';' {
 				end--
 				continue
 			}
-			n := lastIndentLen(s[:end], end)
+			n := lastIndentLen(wm, s[:end], end)
 			if n == 0 || end-n < start {
 				break
 			}
@@ -666,7 +668,7 @@ func valueTail(s string, start, end int, flow []byte) int {
 	}
 	trim()
 	for i := len(flow) - 1; i >= 0 && end > start; i-- {
-		tick(1)
+		tick(wm, 1)
 		if s[end-1] != flow[i]+2 {
 			// '[' and '{' are two below ']' and '}'.
 			break
@@ -679,10 +681,10 @@ func valueTail(s string, start, end int, flow []byte) int {
 
 // addAround adds the range start to end without the names of the secret keys in it (neighbourKey). A key name
 // at start is part of the value unless block is set (a block's first line may be a key of its own).
-func addAround(s string, start, end int, block bool, add func(start, end int)) {
+func addAround(wm *meter.Meter, s string, start, end int, block bool, add func(start, end int)) {
 	pos := start
-	for _, m := range neighbourKey.FindAllStringSubmatchIndex(counted(s[start:end]), -1) {
-		tick(1)
+	for _, m := range neighbourKey.FindAllStringSubmatchIndex(counted(wm, s[start:end]), -1) {
+		tick(wm, 1)
 		ns, ne := m[2], m[3]
 		if ns < 0 {
 			ns, ne = m[4], m[5]
@@ -708,9 +710,9 @@ type bracketCursor struct {
 
 // at returns the innermost maxStripClosers brackets open at pos that open after from (-1 for any), innermost
 // last. Calls come with pos in increasing order, so the line is read once.
-func (b *bracketCursor) at(pos, from int) []byte {
+func (b *bracketCursor) at(wm *meter.Meter, pos, from int) []byte {
 	for ; b.pos < pos; b.pos++ {
-		tick(1)
+		tick(wm, 1)
 		switch c := b.s[b.pos]; c {
 		case '[', '{':
 			b.stack = append(b.stack, b.pos)
@@ -743,39 +745,39 @@ var viewEnvOwnName = regexp.MustCompile(`(?i)^(?:name|key)[ \t]*:[ \t]*["']?(` +
 // keys on the following lines, at most envEntryLines of them, inline or in a block below it. An entry whose
 // "value" comes first ("- value: x" and "name: DB_PASSWORD" below it, #845) is read from its value line: its own
 // keys on the following lines, as many, are looked through for the name.
-func viewEnvLine(s string, l viewLine, add func(start, end int)) {
-	text := trimIndent(s[l.text:l.end])
-	at := l.text + dashes(s[l.text:l.end])
+func viewEnvLine(wm *meter.Meter, s string, l viewLine, add func(start, end int)) {
+	text := trimIndent(wm, s[l.text:l.end])
+	at := l.text + dashes(wm, s[l.text:l.end])
 	if at == l.text {
 		return
 	}
-	entry := colOf(s, l.start, at)
-	if viewEnvValue(s, l, at, l.end, entry, nil) {
-		viewEnvValueFirst(s, l, at, entry, add)
+	entry := colOf(wm, s, l.start, at)
+	if viewEnvValue(wm, s, l, at, l.end, entry, nil) {
+		viewEnvValueFirst(wm, s, l, at, entry, add)
 		return
 	}
-	m := viewEnvName.FindStringSubmatchIndex(counted(text))
+	m := viewEnvName.FindStringSubmatchIndex(counted(wm, text))
 	if m == nil {
 		return
 	}
 	for i := range m {
 		m[i] += l.text
 	}
-	if keepReference(s, m) || sasRefused(s, m, false) {
+	if keepReference(wm, s, m) || sasRefused(wm, s, m, false) {
 		return
 	}
 	pos := l.next
 	for read := 0; pos < len(s) && read < envEntryLines; read++ {
-		tick(1)
-		e := readLine(s, pos)
+		tick(wm, 1)
+		e := readLine(wm, s, pos)
 		pos = e.next
-		if e.blank() {
+		if e.blank(wm) {
 			continue
 		}
-		if !e.ind.atLeast(entry) {
+		if !e.ind.atLeast(wm, entry) {
 			return
 		}
-		if e.ind == entry && viewEnvValue(s, e, e.text, e.end, entry, add) {
+		if e.ind == entry && viewEnvValue(wm, s, e, e.text, e.end, entry, add) {
 			return
 		}
 	}
@@ -783,31 +785,31 @@ func viewEnvLine(s string, l viewLine, add func(start, end int)) {
 
 // viewEnvValueFirst redacts the value on line l, whose "value" key starts at at, when one of the entry's own
 // keys on the following lines (at column entry, at most envEntryLines lines) names a secret (viewEnvOwnName).
-func viewEnvValueFirst(s string, l viewLine, at int, entry col, add func(start, end int)) {
+func viewEnvValueFirst(wm *meter.Meter, s string, l viewLine, at int, entry col, add func(start, end int)) {
 	pos := l.next
 	for read := 0; pos < len(s) && read < envEntryLines; read++ {
-		tick(1)
-		e := readLine(s, pos)
+		tick(wm, 1)
+		e := readLine(wm, s, pos)
 		pos = e.next
-		if e.blank() {
+		if e.blank(wm) {
 			continue
 		}
-		if !e.ind.atLeast(entry) {
+		if !e.ind.atLeast(wm, entry) {
 			return
 		}
 		if e.ind != entry {
 			continue
 		}
-		t := trimIndent(s[e.text:e.end])
-		m := viewEnvOwnName.FindStringSubmatchIndex(counted(t))
+		t := trimIndent(wm, s[e.text:e.end])
+		m := viewEnvOwnName.FindStringSubmatchIndex(counted(wm, t))
 		if m == nil {
 			continue
 		}
 		for i := range m {
 			m[i] += e.text
 		}
-		if !keepReference(s, m) && !sasRefused(s, m, false) {
-			viewEnvValue(s, l, at, l.end, entry, add)
+		if !keepReference(wm, s, m) && !sasRefused(wm, s, m, false) {
+			viewEnvValue(wm, s, l, at, l.end, entry, add)
 		}
 		return
 	}
@@ -817,7 +819,7 @@ func viewEnvValueFirst(s string, l viewLine, at int, entry col, add func(start, 
 // selector's list), and with add set
 // redacts its value: inline after the colon, without blanks and quotes around it, or the block below the line
 // (viewBlock) under a block indicator or nothing, or with no block, the lines right after it at column 0.
-func viewEnvValue(s string, e viewLine, from, end int, entry col, add func(start, end int)) bool {
+func viewEnvValue(wm *meter.Meter, s string, e viewLine, from, end int, entry col, add func(start, end int)) bool {
 	rest, ok := strings.CutPrefix(s[from:end], "value")
 	rest = strings.TrimPrefix(rest, "s")
 	rest = strings.TrimLeft(rest, " \t")
@@ -828,22 +830,22 @@ func viewEnvValue(s string, e viewLine, from, end int, entry col, add func(start
 		return true
 	}
 	v := end - len(rest) + 1
-	for v < end && indentLen(s, v) > 0 {
-		tick(1)
-		v += indentLen(s, v)
+	for v < end && indentLen(wm, s, v) > 0 {
+		tick(wm, 1)
+		v += indentLen(wm, s, v)
 	}
-	if v >= end || isBlockHeader(s, v) {
+	if v >= end || isBlockHeader(wm, s, v) {
 		var holes [][2]int
-		if start, bEnd, _ := viewBlock(s, e.next, entry, &holes); start >= 0 {
-			addHoles(start, bEnd, holes, add)
+		if start, bEnd, _ := viewBlock(wm, s, e.next, entry, &holes); start >= 0 {
+			addHoles(wm, start, bEnd, holes, add)
 			return true
 		}
 		// With no block below it, the lines right after it at column 0 are its items: the strings of a list as
 		// a read tool lays them out, each a line of its own at column 0 (#845, third decision of 2026-11-18).
 		for pos := e.next; pos < len(s); {
-			tick(1)
-			l := readLine(s, pos)
-			if l.blank() || l.ind.n != 0 {
+			tick(wm, 1)
+			l := readLine(wm, s, pos)
+			if l.blank(wm) || l.ind.n != 0 {
 				break
 			}
 			add(l.text, l.end)
@@ -851,9 +853,9 @@ func viewEnvValue(s string, e viewLine, from, end int, entry col, add func(start
 		}
 		return true
 	}
-	for end > v && lastIndentLen(s[:end], end) > 0 {
-		tick(1)
-		end -= lastIndentLen(s[:end], end)
+	for end > v && lastIndentLen(wm, s[:end], end) > 0 {
+		tick(wm, 1)
+		end -= lastIndentLen(wm, s[:end], end)
 	}
 	if c := s[v]; (c == '"' || c == '\'') && end-v >= 2 && s[end-1] == c {
 		v, end = v+1, end-1
@@ -872,23 +874,23 @@ var envValueFirst = regexp.MustCompile(`(?i)\\*["']?\bvalue\\*["']?` + jsonSpace
 
 // envValueFirstSpan is the span function of envValueFirst: the value, without its quotes and the blanks at
 // its end. A name that is a reference keeps it.
-func envValueFirstSpan(s string, m []int, _ int) (int, int, bool) {
-	if isReference(s[m[4]:m[5]]) {
+func envValueFirstSpan(wm *meter.Meter, s string, m []int, _ int) (int, int, bool) {
+	if isReference(wm, s[m[4]:m[5]]) {
 		return 0, 0, false
 	}
 	start, end := m[2], m[3]
-	for end > start && isSpace(s[end-1]) {
-		tick(1)
+	for end > start && isSpace(wm, s[end-1]) {
+		tick(wm, 1)
 		end--
 	}
 	for start < end && s[start] == '\\' {
-		tick(1)
+		tick(wm, 1)
 		start++
 	}
 	if start < end && (s[start] == '"' || s[start] == '\'') {
 		start++
 		for end > start && (s[end-1] == '"' || s[end-1] == '\'' || s[end-1] == '\\') {
-			tick(1)
+			tick(wm, 1)
 			end--
 		}
 	}
@@ -930,9 +932,9 @@ var seqEnvValue = regexp.MustCompile(`(?i)^\\*["']?values?\\*["']?` + keySpaceEx
 // and invisible characters, colons and their look-alikes, equals signs and arrows, with at least one mark), with
 // a block indicator and a comment after it if there are any; and whether it holds a colon, which may open a
 // block.
-func seqSeparator(t string) (ok, colon bool) {
-	r, found := sepRunAt(t, 0)
-	if !found || !seqBlockHeader.MatchString(counted(t[r.end:])) {
+func seqSeparator(wm *meter.Meter, t string) (ok, colon bool) {
+	r, found := sepRunAt(wm, t, 0)
+	if !found || !seqBlockHeader.MatchString(counted(wm, t[r.end:])) {
 		return false, false
 	}
 	return true, strings.Contains(r.marks, ":")
@@ -940,10 +942,10 @@ func seqSeparator(t string) (ok, colon bool) {
 
 // seqTrim returns t without blanks at either end: indentation characters (indentLen), line breaks, and line
 // breaks and tabs escaped with backslashes, as a string written inside another holds them.
-func seqTrim(t string) string {
+func seqTrim(wm *meter.Meter, t string) string {
 	for len(t) > 0 {
-		tick(1)
-		if n := indentLen(t, 0); n > 0 {
+		tick(wm, 1)
+		if n := indentLen(wm, t, 0); n > 0 {
 			t = t[n:]
 			continue
 		}
@@ -951,14 +953,14 @@ func seqTrim(t string) string {
 			t = t[1:]
 			continue
 		}
-		if n := escapedBlankAt(t, 0); n > 0 {
+		if n := escapedBlankAt(wm, t, 0); n > 0 {
 			t = t[n:]
 			continue
 		}
 		break
 	}
 	for len(t) > 0 {
-		tick(1)
+		tick(wm, 1)
 		if c := t[len(t)-1]; c == '\n' || c == '\r' {
 			t = t[:len(t)-1]
 			continue
@@ -966,13 +968,13 @@ func seqTrim(t string) string {
 		if c := t[len(t)-1]; (c == 'n' || c == 'r' || c == 't') && len(t) > 1 && t[len(t)-2] == '\\' {
 			j := len(t) - 2
 			for j > 0 && t[j-1] == '\\' {
-				tick(1)
+				tick(wm, 1)
 				j--
 			}
 			t = t[:j]
 			continue
 		}
-		if n := lastIndentLen(t, len(t)); n > 0 {
+		if n := lastIndentLen(wm, t, len(t)); n > 0 {
 			t = t[:len(t)-n]
 			continue
 		}
@@ -982,10 +984,10 @@ func seqTrim(t string) string {
 }
 
 // escapedBlankAt returns the length of a line break or tab escaped with backslashes at t[i], or 0.
-func escapedBlankAt(t string, i int) int {
+func escapedBlankAt(wm *meter.Meter, t string, i int) int {
 	j := i
 	for j < len(t) && t[j] == '\\' {
-		tick(1)
+		tick(wm, 1)
 		j++
 	}
 	if j > i && j < len(t) && (t[j] == 'n' || t[j] == 'r' || t[j] == 't') {
@@ -995,13 +997,13 @@ func escapedBlankAt(t string, i int) int {
 }
 
 // seqValueStart returns where the value in item starts: after its indentation characters and escaped blanks.
-func seqValueStart(item string) int {
+func seqValueStart(wm *meter.Meter, item string) int {
 	i := 0
 	for i < len(item) {
-		tick(1)
-		n := indentLen(item, i)
+		tick(wm, 1)
+		n := indentLen(wm, item, i)
 		if n == 0 {
-			n = escapedBlankAt(item, i)
+			n = escapedBlankAt(wm, item, i)
 		}
 		if n == 0 {
 			break
@@ -1026,7 +1028,7 @@ func seqValueStart(item string) int {
 // "--password", "V"). Each string is read in its folded view (foldView), as String reads a text: an invisible
 // character inside a key or a flag, or before its separator, is dropped, a colon look-alike reads as ":", and a
 // separator of other characters reads as ": ".
-func seqValues(items []string) []int {
+func seqValues(wm *meter.Meter, items []string) []int {
 	const (
 		none = iota
 		value
@@ -1041,90 +1043,90 @@ func seqValues(items []string) []int {
 	found := map[seqFound][]int{}
 	find := func(re *regexp.Regexp, t string) []int {
 		k := seqFound{re, t}
-		tick(len(t)) // the lookup hashes the text
+		tick(wm, len(t)) // the lookup hashes the text
 		m, ok := found[k]
 		if !ok {
-			m = re.FindStringSubmatchIndex(counted(t))
+			m = re.FindStringSubmatchIndex(counted(wm, t))
 			found[k] = m
 		}
 		return m
 	}
 	for i, it := range items {
-		tick(1)
+		tick(wm, 1)
 		out[i] = -1
-		tick(len(it)) // the lookup hashes the text
+		tick(wm, len(it)) // the lookup hashes the text
 		t, ok := folded[it]
 		if !ok {
-			t = seqTrim(it)
-			if f, ok := foldView(t); ok {
+			t = seqTrim(wm, it)
+			if f, ok := foldView(wm, t); ok {
 				// What a reader sees: an invisible character inside a key or before its separator, a colon
 				// look-alike, a separator of other characters.
-				t = seqTrim(f.text)
+				t = seqTrim(wm, f.text)
 			}
 			folded[it] = t
 		}
 		if t == "" {
 			continue
 		}
-		if inBlock && seqValueStart(it) > 0 {
-			out[i] = seqValueStart(it)
+		if inBlock && seqValueStart(wm, it) > 0 {
+			out[i] = seqValueStart(wm, it)
 			continue
 		}
 		inBlock = false
 		take := func(start int, v string) {
-			if !bare || wordsLookLikeSecret(v) {
+			if !bare || wordsLookLikeSecret(wm, v) {
 				out[i] = start
 			}
 		}
 		switch pending {
 		case value:
-			if ok, colon := seqSeparator(t); ok {
+			if ok, colon := seqSeparator(wm, t); ok {
 				// "--password", "=", "V": the separator in a string of its own.
 				block = block || colon
 				continue
 			}
-			take(seqValueStart(it), t)
+			take(seqValueStart(wm, it), t)
 			inBlock = block && out[i] >= 0
 			pending = none
 		case word:
 			pending = none
-			if ok, colon := seqSeparator(t); ok {
+			if ok, colon := seqSeparator(wm, t); ok {
 				pending, block = value, colon
 				continue
 			}
 			// "? password", ": V": the separator and the value in the next string.
-			start := seqValueStart(it)
-			if r, ok := sepRunAt(it, start); ok && r.end < len(it) {
-				take(r.end+seqValueStart(it[r.end:]), it[r.end:])
+			start := seqValueStart(wm, it)
+			if r, ok := sepRunAt(wm, it, start); ok && r.end < len(it) {
+				take(r.end+seqValueStart(wm, it[r.end:]), it[r.end:])
 			}
 		case env:
 			pending = none
-			start := seqValueStart(it)
-			if m := seqEnvValue.FindStringIndex(counted(it[start:])); m != nil && start+m[1] < len(it) {
+			start := seqValueStart(wm, it)
+			if m := seqEnvValue.FindStringIndex(counted(wm, it[start:])); m != nil && start+m[1] < len(it) {
 				take(start+m[1], it[start+m[1]:])
 			}
 		}
 		if m := find(viewEnvName, t); m != nil {
-			if !isReference(t[m[2]:m[3]]) {
+			if !isReference(wm, t[m[2]:m[3]]) {
 				pending, bare = env, false
 			}
 			continue
 		}
 		if m := find(seqKeyEnd, t); m != nil {
-			if !isReference(t[m[2]:m[3]]) {
+			if !isReference(wm, t[m[2]:m[3]]) {
 				// A colon may have a block below it, with an indicator or with nothing after it.
-				pending, bare, block = value, isBareShortKey(t[m[2]:m[3]]), t[len(t)-1] != '='
+				pending, bare, block = value, isBareShortKey(wm, t[m[2]:m[3]]), t[len(t)-1] != '='
 			}
 			continue
 		}
 		if m := find(seqFlagEnd, t); m != nil {
-			if !referenceKey(t[m[2]:m[3]], true) {
+			if !referenceKey(wm, t[m[2]:m[3]], true) {
 				pending, bare, block = value, false, false
 			}
 			continue
 		}
-		if m := find(seqWordEnd, t); m != nil && !isReference(t[m[2]:m[3]]) {
-			pending, bare = word, isBareShortKey(t[m[2]:m[3]])
+		if m := find(seqWordEnd, t); m != nil && !isReference(wm, t[m[2]:m[3]]) {
+			pending, bare = word, isBareShortKey(wm, t[m[2]:m[3]])
 		}
 	}
 	return out
@@ -1144,19 +1146,33 @@ type seqFound struct {
 // hides in the joined text, a match that runs across the line break between two strings included (a private key
 // header in one string and its lines in the next). So what String hides in the strings joined, Strings hides in
 // them apart.
+//
+// Strings it withhold (budget.go) come back as as many strings, the first Withheld and the others empty.
 func (r *Redactor) Strings(items []string) []string {
+	size := len(items)
+	for _, it := range items {
+		size += len(it)
+	}
+	if out, ok := metered(size, func(wm *meter.Meter) []string { return r.strings(wm, items) }); ok {
+		return out
+	}
+	return withheldStrings(len(items))
+}
+
+// strings is Strings on the budget wm.
+func (r *Redactor) strings(wm *meter.Meter, items []string) []string {
 	ps := make([]Piece, 0, 2*len(items))
 	for i, it := range items {
-		tick(1)
+		tick(wm, 1)
 		if i > 0 {
 			ps = append(ps, Piece{Text: "\n"})
 		}
 		ps = append(ps, Piece{Text: it, Data: true})
 	}
-	all := r.piecesWithin(ps, -1, true, nil)
+	all := r.piecesWithin(wm, ps, -1, true, nil)
 	out := make([]string, len(items))
 	for i := range out {
-		tick(1)
+		tick(wm, 1)
 		out[i] = all[2*i]
 	}
 	return out
@@ -1177,11 +1193,11 @@ var seqBoundary = regexp.MustCompile(`(\\*)"(?:[ \t]|\\+[rt])*(?:,|\r\n?|\n|\\+n
 // indentation, up to their closing quote. The first string of a run is read back from its closing quote to its
 // opening one, no further than the end of the run before; the last one forward to its closing quote, on its
 // line and before the next boundary; so each byte is read a fixed number of times.
-func seqScan(s string, add func(start, end int)) {
-	ms := seqBoundary.FindAllStringSubmatchIndex(counted(s), -1)
+func seqScan(wm *meter.Meter, s string, add func(start, end int)) {
+	ms := seqBoundary.FindAllStringSubmatchIndex(counted(wm, s), -1)
 	floor := 0
 	for i := 0; i < len(ms); {
-		tick(1)
+		tick(wm, 1)
 		m := ms[i]
 		bs := m[3] - m[2]
 		if bs != m[5]-m[4] {
@@ -1189,37 +1205,37 @@ func seqScan(s string, add func(start, end int)) {
 			i++
 			continue
 		}
-		level := quoteLevel(bs)
+		level := quoteLevel(wm, bs)
 		var items [][2]int
-		if open := seqOpenBefore(s, m[2], floor, level); open >= 0 {
+		if open := seqOpenBefore(wm, s, m[2], floor, level); open >= 0 {
 			items = append(items, [2]int{open, m[2]})
 		}
 		j := i
 		for {
-			tick(1)
+			tick(wm, 1)
 			start := ms[j][1]
 			limit := len(s)
 			if j+1 < len(ms) {
 				limit = ms[j+1][2]
 			}
 			if j+1 < len(ms) && ms[j+1][3]-ms[j+1][2] == bs && ms[j+1][5]-ms[j+1][4] == bs &&
-				seqClosesAt(s, start, limit, level) < 0 {
+				seqClosesAt(wm, s, start, limit, level) < 0 {
 				items = append(items, [2]int{start, limit})
 				j++
 				continue
 			}
-			if end := seqClosesAt(s, start, limit, level); end >= 0 && end == seqLineEnd(s, start, end) {
+			if end := seqClosesAt(wm, s, start, limit, level); end >= 0 && end == seqLineEnd(wm, s, start, end) {
 				items = append(items, [2]int{start, end})
 			}
 			break
 		}
 		texts := make([]string, len(items))
 		for k, it := range items {
-			tick(1)
+			tick(wm, 1)
 			texts[k] = s[it[0]:it[1]]
 		}
-		for k, start := range seqValues(texts) {
-			tick(1)
+		for k, start := range seqValues(wm, texts) {
+			tick(wm, 1)
 			if start >= 0 {
 				add(items[k][0]+start, items[k][1])
 			}
@@ -1232,18 +1248,18 @@ func seqScan(s string, add func(start, end int)) {
 // seqOpenBefore returns where the string whose closing quote's backslashes start at end begins: after the
 // opening double quote of the same escape level before it, read back no further than floor; or -1 when a
 // quote of a lower level comes first or there is none.
-func seqOpenBefore(s string, end, floor, level int) int {
+func seqOpenBefore(wm *meter.Meter, s string, end, floor, level int) int {
 	for i := end - 1; i >= floor; i-- {
-		tick(1)
+		tick(wm, 1)
 		if s[i] != '"' {
 			continue
 		}
 		run := 0
 		for i-run-1 >= floor && s[i-run-1] == '\\' {
-			tick(1)
+			tick(wm, 1)
 			run++
 		}
-		switch l := quoteLevel(run); {
+		switch l := quoteLevel(wm, run); {
 		case l == level:
 			return i + 1
 		case l < level:
@@ -1255,15 +1271,15 @@ func seqOpenBefore(s string, end, floor, level int) int {
 
 // seqClosesAt returns where the first double quote from start to limit that closes a string of the given
 // escape level starts (its backslashes), or -1: a quote escaped more deeply stands inside the string.
-func seqClosesAt(s string, start, limit, level int) int {
+func seqClosesAt(wm *meter.Meter, s string, start, limit, level int) int {
 	run := 0
 	for i := start; i < limit; i++ {
-		tick(1)
+		tick(wm, 1)
 		switch c := s[i]; {
 		case c == '\\':
 			run++
 			continue
-		case c == '"' && quoteLevel(run) <= level:
+		case c == '"' && quoteLevel(wm, run) <= level:
 			return i - run
 		}
 		run = 0
@@ -1272,8 +1288,8 @@ func seqClosesAt(s string, start, limit, level int) int {
 }
 
 // seqLineEnd returns end, or the first line break from start before it.
-func seqLineEnd(s string, start, end int) int {
-	if i := indexAny(s[start:end], "\r\n"); i >= 0 {
+func seqLineEnd(wm *meter.Meter, s string, start, end int) int {
+	if i := indexAny(wm, s[start:end], "\r\n"); i >= 0 {
 		return start + i
 	}
 	return end

@@ -809,7 +809,7 @@ func TestWriteCanonMainTable(t *testing.T) {
 	enc := json.NewEncoder(bw)
 	for _, c := range canonCorpus() {
 		row := canonMainRow{Hash: canonHash(c)}
-		for _, sp := range defaultRedactor.spans(c.in) {
+		for _, sp := range defaultRedactor.spans(nil, c.in) {
 			row.Spans = append(row.Spans, [2]int{sp.start, sp.end})
 		}
 		if err := enc.Encode(row); err != nil {

@@ -30,7 +30,7 @@ import (
 
 // lostMainBytes returns the first byte of in that main's redactor removes and this one keeps, or -1.
 func lostMainBytes(in string) int {
-	now := defaultRedactor.spans(in)
+	now := defaultRedactor.spans(nil, in)
 	for _, want := range mainredact.Spans(in) {
 		for i := want[0]; i < want[1]; i++ {
 			if !coveredBy([2]int{i, i + 1}, now) {

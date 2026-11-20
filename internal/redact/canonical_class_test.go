@@ -46,7 +46,7 @@ func TestInvisibleAfterValueGoesWithIt(t *testing.T) {
 					n++
 					v := fmt.Sprintf("Qz%05dxK9w", 60000+n)
 					in := written + ": " + v + run + after
-					spans := defaultRedactor.spans(in)
+					spans := defaultRedactor.spans(nil, in)
 					from := len(written) + 2
 					to := from + len(v) + len(run)
 					ok := true
@@ -155,7 +155,7 @@ func TestFourthRoundKeepsText(t *testing.T) {
 		in := "token" + sep + " Qz12345xK9w\u200b"
 		for cut := 1; cut <= len(in); cut++ {
 			s := in[:cut]
-			for _, sp := range defaultRedactor.spans(s) {
+			for _, sp := range defaultRedactor.spans(nil, s) {
 				if sp.start < 0 || sp.end > len(s) || sp.start >= sp.end {
 					t.Fatalf("spans(%q) gave %d..%d", s, sp.start, sp.end)
 				}

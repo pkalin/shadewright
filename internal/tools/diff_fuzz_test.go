@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -149,6 +150,9 @@ func (s *sceneSources) run(set *Set, scene diffScene, name string, args map[stri
 	}
 	return r
 }
+
+// withheldResult reports whether redaction withheld r whole (#873): it shows a fixed text and no values.
+func withheldResult(r Result) bool { return slices.Contains(r.Labels, LabelWithheld) }
 
 // answerFails returns the P1 and P4 failures of a tool's answer against the text origin/main gave (mainText,
 // with what it hid in rec).
@@ -317,6 +321,9 @@ func diffGetResource(set *Set, src *sceneSources) func([]byte) ([]string, bool) 
 		in := redacttest.Decode(data, 6)
 		scene, obj, kind := getResourceScene(in)
 		r := src.run(set, scene, NameGetResource, map[string]any{argKind: kind, argNamespace: testNS, argName: obj.GetName()})
+		if withheldResult(r) {
+			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		}
 		m := mainTools{rec: redacttest.NewRecorder()}
 		mainText, err := m.getResource(obj.DeepCopyObject().(client.Object))
 		if err != nil {
@@ -352,6 +359,9 @@ func diffGetPodLogs(set *Set, src *sceneSources) func([]byte) ([]string, bool) {
 		r := src.run(set, diffScene{excerpt: ours}, NameGetPodLogs, map[string]any{
 			argNamespace: testNS, argPod: podName, argContainer: container, argPrevious: previous, argMaxBytes: maxBytes,
 		})
+		if withheldResult(r) {
+			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		}
 		mainText := m.podLogs(podName, container, previous, theirs, maxBytes)
 		return answerFails(NameGetPodLogs, r, m.rec, mainText), false
 	}
@@ -393,6 +403,9 @@ func diffListEvents(set *Set, src *sceneSources) func([]byte) ([]string, bool) {
 		in := redacttest.Decode(data, 6)
 		evs := eventsScene(in)
 		r := src.run(set, diffScene{events: evs}, NameListEvents, map[string]any{argNamespace: testNS})
+		if withheldResult(r) {
+			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		}
 		m := mainTools{rec: redacttest.NewRecorder()}
 		mainText := m.listEvents(evs, defaultEvents)
 		return answerFails(NameListEvents, r, m.rec, mainText), false
@@ -423,6 +436,9 @@ func diffQueryMetrics(set *Set, src *sceneSources) func([]byte) ([]string, bool)
 		}
 		scene := diffScene{pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: testNS}}, series: series}
 		r := src.run(set, scene, NameQueryMetrics, map[string]any{argTemplate: tmpl.name, argNamespace: testNS, argPod: podName})
+		if withheldResult(r) {
+			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		}
 		m := mainTools{rec: redacttest.NewRecorder()}
 		mainText := m.queryMetrics(tmpl, series)
 		return answerFails(NameQueryMetrics, r, m.rec, mainText), false
@@ -440,6 +456,9 @@ func diffDeliveryStatus(set *Set, src *sceneSources) func([]byte) ([]string, boo
 		r := src.run(set, diffScene{delivery: st}, NameGetDeliveryStatus, map[string]any{
 			argKind: kustomization, argNamespace: fluxNS, argName: unitName,
 		})
+		if withheldResult(r) {
+			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		}
 		m := mainTools{rec: redacttest.NewRecorder()}
 		mainText := m.deliveryStatus(st)
 		return answerFails(NameGetDeliveryStatus, r, m.rec, mainText), false
@@ -482,6 +501,9 @@ func diffCheckMissingReference(set *Set, src *sceneSources) func([]byte) ([]stri
 		r := src.run(set, diffScene{pod: p, events: evs}, NameCheckMissingReference, map[string]any{
 			argNamespace: testNS, argPod: podName, argKind: secretKind, argName: "db",
 		})
+		if withheldResult(r) {
+			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		}
 		m := mainTools{rec: redacttest.NewRecorder()}
 		mainText := m.checkReference(refcheck.Check(p.DeepCopy(), evs, refcheck.KindSecret, "db", testNow))
 		return answerFails(NameCheckMissingReference, r, m.rec, mainText), false
@@ -502,6 +524,9 @@ func diffGitTools(set *Set, src *sceneSources) func([]byte) ([]string, bool) {
 		var fails []string
 		for _, name := range []string{NameReadGitFile, NameGetRecentChanges} {
 			r := src.run(set, diffScene{}, name, map[string]any{argPath: in.Fields[0], argRef: in.Fields[1]})
+			if withheldResult(r) {
+				return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+			}
 			if r.Status != StatusNotAvailable && r.Status != StatusRefused {
 				fails = append(fails, fmt.Sprintf("P4: %s answered %s: it shows text from a source now, give it a target of its own", name, r.Status))
 			}

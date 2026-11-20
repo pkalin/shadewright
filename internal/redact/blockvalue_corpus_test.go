@@ -266,7 +266,7 @@ var blockInnocentKeys = []string{
 }
 
 // isBareShortCorpusKey reports whether the corpus key counts only with a value that looks like a secret.
-func isBareShortCorpusKey(key string) bool { return isBareShortKey(key) }
+func isBareShortCorpusKey(key string) bool { return isBareShortKey(nil, key) }
 
 // blockCorpus returns the corpus over keys; with secret, the values are secrets (opaque tokens, and
 // passphrases where the key counts them), otherwise innocent words.
@@ -432,14 +432,14 @@ func TestBlockValueCorpusRedactsEverySecret(t *testing.T) {
 		var leaked, lost []string
 		switch {
 		case c.indicator:
-			leaked, lost = blockLeaks(c, defaultRedactor.spans(c.in))
+			leaked, lost = blockLeaks(c, defaultRedactor.spans(nil, c.in))
 		case c.afterText || c.bareQuoted:
 			notRequired++
 			continue
 		case c.lined != c.in:
 			leaked, lost = blockPipelineLeaks(c)
 		default:
-			leaked, lost = blockLeaks(c, defaultRedactor.spans(c.in))
+			leaked, lost = blockLeaks(c, defaultRedactor.spans(nil, c.in))
 		}
 		if len(leaked)+len(lost) == 0 {
 			continue
@@ -540,7 +540,7 @@ func TestWriteBlockMainTable(t *testing.T) {
 	enc := json.NewEncoder(w)
 	for _, c := range blockCorpus(blockSecretKeys, true) {
 		row := blockMainRow{Hash: blockInputHash(c.in)}
-		for _, sp := range defaultRedactor.spans(c.in) {
+		for _, sp := range defaultRedactor.spans(nil, c.in) {
 			row.Spans = append(row.Spans, [2]int{sp.start, sp.end})
 		}
 		if err := enc.Encode(row); err != nil {
@@ -582,7 +582,7 @@ func TestBlockValueStillRedactsWhatMainRedacted(t *testing.T) {
 		if !raceKeeps(t.Name(), cases-1) {
 			continue // a seeded sample under -race; all of them without it
 		}
-		red := redactedBytes(in, defaultRedactor.spans(in))
+		red := redactedBytes(in, defaultRedactor.spans(nil, in))
 		for _, want := range row.Spans {
 			for i := want[0]; i < want[1]; i++ {
 				if !red[i] {

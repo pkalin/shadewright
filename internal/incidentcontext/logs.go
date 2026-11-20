@@ -138,9 +138,12 @@ func (b *Builder) logBlock(pick logPick, ex providers.LogExcerpt, err error, bud
 	}
 	title := "pod " + b.shown(pick.pod) + " " + kind + " " + b.shown(pick.container) + ", " + instance
 	v := RenderLog(b.redactor, false, title, ex, err, budget, budget)
-	failed := v.Read == LogReadFailed || v.Read == LogReadOversized
+	failed := v.Read == LogReadFailed || v.Read == LogReadOversized || v.Read == LogReadWithheld
 	if failed {
 		blk.Availability = CouldNotFetch
+	}
+	if v.Read == LogReadWithheld {
+		blk.addLabel(LabelWithheld)
 	}
 	for _, m := range []struct {
 		on bool

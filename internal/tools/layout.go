@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/incidentcontext"
+	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
 )
 
@@ -97,9 +98,13 @@ func (s *Set) decide(ps []redact.Piece, limit int, fits func(out []string) bool)
 
 // lines takes the one decision on a in which every value is written on a line, and returns each piece as
 // shown: a value longer than 1 KiB once decided is left out whole (incidentcontext.Shown), and the text the
-// answer is made of.
-func (s *Set) lines(a *answer) ([]string, string) {
+// answer is made of; ok is false when redaction withheld the answer whole (redact.PiecesWithheld), and the
+// caller then gives no answer (Result.withhold).
+func (s *Set) lines(a *answer) (pieces []string, text string, ok bool) {
 	out := s.decide(a.pieces, -1, nil)
+	if redact.PiecesWithheld(out) {
+		return nil, "", false
+	}
 	var b strings.Builder
 	for i, p := range a.pieces {
 		if p.Data {
@@ -107,7 +112,7 @@ func (s *Set) lines(a *answer) ([]string, string) {
 		}
 		b.WriteString(out[i])
 	}
-	return out, b.String()
+	return out, b.String(), true
 }
 
 // errUnwritten means the JSON the object was encoded as could not be read back as tokens along the object; the
@@ -150,6 +155,9 @@ func (s *Set) jsonAnswer(obj any, limit int) (answer string, leftOut bool, err e
 		}
 		return limit < 0 || n <= limit
 	})
+	if redact.PiecesWithheld(out) {
+		return "", false, providers.ErrWithheld
+	}
 	answer, leftOut = leaveOut(out, t, limit)
 	return answer, leftOut, nil
 }

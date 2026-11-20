@@ -65,7 +65,7 @@ func TestStillRedactsWhatMainRedactedForKeyNames(t *testing.T) {
 		if len(c.Spans) > 0 {
 			redacted++
 		}
-		now := defaultRedactor.spans(c.In)
+		now := defaultRedactor.spans(nil, c.In)
 		for _, want := range c.Spans {
 			if !coveredBy(want, now) {
 				t.Errorf("main redacted %q, now kept:\n in: %q\nmain: %q\n now: %q",
@@ -594,7 +594,7 @@ func TestKeepsWhatMainKept(t *testing.T) {
 				mainRedacted[i] = true
 			}
 		}
-		for _, sp := range defaultRedactor.spans(r.in) {
+		for _, sp := range defaultRedactor.spans(nil, r.in) {
 			for i := sp.start; i < sp.end; i++ {
 				if !mainRedacted[i] {
 					t.Errorf("removed %q, which main kept:\n  in: %q\nmain: %q\n now: %q",

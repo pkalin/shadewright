@@ -101,18 +101,18 @@ func TestInvisibleIsDefaultIgnorableOrFormat(t *testing.T) {
 	}
 	for _, r := range want {
 		for _, c := range []rune{r[0], r[1], (r[0] + r[1]) / 2} {
-			if !isInvisible(c) {
+			if !isInvisible(nil, c) {
 				t.Errorf("isInvisible(%U) = false", c)
 			}
 		}
 		for _, c := range []rune{r[0] - 1, r[1] + 1} {
-			if !slices.ContainsFunc(want, func(x [2]rune) bool { return x[0] <= c && c <= x[1] }) && isInvisible(c) {
+			if !slices.ContainsFunc(want, func(x [2]rune) bool { return x[0] <= c && c <= x[1] }) && isInvisible(nil, c) {
 				t.Errorf("isInvisible(%U) = true, it is not in the extract", c)
 			}
 		}
 	}
 	for _, c := range []rune{'a', ' ', ':', 0x00A0, 0x3000, 0x2028, 0xFFFC} {
-		if isInvisible(c) {
+		if isInvisible(nil, c) {
 			t.Errorf("isInvisible(%U) = true", c)
 		}
 	}

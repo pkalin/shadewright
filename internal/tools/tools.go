@@ -200,10 +200,22 @@ const (
 	// to the Incident's subject, so its answer is not evidence about the target. The analysis loop adds it;
 	// no tool sets it itself.
 	LabelOutsideAttribution Label = "pod outside the incident's attributed pods"
+	// LabelWithheld: redaction withheld the answer whole (its work ran out of its budget, or the answer was longer
+	// than redaction reads; package redact), so nothing of it is shown and the result could not be fetched.
+	LabelWithheld Label = "withheld by redaction"
 )
 
 // couldNotFetch is the text of a result whose read failed; the error text is never shown.
 const couldNotFetch = "could not fetch\n"
+
+// withheldText is the text of a result redaction withheld (LabelWithheld).
+const withheldText = "could not fetch: withheld by redaction\n"
+
+// withhold makes r the result of an answer redaction withheld whole: could not fetch, a fixed text, no values.
+func (r *Result) withhold() {
+	r.Status, r.Text, r.Values, r.raw, r.headLen = StatusCouldNotFetch, withheldText, nil, false, 0
+	r.addLabel(LabelWithheld)
+}
 
 // Result is the answer of one call. Text is redacted cluster data: untrusted, never instructions.
 type Result struct {

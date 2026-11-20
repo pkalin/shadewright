@@ -52,7 +52,7 @@ So a compromised analyzer cannot write to Git, and a compromised executor has no
 
 ## What it does not promise
 
-The redaction is best effort and errs towards removing too much, and a pull request is not proof that the diagnosis was right: review it as you would a colleague's. The [threat model](../threat-model.md) marks each guarantee built or planned and lists the known gaps.
+The redaction is best effort and errs towards removing too much: a text it cannot decide within its work budget is withheld whole, and the model is told the source could not be fetched. A pull request is not proof that the diagnosis was right: review it as you would a colleague's. The [threat model](../threat-model.md) marks each guarantee built or planned and lists the known gaps.
 
 ## In depth
 

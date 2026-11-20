@@ -100,7 +100,12 @@ const (
 // the whole bound, and a summary that fits is what it always was.
 func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 	s, st := inc.Spec, inc.Status
-	vals, kind, namespace, typ, phase, red := b.summaryValues(inc)
+	vals, kind, namespace, typ, phase, red, withheld := b.summaryValues(inc)
+	if withheld {
+		blk := Block{Section: SectionSummary, Provenance: ProvenanceIncident}
+		withholdBlock(&blk)
+		return blk
+	}
 	render := func(keep [cutValues]int) (*lines, [cutValues]summaryTail) {
 		var l lines
 		var tails [cutValues]summaryTail
@@ -157,9 +162,10 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 // (fitSummary). With a redactor that decides on pieces, the summary's lines are decided once with every value
 // whole, as they were read ([decide]), and the values come back decided: the fit only shortens them, and the
 // lines are not redacted again (the identity). With any other redactor each value is redacted alone ([Value])
-// and the lines are redacted again after the fit ([Redact]), as the release before #845 did.
+// and the lines are redacted again after the fit ([Redact]), as the release before #845 did. withheld is true,
+// with nothing else, when redaction withheld the summary's lines whole.
 func (b *Builder) summaryValues(inc *remediationv1alpha1.Incident) (vals [cutValues]string, kind, namespace, typ, phase string,
-	red func(string) string) {
+	red func(string) string, withheld bool) {
 	s, st := inc.Spec, inc.Status
 	pr, ok := b.redactor.(pieceRedactor)
 	if !ok {
@@ -174,7 +180,7 @@ func (b *Builder) summaryValues(inc *remediationv1alpha1.Incident) (vals [cutVal
 		if st.Phase != "" {
 			phase = b.shown(string(st.Phase))
 		}
-		return vals, kind, namespace, typ, phase, b.redact
+		return vals, kind, namespace, typ, phase, b.redact, false
 	}
 	// The lines as the fit writes them with nothing cut, each value a piece of its own.
 	var l lines
@@ -197,7 +203,11 @@ func (b *Builder) summaryValues(inc *remediationv1alpha1.Incident) (vals [cutVal
 		l.add("phase: %s", val(string(st.Phase)))
 	}
 	var data []string
-	for _, v := range decidedPieces(pr, l.ps) {
+	decided, withheld := decidedPieces(pr, l.ps)
+	if withheld {
+		return vals, "", "", "", "", nil, true
+	}
+	for _, v := range decided {
 		if v.data {
 			data = append(data, v.text)
 		}
@@ -212,7 +222,7 @@ func (b *Builder) summaryValues(inc *remediationv1alpha1.Incident) (vals [cutVal
 	if st.Phase != "" {
 		phase = data[0]
 	}
-	return vals, kind, namespace, typ, phase, func(t string) string { return t }
+	return vals, kind, namespace, typ, phase, func(t string) string { return t }, false
 }
 
 // summaryTail is where a shortened value stands in the rendered summary: its line, and the text from the start

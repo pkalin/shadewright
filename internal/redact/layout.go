@@ -22,6 +22,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/redact/meter"
 )
 
 // A tool result is one text, decided once (#845, third decision of 2026-11-18), and the text decided on is the
@@ -81,12 +83,15 @@ var secretKeyName = regexp.MustCompile(`(?i)^(?:` + bareKeyExpr + `)$`)
 // "pass", "DB_PASS", "storageSas"), and is no reference (isReference). Unlike the rule for prose, which reads a
 // bare short key ("auth: failed") only before a value shaped like a credential, it needs no value. The work is
 // linear in the length of key.
-func SecretKey(key string) bool {
-	if f, ok := foldView(key); ok {
+func SecretKey(key string) bool { return secretKey(nil, key) }
+
+// secretKey is SecretKey on the budget wm.
+func secretKey(wm *meter.Meter, key string) bool {
+	if f, ok := foldView(wm, key); ok {
 		key = f.text
 	}
 	key = strings.TrimSpace(key)
-	return secretKeyName.MatchString(key) && !isReference(key)
+	return secretKeyName.MatchString(key) && !isReference(wm, key)
 }
 
 // secretCollectionName is a field name or map key that holds a secret word, written only in the characters
@@ -101,7 +106,7 @@ var secretCollectionName = regexp.MustCompile(`(?i)^[A-Za-z0-9_.-]*` + secretWor
 // block, where a reference child ("secretName", "path") keeps its value as in any text. Whether those names
 // may be shown is #860. The work is linear in the length of name.
 func SecretCollection(name string) bool {
-	return secretCollectionName.MatchString(name) && !isReference(name)
+	return secretCollectionName.MatchString(name) && !isReference(nil, name)
 }
 
 // Pieces takes the one decision on the answer the pieces make, each data piece written in its Form and all
@@ -145,8 +150,10 @@ func (r *Redactor) Pieces(ps []Piece) []string { return r.PiecesWithin(ps, -1) }
 // otherwise cut at its limit stays whole whenever it can (#845, thirteenth decision of 2026-11-18): the
 // replacements of this package may be longer than those of the release before, which wrote its markers on the
 // values before they were escaped. The work is linear in the length of the pieces.
+//
+// An answer it withholds (budget.go) comes back as one string per piece, the first Withheld and the others empty.
 func (r *Redactor) PiecesWithin(ps []Piece, limit int) []string {
-	return r.piecesWithin(ps, limit, false, nil)
+	return r.meteredPieces(ps, func(wm *meter.Meter) []string { return r.piecesWithin(wm, ps, limit, false, nil) })
 }
 
 // PiecesFitting is Pieces with each replacement in the first form of its marker (marker, down to "***") at
@@ -154,28 +161,41 @@ func (r *Redactor) PiecesWithin(ps []Piece, limit int) []string {
 // longer than the pieces joined (get_resource, which renames two map keys decided alike) checks its own answer
 // (#845, fifteenth decision, P4). The decision is the same as Pieces'; fits is called at most once per form,
 // so the work is linear in the length of the pieces and in what fits does.
+// An answer it withholds comes back as PiecesWithin returns it, with fits not called on it.
 func (r *Redactor) PiecesFitting(ps []Piece, fits func(out []string) bool) []string {
-	return r.piecesWithin(ps, -1, false, fits)
+	return r.meteredPieces(ps, func(wm *meter.Meter) []string { return r.piecesWithin(wm, ps, -1, false, fits) })
+}
+
+// meteredPieces runs f, a decision on ps, on the budget of the pieces' bytes, their keys included (budget.go).
+func (r *Redactor) meteredPieces(ps []Piece, f func(wm *meter.Meter) []string) []string {
+	size := 0
+	for _, p := range ps {
+		size += len(p.Text) + len(p.Key)
+	}
+	if out, ok := metered(size, f); ok {
+		return out
+	}
+	return withheldStrings(len(ps))
 }
 
 // piecesWithin is PiecesWithin; with joined true it also hides, cut at each piece's ends, everything String hides
 // in the answer as written, with no match ended at a line break of a value (Strings, whose answer is the strings
 // joined by line breaks: what String hides joined, Strings hides apart).
 // With fits not nil, the form of the markers is the first at which fits holds (PiecesFitting) instead.
-func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool, fits func([]string) bool) []string {
+func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined bool, fits func([]string) bool) []string {
 	var data []string
 	for _, p := range ps {
-		tick(1)
+		tick(wm, 1)
 		if p.Data {
 			data = append(data, p.Text)
 		}
 	}
-	starts := seqValues(data)
+	starts := seqValues(wm, data)
 	ws := make([]written, len(ps))
 	var raw strings.Builder
 	for i, p := range ps {
-		tick(1)
-		ws[i] = write(p)
+		tick(wm, 1)
+		ws[i] = write(wm, p)
 		raw.WriteString(ws[i].text)
 	}
 	// own holds, by piece, the spans found in its written text; reading 1 first. A value repeated in the pieces
@@ -187,25 +207,25 @@ func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool, fits func([]
 	ids := &windowIDs{}
 	k := 0
 	for i, p := range ps {
-		tick(1)
+		tick(wm, 1)
 		w := ws[i]
 		if !p.Data {
 			continue
 		}
-		if hiddenByObject(p) {
+		if hiddenByObject(wm, p) {
 			own[i] = []span{{start: 0, end: len(w.text), kind: KindCredential, rule: len(r.rules)}}
 		} else {
 			found, ok := read[p.Text]
 			if !ok {
-				found = r.ownSpansWith(p.Text, ids)
+				found = r.ownSpansWith(wm, p.Text, ids)
 				read[p.Text] = found
 			}
 			for _, sp := range found {
-				tick(1)
-				own[i] = append(own[i], w.carry(sp))
+				tick(wm, 1)
+				own[i] = append(own[i], w.carry(wm, sp))
 			}
 			if s := starts[k]; s >= 0 && s < len(p.Text) {
-				own[i] = append(own[i], w.carry(span{start: s, end: len(p.Text), kind: KindCredential, rule: len(r.rules)}))
+				own[i] = append(own[i], w.carry(wm, span{start: s, end: len(p.Text), kind: KindCredential, rule: len(r.rules)}))
 			}
 		}
 		k++
@@ -213,60 +233,60 @@ func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool, fits func([]
 	// Reading 2: the answer as the tool writes it, each match ended at the line breaks of the values.
 	wsize := func(i int) int { return len(ws[i].text) }
 	answer := raw.String()
-	matches := r.ruleMatchesWith(answer, ids)
-	widen := func(i int, sp span) span { return ws[i].widen(sp) }
+	matches := r.ruleMatchesWith(wm, answer, ids)
+	widen := func(i int, sp span) span { return ws[i].widen(wm, sp) }
 	text := func(i int) string { return ws[i].text }
 	if joined {
 		// What String hides in the answer, the reading of the release before included, as String reads it: a match
 		// is not ended at the line breaks of the values (#845, fifteenth decision, P2).
-		whole := append(slices.Clone(matches), r.releasedString(answer, false, nil)...)
-		r.cutAnswer(ps, own, settle(answer, whole), widen, text)
+		whole := append(slices.Clone(matches), r.releasedString(wm, answer, false, nil)...)
+		r.cutAnswer(wm, ps, own, settle(wm, answer, whole), widen, text)
 	}
-	reading2 := endAtValueLines(ps, ws, answer, matches)
-	r.cutAnswer(ps, own, settle(answer, endAtObjectValues(ps, wsize, reading2)), widen, text)
+	reading2 := endAtValueLines(wm, ps, ws, answer, matches)
+	r.cutAnswer(wm, ps, own, settle(wm, answer, endAtObjectValues(wm, ps, wsize, reading2)), widen, text)
 	// Reading 3: the release before, on the pieces as they were read.
-	hidden := mergeSpans(r.releasedPieces(ps))
+	hidden := mergeSpans(wm, r.releasedPieces(wm, ps))
 	off, h := 0, 0
 	for i, p := range ps {
-		tick(1)
+		tick(wm, 1)
 		end := off + len(p.Text)
 		for h < len(hidden) && hidden[h].end <= off {
-			tick(1)
+			tick(wm, 1)
 			h++
 		}
 		for j := h; p.Data && j < len(hidden) && hidden[j].start < end; j++ {
-			tick(1)
+			tick(wm, 1)
 			sp := hidden[j]
 			from := max(sp.start, off) - off
 			if sp.start < off {
 				// A span that begins before the piece takes it from its first byte that is no blank, the blanks before
 				// that kept as the indentation they are, as for reading 2 (cutAnswer).
 				for from < len(p.Text) && strings.IndexByte(" \t\r\n", p.Text[from]) >= 0 {
-					tick(1)
+					tick(wm, 1)
 					from++
 				}
 			}
 			sp.start, sp.end = from, min(sp.end, end)-off
 			if sp.end > sp.start { // an empty value has no byte to carry the span to
-				own[i] = append(own[i], ws[i].carry(sp))
+				own[i] = append(own[i], ws[i].carry(wm, sp))
 			}
 		}
 		off = end
 	}
 	merged := make([][]span, len(ps))
 	for i, p := range ps {
-		tick(1)
+		tick(wm, 1)
 		if p.Data {
-			merged[i] = mergeSpans(own[i])
+			merged[i] = mergeSpans(wm, own[i])
 		}
 	}
 	out := make([]string, len(ps))
 	if fits != nil {
 		for level := range markerLevels {
-			tick(1)
+			tick(wm, 1)
 			for i := range ps {
-				tick(1)
-				out[i] = ws[i].render(merged[i], level)
+				tick(wm, 1)
+				out[i] = ws[i].render(wm, merged[i], level)
 			}
 			if fits(out) {
 				break
@@ -274,10 +294,10 @@ func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool, fits func([]
 		}
 		return out
 	}
-	level := fitLevel(ws, merged, limit)
+	level := fitLevel(wm, ws, merged, limit)
 	for i := range ps {
-		tick(1)
-		out[i] = ws[i].render(merged[i], level)
+		tick(wm, 1)
+		out[i] = ws[i].render(wm, merged[i], level)
 	}
 	return out
 }
@@ -285,17 +305,17 @@ func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool, fits func([]
 // fitLevel returns the first level of the markers (markerAt) at which the pieces written ws, with the sorted,
 // disjoint spans of each replaced (written.render), are at most limit bytes long; the last level when none is,
 // 0 when limit is negative.
-func fitLevel(ws []written, merged [][]span, limit int) int {
+func fitLevel(wm *meter.Meter, ws []written, merged [][]span, limit int) int {
 	level := 0
 	for ; limit >= 0 && level < markerLevels-1; level++ {
-		tick(1)
+		tick(wm, 1)
 		n := 0
 		for i, w := range ws {
-			tick(1)
+			tick(wm, 1)
 			n += len(w.text)
 			for _, sp := range merged[i] {
-				tick(1)
-				n += len(markerAt(sp.kind, w.size(sp, level), level)) - (sp.end - sp.start)
+				tick(wm, 1)
+				n += len(markerAt(wm, sp.kind, w.size(wm, sp, level), level)) - (sp.end - sp.start)
 			}
 		}
 		if n <= limit {
@@ -309,13 +329,13 @@ func fitLevel(ws []written, merged [][]span, limit int) int {
 // as everywhere else; at a shorter level, as the answer must fit, its units (the characters of the value it
 // covers, as the release before wrote its markers on the values before they were escaped), so `\"` is one "*".
 // The work is linear in the length of sp.
-func (w written) size(sp span, level int) int {
+func (w written) size(wm *meter.Meter, sp span, level int) int {
 	if level == 0 || w.unitEnd == nil {
 		return sp.end - sp.start
 	}
 	n := 0
 	for x := sp.start; x < sp.end; x = w.unitEnd[x] {
-		tick(1)
+		tick(wm, 1)
 		n++
 	}
 	return n
@@ -323,16 +343,16 @@ func (w written) size(sp span, level int) int {
 
 // render returns w's text with each of the sorted, disjoint spans replaced by its marker of the given level,
 // fitted to size.
-func (w written) render(spans []span, level int) string {
+func (w written) render(wm *meter.Meter, spans []span, level int) string {
 	if level == 0 {
-		return render(w.text, spans)
+		return render(wm, w.text, spans)
 	}
 	var b strings.Builder
 	pos := 0
 	for _, sp := range spans {
-		tick(1)
+		tick(wm, 1)
 		b.WriteString(w.text[pos:sp.start])
-		b.WriteString(markerAt(sp.kind, w.size(sp, level), level))
+		b.WriteString(markerAt(wm, sp.kind, w.size(wm, sp, level), level))
 		pos = sp.end
 	}
 	b.WriteString(w.text[pos:])
@@ -345,27 +365,27 @@ func (w written) render(spans []span, level int) string {
 // before that stay as the indentation they are, as for a value a key outside it takes. A piece the
 // object hides whole takes nothing more: it is hidden whole already. The work is linear in the length of the
 // text and the number of pieces and spans.
-func (r *Redactor) cutAnswer(ps []Piece, own [][]span, spans []span, to func(i int, sp span) span, text func(i int) string) {
+func (r *Redactor) cutAnswer(wm *meter.Meter, ps []Piece, own [][]span, spans []span, to func(i int, sp span) span, text func(i int) string) {
 	off, next := 0, 0
 	for i, p := range ps {
-		tick(1)
+		tick(wm, 1)
 		t := text(i)
 		end := off + len(t)
-		if p.Data && !hiddenByObject(p) {
+		if p.Data && !hiddenByObject(wm, p) {
 			for next < len(spans) && spans[next].end <= off {
-				tick(1)
+				tick(wm, 1)
 				next++
 			}
 			lead := -1 // the piece's blanks before its first other byte, counted when a span needs them
 			for j := next; j < len(spans) && spans[j].start < end; j++ {
-				tick(1)
+				tick(wm, 1)
 				sp := spans[j]
 				from := max(sp.start, off) - off
 				if sp.start < off {
 					if lead < 0 {
 						lead = 0
 						for lead < len(t) && strings.IndexByte(" \t\r\n", t[lead]) >= 0 {
-							tick(1)
+							tick(wm, 1)
 							lead++
 						}
 					}
@@ -383,7 +403,7 @@ func (r *Redactor) cutAnswer(ps []Piece, own [][]span, spans []span, to func(i i
 
 // isLineBreak reports whether c is a line break: a line feed, a carriage return, a vertical tab, a form feed, a
 // next line (U+0085), a line separator (U+2028) or a paragraph separator (U+2029).
-func isLineBreak(c rune) bool {
+func isLineBreak(_ *meter.Meter, c rune) bool {
 	switch c {
 	case '\n', '\r', '\v', '\f', '\u0085', '\u2028', '\u2029':
 		return true
@@ -407,16 +427,16 @@ const (
 // its key is still taken: the line breaks before the match's first other byte do not end it. The matches are
 // changed in place and returned. The work and the allocation are linear in the length of the answer and the
 // number of matches.
-func endAtValueLines(ps []Piece, ws []written, answer string, matches []span) []span {
+func endAtValueLines(wm *meter.Meter, ps []Piece, ws []written, answer string, matches []span) []span {
 	n := len(answer)
 	kind := make([]byte, n)
 	off := 0
 	for i, p := range ps {
-		tick(1)
+		tick(wm, 1)
 		w := ws[i]
 		if !p.Data {
 			for j := range len(w.text) {
-				tick(1)
+				tick(wm, 1)
 				if c := w.text[j]; c == ' ' || c == '\t' || c == '\n' || c == '\r' {
 					kind[off+j] = byteBlank
 				}
@@ -425,7 +445,7 @@ func endAtValueLines(ps []Piece, ws []written, answer string, matches []span) []
 			continue
 		}
 		for j := 0; j < len(p.Text); {
-			tick(1)
+			tick(wm, 1)
 			c, size := utf8.DecodeRuneInString(p.Text[j:])
 			s, e := j, j+size
 			if w.start != nil {
@@ -434,13 +454,13 @@ func endAtValueLines(ps []Piece, ws []written, answer string, matches []span) []
 			k := byte(byteSolid)
 			switch {
 			case c == utf8.RuneError && size == 1:
-			case isLineBreak(c):
+			case isLineBreak(wm, c):
 				k = byteLineBreak
 			case c == ' ' || c == '\t':
 				k = byteBlank
 			}
 			for x := s; x < e; x++ {
-				tick(1)
+				tick(wm, 1)
 				kind[off+x] = k
 			}
 			j += size
@@ -451,7 +471,7 @@ func endAtValueLines(ps []Piece, ws []written, answer string, matches []span) []
 	nextSolid, nextBreak := make([]int, n+1), make([]int, n+1)
 	nextSolid[n], nextBreak[n] = n, n
 	for x := n - 1; x >= 0; x-- {
-		tick(1)
+		tick(wm, 1)
 		nextSolid[x], nextBreak[x] = nextSolid[x+1], nextBreak[x+1]
 		switch kind[x] {
 		case byteSolid:
@@ -461,7 +481,7 @@ func endAtValueLines(ps []Piece, ws []written, answer string, matches []span) []
 		}
 	}
 	for i := range matches {
-		tick(1)
+		tick(wm, 1)
 		if q := nextSolid[min(matches[i].start, n)]; q < matches[i].end {
 			matches[i].end = min(matches[i].end, nextBreak[q])
 		}
@@ -474,12 +494,12 @@ func endAtValueLines(ps []Piece, ws []written, answer string, matches []span) []
 // says where the value ends, so a block or a flow collection that the value opens, or a key inside it, takes no
 // later piece (#845, sixth decision of 2026-11-18, point 2). The spans are changed in place and returned. The work
 // and the allocation are linear in the length of the text and the number of spans.
-func endAtObjectValues(ps []Piece, size func(i int) int, spans []span) []span {
+func endAtObjectValues(wm *meter.Meter, ps []Piece, size func(i int) int, spans []span) []span {
 	var starts, ends []int // the hidden pieces, in order
 	off := 0
 	for i, p := range ps {
-		tick(1)
-		if n := size(i); hiddenByObject(p) && n > 0 {
+		tick(wm, 1)
+		if n := size(i); hiddenByObject(wm, p) && n > 0 {
 			starts, ends = append(starts, off), append(ends, off+n)
 		}
 		off += size(i)
@@ -491,15 +511,15 @@ func endAtObjectValues(ps []Piece, size func(i int) int, spans []span) []span {
 	first := make([]int, off+1)
 	j := len(starts)
 	for x := off; x >= 0; x-- {
-		tick(1)
+		tick(wm, 1)
 		for j > 0 && ends[j-1] > x {
-			tick(1)
+			tick(wm, 1)
 			j--
 		}
 		first[x] = j
 	}
 	for i := range spans {
-		tick(1)
+		tick(wm, 1)
 		if h := first[min(spans[i].start, off)]; h < len(starts) && starts[h] < spans[i].end {
 			spans[i].end = min(spans[i].end, ends[h])
 		}
@@ -509,7 +529,9 @@ func endAtObjectValues(ps []Piece, size func(i int) int, spans []span) []span {
 
 // hiddenByObject reports whether the object says the data piece p is hidden whole: it is marked Whole or its
 // key is a secret key.
-func hiddenByObject(p Piece) bool { return p.Data && (p.Whole || (p.Key != "" && SecretKey(p.Key))) }
+func hiddenByObject(wm *meter.Meter, p Piece) bool {
+	return p.Data && (p.Whole || (p.Key != "" && secretKey(wm, p.Key)))
+}
 
 // written is a piece as the answer writes it, with the units it was written in: each character of a data piece
 // (an invalid byte counts as one, and in JSON a run of them) is one unit of the value and one of the answer.
@@ -522,7 +544,7 @@ type written struct {
 }
 
 // write writes the piece p as the answer writes it.
-func write(p Piece) written {
+func write(wm *meter.Meter, p Piece) written {
 	if !p.Data || p.Form == AsIs {
 		return written{text: p.Text}
 	}
@@ -531,7 +553,7 @@ func write(p Piece) written {
 	var b strings.Builder
 	b.Grow(n)
 	for i := 0; i < n; {
-		tick(1)
+		tick(wm, 1)
 		c, size := utf8.DecodeRuneInString(p.Text[i:])
 		from := b.Len()
 		if p.Form == JSON && c == utf8.RuneError && size == 1 {
@@ -541,7 +563,7 @@ func write(p Piece) written {
 			// byte, then per run (six bytes for one), made an answer of a few KiB of them too long for its bound
 			// (#845, fifteenth decision, P4).
 			for i+size < n {
-				tick(1)
+				tick(wm, 1)
 				if r, sz := utf8.DecodeRuneInString(p.Text[i+size:]); r != utf8.RuneError || sz != 1 {
 					break
 				}
@@ -549,15 +571,15 @@ func write(p Piece) written {
 			}
 			b.WriteByte('?')
 		} else {
-			writeUnit(&b, p.Form, p.Text[i:i+size], c, size)
+			writeUnit(wm, &b, p.Form, p.Text[i:i+size], c, size)
 		}
 		to := b.Len()
 		for j := i; j < i+size; j++ {
-			tick(1)
+			tick(wm, 1)
 			w.start[j], w.end[j] = from, to
 		}
 		for range to - from {
-			tick(1)
+			tick(wm, 1)
 			w.unitStart, w.unitEnd = append(w.unitStart, from), append(w.unitEnd, to)
 		}
 		i += size
@@ -570,7 +592,7 @@ func write(p Piece) written {
 const jsonHex = "0123456789abcdef"
 
 // writeUnit writes one unit of a value, the character c of size bytes (raw), in form f.
-func writeUnit(b *strings.Builder, f Form, raw string, c rune, size int) {
+func writeUnit(_ *meter.Meter, b *strings.Builder, f Form, raw string, c rune, size int) {
 	invalid := c == utf8.RuneError && size == 1
 	switch f {
 	case Line:
@@ -616,7 +638,7 @@ func writeUnit(b *strings.Builder, f Form, raw string, c rune, size int) {
 }
 
 // widen widens a span of the written text to the whole units it touches.
-func (w written) widen(sp span) span {
+func (w written) widen(_ *meter.Meter, sp span) span {
 	if w.unitStart != nil {
 		sp.start, sp.end = w.unitStart[sp.start], w.unitEnd[sp.end-1]
 	}
@@ -624,7 +646,7 @@ func (w written) widen(sp span) span {
 }
 
 // carry carries a span of the value to the units of the written text it was written as.
-func (w written) carry(sp span) span {
+func (w written) carry(_ *meter.Meter, sp span) span {
 	if w.start != nil {
 		sp.start, sp.end = w.start[sp.start], w.end[sp.end-1]
 	}
@@ -636,4 +658,4 @@ func Pieces(ps []Piece) []string { return defaultRedactor.Pieces(ps) }
 
 // Written returns s as the answer writes it in form f, with nothing redacted: what a redactor that takes no
 // decision on pieces writes after it redacted the value alone.
-func Written(f Form, s string) string { return write(Piece{Text: s, Data: true, Form: f}).text }
+func Written(f Form, s string) string { return write(nil, Piece{Text: s, Data: true, Form: f}).text }

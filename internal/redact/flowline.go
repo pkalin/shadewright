@@ -20,6 +20,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/redact/meter"
 )
 
 // flowLine answers, for the keys of one line, where a value in a flow collection ends (viewValueEnd): the
@@ -66,7 +68,7 @@ type flowLine struct {
 }
 
 // flowKind returns 0 for '[' or ']', 1 for '{' or '}'.
-func flowKind(c byte) int {
+func flowKind(_ *meter.Meter, c byte) int {
 	if c == '[' || c == ']' {
 		return 0
 	}
@@ -74,16 +76,16 @@ func flowKind(c byte) int {
 }
 
 // newFlowLine returns the line from lo to hi of s, read when a key first asks.
-func newFlowLine(s string, lo, hi int) *flowLine {
+func newFlowLine(_ *meter.Meter, s string, lo, hi int) *flowLine {
 	return &flowLine{s: s, lo: lo, hi: hi}
 }
 
 // isRunChar reports whether c is a closing bracket or a quote, the characters of a run after a closing bracket.
-func isRunChar(c byte) bool { return strings.IndexByte(`]})"'`, c) >= 0 }
+func isRunChar(_ *meter.Meter, c byte) bool { return strings.IndexByte(`]})"'`, c) >= 0 }
 
 // build reads the line once: the pairs of brackets, the runs of closing characters and the commas. It keeps
 // about nine bytes for each byte of the line and four for each bracket and comma.
-func (f *flowLine) build() {
+func (f *flowLine) build(wm *meter.Meter) {
 	if f.built {
 		return
 	}
@@ -92,7 +94,7 @@ func (f *flowLine) build() {
 	f.mate, f.good, f.runStart = make([]int32, n), make([]bool, n), make([]int32, n+1)
 	var open []int32
 	for i := range n {
-		tick(1)
+		tick(wm, 1)
 		f.mate[i] = -1
 		switch c := s[lo+i]; c {
 		case '[', '{':
@@ -106,9 +108,9 @@ func (f *flowLine) build() {
 			f.commas = append(f.commas, int32(i))
 		}
 		f.runStart[i+1] = int32(i + 1)
-		if isRunChar(s[lo+i]) {
+		if isRunChar(wm, s[lo+i]) {
 			f.runStart[i+1] = int32(i)
-			if i > 0 && isRunChar(s[lo+i-1]) {
+			if i > 0 && isRunChar(wm, s[lo+i-1]) {
 				f.runStart[i+1] = f.runStart[i]
 			}
 		}
@@ -117,21 +119,21 @@ func (f *flowLine) build() {
 	// or a comment; read back to front, with the end of the current run.
 	runEnd := n
 	for i := n - 1; i >= 0; i-- {
-		tick(1)
+		tick(wm, 1)
 		c := s[lo+i]
-		if !isRunChar(c) {
+		if !isRunChar(wm, c) {
 			runEnd = i
 			continue
 		}
 		if (c == ']' || c == '}') && runEnd < n {
-			f.good[i] = indentLen(s, lo+runEnd) > 0 || strings.IndexByte(",;#", s[lo+runEnd]) >= 0
+			f.good[i] = indentLen(wm, s, lo+runEnd) > 0 || strings.IndexByte(",;#", s[lo+runEnd]) >= 0
 		}
 	}
 	for i := range n {
-		tick(1)
+		tick(wm, 1)
 		switch c := s[lo+i]; c {
 		case ']', '}':
-			t := flowKind(c)
+			t := flowKind(wm, c)
 			f.closes[t] = append(f.closes[t], int32(i))
 			if f.mate[i] < 0 {
 				f.lone[t] = append(f.lone[t], int32(i))
@@ -140,7 +142,7 @@ func (f *flowLine) build() {
 				}
 			}
 		case ',':
-			if e := plainKeyCommaEnd(s, lo+i, f.hi); e >= 0 {
+			if e := plainKeyCommaEnd(wm, s, lo+i, f.hi); e >= 0 {
 				f.keyCommas = append(f.keyCommas, [2]int{lo + i, e})
 			}
 		}
@@ -148,10 +150,10 @@ func (f *flowLine) build() {
 }
 
 // firstFrom returns the index of the first offset in xs (in order) at or after x, or len(xs).
-func firstFrom(xs []int32, x int) int {
+func firstFrom(wm *meter.Meter, xs []int32, x int) int {
 	lo, hi := 0, len(xs)
 	for lo < hi {
-		tick(1)
+		tick(wm, 1)
 		mid := (lo + hi) / 2
 		if int(xs[mid]) >= x {
 			hi = mid
@@ -163,35 +165,35 @@ func firstFrom(xs []int32, x int) int {
 }
 
 // lastBefore returns the last offset in xs (in order) before e, or -1.
-func lastBefore(xs []int32, e int) int {
-	if i := firstFrom(xs, e); i > 0 {
+func lastBefore(wm *meter.Meter, xs []int32, e int) int {
+	if i := firstFrom(wm, xs, e); i > 0 {
 		return int(xs[i-1])
 	}
 	return -1
 }
 
 // nextComma returns the first comma at or after start, or hi.
-func (f *flowLine) nextComma(start int) int {
-	f.build()
-	if i := firstFrom(f.commas, start-f.lo); i < len(f.commas) {
+func (f *flowLine) nextComma(wm *meter.Meter, start int) int {
+	f.build(wm)
+	if i := firstFrom(wm, f.commas, start-f.lo); i < len(f.commas) {
 		return f.lo + int(f.commas[i])
 	}
 	return f.hi
 }
 
 // advance moves the cursor to offset x, pairing the brackets before it as build did.
-func (f *flowLine) advance(x int) {
+func (f *flowLine) advance(wm *meter.Meter, x int) {
 	if x < f.pos {
 		// The values of a line's keys start in order (viewKeyLine), so this does not happen there; read again.
 		f.pos, f.stack, f.goodOpen = 0, f.stack[:0], [2][]int{f.goodOpen[0][:0], f.goodOpen[1][:0]}
 	}
 	for ; f.pos < x; f.pos++ {
-		tick(1)
+		tick(wm, 1)
 		i := f.pos
 		switch c := f.s[f.lo+i]; c {
 		case '[', '{':
 			if j := f.mate[i]; j >= 0 && f.good[j] {
-				t := flowKind(c)
+				t := flowKind(wm, c)
 				f.goodOpen[t] = append(f.goodOpen[t], len(f.stack))
 			}
 			f.stack = append(f.stack, i)
@@ -200,7 +202,7 @@ func (f *flowLine) advance(x int) {
 				continue
 			}
 			k := len(f.stack) - 1
-			t := flowKind(c)
+			t := flowKind(wm, c)
 			if g := len(f.goodOpen[t]); g > 0 && f.goodOpen[t][g-1] == k {
 				f.goodOpen[t] = f.goodOpen[t][:g-1]
 			}
@@ -211,17 +213,17 @@ func (f *flowLine) advance(x int) {
 
 // closeAt returns where a value from start to end in a flow collection opened by opener ends: the last closing
 // bracket of that collection that flowCloseAt finds, or -1.
-func (f *flowLine) closeAt(start, end int, opener byte) int {
-	f.build()
+func (f *flowLine) closeAt(wm *meter.Meter, start, end int, opener byte) int {
+	f.build(wm)
 	x, e := start-f.lo, end-f.lo
 	if x >= e {
 		return -1
 	}
-	t := flowKind(opener)
-	f.advance(x)
+	t := flowKind(wm, opener)
+	f.advance(wm, x)
 	best := -1
 	// A closing bracket that pairs with nothing and ends a value whatever its end.
-	if u := lastBefore(f.goodLone[t], e); u >= x {
+	if u := lastBefore(wm, f.goodLone[t], e); u >= x {
 		best = u
 	}
 	// The good closing bracket of the outermost bracket of the kind open at start that closes before the end:
@@ -229,7 +231,7 @@ func (f *flowLine) closeAt(start, end int, opener byte) int {
 	g := f.goodOpen[t]
 	loIdx, hiIdx := 0, len(g)
 	for loIdx < hiIdx {
-		tick(1)
+		tick(wm, 1)
 		mid := (loIdx + hiIdx) / 2
 		if int(f.mate[f.stack[g[mid]]]) < e {
 			hiIdx = mid
@@ -244,10 +246,10 @@ func (f *flowLine) closeAt(start, end int, opener byte) int {
 	// follows. The last of the kind there is the outermost; when it closes a bracket opened inside the value, the
 	// brackets before it in the run lie inside that pair, and only one that pairs with nothing ends the value.
 	if from := max(x, int(f.runStart[e])); from < e {
-		if c := lastBefore(f.closes[t], e); c >= from {
+		if c := lastBefore(wm, f.closes[t], e); c >= from {
 			if p := int(f.mate[c]); p < x {
 				best = max(best, c)
-			} else if u := lastBefore(f.lone[t], c); u >= from {
+			} else if u := lastBefore(wm, f.lone[t], c); u >= from {
 				best = max(best, u)
 			}
 		}
@@ -260,12 +262,12 @@ func (f *flowLine) closeAt(start, end int, opener byte) int {
 
 // keyCommaAt returns the first comma from start on that starts a plain key ending at or before end
 // (plainKeyAfterComma in s[start:end]), or -1.
-func (f *flowLine) keyCommaAt(start, end int) int {
-	f.build()
+func (f *flowLine) keyCommaAt(wm *meter.Meter, start, end int) int {
+	f.build(wm)
 	cs := f.keyCommas
 	loIdx, hiIdx := 0, len(cs)
 	for loIdx < hiIdx {
-		tick(1)
+		tick(wm, 1)
 		mid := (loIdx + hiIdx) / 2
 		if cs[mid][0] >= start {
 			hiIdx = mid
@@ -276,7 +278,7 @@ func (f *flowLine) keyCommaAt(start, end int) int {
 	// A match is one comma, a quoted or plain key and a colon, and a key that holds a comma holds it in quotes,
 	// so the matches that hold end are few: each starts before end and the next starts inside its quotes.
 	for i := loIdx; i < len(cs) && cs[i][0] < end; i++ {
-		tick(1)
+		tick(wm, 1)
 		if cs[i][1] <= end {
 			return cs[i][0]
 		}
@@ -285,16 +287,16 @@ func (f *flowLine) keyCommaAt(start, end int) int {
 }
 
 // isKeySpace reports whether r is a character of keySpaceExpr.
-func isKeySpace(r rune) bool {
+func isKeySpace(_ *meter.Meter, r rune) bool {
 	return r == ' ' || r == '\t' || r == 0x200b || r == 0x2060 || r == 0xfeff || unicode.Is(unicode.Zs, r)
 }
 
 // keySpaceRun returns where the run of keySpaceExpr characters from i ends, at most at hi.
-func keySpaceRun(s string, i, hi int) int {
+func keySpaceRun(wm *meter.Meter, s string, i, hi int) int {
 	for i < hi {
-		tick(1)
+		tick(wm, 1)
 		r, n := utf8.DecodeRuneInString(s[i:hi])
-		if !isKeySpace(r) || r == utf8.RuneError && n <= 1 {
+		if !isKeySpace(wm, r) || r == utf8.RuneError && n <= 1 {
 			break
 		}
 		i += n
@@ -305,8 +307,8 @@ func keySpaceRun(s string, i, hi int) int {
 // plainKeyCommaEnd returns the end of the match of plainKeyAfterComma that starts at the comma s[c], read up to
 // hi, or -1. The match is unique when there is one: the key is quoted or a run of name characters, which a
 // shorter key could not end, and the blanks around it are runs.
-func plainKeyCommaEnd(s string, c, hi int) int {
-	i := keySpaceRun(s, c+1, hi)
+func plainKeyCommaEnd(wm *meter.Meter, s string, c, hi int) int {
+	i := keySpaceRun(wm, s, c+1, hi)
 	if i >= hi {
 		return -1
 	}
@@ -314,7 +316,7 @@ func plainKeyCommaEnd(s string, c, hi int) int {
 	case q == '"' || q == '\'':
 		j := i + 1
 		for j < hi && s[j] != q && s[j] != '\r' && s[j] != '\n' {
-			tick(1)
+			tick(wm, 1)
 			j++
 		}
 		if j >= hi || s[j] != q {
@@ -324,7 +326,7 @@ func plainKeyCommaEnd(s string, c, hi int) int {
 	case q == '_' || q >= 'A' && q <= 'Z' || q >= 'a' && q <= 'z':
 		i++
 		for i < hi {
-			tick(1)
+			tick(wm, 1)
 			b := s[i]
 			if b != '_' && b != '.' && b != '-' && (b < 'A' || b > 'Z') && (b < 'a' || b > 'z') && (b < '0' || b > '9') {
 				break
@@ -334,7 +336,7 @@ func plainKeyCommaEnd(s string, c, hi int) int {
 	default:
 		return -1
 	}
-	i = keySpaceRun(s, i, hi)
+	i = keySpaceRun(wm, s, i, hi)
 	if i < hi && s[i] == ':' {
 		return i + 1
 	}

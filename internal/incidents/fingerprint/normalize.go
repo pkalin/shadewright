@@ -184,6 +184,10 @@ func normalize(o Observation, mode quantityMode) string {
 	// would hide a folded block scalar indicator from the rules (#840). Each match becomes its placeholder
 	// at once, and only the text between matches is sanitized.
 	s := redact.Replace(o.Note, rawPlaceholder, sanitize)
+	if redact.IsWithheld(s) {
+		// Redaction withheld the note whole (its work budget ran out): it stands as a note too long to read.
+		return placeholderRedacted
+	}
 	s = expandShortIPv6(s)
 	s = flatten(s)
 	s = apply(s, identifierRules)

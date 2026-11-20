@@ -18,14 +18,19 @@ limitations under the License.
 
 package released
 
+import "github.com/pkalin/shadewright/internal/redact/meter"
+
 // Counter receives the steps of work of this package in a build with the tag redactwork, so that the
 // linearity tests of package redact count the work of the reading of the release before with its own. Package
 // redact sets it once, when it is initialised; nothing else writes it.
-var Counter func(n int)
+// metered says whether the steps were spent on a budget (a meter.Meter that is not nil).
+var Counter func(metered bool, n int)
 
-// tick reports n steps of work to Counter.
-func tick(n int) {
+// tick reports n steps of work to Counter, and to wm, the budget of the redaction it is part of (package meter,
+// #873).
+func tick(wm *meter.Meter, n int) {
+	wm.Spend(n)
 	if Counter != nil {
-		Counter(n)
+		Counter(wm != nil, n)
 	}
 }

@@ -303,6 +303,6 @@ func TestAnalyzerMetricsAreBoundedAndDocumented(t *testing.T) {
 	analysesUsedToday.set(1)
 	analysesPerDayLimit.set(2)
 
-	metricguard.Check(t, metrics.Registry, analyzerMetrics())
+	metricguard.Check(t, metrics.Registry, metricguard.WithRedaction(analyzerMetrics()))
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), analyzerMetrics())
 }

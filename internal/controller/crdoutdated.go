@@ -148,7 +148,17 @@ func (e *CRDOutdatedError) Error() string {
 	return fmt.Sprintf("the API server %s %s of RemediationRequest %s: the installed "+
 		"CustomResourceDefinition of RemediationRequest is older than the executor; apply the "+
 		"CustomResourceDefinitions of this release before the executor (%s)", e.verb(),
-		strings.Join(e.Fields, ", "), e.Request, upgradeDocsURL)
+		strings.Join(e.Fields, ", "), e.Request, upgradeDocsURL) + e.answer()
+}
+
+// answer is the API server's answer of a refused write, for the log: one 422 can name other causes besides the
+// value this executor's CRD does not know, and those must not hide behind the advice to apply the CRDs. The
+// Event keeps to fixed text (eventMessage).
+func (e *CRDOutdatedError) answer() string {
+	if !e.Refused || e.Err == nil {
+		return ""
+	}
+	return "; the API server answered: " + e.Err.Error()
 }
 
 // Unwrap returns the API server's answer of a refused write, nil for a pruned field.

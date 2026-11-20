@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 520" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">The failed review check on a pull request on another base</title>
-  <desc id="d">Overview of ADR-0045. With reviewer hints on, when a stale plan, a cancel or a stop finds the request's own pull request open on a base other than the target branch, the executor completes the check run shadewright/review on the recorded head commit as failed and records it Stale. The summary holds fixed text and one constant: the phase, ChangeRequestOnOtherBase or the stale reason, never text from the code host. The check run belongs to the commit, so a pass written before the base changed is no longer the latest, and a pull request moved back or merged on a base whose ruleset requires the check from the App is blocked. Nothing is written when hints are off, when the pull request is merged on the other base, or when its read fails. When writes are paused, the settings entry names another target branch, the repository is gone or the Git host fails the write, the condition ReviewCheckNotFailed says so and the next look tries again. Never on another base: push, comment, merge, update of title or body. No new read and no new grant.</desc>
+  <desc id="d">Overview of ADR-0045. With reviewer hints on, the executor completes the check run shadewright/review on the recorded head commit as failed and records it Stale in four cases: a stale plan, a cancel or a stop reads the request's own pull request open on a base other than the target branch; a stale plan or a cancel reads it closed there, because a closed pull request can be reopened; and a stopped holder whose own pull request is not open looks while another open pull request from its branch holds the lock and the check is still owed, because the check belongs to the request's own commit. On another base the summary is a fixed variant that promises no close, with one constant or none, never text from the code host. A pull request read gone or merged on another base gets no check, and nothing is written when hints are off or when the read fails. When writes are paused, the settings entry names another target branch, the repository is gone or the Git host fails the write, the condition ReviewCheckNotFailed says so and the next look tries again. Never on another base: push, comment, merge, update of title or body. No new read and no new grant.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
@@ -20,12 +20,12 @@
   <rect class="box" x="36" y="36" width="310" height="214" rx="12"/>
   <text class="tag" x="54" y="62">A REQUEST STOPS</text>
   <text class="h" x="54" y="86">Stale plan, cancel or stop</text>
-  <text class="s" x="54" y="112">The request's own pull request is read</text>
-  <text class="s" x="54" y="132">by its number and found open on a base</text>
-  <text class="s" x="54" y="152">other than the target branch.</text>
-  <text class="s" x="54" y="182">Only with reviewer hints on</text>
-  <text class="s" x="54" y="202">(--reviewer-hints, ADR-0028), the only</text>
-  <text class="s" x="54" y="222">case where the executor owns the check.</text>
+  <text class="s" x="54" y="108">Own pull request read open or closed on</text>
+  <text class="s" x="54" y="126">another base: stale plan, cancel, stop</text>
+  <text class="s" x="54" y="144">(a closed one can reopen). Or a stopped</text>
+  <text class="s" x="54" y="162">holder's own one is not open while another</text>
+  <text class="s" x="54" y="180">from its branch holds the lock, check owed.</text>
+  <text class="s" x="54" y="206">Only with reviewer hints on (ADR-0028).</text>
 
   <path class="f" d="M346 143H384" marker-end="url(#a)"/>
   <path class="f" d="M722 143H760" marker-end="url(#a)"/>
@@ -35,10 +35,10 @@
   <text class="h" x="402" y="86">Failed check shadewright/review</text>
   <text class="s" x="402" y="112">On the recorded head commit, recorded</text>
   <text class="s" x="402" y="132">Stale: never written again, any state.</text>
-  <text class="s" x="402" y="162">Summary: fixed text and one constant,</text>
-  <text class="s" x="402" y="182">the phase, ChangeRequestOnOtherBase or</text>
-  <text class="s" x="402" y="202">the stale reason. No text from the host.</text>
-  <text class="s" x="402" y="232">The only write there besides the close.</text>
+  <text class="s" x="402" y="162">Summary: fixed variant, promises no close;</text>
+  <text class="s" x="402" y="182">one constant at most, never host text.</text>
+  <text class="s" x="402" y="212">These are the only writes there besides</text>
+  <text class="s" x="402" y="232">the close.</text>
 
   <rect class="box" x="760" y="36" width="324" height="214" rx="12"/>
   <text class="tag" x="778" y="62">EFFECT</text>
@@ -53,8 +53,8 @@
   <rect class="ext" x="36" y="274" width="510" height="112" rx="12"/>
   <text class="tag" x="54" y="300">NOT WRITTEN</text>
   <text class="s" x="54" y="324">Hints off. Merged on the other base (nothing left</text>
-  <text class="s" x="54" y="344">to block). The read of the pull request failed:</text>
-  <text class="s" x="54" y="364">nothing is written and the read is retried.</text>
+  <text class="s" x="54" y="344">to block). Read gone: not tied to the request. Read</text>
+  <text class="s" x="54" y="364">failed: nothing is written, the read is retried.</text>
 
   <rect class="box" x="574" y="274" width="510" height="112" rx="12"/>
   <text class="tag" x="592" y="300">WRITTEN LATER, SAID IN STATUS</text>

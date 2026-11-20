@@ -35,6 +35,10 @@ import (
 // between them.
 const MaxLogExcerpts = 2
 
+// logBudgetCalls is the time budget of the log section in call timeouts: the most it could take with one read
+// per container. Every read of the section shares it, whatever their order and outcome.
+const logBudgetCalls = MaxLogExcerpts
+
 // minSecondRead is the least of a container's share of the log bound that must be left after the excerpt of
 // its terminated current instance for the builder to read its previous instance as well.
 const minSecondRead = 1 << 10
@@ -111,8 +115,8 @@ func notAvailable(sec Section, prov Provenance, text string) Block {
 	return Block{Section: sec, Provenance: prov, Availability: NotAvailable, Text: text}
 }
 
-// logBlocks reads and bounds the log excerpts. It reports whether the log source failed, and returns an
-// error only when ctx is done.
+// logBlocks reads and bounds the log excerpts, within a time budget of logBudgetCalls call timeouts for the
+// whole section. It reports whether the log source failed, and returns an error only when ctx is done.
 func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, bool, error) {
 	if b.logs == nil {
 		return []Block{notAvailable(SectionLogs, ProvenanceLogExcerpt, "not available: no log source is configured\n")}, false, nil
@@ -121,6 +125,7 @@ func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, 
 	if t.state != targetResolved || len(picks) == 0 {
 		return []Block{notAvailable(SectionLogs, ProvenanceLogExcerpt, "not available: no pod of the target to read logs from\n")}, false, nil
 	}
+	ctx = withBudget(ctx, logBudgetCalls*b.timeout)
 	budget := b.limits.Logs / len(picks)
 	since := w.end.Sub(w.start).Round(time.Second)
 	blocks := make([]Block, 0, len(picks))
@@ -148,7 +153,8 @@ func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, 
 // is a block whose header names its instance. A read that gave no lines leaves its header lines (the instance
 // and the fixed reason) before the first excerpt, or, when no read gave lines, a block of those lines alone,
 // marked [CouldNotFetch] when a read failed. It reports whether the log source failed: a read failed and none
-// gave an excerpt. It returns an error only when ctx is done.
+// gave an excerpt, or the time budget of the section cut a read short (the excerpts read before it are kept).
+// It returns an error only when ctx is done.
 func (b *Builder) pickBlocks(ctx context.Context, pick logPick, since time.Duration, budget int) ([]Block, bool, error) {
 	order := []bool{pick.previous}
 	if pick.other {
@@ -156,7 +162,7 @@ func (b *Builder) pickBlocks(ctx context.Context, pick logPick, since time.Durat
 	}
 	var out []Block
 	var notes strings.Builder
-	left, readFailed := budget, false
+	left, readFailed, cut := budget, false, false
 	for i, previous := range order {
 		if i > 0 && (left <= 0 || len(out) > 0 && (!pick.currentDead || left < minSecondRead)) {
 			break
@@ -198,6 +204,8 @@ func (b *Builder) pickBlocks(ctx context.Context, pick logPick, since time.Durat
 			// The source failed, not the instance: a second read of it would cost another timeout and could
 			// use up the build deadline that the metrics and policy sections need.
 			readFailed = true
+			// A read that failed once the time was up was cut short by it: the logs are incomplete.
+			cut = v.Read == LogReadFailed && outOfTime(ctx)
 			break
 		}
 	}
@@ -210,7 +218,7 @@ func (b *Builder) pickBlocks(ctx context.Context, pick logPick, since time.Durat
 		return []Block{blk}, readFailed, nil
 	}
 	out[0].Text, out[0].headLen = notes.String()+out[0].Text, notes.Len()+out[0].headLen
-	return out, false, nil
+	return out, cut, nil
 }
 
 // instanceName names an instance in a block header and in the log.

@@ -122,7 +122,10 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -timeout 20m -coverprofile cover.out
+	@# -timeout applies to each package's test binary. internal/controller (the plain tests, then the envtest suite
+	@# TestControllers) took 14 to 15 minutes under -race on a hosted runner before #838 and ran past 20 after it (#961),
+	@# so the limit is 30 minutes; the packages still run side by side.
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -timeout 30m -coverprofile cover.out
 	@# The redact timing tests and the 100,000 seeded keys skip under -race, and the generated corpora check a seeded
 	@# sample there (internal/redact/race_test.go, racesample_test.go), and so do the log source's tests on logs of
 	@# about 1 MiB (internal/providers/logs/kube/racesample_test.go): run both packages again without it, so

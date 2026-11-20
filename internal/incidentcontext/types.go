@@ -163,8 +163,10 @@ const (
 	LabelLogTruncated Label = "log excerpt truncated by the source"
 	// LabelLogEndMissing means the log source could not read the newest lines.
 	LabelLogEndMissing Label = "log excerpt end missing"
-	// LabelLogInstanceUncertain means the log source cannot tie the excerpt to one container instance.
-	LabelLogInstanceUncertain Label = "log excerpt uncertain about its instance"
+	// LabelLogInstanceUncertain means the log source cannot tie the excerpt to one instance of the container:
+	// a restart, a pod re-created under the same name, a pod gone at the second check, or no instance in its status.
+	// The text names both causes and claims neither the pod nor the container is certain (#951).
+	LabelLogInstanceUncertain Label = "log excerpt from an uncertain instance of this container (a restart or a re-created pod)"
 	// LabelMetricsPartial means the metrics source warned that an answer may be incomplete: a missing series
 	// may exist and a total may be short.
 	LabelMetricsPartial Label = "partial metrics answer"

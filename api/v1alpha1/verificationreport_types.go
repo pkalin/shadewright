@@ -27,9 +27,9 @@ const MaxReportBaselines = 200
 
 // ResetReason says why a verification window was reset (ADR-0030 section 4). The verifier sets Restarted,
 // PodNotReady, PartialRollout, EvidenceMissing, ScaledToZero and ObservationGap in its report, the only reasons
-// the enum of WindowReset.reason accepts. NotAvailable, StaleReport and ReportMismatch are the executor's
-// reasons for its own window; with PartialRollout they are the reasons of status.verification.lastReset of a
-// RemediationRequest (VerificationReset), never of a report.
+// the enum of WindowReset.reason accepts. NotAvailable, StaleReport, ReportMismatch and ExecutorRestarted are
+// the executor's reasons for its own window; with PartialRollout they are the reasons of
+// status.verification.lastReset of a RemediationRequest (VerificationReset), never of a report.
 type ResetReason string
 
 // The reset reasons.
@@ -59,6 +59,9 @@ const (
 	// ResetReportMismatch: the report's spec names another request, merge commit, target or template revision
 	// (executor). No evidence.
 	ResetReportMismatch ResetReason = "ReportMismatch"
+	// ResetExecutorRestarted: a new executor process (a restart or a leader change) found the window open and
+	// opened by no check of its own, a span no check of its own covers (the executor). No evidence.
+	ResetExecutorRestarted ResetReason = "ExecutorRestarted"
 )
 
 // WindowReset is a reset of a verification window. Its class (Restarted is trouble, every other reason no

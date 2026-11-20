@@ -1499,9 +1499,9 @@ Used by: [RemediationRequestSpec](#remediationrequestspec).
 
 ResetReason says why a verification window was reset (ADR-0030 section 4). The verifier sets Restarted,
 PodNotReady, PartialRollout, EvidenceMissing, ScaledToZero and ObservationGap in its report, the only reasons
-the enum of WindowReset.reason accepts. NotAvailable, StaleReport and ReportMismatch are the executor's
-reasons for its own window; with PartialRollout they are the reasons of status.verification.lastReset of a
-RemediationRequest (VerificationReset), never of a report.
+the enum of WindowReset.reason accepts. NotAvailable, StaleReport, ReportMismatch and ExecutorRestarted are
+the executor's reasons for its own window; with PartialRollout they are the reasons of
+status.verification.lastReset of a RemediationRequest (VerificationReset), never of a report.
 
 - Underlying type: string
 
@@ -1518,6 +1518,7 @@ Used by: [VerificationReset](#verificationreset), [WindowReset](#windowreset).
 | `NotAvailable` | ResetNotAvailable: the target reports other available replicas than desired, fewer or more (executor). No evidence. |
 | `StaleReport` | ResetStaleReport: the report is missing or its sample counter stopped rising (executor). No evidence. |
 | `ReportMismatch` | ResetReportMismatch: the report's spec names another request, merge commit, target or template revision (executor). No evidence. |
+| `ExecutorRestarted` | ResetExecutorRestarted: a new executor process (a restart or a leader change) found the window open and opened by no check of its own, a span no check of its own covers (the executor). No evidence. |
 
 ### ResolvedSource
 
@@ -1836,15 +1837,17 @@ Used by: [VerificationWindow](#verificationwindow).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `reason` | [ResetReason](#resetreason) | Yes | reason says why the window was reset: NotAvailable (the target reports other available replicas than desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision or container) or PartialRollout (the report does not cover every desired replica, or a revert is checked before RolledOut is True). Every one is a reset of the no-evidence class.<br>One of `NotAvailable`, `StaleReport`, `ReportMismatch`, `PartialRollout` |
+| `reason` | [ResetReason](#resetreason) | Yes | reason says why the window was reset: NotAvailable (the target reports other available replicas than desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision or container), PartialRollout (the report does not cover every desired replica, or a revert is checked before RolledOut is True) or ExecutorRestarted (a new executor process, after a restart or a leader change, found the window open and opened by no check of its own; its time is the second before it began reconciling, or windowStart when that is later). Every one is a reset of the no-evidence class.<br>One of `NotAvailable`, `StaleReport`, `ReportMismatch`, `PartialRollout`, `ExecutorRestarted` |
 | `time` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | time is when the reset was recorded, on the executor's clock. It is never earlier than windowStart at that moment or the previous reset, so the window is open only while windowStart is later than it. |
 
 ### VerificationWindow
 
 VerificationWindow is the executor's own stable window of a Verifying request (ADR-0030 section 4), kept next
 to the verifier's window in the VerificationReport. Every time in it is on the executor's clock, and it is
-never compared with a time of the report. No window counts time from before the executor process began reconciling, so after a restart or a leader change every open window needs a full stableFor again. A lastReset is
-counted: resets is at least 1 when it is set.
+never compared with a time of the report. No window counts time from before the executor process began
+reconciling: after a restart or a leader change the first check resets every open window no check of the new
+process opened, with ExecutorRestarted, so it needs a full stableFor again and the window stored is the one
+that decides. A lastReset is counted: resets is at least 1 when it is set.
 
 
 Validation rules:

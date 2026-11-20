@@ -59,7 +59,7 @@ var statusClocks = map[string]statusClock{
 		why: "a paused rollout, which moves the delivery window by the pause"},
 	"status.pullRequest.appliedObservedAt": {test: "TestEveryGitReadRetrySiteKeepsItsBound",
 		why: "the start of the delivery window (paceAt(windowEnd) of deliveryStep and waitForDelivery)"},
-	"status.verification.windowStart": {test: "TestCountedStartsNoWindowBeforeReconciling",
+	"status.verification.windowStart": {test: "TestRestartedResetsWindowsNotOfThisProcess",
 		why: "the stable window of the verification, ended by its verdict"},
 
 	"status.pullRequest.incidentStopped.readAt": {why: "the read that set the IncidentStopped mark; the wait before " +

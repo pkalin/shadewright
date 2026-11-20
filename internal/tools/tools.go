@@ -192,8 +192,9 @@ const (
 	LabelLogTruncated Label = "log excerpt truncated by the source"
 	// LabelLogEndMissing: the log source could not read the newest lines.
 	LabelLogEndMissing Label = "log excerpt end missing"
-	// LabelLogInstanceUncertain: the log source cannot tie the excerpt to one container instance.
-	LabelLogInstanceUncertain Label = "log excerpt uncertain about its instance"
+	// LabelLogInstanceUncertain: the log source cannot tie the excerpt to one instance of the container; the
+	// it may be another restart or a pod re-created under the same name (#951). Same text as the context's label.
+	LabelLogInstanceUncertain Label = Label(incidentcontext.LabelLogInstanceUncertain)
 	// LabelMetricsPartial: the metrics source warned that the answer may be incomplete.
 	LabelMetricsPartial Label = "partial metrics answer"
 	// LabelOutsideAttribution: the call names a pod that is not one of the pods the context builder attributed

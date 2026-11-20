@@ -321,7 +321,10 @@ func TestSettlementGitReadFailures(t *testing.T) {
 				continue
 			}
 			if path == pathWatch {
-				t.Run("recovered-content/"+m.Name, func(t *testing.T) { testSettlementContentClock(t, m.Name) })
+				t.Run("recovered-content/"+m.Name, func(t *testing.T) {
+					t.Parallel()
+					testSettlementContentClock(t, m.Name)
+				})
 			}
 			if calls[m.Name] == 0 {
 				t.Run(path+"/"+m.Name, func(t *testing.T) { t.Skip("method not used by this path") })
@@ -329,6 +332,8 @@ func TestSettlementGitReadFailures(t *testing.T) {
 			}
 			for nth := 1; nth <= calls[m.Name]; nth++ {
 				t.Run(fmt.Sprintf("%s/%s/%d", path, m.Name, nth), func(t *testing.T) {
+					// Each row builds its own world (#961).
+					t.Parallel()
 					r, g, rr := readFailureWorld(t, path)
 					ctx := context.Background()
 					count := 0

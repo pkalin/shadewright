@@ -450,8 +450,11 @@ func TestEveryGitReadRetrySiteKeepsItsBound(t *testing.T) {
 			continue
 		}
 		t.Run(site, func(t *testing.T) {
+			// Each case builds its own world and clock (#961: one after the other they took 11 s under -race).
+			t.Parallel()
 			for _, c := range cases {
 				t.Run(c.String(), func(t *testing.T) {
+					t.Parallel()
 					wait, expired := row.check(t, c)
 					rest := c.left - c.during
 					switch {

@@ -175,14 +175,18 @@ func boundOrders() [][]boundEvent {
 
 // Every order of a refusal, a restart, the bound passing, a merge or a close, and the Git host answering again, with
 // one reconcile after each event: the replacement ends as the rule says (boundModel), and one ended at the bound
-// keeps the lock unless a read shows the pull request closed.
+// keeps the lock unless a read shows the pull request closed. Each order builds its own world and clock, so the orders
+// run in parallel (#961).
 func TestRecoveryBoundGeneratedOrders(t *testing.T) {
 	orders := boundOrders()
 	if len(orders) < 500 {
 		t.Fatalf("only %d orders", len(orders))
 	}
 	for _, seq := range orders {
-		t.Run(string(seq)+"_", func(t *testing.T) { boundOrder(t, seq) })
+		t.Run(string(seq)+"_", func(t *testing.T) {
+			t.Parallel()
+			boundOrder(t, seq)
+		})
 	}
 }
 

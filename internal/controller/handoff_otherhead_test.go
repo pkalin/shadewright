@@ -20,9 +20,11 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
@@ -186,6 +188,110 @@ func TestOtherHeadContentReadFailsWaitsThenRecords(t *testing.T) {
 	}
 	gotP, _ = reconcileOnce(t, r, p)
 	noRecordOnPredecessor(t, gotP)
+}
+
+// predecessorHeadMerged is endedWatch with the predecessor's own recorded head put back on the pull request by a force
+// push and merged, before the replacement took it over.
+func predecessorHeadMerged(t *testing.T) (*RemediationRequestReconciler, *api.RemediationRequest, *api.RemediationRequest,
+	providers.ChangeRequest, func(time.Duration)) {
+	t.Helper()
+	r, g, p, rr, cr, move := endedWatch(t)
+	g.SetFail(nil)
+	if err := g.ForcePush("shadewright/"+string(chainRootOf(p)), p.Status.PullRequest.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.MergeWithCommit(cr.Number); err != nil {
+		t.Fatal(err)
+	}
+	return r, p, rr, cr, move
+}
+
+// The predecessor's own head is merged and the predecessor is gone before it recorded it, while the replacement holds
+// the lock before its takeover (third case of the decision of 2026-11-20 on #870): the replacement records the merge
+// as a foreign change and then settles its lock. Before, it ended with the lock released and nothing recorded.
+func TestPredecessorHeadMergeRecordedWithThePredecessorGone(t *testing.T) {
+	r, p, rr, cr, move := predecessorHeadMerged(t)
+	ctx := t.Context()
+	gone := storedRR(t, r, p)
+	gone.Finalizers = nil
+	if err := r.Update(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	move(heldRecheckInterval)
+	got, err := reconcileOnce(t, r, rr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignRecordedOnReplacement(t, got, cr.Number)
+	move(heldRecheckInterval)
+	for range 2 {
+		got, _ = reconcileOnce(t, r, rr)
+	}
+	foreignRecordedOnReplacement(t, got, cr.Number)
+	if ptr.Deref(got.Status.HoldsTarget, false) {
+		t.Fatal("the recorded merge did not settle the replacement's lock")
+	}
+}
+
+// The same merge while the predecessor is being deleted (its finalizer pending) and holds no record of it: the
+// replacement records it, and the predecessor's finalizer records none and lets go.
+func TestPredecessorHeadMergeRecordedWhileThePredecessorIsDeleted(t *testing.T) {
+	r, p, rr, cr, move := predecessorHeadMerged(t)
+	deleted := storedRR(t, r, p)
+	if controllerutil.AddFinalizer(deleted, FinalizerName) {
+		if err := r.Update(t.Context(), deleted); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Delete(t.Context(), deleted); err != nil {
+		t.Fatal(err)
+	}
+	if deleting := storedRR(t, r, p); deleting.DeletionTimestamp.IsZero() || recordsMerge(deleting) {
+		t.Fatalf("predecessor %q, deleting %v: want it being deleted with no record of the merge",
+			deleting.Status.Phase, deleting.DeletionTimestamp)
+	}
+	move(heldRecheckInterval)
+	got, err := reconcileOnce(t, r, rr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignRecordedOnReplacement(t, got, cr.Number)
+	for range 3 {
+		move(heldRecheckInterval)
+		_, _ = r.Reconcile(t.Context(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(p)})
+		got, _ = reconcileOnce(t, r, rr)
+	}
+	foreignRecordedOnReplacement(t, got, cr.Number)
+	left := &api.RemediationRequest{}
+	switch err := r.Get(t.Context(), client.ObjectKeyFromObject(p), left); {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		t.Fatal(err)
+	default:
+		noRecordOnPredecessor(t, left)
+	}
+}
+
+// A present predecessor keeps its own head: the replacement records nothing of that merge and the predecessor
+// records it, so exactly one request holds the record.
+func TestPredecessorHeadMergeKeptByThePresentPredecessor(t *testing.T) {
+	r, p, rr, _, move := predecessorHeadMerged(t)
+	var got, gotP *api.RemediationRequest
+	for range 3 {
+		move(heldRecheckInterval)
+		got, _ = reconcileOnce(t, r, rr)
+		gotP, _ = reconcileOnce(t, r, p)
+	}
+	if recordsMerge(got) {
+		c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionApproved)
+		t.Fatalf("replacement %q, Approved %+v: it records the merge of the predecessor's head", got.Status.Phase, c)
+	}
+	if !recordsMerge(gotP) {
+		t.Fatalf("predecessor %q: want it to record the merge of its own head", gotP.Status.Phase)
+	}
 }
 
 // The content read of recordOtherHeadMerge is bounded by the MergeContent wait, the same entry and end as the read of

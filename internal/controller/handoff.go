@@ -607,7 +607,9 @@ const (
 // of that, a replacement that is being deleted records nothing, nor does one whose handoff a verdict settled
 // (handoffSettled), so its commit counts as foreign. Short of those, a replacement that holds the target lock before
 // its takeover (recordsEveryMerge) records a merge of any other head too, as a foreign change (decision of 2026-11-20 on
-// #870), so the predecessor records none. A failed read is an error.
+// #870), so the predecessor records none. The predecessor's own head is the predecessor's, except once it is being
+// deleted without a record of that merge while such a replacement holds the lock (predecessorLeftItsMerge, third case
+// of that decision). A failed read is an error.
 func (r *RemediationRequestReconciler) mergedHeadOwner(ctx context.Context, git providers.GitProvider,
 	pred, repl *remediationv1alpha1.RemediationRequest, to *remediationv1alpha1.OutgoingHandoff, head string) (
 	mergeOwner, error) {
@@ -622,6 +624,9 @@ func (r *RemediationRequestReconciler) mergedHeadOwnerOf(ctx context.Context, gi
 	pred, repl *remediationv1alpha1.RemediationRequest, to *remediationv1alpha1.OutgoingHandoff, head string,
 	judge bool) (mergeOwner, bool, error) {
 	if pred.Status.PullRequest != nil && head == pred.Status.PullRequest.HeadSHA {
+		if predecessorLeftItsMerge(pred, repl, to, head) {
+			return ownerReplacement, false, nil
+		}
 		return ownerPredecessor, false, nil
 	}
 	if to == nil || repl == nil || repl.UID != types.UID(to.UID) {
@@ -647,6 +652,18 @@ func (r *RemediationRequestReconciler) mergedHeadOwnerOf(ctx context.Context, gi
 		return ownerReplacement, false, nil
 	}
 	return ownerForeign, false, nil
+}
+
+// predecessorLeftItsMerge reports whether a merge of pred's own recorded head is left to repl, its replacement named by
+// its outgoing handoff to (third case of the decision of 2026-11-20 on #870): pred is being deleted and holds no
+// record of that merge (holdsMergeRecord), so its finalizer records none, and repl holds the target lock before its
+// takeover (recordsEveryMerge), so it records the merge as a foreign change with the same reasons as any other head.
+// A present predecessor keeps its own head. It reads the status only.
+func predecessorLeftItsMerge(pred, repl *remediationv1alpha1.RemediationRequest,
+	to *remediationv1alpha1.OutgoingHandoff, head string) bool {
+	return !pred.DeletionTimestamp.IsZero() && pred.Status.PullRequest != nil &&
+		!holdsMergeRecord(pred, pred.Status.PullRequest.Number, head) &&
+		to != nil && repl != nil && repl.UID == types.UID(to.UID) && recordsEveryMerge(repl)
 }
 
 // recordsEveryMerge reports whether repl, a replacement that exists and is not being deleted, records every merge of

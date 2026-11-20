@@ -131,8 +131,11 @@ import (
 //	   held the target lock, existed and was not being deleted at the merge, the replacement records it (no receipt,
 //	   MergedWithForeignChange or MergeContentUnreadable) and the predecessor records none while the replacement
 //	   lives, nor ends a failure for the breaker on it; that replacement does not release the lock before its record;
-//	   and, once reads answer, the merge is recorded on one request while either lives. One merge P12 asks no record
-//	   of from that replacement: a head without its commit once the predecessor is gone (foreignPredGone);
+//	   and, once reads answer, the merge is recorded on one request while either lives. A merge of the predecessor's
+//	   own head before the takeover is the predecessor's while it is present (P1); once it is gone or being deleted
+//	   without a record of it while that replacement holds the lock (predLeft, third case of the same decision), the
+//	   replacement records it with the same reasons and the predecessor none, and a predecessor that recorded it and
+//	   then went leaves a record on the replacement too, never at the same time as its own (predHeadOnReplacement);
 //	P9 the predecessor never stores the abort of an intent whose takeover the replacement, as stored at that write,
 //	   recorded (from Done), whatever ends it, unless a person put the predecessor's own head back on the pull
 //	   request (fourth round of #786).
@@ -156,7 +159,7 @@ import (
 // to 500, 1 to 100 under the race detector or -short; the code was checked against the seeds 1 to 9,000 and then
 // 9,001 to 13,000, in the fifth round of #786 against 1 to 24,000, for #880 against 1 to 60,000, and for its second decision (a wait is a claim) against 1 to 260,000 with the
 // deletion of the claim holder drawn, and for the live copies of the requests (decision of 2026-11-19 on #786) against 1 to
-// 260,000 with the cache lagging behind a change of the other request drawn. For #870 (P12) it was checked against 1 to 120,000. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
+// 260,000 with the cache lagging behind a change of the other request drawn. For #870 (P12) it was checked against 1 to 120,000, and for its third case (predLeft) against 1 to 36,000 (seed 59 breaks P12 without the change, seed 175 without its part for a predecessor that is gone). SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
 // to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1 prints the trace of every seed
 // (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile). The log of every run (go test -v)
 // holds the count of failures per property, of the exclusions, and of what the sequences reached.
@@ -474,6 +477,46 @@ type hmMerge struct {
 	// replHeld: the replacement, before its takeover, held the target lock, existed and was not being deleted when
 	// the merge was made, so it records a merge of any head that is not the predecessor's own (P12, #870).
 	replHeld bool
+	// predLeft: the predecessor's own head was merged before the takeover, and the predecessor was gone or being
+	// deleted, without a record of the merge, while the replacement held the target lock before its takeover, existed
+	// and was not being deleted: the replacement records it (P12, third case of the decision of 2026-11-20 on #870).
+	predLeft bool
+}
+
+// notePredLeft notes predLeft once it holds, on reqs as they are after a step.
+func (m *hmWorld) notePredLeft(reqs map[string]*api.RemediationRequest) {
+	mg, p := m.merge, reqs[hmPred]
+	if mg == nil || mg.owner != hmPred || mg.afterTakeover || mg.predLeft || mg.recorded[hmPred] || recordsMerge(p) ||
+		(p != nil && p.DeletionTimestamp.IsZero()) || !m.replHoldsBeforeTakeover() {
+		return
+	}
+	mg.predLeft = true
+	m.reach["pred-head-merge-pred-left"] = true
+	m.logf("  the predecessor left its merged head unrecorded while the replacement holds the lock")
+}
+
+// predHeadOnReplacement reports the record a merge of the predecessor's own head, before the takeover, has once the
+// predecessor left it (predLeft) or is gone: on the replacement, without a receipt, as MergedWithForeignChange or
+// MergeContentUnreadable. A predecessor that recorded the merge and then went leaves nothing the replacement can read,
+// so the replacement holding the lock records it as well; the two records never stand at the same time (P1's first
+// read).
+func (m *hmWorld) predHeadOnReplacement(reqs map[string]*api.RemediationRequest) bool {
+	mg, repl := m.merge, reqs[hmRepl]
+	if mg == nil || mg.owner != hmPred || mg.afterTakeover || (!mg.predLeft && reqs[hmPred] != nil) {
+		return false
+	}
+	if repl == nil {
+		return mg.recorded[hmRepl]
+	}
+	return recordedAsForeign(repl)
+}
+
+// recordedAsForeign reports whether x records a merge without a receipt as a foreign change or as one whose content
+// could not be read.
+func recordedAsForeign(x *api.RemediationRequest) bool {
+	c := meta.FindStatusCondition(x.Status.Conditions, api.ConditionApproved)
+	return x.Status.MergeReceipt == nil && c != nil &&
+		(c.Reason == ReasonMergedWithForeignChange || c.Reason == ReasonMergeContentUnreadable)
 }
 
 // foreignOnReplacement reports the other record a merge of the predecessor's commit may have once the replacement took
@@ -1419,7 +1462,8 @@ func (m *hmWorld) observeMerge(reqs map[string]*api.RemediationRequest) {
 		return
 	}
 	other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}[mg.owner]
-	if recordsMerge(reqs[other]) && !m.foreignForGone(reqs) && !m.foreignOnReplacement(reqs) {
+	if recordsMerge(reqs[other]) && !m.foreignForGone(reqs) && !m.foreignOnReplacement(reqs) &&
+		!m.predHeadOnReplacement(reqs) {
 		m.fail("P1", "the merge of the %s's commit is recorded on the %s (%s)", mg.owner, other, describe(reqs[other]))
 	}
 	for who, x := range reqs {
@@ -1427,7 +1471,7 @@ func (m *hmWorld) observeMerge(reqs map[string]*api.RemediationRequest) {
 			mg.recorded[who] = true
 		}
 	}
-	if len(mg.recorded) > 1 {
+	if len(mg.recorded) > 1 && !m.predHeadOnReplacement(reqs) {
 		m.fail("P1", "the merge of the %s's commit is recorded on both requests", mg.owner)
 	}
 	successes := 0
@@ -1479,13 +1523,6 @@ func (m *hmWorld) observeOtherMerge(reqs map[string]*api.RemediationRequest) {
 	}
 }
 
-// foreignPredGone reports the one merge P12 asks no record of from the replacement that held the lock: a head without
-// the replacement's commit once the predecessor is gone. It may be the predecessor's own head, recorded before it went,
-// and nothing stored tells, so the replacement settles its lock on it without a record (heldRecoveryAlone).
-func (m *hmWorld) foreignPredGone(reqs map[string]*api.RemediationRequest) bool {
-	return m.merge != nil && m.merge.owner == "foreign" && reqs[hmPred] == nil
-}
-
 // settledOtherRecord checks P12 after the settling run: the merge of a head that is neither request's own commit is
 // recorded on the replacement that held the lock at the merge while it lives, and on one request otherwise while either
 // lives (the predecessor ended HandedOff records nothing, as P1 for #875).
@@ -1497,8 +1534,11 @@ func (m *hmWorld) settledOtherRecord(mg *hmMerge, reqs map[string]*api.Remediati
 	p, repl := reqs[hmPred], reqs[hmRepl]
 	live := func(x *api.RemediationRequest) bool { return x != nil && x.DeletionTimestamp.IsZero() }
 	switch {
-	case m.foreignPredGone(reqs) && !mg.recorded[hmRepl]:
-		m.excused["#870 head without the replacement's commit, predecessor gone"]++
+	case !mg.replHeld && p == nil && !mg.recorded[hmPred] && !mg.recorded[hmRepl]:
+		// No request held the lock that records it at the merge, and the predecessor went before it recorded it: a
+		// request deleted before it records the merge of its pull request records nothing (finalize reads it merged
+		// and lets go), as for #875.
+		m.excused["#870 merge after the replacement let go, predecessor deleted"]++
 	case mg.replHeld && live(repl):
 		if !recordsOn(repl, m.number) || repl.Status.MergeReceipt != nil {
 			m.failAbout("P12", aboutUnrecorded, "the replacement that held the lock does not record the merge of %s "+
@@ -1526,6 +1566,7 @@ func (m *hmWorld) observe() {
 	m.prEnded = cr.State != providers.ChangeRequestOpen || m.branchGone
 	m.mu.Unlock()
 	m.note(p, rr)
+	m.notePredLeft(reqs)
 	// P1 and P2 after a merge of a request's own commit; the first read of P1 after a merge of any head.
 	m.observeFirstRead(reqs)
 	m.observeMerge(reqs)
@@ -1602,19 +1643,7 @@ func (m *hmWorld) observeLock(reqs map[string]*api.RemediationRequest) {
 			free = false
 		}
 		if m.held[who] && !holds && x != nil && !repoGone {
-			switch {
-			case cr.State == providers.ChangeRequestOpen && who == hmRepl && m.carriesOwn(cr.HeadSHA, hmRepl):
-				m.fail("P3", "the replacement released the lock while its commit is on the open pull request (%s)",
-					describe(x))
-			case cr.State == providers.ChangeRequestMerged && m.merge != nil && m.merge.owner == who && !recordsMerge(x) &&
-				!m.foreignOnReplacement(reqs) && (!m.merge.afterTakeover || who != hmPred || !handedOff(x)):
-				m.fail("P3", "the %s released the lock on a merge of its commit it does not record (%s)", who,
-					describe(x))
-			case cr.State == providers.ChangeRequestMerged && who == hmRepl && m.otherMerge() && m.merge.replHeld &&
-				!recordsMerge(x) && !m.foreignPredGone(reqs):
-				m.fail("P12", "the replacement released the lock on the merge of %s before it recorded it (%s)",
-					short(m.merge.head), describe(x))
-			}
+			m.checkRelease(who, x, reqs, cr)
 		}
 		m.held[who] = holds
 	}
@@ -1622,6 +1651,26 @@ func (m *hmWorld) observeLock(reqs map[string]*api.RemediationRequest) {
 		!m.reopenExcuses(cr.HeadSHA) {
 		m.failAbout("P3", aboutLockFree, "the lock is free while the open pull request carries a commit of a request (pred: %s, repl: %s)",
 			describe(reqs[hmPred]), describe(reqs[hmRepl]))
+	}
+}
+
+// checkRelease checks P3 and P12 for who, which held the target lock before this step and no longer does (x as it is
+// now, cr the pull request).
+func (m *hmWorld) checkRelease(who string, x *api.RemediationRequest, reqs map[string]*api.RemediationRequest,
+	cr providers.ChangeRequest) {
+	switch {
+	case cr.State == providers.ChangeRequestOpen && who == hmRepl && m.carriesOwn(cr.HeadSHA, hmRepl):
+		m.fail("P3", "the replacement released the lock while its commit is on the open pull request (%s)",
+			describe(x))
+	case cr.State == providers.ChangeRequestMerged && m.merge != nil && m.merge.owner == who && !recordsMerge(x) &&
+		!m.foreignOnReplacement(reqs) && (!m.merge.afterTakeover || who != hmPred || !handedOff(x)) &&
+		(who != hmPred || !m.predHeadOnReplacement(reqs)):
+		m.fail("P3", "the %s released the lock on a merge of its commit it does not record (%s)", who,
+			describe(x))
+	case cr.State == providers.ChangeRequestMerged && who == hmRepl && m.merge != nil &&
+		((m.otherMerge() && m.merge.replHeld) || m.merge.predLeft) && !recordsMerge(x):
+		m.fail("P12", "the replacement released the lock on the merge of %s before it recorded it (%s)",
+			short(m.merge.head), describe(x))
 	}
 }
 
@@ -1838,6 +1887,8 @@ func (m *hmWorld) deleteArmedClaimHolder() {
 			}
 			m.logf("  a person deletes the %s, which holds only a claim on the merge", who)
 			m.deleteRequest(who)
+			// The deletion follows the checks of this step: what it leaves to the replacement is noted now.
+			m.notePredLeft(map[string]*api.RemediationRequest{hmPred: m.get(hmPred), hmRepl: m.get(hmRepl)})
 			return
 		}
 	}
@@ -2217,7 +2268,8 @@ func (m *hmWorld) settle() {
 // was made.
 func (m *hmWorld) settledBreaker(mg *hmMerge, reqs map[string]*api.RemediationRequest) {
 	for _, who := range []string{hmPred, hmRepl} {
-		if (who == hmPred && m.foreignForGone(reqs)) || (who == hmRepl && m.foreignOnReplacement(reqs)) {
+		if (who == hmPred && m.foreignForGone(reqs)) || (who == hmRepl && m.foreignOnReplacement(reqs)) ||
+			(who == hmRepl && m.predHeadOnReplacement(reqs)) {
 			// #786, decision 2 of the model result of 2026-11-18: MergedWithForeignChange is a failure for the
 			// breaker, as on main.
 			continue
@@ -2244,6 +2296,10 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 		return
 	}
 	owner := m.get(mg.owner)
+	if mg.predLeft {
+		m.settledPredHeadRecord(mg, reqs)
+		return
+	}
 	if mg.afterTakeover && (owner == nil || !owner.DeletionTimestamp.IsZero()) && !mg.recorded[hmPred] {
 		// The predecessor went before it recorded the merge of its commit put back after the takeover: the replacement
 		// records it as a foreign change.
@@ -2276,6 +2332,22 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 	if (owner.Status.MergeReceipt == nil || owner.Status.MergeReceipt.HeadSHA != mg.head) && !m.foreignOnReplacement(reqs) {
 		m.failAbout("P1", aboutUnrecorded, "the merge of the %s's commit %s is not recorded on it with its receipt (pred: %s, repl: %s)",
 			mg.owner, short(mg.head), describe(m.get(hmPred)), describe(m.get(hmRepl)))
+	}
+}
+
+// settledPredHeadRecord checks P12 after the settling run for a merge of the predecessor's own head that the
+// predecessor left (predLeft): the replacement records it without a receipt while it lives and is not being deleted,
+// and the predecessor, if still there, records none.
+func (m *hmWorld) settledPredHeadRecord(mg *hmMerge, reqs map[string]*api.RemediationRequest) {
+	p, repl := reqs[hmPred], reqs[hmRepl]
+	if recordsMerge(p) {
+		m.fail("P12", "the predecessor, which left the merge of its head %s to the replacement, records it (pred: %s, "+
+			"repl: %s)", short(mg.head), describe(p), describe(repl))
+	}
+	if repl != nil && repl.DeletionTimestamp.IsZero() && !recordedAsForeign(repl) {
+		m.failAbout("P12", aboutUnrecorded, "the replacement that held the lock does not record the merge of the "+
+			"predecessor's head %s, which the predecessor left (pred: %s, repl: %s)", short(mg.head), describe(p),
+			describe(repl))
 	}
 }
 

@@ -7522,43 +7522,88 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// The failed review check of a stale plan and of a cancel, with reviewer hints on (failCheckStep, decisions of
 		// 2026-11-20 on #925): what each verdict of its read of the recorded pull request writes on the recorded head.
 		// "target" is a failed check whose summary promises the close, "other base" one whose summary says nothing is
-		// closed on that base and a person decides, and "none" no check at all. Gone writes nothing: a check on a commit
-		// the Git host does not tie to the request is not the request's to write.
+		// closed on that base and a person decides, and "none" no check at all. Gone writes the check with the summary
+		// of another base, since the pull request is not read open on the target branch: it is the request's own
+		// recorded commit, and without the check an earlier pass there stays while another pull request from the
+		// branch is open (decision of 2026-11-20 on #925 replacing point 2). Through a new installation of the App
+		// (#290) gone writes nothing (failCheckNotOursReinstalled): goneReinstalled is that cell.
 		type checkCell struct{ written, summary string }
 		const target, otherBase = "target", "other base"
 		checkCases := []verdictCase{isOpen, isClosed, closedThere, isElsewhere, isGone, mergedThere, failedRead}
 		checkCallers := map[string]struct {
-			act  func(own, other int64)
-			want map[verdictCase]string
+			act             func(own, other int64)
+			title           string
+			want            map[verdictCase]string
+			goneReinstalled string
 		}{
 			"cleanUpStale": {
-				act: func(own, other int64) { cleanUp(own, other) },
+				act:   func(own, other int64) { cleanUp(own, other) },
+				title: staleCheckTitle,
 				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
-					isElsewhere: otherBase, isGone: none, mergedThere: none, failedRead: none},
+					isElsewhere: otherBase, isGone: otherBase, mergedThere: none, failedRead: none},
+				goneReinstalled: none,
 			},
 			"cancel the request": {
 				act: func(own, other int64) {
 					cancelIt()
 					_, _ = reconcileResult()
 				},
+				title: cancelCheckTitle,
 				// Open on another base, the cancel's look ends it Cancelled with the lock kept and writes no check in
 				// that reconcile: the stopped holder's later looks write the stop's check (failStoppedCheck), whose
-				// summary promises no close.
+				// summary promises no close. Gone never reaches the cancel's check: the look at the pull request
+				// before the cancel reads it gone and stops the request with ChangeRequestGone, so no check is
+				// written, through a new installation or not. "the check step of a cancel" proves the row for it.
 				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
 					isElsewhere: none, isGone: none, mergedThere: none, failedRead: none},
 			},
+			"the check step of a cancel": {
+				// failCancelCheck on its own, as cancelOpen calls it before the close: a pull request that goes
+				// between the look and the check's read of it meets the gone row here.
+				act:   func(own, other int64) { _ = reconciler().failCancelCheck(ctx, fetch()) },
+				title: cancelCheckTitle,
+				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
+					isElsewhere: otherBase, isGone: otherBase, mergedThere: none, failedRead: none},
+				goneReinstalled: none,
+			},
 		}
-		checkEntries := make([]TableEntry, 0, len(checkCallers)*len(checkCases))
+		// reinstall leaves the request stale (PlanFresh False with a stale reason, the mark under which the plan's
+		// repository is opened through a new installation, cleanupRepository) and moves the settings entry of the
+		// plan's repository to a new installation of the GitHub App.
+		reinstall := func() {
+			GinkgoHelper()
+			got := fetch()
+			meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionPlanFresh,
+				Status: metav1.ConditionFalse, Reason: freshness.ReasonPlanChanged, Message: "the plan is stale"})
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(settings), settings)).To(Succeed())
+			settings.Spec.Repositories[0].GitHub.InstallationID++
+			Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+			live := &remediationv1alpha1.RemediationSettings{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(settings), live)).To(Succeed())
+			_, reinstalled, ok := cleanupRepository(live, fetch(), true)
+			Expect(ok && reinstalled).To(BeTrue(), "the request needs its repository through a new installation")
+		}
+		checkEntries := make([]TableEntry, 0, len(checkCallers)*(len(checkCases)+1))
 		for _, caller := range slices.Sorted(maps.Keys(checkCallers)) {
 			for i, c := range checkCases {
-				checkEntries = append(checkEntries, Entry(caller+" on "+name(c), caller, i))
+				checkEntries = append(checkEntries, Entry(caller+" on "+name(c), caller, i, false))
+			}
+			if checkCallers[caller].goneReinstalled != "" {
+				checkEntries = append(checkEntries, Entry(caller+" on "+name(isGone)+" through a new installation",
+					caller, slices.Index(checkCases, isGone), true))
 			}
 		}
-		DescribeTable("writes the failed review check of a stale plan or a cancel as the verdict's rule says", func(caller string, i int) {
+		DescribeTable("writes the failed review check of a stale plan or a cancel as the verdict's rule says", func(caller string, i int, reinstalled bool) {
 			c, vc := checkCallers[caller], checkCases[i]
 			recorder = record.NewFakeRecorder(50)
 			hints = true
 			own, other := recorded(vc)
+			want := checkCell{written: c.want[vc]}
+			if reinstalled {
+				reinstall()
+				want.written = c.goneReinstalled
+			}
 			head := fetch().Status.PullRequest.HeadSHA
 			before := len(git.CheckRuns(head))
 			c.act(own, other)
@@ -7567,6 +7612,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			got := checkCell{written: none}
 			for _, run := range runs {
 				Expect(run.Status).To(Equal(providers.CheckRunFailure), "only a failed check is written")
+				Expect(run.Title).To(Equal(c.title), "the check of the caller's own path")
 				Expect(run.Summary).NotTo(ContainSubstring("hotfix"), "no text of the Git host in a summary")
 				got.written = target
 				if strings.HasSuffix(run.Summary, otherBaseCheckSummary) {
@@ -7574,7 +7620,6 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				}
 				got.summary = run.Summary
 			}
-			want := checkCell{written: c.want[vc]}
 			switch want.written {
 			case target:
 				Expect(got.summary).To(HaveSuffix(closeSummary))

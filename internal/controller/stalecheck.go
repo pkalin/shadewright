@@ -143,12 +143,15 @@ func (r *RemediationRequestReconciler) failCheck(ctx context.Context, rr *remedi
 
 // failCheckStep is failCheck's work: it reads the recorded pull request by its number, writes the failed check, then
 // records Stale. What the read allows is the verdict table's (verdictRow.failCheck): nothing is written when that
-// read fails (returned for a retry), finds the pull request merged into a base a person moved it to, or finds it gone
-// (the Git host does not tie that number to the request, decision of 2026-11-20 on #925, point 2), and through a new
-// installation of the plan's repository (#290) the read also asks for this request's marker. One open or closed on a
-// base a person moved it to gets the failed check too (#925, ADR-0045): the check run belongs to the head commit, and
-// moved back to the target branch, or reopened, the pull request must not merge on a check written before. Its
-// summary then promises no close (run(true), otherBaseCheckSummary).
+// read fails (returned for a retry) or finds the pull request merged into a base a person moved it to. Through a new
+// installation of the plan's repository (#290) the read also asks for this request's marker, and nothing is written
+// either when it finds the pull request gone (not this request's). One open or closed on a base a person moved it to
+// gets the failed check too (#925, ADR-0045): the check run belongs to the head commit, and moved back to the target
+// branch, or reopened, the pull request must not merge on a check written before. So does one read gone without a
+// new installation (decision of 2026-11-20 on #925 replacing point 2): the check is on the request's own recorded
+// commit, and without it an earlier pass there stays while another pull request from the branch is open. A pull
+// request not read open on the target branch gets the summary that promises no close (run(true),
+// otherBaseCheckSummary).
 func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, run failedCheckRun) error {
 	git, _, reinstalled, err := r.openPlanRepositoryFor(ctx, rr)
@@ -161,8 +164,13 @@ func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 	case failCheckRetry:
 		return v.err
 	case failCheckNotOurs:
-		// Gone, or merged into another base: nothing is written for it.
+		// Merged into another base: nothing is written for it.
 		return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
+	case failCheckNotOursReinstalled:
+		if reinstalled {
+			return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
+		}
+		onOtherBase = true
 	case failCheckWriteOtherBase:
 		onOtherBase = true
 	case failCheckWrite:

@@ -120,7 +120,8 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 // recorded head is failed (failCancelCheck, as for a stale plan, #713), so a pull request reopened later cannot be
 // merged on a check that is still green. The check reads the recorded pull request by its number first: one open or
 // closed on a base a person moved it to gets the failed check too, with a summary that promises no close there
-// (failCheckStep, ADR-0045), one open there ends the request Cancelled saying so, and one read gone gets no check.
+// (failCheckStep, ADR-0045), one open there ends the request Cancelled saying so, and one read gone gets it on the
+// recorded head with that summary too, but through a new installation of the App, where it gets none.
 // A closed pull request ends the request even when that check cannot be written: at once on a refusal, after cleanupFailingBound on a failure worth a retry, with a Warning Event that
 // says so (endCancelClosed).
 //

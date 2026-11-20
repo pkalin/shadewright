@@ -74,7 +74,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundGone, keepsLockMoved: false, lookConfirmGone: true, lookYields: true,
 		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: true, lockLooksElsewhere: true, fromOtherBases: otherBaseNone,
 		yieldsToClosed: true, handed: handedGone, recover: recoverNothing, mergedInto: false,
-		retargetCancel: retargetCancelClosed, failCheck: failCheckNotOurs, stoppedCheck: false, cancelLook: cancelLookEnd,
+		retargetCancel: retargetCancelClosed, failCheck: failCheckNotOursReinstalled, stoppedCheck: false, cancelLook: cancelLookEnd,
 		adopt: adoptNone, refuseOpened: refuseClose, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGone,
 		closeRecorded: closeRecordedNotOurs, closeUnrecorded: closeUnrecordedLookElsewhere,
 		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing,
@@ -170,9 +170,11 @@ type verdictRow struct {
 	// failCheck is what failCheckStep does before it writes a failed review check. The check run belongs to the head
 	// commit, so it is written also for a pull request open or closed on a base a person moved it to (#925, ADR-0045):
 	// moved back or reopened, it cannot merge on a check written before the request stopped. There the check's
-	// summary promises no close (failCheckWriteOtherBase). A pull request read gone gets nothing, with or without a
-	// new installation (decision of 2026-11-20 on #925, point 2): a check on a commit the Git host does not tie to
-	// the request is not the request's to write.
+	// summary promises no close (failCheckWriteOtherBase). A pull request read gone gets the failed check on the
+	// recorded head too, with the summary that promises no close, since it is not read open on the target branch
+	// (failCheckNotOursReinstalled, decision of 2026-11-20 on #925 replacing point 2): the check sits on the request's
+	// own commit, so it can only keep that commit from merging through another pull request from the request's
+	// branch. Through a new installation of the plan's repository nothing is written for it.
 	failCheck failCheck
 	// stoppedCheck: the request's own pull request is open, on the target branch or on a base a person moved it to,
 	// so a stopped request fails its review check (failStoppedCheck, #925).
@@ -275,8 +277,12 @@ type failCheck int
 const (
 	// failCheckRetry writes nothing: the read failed, and the error is returned for a retry.
 	failCheckRetry failCheck = iota
-	// failCheckNotOurs writes nothing and returns errChangeRequestNotOurs: gone, or merged into another base.
+	// failCheckNotOurs writes nothing and returns errChangeRequestNotOurs: merged into another base.
 	failCheckNotOurs
+	// failCheckNotOursReinstalled is gone: through a new installation of the plan's repository (#290) it is
+	// failCheckNotOurs; otherwise the failed check is written with the summary of failCheckWriteOtherBase, since the
+	// pull request is not read open on the target branch (ADR-0045).
+	failCheckNotOursReinstalled
 	// failCheckWrite writes the failed check with the summary of a read on the target branch.
 	failCheckWrite
 	// failCheckWriteOtherBase writes the failed check with the summary of a pull request on another base: nothing is

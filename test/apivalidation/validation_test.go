@@ -325,6 +325,63 @@ var _ = Describe("RemediationRequest", func() {
 		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed(), "a later failure starts its own wait")
 	})
 
+	// #786 (decision of 2026-11-18): the 24 hours of a handoff recovery's refusal are their own kind, HandoffRecovery,
+	// so neither end moves. It takes the rules of the other kinds that end with no read: it records its end, names no
+	// pull request, keeps its start and end while it stands, and stands once. The executor removes the grace in the
+	// write that adds it (third decision of 2026-11-18); a status stored before that holds both, and stays valid.
+	It("keeps a HandoffRecovery wait next to the HandoffGrace wait, each from moving", func() {
+		rr := fx.RemediationRequest("default", unique("rr"))
+		Expect(k8sClient.Create(ctx, rr)).To(Succeed())
+		deleteAfterSpec(rr)
+		since := metav1.NewTime(time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC))
+		graceEnds := metav1.NewTime(since.Add(15 * time.Minute))
+		recoveryEnds := metav1.NewTime(since.Add(24 * time.Hour))
+		const op = "read the head of the branch"
+		grace := v1alpha1.GitWait{Kind: v1alpha1.GitWaitHandoffGrace, Since: since, Ends: &graceEnds, Operation: op}
+		recovery := v1alpha1.GitWait{Kind: v1alpha1.GitWaitHandoffRecovery, Since: since, Ends: &recoveryEnds,
+			Operation: op}
+		rr.Status.GitWaits = []v1alpha1.GitWait{grace}
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "the grace alone")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), rr)).To(Succeed())
+		rr.Status.GitWaits = append(rr.Status.GitWaits, recovery)
+		Expect(k8sClient.Status().Update(ctx, rr)).To(Succeed(), "a status stored before the third decision of 2026-11-18, with both")
+
+		refused := func(name, message string, change func(got *v1alpha1.RemediationRequest)) {
+			got := &v1alpha1.RemediationRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(rr), got)).To(Succeed())
+			change(got)
+			err := k8sClient.Status().Update(ctx, got)
+			Expect(err).To(HaveOccurred(), "the API server accepted: "+name)
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "%s: unexpected error: %v", name, err)
+			if message != "" {
+				Expect(err.Error()).To(ContainSubstring(message), name)
+			}
+		}
+		later := metav1.NewTime(recoveryEnds.Add(time.Hour))
+		refused("the grace's end moved to the refusal's", "a Git wait keeps its start, its end",
+			func(got *v1alpha1.RemediationRequest) { got.Status.GitWaits[0].Ends = &later })
+		refused("a moved end", "a Git wait keeps its start, its end",
+			func(got *v1alpha1.RemediationRequest) { got.Status.GitWaits[1].Ends = &later })
+		refused("a moved start", "a Git wait keeps its start",
+			func(got *v1alpha1.RemediationRequest) { got.Status.GitWaits[1].Since = later })
+		refused("without its end", "a wait of a bounded kind records its end",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits = []v1alpha1.GitWait{{Kind: v1alpha1.GitWaitHandoffRecovery, Since: since,
+					Operation: op}}
+			})
+		refused("with a pull request", "a MergeContent or MergeCheck wait names its pull request",
+			func(got *v1alpha1.RemediationRequest) {
+				got.Status.GitWaits[1].PullRequest = &v1alpha1.GitWaitPullRequest{Number: 7,
+					URL: "https://github.com/example/fleet/pull/7", HeadSHA: testHeadSHA}
+			})
+		refused("twice", "", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits = append(got.Status.GitWaits, recovery)
+		})
+		refused("an unknown kind", "", func(got *v1alpha1.RemediationRequest) {
+			got.Status.GitWaits[1].Kind = "HandoffBound"
+		})
+	})
+
 	// ADR-0030 section 1 (#678): the merge receipt is written once and never changed, also by dropping it or the
 	// whole status and writing it again, and its merge commit is the one status.pullRequest records.
 	Describe("status.mergeReceipt", func() {

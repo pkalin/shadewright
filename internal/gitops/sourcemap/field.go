@@ -257,6 +257,30 @@ func PreviousValue(action v1alpha1.Action) (any, bool) {
 	}
 }
 
+// WithPrevious returns action with its previous value set to v, a value of its field as ReadField decodes it (a
+// quantity for a memory limit, read only in the bounded form of quantity.Parse; a whole number that fits an int32 for
+// a replica count). It reports false for a value it cannot read that way or an action of no known type.
+func WithPrevious(action v1alpha1.Action, v any) (v1alpha1.Action, bool) {
+	a := *action.DeepCopy()
+	switch {
+	case a.SetContainerMemoryLimit != nil:
+		q, ok := toQuantity(v)
+		if !ok {
+			return a, false
+		}
+		a.SetContainerMemoryLimit.Previous = q
+	case a.AdjustKedaMaxReplicas != nil:
+		n, ok := toInteger(v)
+		if !ok || n < 0 || n > math.MaxInt32 {
+			return a, false
+		}
+		a.AdjustKedaMaxReplicas.PreviousValue = int32(n)
+	default:
+		return a, false
+	}
+	return a, true
+}
+
 // DesiredValue returns the desired value an action sets for its field, in the same form as PreviousValue.
 // It reports false for an action of no known type.
 func DesiredValue(action v1alpha1.Action) (any, bool) {

@@ -172,7 +172,7 @@ func TestExecutorDefaultIsOn(t *testing.T) {
 // output; it fails the test if the render succeeds.
 func helmFailsCI(t *testing.T, set ...string) string {
 	t.Helper()
-	args := helmArgsWith(t, ciValues(t), append([]string{"clusterId=chart-test"}, set...)...)
+	args := helmArgsWith(t, ciValues(t), append([]string{testCluster}, set...)...)
 	cmd := exec.Command(tool(t, "HELM", "helm"), args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -228,7 +228,7 @@ func TestExecutorOffRefusesExecutorOnlyValues(t *testing.T) {
 // TestExecutorOffNeedsNoExecutorImage: a source checkout has no executor digest, and without the executor the
 // chart does not ask for one.
 func TestExecutorOffNeedsNoExecutorImage(t *testing.T) {
-	args := helmArgsWith(t, nil, "clusterId=chart-test", executorOff,
+	args := helmArgsWith(t, nil, testCluster, executorOff,
 		"analyzer.image.digest=sha256:"+strings.Repeat("2", 64))
 	r := renderArgs(t, args)
 	if r.chart[analyzerDeployment] == nil || r.chart[executorDeployment] != nil {

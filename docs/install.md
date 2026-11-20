@@ -178,7 +178,7 @@ helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <vers
 
 `executor.enabled=false` leaves out every object of the executor: Deployment, ServiceAccount, Roles and bindings, PodDisruptionBudget, metrics Service, NetworkPolicy, leader election Lease, ServiceMonitor and its subject in the metrics authentication binding. The analyzer's identity and grants are the same as with the executor. The verifier only works on requests the executor has merged, so the example also sets `verifier.watchNamespaces` to an empty list, which leaves it out too. A source checkout needs no executor image digest in this mode.
 
-The chart refuses `executor.enabled=false` together with a value that only configures an executor, and the message names it: `executor.replicas` other than 1, `executor.identity.azure.clientId`, `executor.serviceAccount.annotations`, `executor.goMemLimit`, `executor.reviewerHints.enabled`, `executor.verification.enabled`, `executor.verification.nodeGrace` other than `1m`, `executor.extraArgs` and `executor.metricsTLS.secretName`. Image, resources and Pod placement values are not refused and have no effect.
+The chart refuses `executor.enabled=false` together with a value that only configures an executor, and the message names it: `executor.replicas` other than 1, `executor.identity.azure.clientId`, `executor.identity.azure.tenantId`, `executor.identity.azure.projectToken`, `executor.serviceAccount.annotations`, `executor.goMemLimit`, `executor.reviewerHints.enabled`, `executor.verification.enabled`, `executor.verification.nodeGrace` other than `1m`, `executor.extraArgs` and `executor.metricsTLS.secretName`. Image, resources and Pod placement values are not refused and have no effect.
 
 What the analyzer leaves, and where to read it:
 
@@ -189,6 +189,25 @@ What the analyzer leaves, and where to read it:
 To go on to proposals, upgrade with `executor.enabled=true` and the executor's identity ([first proposal](first-proposal.md)). An executor started later treats a request with no phase as a new one and runs the policy check on it.
 
 The Chart workflow installs this shape on Kind (`hack/chart-analyzer-only-install-test.sh`: no executor or verifier object, an Incident for a workload whose image does not exist, no request); run it locally with `make test-chart-analyzer-only` (needs Docker and Kind, builds only the analyzer image).
+
+## Azure workload identity without the webhook
+
+The chart assumes the Azure workload identity mutating webhook: it sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`, and the webhook adds the token volume and the `AZURE_*` variables. On a cluster without the webhook, set `identity.azure.projectToken` for the component and the chart renders those itself. It applies to the analyzer and the executor; the verifier has no cloud identity.
+
+```bash
+helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+  --set executor.identity.azure.clientId=<executor client ID> \
+  --set executor.identity.azure.tenantId=<tenant ID> \
+  --set executor.identity.azure.projectToken=true
+```
+
+The same three values exist under `analyzer.identity.azure` (needed when the analyzer uses Foundry or a Blob record store). With `projectToken` the Pod gets:
+
+- a projected ServiceAccount token volume, `azure-identity-token`: audience `api://AzureADTokenExchange`, expiry 3600 seconds, mounted read-only at `/var/run/secrets/azure/tokens`;
+- `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` from the two values, `AZURE_FEDERATED_TOKEN_FILE` set to `/var/run/secrets/azure/tokens/azure-identity-token`, and `AZURE_AUTHORITY_HOST` set to `https://login.microsoftonline.com/` (the public cloud; the binaries accept only the public, US Government and China hosts);
+- no `azure.workload.identity/use` label, so a cluster that does have the webhook does not mutate the Pod a second time.
+
+The ServiceAccount annotation stays. The managed identity and its federated credential are the same as with the webhook (subject `system:serviceaccount:<namespace>:<ServiceAccount>`, audience `api://AzureADTokenExchange`), so the mode grants nothing more. The chart refuses `projectToken` without both `clientId` and `tenantId`, and `tenantId` without `projectToken`. The tenant ID is not a secret; keep it in your own values file, not in a public repository. The kubelet rotates the token in the volume.
 
 ## OpenAI-compatible inference
 

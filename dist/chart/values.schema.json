@@ -92,6 +92,13 @@
             "clientId": {
               "type": "string",
               "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?$"
+            },
+            "tenantId": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z0-9-]{1,63}(\\.[A-Za-z0-9-]{1,63})+)?$"
+            },
+            "projectToken": {
+              "type": "boolean"
             }
           }
         }

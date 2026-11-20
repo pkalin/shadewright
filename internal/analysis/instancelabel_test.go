@@ -18,7 +18,7 @@ func TestContextShowsLogInstanceUncertainLabel(t *testing.T) {
 		Text:         "pod web-1, container web, previous instance\nline\n",
 	}}}
 	msg, _ := contextMessage(&c)
-	want := `labels="log excerpt from this container (which restart it comes from is uncertain)">`
+	want := `labels="log excerpt from an uncertain instance of this container (a restart or a re-created pod)">`
 	if !strings.Contains(msg, want) {
 		t.Fatalf("context lacks %s:\n%s", want, msg)
 	}

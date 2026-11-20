@@ -268,7 +268,8 @@ type Collector struct {
 	// conditions remembers the handled symptom states of objects read by module symptom sources, keyed by
 	// kind and name.
 	conditions *stateTracker
-	// probes remembers the probe failures whose decision is put off while their pod starts (probe.go).
+	// probes remembers the probe failures whose decision is put off while their pod starts (probe.go), and the
+	// kubelet Evicted events that wait for their pod's status to show the eviction (eviction.go).
 	probes *probeDeferrals
 	// holds remembers the consequences held for at most ConsequenceGrace (hold.go).
 	holds *consequenceHolds

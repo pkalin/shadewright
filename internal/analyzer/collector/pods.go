@@ -44,8 +44,9 @@ const (
 	idsPerContainer = 2
 )
 
-// termination is one container termination worth an observation, or one waiting reason of
-// WaitingCauseReasons (waiting set), which has no finish time.
+// termination is one container termination worth an observation, one waiting reason of
+// WaitingCauseReasons (waiting set), which has no finish time, or the eviction of the pod (evicted set,
+// eviction.go), which names no container and carries the kubelet's message.
 type termination struct {
 	container string
 	id        string
@@ -53,6 +54,8 @@ type termination struct {
 	exitCode  int32
 	finished  time.Time
 	waiting   bool
+	evicted   bool
+	message   string
 }
 
 // terminations returns the abnormal terminations in a pod's status: OOMKilled or a non-zero exit code, in
@@ -113,8 +116,12 @@ func waitings(pod *corev1.Pod) []termination {
 // 2026-11-16); the consumer tells it apart by this prefix.
 const WaitingOccurrencePrefix = "waiting:"
 
-// podSymptoms returns the terminations and the waiting causes of a pod's status.
+// podSymptoms returns the terminations and the waiting causes of a pod's status, or only its eviction when the
+// status shows one (eviction.go).
 func podSymptoms(pod *corev1.Pod) []termination {
+	if e, ok := eviction(pod); ok {
+		return []termination{e}
+	}
 	return append(terminations(pod), waitings(pod)...)
 }
 
@@ -137,13 +144,21 @@ func (t termination) slot() string {
 	return t.container
 }
 
-// class is the termination's part in the consequence rule: an OOM kill or a waiting reason is a cause; a
-// non-zero exit is a symptom of its own and links nothing (ADR-0039 point 3).
+// class is the termination's part in the consequence rule: every symptom read from pod status is a cause (an
+// OOM kill, a non-zero exit, a waiting reason, an eviction; ADR-0039 point 3, amended 2026-11-20).
 func (t termination) class() Class {
-	if t.waiting || t.reason == ReasonOOMKilled {
-		return ClassCause
+	return ClassCause
+}
+
+// note is the symptom text of the termination's observation.
+func (t termination) note() string {
+	switch {
+	case t.evicted:
+		return evictionNote(t.message)
+	case t.waiting:
+		return waitingNote(t.container, t.reason)
 	}
-	return ClassNone
+	return terminationNote(t.container, t.exitCode)
 }
 
 func hasPodSymptom(o client.Object) bool {
@@ -389,10 +404,7 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return r.repeatLater(req.NamespacedName, pod.UID, now), nil
 	}
 	for _, t := range pending {
-		note := terminationNote(t.container, t.exitCode)
-		if t.waiting {
-			note = waitingNote(t.container, t.reason)
-		}
+		note := t.note()
 		at := t.finished
 		if t.repeat {
 			at = now

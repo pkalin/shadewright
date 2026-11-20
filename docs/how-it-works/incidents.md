@@ -11,7 +11,7 @@ An `Incident` is one problem on one workload, stored as a small object in the op
 The analyzer reads only the namespaces you list, and it reads three kinds of signal.
 
 - **Warning events.** Normal events are ignored. An event that is malformed, or about an object in another namespace, is dropped.
-- **Pod status.** Every container that ended abnormally (an out-of-memory kill, or a non-zero exit code) and every container stuck waiting on an image or a configuration error, such as `ImagePullBackOff`. It never reads the text a container leaves when it dies.
+- **Pod status.** Every container that ended abnormally (an out-of-memory kill, or a non-zero exit code) and every container stuck waiting on an image or a configuration error, such as `ImagePullBackOff`. It never reads the text a container leaves when it dies. A pod the node evicted is one symptom, the eviction with the node's message, instead of one per container.
 - **Add-on objects**, only when you enable the matching module: autoscalers, KEDA, Flux and Kyverno status. A KEDA scaler that has hit its replica ceiling is one example.
 
 Each signal is attached to the workload that owns the pod, such as the Deployment, so symptoms from successive pods of one workload count together. Text is redacted before anything is stored.
@@ -24,7 +24,7 @@ A symptom seen once opens nothing. It opens an Incident when it is seen again be
 
 A restart of the analyzer loses nothing that matters. First sightings are held in memory only, and a real symptom comes back.
 
-A crash loop produces many follow-on events (`BackOff`, failing probes). When the pod status already shows the cause, those events are counted on the cause's Incident and open none of their own.
+A crash loop produces many follow-on events (`BackOff`, failing probes). When the pod status already shows the cause (an out-of-memory kill or a non-zero exit in the last 10 minutes, or a wait on an image or a configuration), those events are counted on the cause's Incident and open none of their own. The node's `Evicted` event about a pod whose status shows the eviction opens nothing either.
 
 ```mermaid
 flowchart LR

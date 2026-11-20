@@ -364,21 +364,22 @@ func TestWaitingCauseOfAnInitContainer(t *testing.T) {
 	}
 }
 
-// TestNonZeroExitLinksNothing checks that a crash (a non-zero exit) is an observation as before, of no class,
-// and no cause of a consequence.
-func TestNonZeroExitLinksNothing(t *testing.T) {
+// TestNonZeroExitIsACause checks that a crash (a non-zero exit) is a cause read from pod status, and that a
+// BackOff of its container within KillCauseWindow links to it (ADR-0039 point 3, amended 2026-11-20, #432).
+func TestNonZeroExitIsACause(t *testing.T) {
 	h, pod := causeHarness(t, func(p *corev1.Pod) {
 		withTermination(p, "containerd://crash", reasonError, 1, t0)
 	})
 	h.reconcilePod(pod.Name)
-	if got := h.one(); got.Class != ClassNone || got.Container != containerApp || !strings.HasPrefix(got.Occurrence, "termination:") {
-		t.Errorf("crash: class %q, container %q, occurrence %q", got.Class, got.Container, got.Occurrence)
+	crash := h.one()
+	if crash.Class != ClassCause || crash.Container != containerApp || !strings.HasPrefix(crash.Occurrence, "termination:") {
+		t.Errorf("crash: class %q, container %q, occurrence %q", crash.Class, crash.Container, crash.Occurrence)
 	}
 	ev := consequence("c", reasonBack, "spec.containers{"+containerApp+"}", t0)
 	h.create(ev)
 	h.reconcileEvent(ev.Name)
-	if got := h.one(); got.Class != ClassConsequence || got.CauseFingerprint != "" {
-		t.Errorf("BackOff after a crash: class %q, cause %q", got.Class, got.CauseFingerprint)
+	if got := h.one(); got.Class != ClassConsequence || got.CauseFingerprint != crash.Fingerprint {
+		t.Errorf("BackOff after a crash: class %q, cause %q, want %q", got.Class, got.CauseFingerprint, crash.Fingerprint)
 	}
 }
 

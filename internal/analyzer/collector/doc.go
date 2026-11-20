@@ -20,7 +20,8 @@ limitations under the License.
 //
 // What it watches: events.k8s.io/v1 Events of type Warning, and Pods with an abnormal container
 // termination (OOMKilled or a non-zero exit code) or a container waiting with a reason of
-// WaitingCauseReasons (an image or configuration error, never its message). OOMKilled comes from container status, never from an
+// WaitingCauseReasons (an image or configuration error, never its message), or a pod its node evicted (one
+// observation for the pod, with the kubelet's message). OOMKilled comes from container status, never from an
 // event reason, so the pod watch is how it is seen. There is no core/v1 Event watch: those are the same
 // objects in an older version, and watching both would count each event twice. Both watches use the
 // manager's cache, which the analyzer restricts to the watched namespaces. A termination OOMKilled and a

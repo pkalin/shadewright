@@ -26,8 +26,12 @@ import (
 )
 
 // The reproductions of #432 at the Incident controller, with the observations the collector emits in each
-// case (internal/analyzer/collector/issue432_test.go shows it emits them so), in their order and at their
-// times, t0 standing for the first sighting. Each requires one Incident for one cause; main opens more.
+// case since ADR-0039 point 3 was amended on 2026-11-20 (internal/analyzer/collector/issue432_test.go shows it
+// emits them so, and holds the properties P1 to P5), in their order and at their times, t0 standing for the
+// first sighting. Each requires one Incident for one cause. On main the collector emitted the crashes with no
+// class, the BackOff with no cause, and a termination and an Evicted event per evicted pod: those inputs open
+// two and three Incidents here, and the fix is in the collector, so these tests pin what the controller does
+// with the new inputs, not the fix itself.
 
 // opened returns the fingerprints with an Incident due to be written.
 func opened(c *Controller) []string {
@@ -39,66 +43,54 @@ func opened(c *Controller) []string {
 	return fps
 }
 
-// TestIssue432CrashLoopOpensTwoIncidents is cases (a) and (c): crashes of container web with exit code 2
-// (reason Error, pod status, no class) open the Error Incident on the second sighting, 20:27:28Z; the BackOff
-// released by the collector's hold at the end of ConsequenceGrace, 20:29:15Z, recurs and opens its own. It does
-// so as emitted on main (no cause fingerprint), and also when the collector would link it to the Error's
-// fingerprint: only a cause observation (class cause from pod status, isCause) makes an Incident one that a
-// consequence is counted on (causeIncident reads c.causes), and the Error termination is none.
+// TestIssue432CrashLoopOpensTwoIncidents is cases (a) and (c) (P1): crashes of container web with exit code 2
+// (reason Error, pod status, a cause) open the Error Incident on the second sighting, 20:27:28Z, with
+// status.cause; the BackOff, linked by the collector to the Error's fingerprint, counts on it as evidence.
 func TestIssue432CrashLoopOpensTwoIncidents(t *testing.T) {
-	t.Skip("#432: BackOff of a crash loop opens its own Incident; the Error termination is no cause (collector class none, isCause false)")
-	for _, linked := range []bool{false, true} {
-		name := map[bool]string{false: "as emitted on main", true: "linked by the collector"}[linked]
-		t.Run(name, func(t *testing.T) {
-			c, clock := newAt(t)
-			crash := func(i int, at time.Time) {
-				clock.set(at)
-				o := symptomOf(1, "Error", terminationID(i), 1, fingerprint.SourcePodStatus, "web", collector.ClassNone, at)
-				o.Began = at
-				c.consume(t.Context(), o)
-			}
-			crash(1, t0.Add(20*time.Second))               // 20:25:20, held as a first sighting
-			crash(2, t0.Add(2*time.Minute+28*time.Second)) // 20:27:28, opens the Error Incident
-			if got := opened(c); !slices.Equal(got, []string{fp(1)}) {
-				t.Fatalf("after the crashes %v are open, want the Error's %s", got, fp(1))
-			}
-			at := t0.Add(4*time.Minute + 15*time.Second) // 20:29:15, released at the end of the hold
-			clock.set(at)
-			cause := 0
-			if linked {
-				cause = 1
-			}
-			c.consume(t.Context(), consequenceOf(2, cause, "web", reasonBackOff, 3, 6, at))
-			if got := opened(c); len(got) != 1 {
-				t.Errorf("one crash loop opened %d Incidents %v, want 1", len(got), got)
-			}
-		})
-	}
-}
-
-// TestIssue432EvictionOpensThreeIncidents is case (b): pods of one Deployment evicted for ephemeral storage one
-// after the other. Each fingerprint (Error and ContainerStatusUnknown terminations from pod status, the
-// kubelet's Evicted event, all of no class and of the same Deployment) opens its Incident on its second
-// sighting, from the next evicted pod: 21:14:27Z, 21:16:24Z and 21:17:26Z.
-func TestIssue432EvictionOpensThreeIncidents(t *testing.T) {
-	t.Skip("#432: the terminations and the Evicted event of an evicted pod are each a symptom of their own; no rule links them")
 	c, clock := newAt(t)
-	const errorF, unknownF, evictedF = 11, 12, 13
-	see := func(f int, reason, id string, origin fingerprint.Source, container string, at time.Time) {
+	crash := func(i int, at time.Time) {
 		clock.set(at)
-		o := symptomOf(f, reason, id, 1, origin, container, collector.ClassNone, at)
+		o := symptomOf(1, "Error", terminationID(i), 1, fingerprint.SourcePodStatus, "web", collector.ClassCause, at)
 		o.Began = at
 		c.consume(t.Context(), o)
 	}
-	see(errorF, "Error", terminationID(1), fingerprint.SourcePodStatus, "web", t0.Add(20*time.Second))
-	see(unknownF, "ContainerStatusUnknown", terminationID(2), fingerprint.SourcePodStatus, "web",
-		t0.Add(24*time.Second))
-	see(evictedF, "Evicted", eventID(1), fingerprint.SourceEvent, "", t0.Add(26*time.Second))
-	see(errorF, "Error", terminationID(3), fingerprint.SourcePodStatus, "web", t0.Add(2*time.Minute+27*time.Second))
-	see(unknownF, "ContainerStatusUnknown", terminationID(4), fingerprint.SourcePodStatus, "web",
-		t0.Add(4*time.Minute+24*time.Second))
-	see(evictedF, "Evicted", eventID(2), fingerprint.SourceEvent, "", t0.Add(5*time.Minute+26*time.Second))
+	crash(1, t0.Add(20*time.Second))               // 20:25:20, held as a first sighting
+	crash(2, t0.Add(2*time.Minute+28*time.Second)) // 20:27:28, opens the Error Incident
+	if got := opened(c); !slices.Equal(got, []string{fp(1)}) {
+		t.Fatalf("after the crashes %v are open, want the Error's %s", got, fp(1))
+	}
+	at := t0.Add(4*time.Minute + 15*time.Second) // 20:29:15
+	clock.set(at)
+	c.consume(t.Context(), consequenceOf(2, 1, "web", reasonBackOff, 3, 6, at))
 	if got := opened(c); len(got) != 1 {
-		t.Errorf("one eviction cause opened %d Incidents %v, want 1", len(got), got)
+		t.Errorf("one crash loop opened %d Incidents %v, want 1", len(got), got)
+	}
+	if n, _ := absorbedOn(c, fp(1)); n != 6 {
+		t.Errorf("the Error Incident holds %d BackOff as evidence, want 6", n)
+	}
+}
+
+// TestIssue432EvictionOpensThreeIncidents is case (b) (P3): pods of one Deployment evicted for ephemeral
+// storage one after the other. The collector emits one eviction per pod, read from pod status, a cause with no
+// container, and nothing for the pods' terminations and Evicted events: the second evicted pod opens the one
+// Incident, and the third counts on it.
+func TestIssue432EvictionOpensThreeIncidents(t *testing.T) {
+	c, clock := newAt(t)
+	const evictionF = 11
+	evict := func(i int, at time.Time) {
+		clock.set(at)
+		o := symptomOf(evictionF, "Evicted", terminationID(i), 1, fingerprint.SourcePodStatus, "",
+			collector.ClassCause, at)
+		o.Container, o.Began = "", at
+		c.consume(t.Context(), o)
+	}
+	evict(1, t0.Add(20*time.Second))
+	evict(2, t0.Add(2*time.Minute+27*time.Second))
+	evict(3, t0.Add(4*time.Minute+24*time.Second))
+	if got := opened(c); !slices.Equal(got, []string{fp(evictionF)}) {
+		t.Fatalf("one eviction cause opened %v, want only %s", got, fp(evictionF))
+	}
+	if b := c.pending[fp(evictionF)]; len(b.containers) != 0 {
+		t.Errorf("the eviction Incident names containers %v, want none", b.containers)
 	}
 }

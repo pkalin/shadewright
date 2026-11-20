@@ -36,7 +36,7 @@ import (
 const MaxLogExcerpts = 2
 
 // logBudgetCalls is the time budget of the log section in call timeouts: the most it could take with one read
-// per container. Every read of the section shares it, whatever their order and outcome.
+// per container. The first reads take at most one call timeout each; the second reads share what is left.
 const logBudgetCalls = MaxLogExcerpts
 
 // minSecondRead is the least of a container's share of the log bound that must be left after the excerpt of
@@ -115,8 +115,12 @@ func notAvailable(sec Section, prov Provenance, text string) Block {
 	return Block{Section: sec, Provenance: prov, Availability: NotAvailable, Text: text}
 }
 
-// logBlocks reads and bounds the log excerpts, within a time budget of logBudgetCalls call timeouts for the
-// whole section. It reports whether the log source failed, and returns an error only when ctx is done.
+// logBlocks reads and bounds the log excerpts. Every container's first read comes before any second read, in
+// the order of [logPicks], each with the call timeout of its own: the reads and deadlines of one read per
+// container. The second reads ([containerReads.wantsSecond]) follow in the same order, within what is left of
+// a time budget of logBudgetCalls call timeouts for the whole section, counted from its start; none starts
+// once that time is up. It reports whether the log source failed, which only a first read decides, and
+// returns an error only when ctx is done.
 func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, bool, error) {
 	if b.logs == nil {
 		return []Block{notAvailable(SectionLogs, ProvenanceLogExcerpt, "not available: no log source is configured\n")}, false, nil
@@ -125,100 +129,125 @@ func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, 
 	if t.state != targetResolved || len(picks) == 0 {
 		return []Block{notAvailable(SectionLogs, ProvenanceLogExcerpt, "not available: no pod of the target to read logs from\n")}, false, nil
 	}
-	ctx = withBudget(ctx, logBudgetCalls*b.timeout)
+	second := withBudget(ctx, logBudgetCalls*b.timeout)
 	budget := b.limits.Logs / len(picks)
 	since := w.end.Sub(w.start).Round(time.Second)
-	blocks := make([]Block, 0, len(picks))
-	failed := false
-	for _, pick := range picks {
-		blks, bad, err := b.pickBlocks(ctx, pick, since, budget)
-		if err != nil {
+	reads := make([]containerReads, len(picks))
+	for i, pick := range picks {
+		reads[i] = containerReads{pick: pick, left: budget}
+		if err := b.readInstance(ctx, &reads[i], pick.previous, since); err != nil {
 			return nil, false, err
 		}
-		failed = failed || bad
-		for i := range blks {
-			b.podLabels(&blks[i], t)
+	}
+	for i := range reads {
+		if !reads[i].wantsSecond() {
+			continue
+		}
+		if outOfTime(second) {
+			break
+		}
+		if err := b.readInstance(second, &reads[i], !reads[i].pick.previous, since); err != nil {
+			return nil, false, err
+		}
+	}
+	blocks := make([]Block, 0, len(picks))
+	failed := false
+	for i := range reads {
+		blks := reads[i].blocks()
+		failed = failed || reads[i].failed
+		for j := range blks {
+			b.podLabels(&blks[j], t)
 		}
 		blocks = append(blocks, blks...)
 	}
 	return blocks, failed, nil
 }
 
-// pickBlocks reads the logs of one container in at most two reads, within budget bytes in all: the instance
-// [logPicks] chose first, then the other instance when the first answered without lines (collected, refused
-// for that instance, pod not found or empty), or, after the excerpt of a terminated current instance, the
-// previous instance when at least minSecondRead bytes are left. A read that failed (the source failed, timed
-// out, refused the identity or answered oversized) is not followed by a second one: a failing source costs
-// one call per container. Each excerpt
-// is a block whose header names its instance. A read that gave no lines leaves its header lines (the instance
-// and the fixed reason) before the first excerpt, or, when no read gave lines, a block of those lines alone,
-// marked [CouldNotFetch] when a read failed. It reports whether the log source failed: a read failed and none
-// gave an excerpt, or the time budget of the section cut a read short (the excerpts read before it are kept).
-// It returns an error only when ctx is done.
-func (b *Builder) pickBlocks(ctx context.Context, pick logPick, since time.Duration, budget int) ([]Block, bool, error) {
-	order := []bool{pick.previous}
-	if pick.other {
-		order = append(order, !pick.previous)
-	}
-	var out []Block
-	var notes strings.Builder
-	left, readFailed, cut := budget, false, false
-	for i, previous := range order {
-		if i > 0 && (left <= 0 || len(out) > 0 && (!pick.currentDead || left < minSecondRead)) {
-			break
-		}
-		q := providers.LogQuery{
-			Namespace: pick.namespace, Pod: pick.pod, Container: pick.container, Previous: previous,
-			MaxBytes: int64(left),
-		}
-		if !previous {
-			// The previous instance stopped at some time in the past: no window for it.
-			q.Since = since
-		}
-		var ex providers.LogExcerpt
-		err := b.call(ctx, func(ctx context.Context) error {
-			var err error
-			ex, err = b.logs.Logs(ctx, q)
-			return err
-		})
-		if err != nil {
-			if a := abandoned(ctx); a != nil {
-				return nil, false, a
-			}
-		}
-		read := pick
-		read.previous = previous
-		blk, v := b.renderBlock(read, ex, err, left)
-		left -= len(blk.Text)
-		if v.Read == LogReadOK {
-			out = append(out, blk)
-			continue
-		}
-		reason := logReadReasons[noLinesReason(v.Read, err)]
-		logReadsWithoutLines.WithLabelValues(reason).Inc()
-		logf.FromContext(ctx).Info("Read no log lines of a container instance for the incident context",
-			"namespace", pick.namespace, "pod", pick.pod, "container", pick.container,
-			"instance", instanceName(previous), "reason", reason)
-		notes.WriteString(blk.Text)
-		if v.Read == LogReadFailed || v.Read == LogReadOversized {
-			// The source failed, not the instance: a second read of it would cost another timeout and could
-			// use up the build deadline that the metrics and policy sections need.
-			readFailed = true
-			// A read that failed once the time was up was cut short by it: the logs are incomplete.
-			cut = v.Read == LogReadFailed && outOfTime(ctx)
-			break
-		}
-	}
-	if len(out) == 0 {
-		blk := Block{Section: SectionLogs, Provenance: ProvenanceLogExcerpt, Availability: Available, Text: notes.String()}
-		if readFailed {
+// containerReads is what the reads of one container gave: at most two reads, within its share of the log
+// bound in all.
+type containerReads struct {
+	pick logPick
+	// reads counts the reads made, left is what is left of the container's share of the bound.
+	reads, left int
+	// out are the excerpts, in the order read; notes the header lines of the reads that gave no lines.
+	out   []Block
+	notes strings.Builder
+	// failed: the first read failed (the source failed, timed out, refused the identity or answered
+	// oversized). A second read that failed is only named in notes.
+	failed bool
+}
+
+// wantsSecond reports whether the container's other instance is read after its first read: the other
+// instance exists, the first read did not fail (a failing source costs one call per container), bytes are
+// left, and the first read gave no lines (collected, refused for that instance, pod not found or empty) or
+// it gave the excerpt of a terminated current instance and at least minSecondRead bytes are left.
+func (r *containerReads) wantsSecond() bool {
+	return r.reads == 1 && r.pick.other && !r.failed && r.left > 0 &&
+		(len(r.out) == 0 || r.pick.currentDead && r.left >= minSecondRead)
+}
+
+// blocks returns the container's blocks: each excerpt in a block whose header names its instance, the header
+// lines of the reads that gave no lines before the first excerpt, or, when no read gave lines, a block of
+// those lines alone, marked [CouldNotFetch] when the first read failed. A second read that failed is named in
+// the header lines; it does not make the block or the section failed, since one read per container would
+// not have made it.
+func (r *containerReads) blocks() []Block {
+	if len(r.out) == 0 {
+		blk := Block{Section: SectionLogs, Provenance: ProvenanceLogExcerpt, Availability: Available, Text: r.notes.String()}
+		if r.failed {
 			blk.Availability = CouldNotFetch
 		}
 		blk.headLen = len(blk.Text)
-		return []Block{blk}, readFailed, nil
+		return []Block{blk}
 	}
-	out[0].Text, out[0].headLen = notes.String()+out[0].Text, notes.Len()+out[0].headLen
-	return out, cut, nil
+	out := slices.Clone(r.out)
+	out[0].Text, out[0].headLen = r.notes.String()+out[0].Text, r.notes.Len()+out[0].headLen
+	return out
+}
+
+// readInstance reads one instance of r's container, the previous one when previous is set, asking for no
+// more than what is left of its share, and records the answer in r. It returns an error only when ctx is
+// done.
+func (b *Builder) readInstance(ctx context.Context, r *containerReads, previous bool, since time.Duration) error {
+	pick := r.pick
+	q := providers.LogQuery{
+		Namespace: pick.namespace, Pod: pick.pod, Container: pick.container, Previous: previous,
+		MaxBytes: int64(r.left),
+	}
+	if !previous {
+		// The previous instance stopped at some time in the past: no window for it.
+		q.Since = since
+	}
+	var ex providers.LogExcerpt
+	err := b.call(ctx, func(ctx context.Context) error {
+		var err error
+		ex, err = b.logs.Logs(ctx, q)
+		return err
+	})
+	if err != nil {
+		if a := abandoned(ctx); a != nil {
+			return a
+		}
+	}
+	r.reads++
+	read := pick
+	read.previous = previous
+	blk, v := b.renderBlock(read, ex, err, r.left)
+	r.left -= len(blk.Text)
+	if v.Read == LogReadOK {
+		r.out = append(r.out, blk)
+		return nil
+	}
+	reason := logReadReasons[noLinesReason(v.Read, err)]
+	logReadsWithoutLines.WithLabelValues(reason).Inc()
+	logf.FromContext(ctx).Info("Read no log lines of a container instance for the incident context",
+		"namespace", pick.namespace, "pod", pick.pod, "container", pick.container,
+		"instance", instanceName(previous), "reason", reason)
+	r.notes.WriteString(blk.Text)
+	if r.reads == 1 && (v.Read == LogReadFailed || v.Read == LogReadOversized) {
+		r.failed = true
+	}
+	return nil
 }
 
 // instanceName names an instance in a block header and in the log.

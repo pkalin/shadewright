@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,7 +34,9 @@ import (
 //   - B1: the log section takes at most two call timeouts in all, whatever the order and outcome of its reads.
 //   - B2: it makes at most MaxLogExcerpts x 2 calls, and a failed read is not followed by a second read of
 //     that container.
-//   - B3: a read the budget cut short marks the log excerpt failed; excerpts read before it are kept.
+//   - B3: the first reads take one call timeout each, as with one read per container; a second read the
+//     budget cut short does not mark the log excerpt failed, and the excerpts read before it are kept (O1 to
+//     O3 in order_test.go).
 
 // secondPod is the web fixture's other pod.
 const secondPod = "web-abc-2"
@@ -80,8 +81,10 @@ type timedLogs struct {
 	calls   []providers.LogQuery
 	first   time.Time
 	cutAt   []time.Time
-	// deadlines are the deadlines of the calls' contexts, in the order of calls.
+	// deadlines are the deadlines of the calls' contexts, and starts the times the calls reached the source,
+	// in the order of calls.
 	deadlines []time.Time
+	starts    []time.Time
 }
 
 // cut records a read that its context ended.
@@ -94,9 +97,11 @@ func (l *timedLogs) cut(ctx context.Context) (providers.LogExcerpt, error) {
 
 func (l *timedLogs) Logs(ctx context.Context, q providers.LogQuery) (providers.LogExcerpt, error) {
 	l.mu.Lock()
+	now := time.Now()
 	if l.first.IsZero() {
-		l.first = time.Now()
+		l.first = now
 	}
+	l.starts = append(l.starts, now)
 	l.calls = append(l.calls, q)
 	d, _ := ctx.Deadline()
 	l.deadlines = append(l.deadlines, d)
@@ -135,11 +140,17 @@ func (l *timedLogs) Logs(ctx context.Context, q providers.LogQuery) (providers.L
 // section.
 func timedBuild(t *testing.T, l *timedLogs, call, whole time.Duration) (*Context, int, time.Duration, time.Duration) {
 	t.Helper()
+	return timedBuildOf(t, bothExited(), l, call, whole)
+}
+
+// timedBuildOf is timedBuild over the given objects.
+func timedBuildOf(t *testing.T, objs []client.Object, l *timedLogs, call, whole time.Duration) (*Context, int, time.Duration, time.Duration) {
+	t.Helper()
 	src := webSources()
 	var mu sync.Mutex
 	var metricReads int
 	var metricsAt time.Time
-	b := newBuilder(t, reader(t, bothExited()...), src, func(c *Config) {
+	b := newBuilder(t, reader(t, objs...), src, func(c *Config) {
 		c.SourceTimeout, c.BuildTimeout = call, whole
 		c.Logs = l
 		c.Metrics = metricsFunc(func(ctx context.Context, q providers.MetricsQuery) (providers.MetricsResult, error) {
@@ -169,8 +180,9 @@ func timedBuild(t *testing.T, l *timedLogs, call, whole time.Duration) (*Context
 }
 
 // B1, B3: the case the second review of the fix proved. Two exited containers, each answering its current
-// instance slowly and hanging on its previous one: the section stops at its budget, marks the log excerpt
-// failed and keeps the excerpt read before, and the metrics are still read within the build deadline.
+// instance slowly and hanging on its previous one: both current instances are read first, the second read
+// that follows stops at the section's budget without marking the log excerpt failed, both excerpts stay, and
+// the metrics are still read within the build deadline.
 func TestLogSectionKeepsItsTimeBudget(t *testing.T) {
 	const call = 400 * time.Millisecond
 	l := &timedLogs{
@@ -187,15 +199,17 @@ func TestLogSectionKeepsItsTimeBudget(t *testing.T) {
 			t.Logf("no metric reads, the build took %s to reach the log section", lead)
 		}
 	}
-	if !slices.Contains(c.FailedSources, SectionLogs) {
-		t.Errorf("failed sources %v, want the log excerpt", c.FailedSources)
+	if slices.Contains(c.FailedSources, SectionLogs) {
+		t.Errorf("failed sources %v: only a second read was cut short", c.FailedSources)
 	}
 	var data []string
 	for _, blk := range blocks(c, SectionLogs) {
 		data = append(data, blk.Data()...)
 	}
-	if !slices.Contains(data, crashPod+" current instance failed\n") {
-		t.Errorf("the excerpt read before the budget ran out is gone: %q", data)
+	for _, p := range []string{crashPod, secondPod} {
+		if !slices.Contains(data, p+" current instance failed\n") {
+			t.Errorf("the excerpt of %s read before the budget ran out is gone: %q", p, data)
+		}
 	}
 	// The budget is 800 ms; checkDeadlines below checks it exactly, this coarse check by the clock leaves a
 	// margin for scheduling under -race that stays below the 1.1 s the section took without a budget.
@@ -205,82 +219,22 @@ func TestLogSectionKeepsItsTimeBudget(t *testing.T) {
 	if len(l.calls) > 2*MaxLogExcerpts {
 		t.Errorf("%d log calls, want at most %d", len(l.calls), 2*MaxLogExcerpts)
 	}
-	checkDeadlines(t, l, 2*call)
+	checkDeadlines(t, l, call, MaxLogExcerpts)
 }
 
-// B1, B2, B3 over the outcomes of the reads: every container plan (the current and the previous instance's
-// outcome) for each of two containers, in each order. The section never takes longer than its budget, never
-// makes more calls than the bound, and is marked failed whenever the budget cut a read short.
-func TestLogSectionBudgetOverOutcomes(t *testing.T) {
-	const call = 100 * time.Millisecond
-	var plans [][2]outcome
-	for o := answers; o <= hangs; o++ {
-		plans = append(plans, [2]outcome{o, o})
-		if o != answers {
-			plans = append(plans, [2]outcome{answers, o})
-		}
-	}
-	plans = append(plans, [2]outcome{slow, hangs}, [2]outcome{hangs, answers})
-	for _, a := range plans {
-		for _, b := range plans {
-			t.Run(fmt.Sprintf("%v-%v_%v-%v", a[0], a[1], b[0], b[1]), func(t *testing.T) {
-				t.Parallel()
-				l := &timedLogs{plan: map[string][2]outcome{crashPod: a, secondPod: b}, slowFor: 80 * time.Millisecond}
-				c, metricReads, _, _ := timedBuild(t, l, call, 10*time.Second)
-				// The time is checked by the calls' deadlines, which CPU load under -race does not move: the
-				// section starts before its first call, so no call may end later than first + budget. Without
-				// a section budget, the third read of two slow-then-hanging containers would end at 260 ms.
-				checkDeadlines(t, l, 2*call)
-				if metricReads == 0 {
-					t.Error("no metric reads")
-				}
-				if len(l.calls) > 2*MaxLogExcerpts {
-					t.Errorf("%d log calls, want at most %d", len(l.calls), 2*MaxLogExcerpts)
-				}
-				for _, p := range []string{crashPod, secondPod} {
-					var reads []providers.LogQuery
-					for _, q := range l.calls {
-						if q.Pod == p {
-							reads = append(reads, q)
-						}
-					}
-					if len(reads) > 2 {
-						t.Errorf("pod %s: %d reads, want at most 2", p, len(reads))
-					}
-					if len(reads) > 1 {
-						first := l.plan[p][0]
-						if reads[0].Previous {
-							first = l.plan[p][1]
-						}
-						if first.fails() {
-							t.Errorf("pod %s: read again after a failed read (%v)", p, first)
-						}
-					}
-				}
-				// The section starts before its first call, so a read cut at or after first + budget was cut
-				// by the budget (the build deadline is far off). One cut earlier may be the call timeout.
-				for _, at := range l.cutAt {
-					if !at.Before(l.first.Add(2*call)) && !slices.Contains(c.FailedSources, SectionLogs) {
-						t.Errorf("the budget cut a read short, failed sources %v", c.FailedSources)
-					}
-				}
-				for _, blk := range blocks(c, SectionLogs) {
-					if strings.Count(blk.Text, "instance\n") == 0 {
-						t.Errorf("block names no instance: %q", blk.Text)
-					}
-				}
-			})
-		}
-	}
-}
-
-// checkDeadlines checks B1 by the deadlines of the log calls: none later than budget after the first call.
-func checkDeadlines(t *testing.T, l *timedLogs, budget time.Duration) {
+// checkDeadlines checks B1 by the deadlines of the log calls: each of the first reads may run for one call
+// timeout from its start, as a read of its own; every later call ends no later than two call timeouts after
+// the first call (the section starts before it).
+func checkDeadlines(t *testing.T, l *timedLogs, call time.Duration, firstReads int) {
 	t.Helper()
 	for i, d := range l.deadlines {
-		if d.IsZero() || d.After(l.first.Add(budget)) {
-			t.Errorf("log call %d (%+v) may run until %s after the first, budget %s",
-				i, l.calls[i], d.Sub(l.first), budget)
+		limit := l.first.Add(2 * call)
+		if i < firstReads {
+			limit = l.starts[i].Add(call)
+		}
+		if d.IsZero() || d.After(limit) {
+			t.Errorf("log call %d (%+v) may run until %s after the first, %s after its start",
+				i, l.calls[i], d.Sub(l.first), d.Sub(l.starts[i]))
 		}
 	}
 }

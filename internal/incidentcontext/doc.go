@@ -31,9 +31,10 @@ limitations under the License.
 //     as [Context.ScaledObject] for the analysis loop to decide from;
 //   - log excerpt: excerpts from a [providers.LogSource] of at most two containers, those that look most
 //     relevant (a terminated instance first, then a waiting or unready container), at most two excerpts
-//     (one per instance) within each container's equal share of the bound, all its reads within a time budget
-//     of two call timeouts in total; a read the budget cuts short makes the section a failed source, and the
-//     excerpts read before it stay;
+//     (one per instance) within each container's equal share of the bound; every container's first read comes
+//     before any second read, each with one call timeout, and only a first read that failed makes the section
+//     a failed source; the second reads run in what is left of a time budget of two call timeouts for the
+//     section, and none starts once it is up;
 //   - metrics: the approved metric templates for the target's pods from a [providers.MetricsSource];
 //   - Git: always "not available" for now: the analyzer has no Git identity (invariant 6, #373);
 //   - policy bounds (#493): for each catalog action that can change the subject, the bounds of the

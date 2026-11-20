@@ -17,11 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -294,10 +296,11 @@ func TestPredecessorHeadMergeKeptByThePresentPredecessor(t *testing.T) {
 	}
 }
 
-// The content read of recordOtherHeadMerge is bounded by the MergeContent wait, the same entry and end as the read of
-// a retargeted merge (checkRetargeted): the bound is checked by that site's case.
+// The wait for the merge commit and the content read of recordOtherHeadMerge are bounded by the MergeContent wait, the
+// same entry and end as the read of a retargeted merge (checkRetargeted): the bound is checked by that site's case.
 func init() {
 	gitReadSites["recoverywait.go:recordOtherHeadMerge:1"] = gitReadSites["branchchange.go:checkRetargeted:1"]
+	gitReadSites["recoverywait.go:recordOtherHeadMerge:2"] = gitReadSites["branchchange.go:checkRetargeted:1"]
 }
 
 // The predecessor records the merge of its own head while the replacement holds the lock before its takeover, and is
@@ -374,5 +377,164 @@ func TestPredecessorRecordedItsHeadEndsTheWatchingReplacement(t *testing.T) {
 		t.Fatalf("replacement %q, PullRequestOpened %+v, handoff %q, lock %v: want Superseded with "+
 			"MergedForPredecessor, its handoff Aborted, the lock released and no record", got.Status.Phase, c,
 			got.Status.Handoff.From.Phase, ptr.Deref(got.Status.HoldsTarget, false))
+	}
+}
+
+// The replacement that holds the lock sees the predecessor's own head merged first, while the predecessor is present
+// without a record of it, and the predecessor is then deleted before it reads the merge (decision of 2026-11-20 on
+// #870, one rule over the state): the replacement keeps the lock and waits, visibly (TargetHeld with
+// MergeRecordPending), and records the merge itself once the predecessor is gone. Before, it released the lock at its
+// first look and the merge was recorded on neither request.
+func TestReplacementSeesPredecessorHeadFirstThenPredecessorGone(t *testing.T) {
+	r, p, rr, cr, move := predecessorHeadMerged(t)
+	ctx := t.Context()
+	move(heldRecheckInterval)
+	res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+	if err != nil {
+		t.Fatalf("the look returned %v; want a wait without an error", err)
+	}
+	waiting := storedRR(t, r, rr)
+	held := meta.FindStatusCondition(waiting.Status.Conditions, api.ConditionTargetHeld)
+	if !ptr.Deref(waiting.Status.HoldsTarget, false) || waiting.Status.Handoff.From.Phase != api.HandoffReserved ||
+		held == nil || held.Reason != ReasonMergeRecordPending || recordsMerge(waiting) || res.RequeueAfter <= 0 {
+		t.Fatalf("replacement %q, handoff %q, lock %v, TargetHeld %+v, result %+v: want the lock kept with "+
+			"MergeRecordPending and a wait while the present predecessor holds no record", waiting.Status.Phase,
+			waiting.Status.Handoff.From.Phase, ptr.Deref(waiting.Status.HoldsTarget, false), held, res)
+	}
+	gone := storedRR(t, r, p)
+	if recordsMerge(gone) {
+		t.Fatalf("predecessor %q records the merge already: the order under test is look, delete, look", gone.Status.Phase)
+	}
+	gone.Finalizers = nil
+	if err := r.Update(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	var got *api.RemediationRequest
+	for range 3 {
+		move(heldRecheckInterval)
+		got, _ = reconcileOnce(t, r, rr)
+	}
+	foreignRecordedOnReplacement(t, got, cr.Number)
+	if ptr.Deref(got.Status.HoldsTarget, false) {
+		t.Fatal("the recorded merge did not settle the replacement's lock")
+	}
+}
+
+// The Git host reports the merge with another head without a full merge commit ID: the replacement records nothing
+// yet, keeps the lock, holds a MergeContent wait about the merge (a claim the predecessor waits for) and returns a
+// wait, no error, as the other merge paths wait for the commit. Once the host reports it, what the merge brought is
+// read and the merge is recorded as a foreign change.
+func TestOtherHeadWithoutMergeCommitWaitsForIt(t *testing.T) {
+	r, g, p, rr, cr, move := watchingAfterRefusal(t)
+	branch := "shadewright/" + string(chainRootOf(p))
+	if _, err := g.Push(branch, "person.yaml", []byte("by: a person\n")); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := g.MergeWithCommit(cr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetMergeCommit(cr.Number, ""); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.Reconcile(t.Context(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)})
+	if err != nil {
+		t.Fatalf("a merge without its merge commit ID returned %v; want a wait without an error", err)
+	}
+	got := storedRR(t, r, rr)
+	w := gitWait(got, waitMergeContent)
+	if res.RequeueAfter <= 0 || recordsMerge(got) || got.Status.Phase == api.PhaseNeedsIntervention || w == nil ||
+		w.PullRequest == nil || w.PullRequest.Number != cr.Number || !ptr.Deref(got.Status.HoldsTarget, false) {
+		t.Fatalf("result %+v, phase %q, waits %+v: want no record yet, a wait about #%d and the lock", res,
+			got.Status.Phase, got.Status.GitWaits, cr.Number)
+	}
+	gotP, _ := reconcileOnce(t, r, p)
+	noRecordOnPredecessor(t, gotP)
+	if err := g.SetMergeCommit(cr.Number, commit); err != nil {
+		t.Fatal(err)
+	}
+	move(time.Minute)
+	got, _ = reconcileOnce(t, r, rr)
+	foreignRecordedOnReplacement(t, got, cr.Number)
+	if c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionApproved); strings.Contains(c.Message,
+		"no full merge commit ID") {
+		t.Fatalf("Approved message %q: the merge was recorded on the missing ID", c.Message)
+	}
+}
+
+// The Git host never reports the merge commit ID: past mergeContentWait the merge is recorded on the replacement as
+// MergeContentUnreadable, which claims nothing about what the merge brought, and the predecessor records none.
+func TestOtherHeadMergeCommitNeverReportedRecordsUnreadable(t *testing.T) {
+	r, g, p, rr, cr, move := watchingAfterRefusal(t)
+	if _, err := g.Push("shadewright/"+string(chainRootOf(p)), "person.yaml", []byte("by: a person\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.MergeWithCommit(cr.Number); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetMergeCommit(cr.Number, ""); err != nil {
+		t.Fatal(err)
+	}
+	var got *api.RemediationRequest
+	for range 3 {
+		got, _ = reconcileOnce(t, r, rr)
+		move(mergeContentWait)
+	}
+	c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionApproved)
+	if got.Status.Phase != api.PhaseNeedsIntervention || c == nil || c.Reason != ReasonMergeContentUnreadable ||
+		got.Status.PullRequest == nil || got.Status.PullRequest.Number != cr.Number || !tookOver(got) {
+		t.Fatalf("phase %q, Approved %+v: want the merge recorded as MergeContentUnreadable at the end of the wait",
+			got.Status.Phase, c)
+	}
+	gotP, _ := reconcileOnce(t, r, p)
+	noRecordOnPredecessor(t, gotP)
+}
+
+// The kill switch pauses Git writes between the predecessor's record of the merge of its own head and the end of the
+// replacement that holds the lock before its takeover (endReplacementAfterRecord, run at the end of the predecessor's
+// reconcile on the predecessor as that reconcile stored it): the replacement keeps the lock and the reconcile is
+// requeued no later than freshRecheckDelay, never with an error; once writes resume the same step ends the
+// replacement.
+func TestPredecessorRecordUnderPauseEndsTheReplacementLater(t *testing.T) {
+	r, p, rr, _, _ := predecessorHeadMerged(t)
+	recorded := storedRR(t, r, p)
+	now := metav1.NowMicro()
+	recorded.Status.PullRequest.MergedAt = &now
+	if !holdsMergeRecord(recorded, recorded.Status.PullRequest.Number, recorded.Status.PullRequest.HeadSHA) {
+		t.Fatal("the predecessor as stored by its record does not hold the record")
+	}
+	setPaused(t, r, true)
+	var res reconcile.Result
+	var err error
+	r.endReplacementAfterRecord(t.Context(), recorded, &res, &err)
+	if err != nil {
+		t.Fatalf("the paused step returned %v; want a requeue without an error", err)
+	}
+	if res.RequeueAfter <= 0 || res.RequeueAfter > freshRecheckDelay {
+		t.Fatalf("result %+v: want a requeue within %v, so the end of the replacement is tried again", res,
+			freshRecheckDelay)
+	}
+	if held := storedRR(t, r, rr); !ptr.Deref(held.Status.HoldsTarget, false) {
+		t.Fatal("the replacement let go of the lock while writes are paused")
+	}
+	// A longer wait the reconcile had is shortened only to the pause's recheck, and a shorter one is kept.
+	res, err = reconcile.Result{RequeueAfter: time.Second}, nil
+	r.endReplacementAfterRecord(t.Context(), recorded, &res, &err)
+	if err != nil || res.RequeueAfter != time.Second {
+		t.Fatalf("result %+v, error %v: want the shorter wait of the reconcile kept", res, err)
+	}
+	setPaused(t, r, false)
+	res, err = reconcile.Result{}, nil
+	r.endReplacementAfterRecord(t.Context(), recorded, &res, &err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ended := storedRR(t, r, rr); ptr.Deref(ended.Status.HoldsTarget, false) ||
+		ended.Status.Handoff.From.Phase != api.HandoffAborted || recordsMerge(ended) {
+		t.Fatalf("replacement %q, handoff %q, lock %v: want it ended on the predecessor's record once writes resume",
+			ended.Status.Phase, ended.Status.Handoff.From.Phase, ptr.Deref(ended.Status.HoldsTarget, false))
 	}
 }

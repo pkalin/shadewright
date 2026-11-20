@@ -360,6 +360,7 @@ These come and go beside the phase; most name a Git host problem that is retried
 | --- | --- | --- |
 | <span id="th-pullrequestopenonbranch"></span>`PullRequestOpenOnBranch` | A request that stopped keeps the lock on its target because another pull request is open on its branch and may still deliver the change. The message names it. | Merge or close that pull request; the lock goes at the next look (every 10 minutes). [More](troubleshooting.md#limits) |
 | <span id="th-personcommitonpullrequest"></span>`PersonCommitOnPullRequest` | A replacement that ended before it took the pull request over keeps the lock because that pull request is open with a person's commit on it, so it may still deliver the replacement's commit. | Merge or close the pull request; the lock goes then. [More](troubleshooting.md#pull-request-step) |
+| <span id="th-mergerecordpending"></span>`MergeRecordPending` | A replacement that ended before it took the pull request over keeps the lock because that pull request was merged with the head of the request it replaces, which records the merge and holds no record of it yet. The lock goes once that record is stored; if that request is deleted without it, the replacement records the merge itself. | Nothing, while the request it replaces works; if it is stuck, fix what it names or delete it. [More](troubleshooting.md#pull-request-step) |
 
 #### PullRequestUnreadable
 

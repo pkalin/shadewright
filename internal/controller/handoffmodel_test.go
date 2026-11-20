@@ -137,7 +137,12 @@ import (
 //	   replacement records it with the same reasons and the predecessor none; a predecessor that recorded it ends the
 //	   replacement in that pass, so the replacement never records it too, also once the predecessor went (record,
 //	   delete, look: the step hDeleteRecorder; replRecordsPredRecord). The default seed set must reach both shapes
-//	   (hmP12Reach), under the race detector too;
+//	   (hmP12Reach), under the race detector too, and the order look, delete, look (the step hDeleteAfterLook);
+//	P13 a replacement before its takeover, not being deleted, never lets go of the target lock on a merge of the pull
+//	   request it was to take over while no request holds the record of that merge (decision of 2026-11-20 on #870, one
+//	   rule over the state): it releases in the write that records the merge, or after it reads the predecessor's
+//	   record (mayReleaseOnMerge). Every such release is checked and counted, and the default seed set must reach one
+//	   (hmP13Reach), under the race detector too;
 //	P9 the predecessor never stores the abort of an intent whose takeover the replacement, as stored at that write,
 //	   recorded (from Done), whatever ends it, unless a person put the predecessor's own head back on the pull
 //	   request (fourth round of #786).
@@ -161,7 +166,7 @@ import (
 // to 500, 1 to 100 under the race detector or -short; the code was checked against the seeds 1 to 9,000 and then
 // 9,001 to 13,000, in the fifth round of #786 against 1 to 24,000, for #880 against 1 to 60,000, and for its second decision (a wait is a claim) against 1 to 260,000 with the
 // deletion of the claim holder drawn, and for the live copies of the requests (decision of 2026-11-19 on #786) against 1 to
-// 260,000 with the cache lagging behind a change of the other request drawn. For #870 (P12) it was checked against 1 to 120,000, and for its third case (predLeft) against 1 to 36,000 (seed 59 broke P12 without the change, seed 175 without its part for a predecessor that is gone, both drawn before the record-then-delete step existed). With that step (decision of 2026-11-20 on #870 replacing the third row), seed 10 breaks P12 when the predecessor does not end the replacement on its record. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
+// 260,000 with the cache lagging behind a change of the other request drawn. For #870 (P12) it was checked against 1 to 120,000, and for its third case (predLeft) against 1 to 36,000 (seed 59 broke P12 without the change, seed 175 without its part for a predecessor that is gone, both drawn before the record-then-delete step existed). With that step (decision of 2026-11-20 on #870 replacing the third row), seed 10 breaks P12 when the predecessor does not end the replacement on its record. With the step for look, delete, look and P13 (decision of 2026-11-20 on #870, one rule over the state), seed 47 breaks P13 when the replacement releases at its look without the predecessor's record (seeds 4, 55 and 75 too, among the seeds 1 to 100 under the race detector). SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
 // to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1 prints the trace of every seed
 // (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile). The log of every run (go test -v)
 // holds the count of failures per property, of the exclusions, and of what the sequences reached.
@@ -215,6 +220,10 @@ const (
 	// hDeleteRecorder is drawn by the generator only and becomes a deletion of the predecessor once it records the
 	// merge of its own head (hDelete, deleteRecorder).
 	hDeleteRecorder hmKind = "delete-merge-recorder"
+	// hDeleteAfterLook is drawn by the generator only and becomes a deletion of the predecessor once the replacement
+	// that holds the lock before its takeover looked at the merge of the predecessor's own head while the predecessor
+	// holds no record of it (hDelete, deleteAfterLook).
+	hDeleteAfterLook hmKind = "delete-after-replacement-look"
 	// hRestartLate is a restart after the executor was down for longer than the longest wait a request records
 	// (hmLongestWait): every wait that stands is past its end at the first reconcile.
 	hRestartLate hmKind = "restart-after-every-wait"
@@ -260,6 +269,11 @@ const (
 	// the merge of its own head, made before the takeover (deleteArmedRecorder): record, then delete, then the
 	// replacement looks (decision of 2026-11-20 on #870 replacing the third row).
 	deleteRecorder = "merge-recorder"
+	// deleteAfterLook is the variant of a deletion (hDelete) that deletes the predecessor once the replacement, which
+	// holds the lock before its takeover, looked at the merge of the predecessor's own head while the predecessor holds
+	// no record of it (deleteArmedAfterLook): look (the replacement keeps the lock, or before the decision of 2026-11-20
+	// on #870 released it), then delete, then the replacement looks again (P13).
+	deleteAfterLook = "after-replacement-look"
 
 	// hmOtherBranch is the target branch a settings change names; hmOtherURL the repository that replaces the plan's.
 	hmOtherBranch = "release"
@@ -312,6 +326,9 @@ func (s hmStep) String() string {
 		}
 		if s.Variant == deleteRecorder {
 			return string(s.Kind) + " the predecessor once it records the merge of its own head"
+		}
+		if s.Variant == deleteAfterLook {
+			return string(s.Kind) + " the predecessor once the replacement looked at the merge of its head"
 		}
 		return string(s.Kind) + " " + s.Obj
 	case hLose, hConflict, hStale:
@@ -374,6 +391,9 @@ type hmWorld struct {
 	// recorderDeleteArmed: a deletion of the predecessor waits for its record of the merge of its own head
 	// (deleteArmedRecorder).
 	recorderDeleteArmed bool
+	// lookDeleteArmed: a deletion of the predecessor waits for the replacement's look at the merge of the
+	// predecessor's own head (deleteArmedAfterLook).
+	lookDeleteArmed bool
 
 	t      *testing.T
 	schema *statusSchema
@@ -1612,6 +1632,7 @@ func (m *hmWorld) observe() {
 	m.observeLock(reqs)
 	m.deleteArmedClaimHolder()
 	m.deleteArmedRecorder()
+	m.deleteArmedAfterLook()
 }
 
 // deleteArmedRecorder carries out an armed deletion of the predecessor (deleteRecorder) once it records the merge of
@@ -1631,6 +1652,56 @@ func (m *hmWorld) deleteArmedRecorder() {
 	}
 	m.logf("  a person deletes the predecessor, which recorded the merge of its own head")
 	m.deleteRequest(hmPred)
+}
+
+// deleteArmedAfterLook carries out an armed deletion of the predecessor (deleteAfterLook) once the replacement looked
+// at the merge of the predecessor's own head, made before the takeover, while the predecessor is present and holds no
+// record of it, and disarms it. When the replacement has not looked yet but ended before its takeover holding the lock,
+// it reconciles first (a random order rarely puts its look before the predecessor's record). The order of the finding
+// of 2026-11-20 on #870 (look, delete, look): the replacement must keep the lock at its first look and record the
+// merge once the predecessor went without one (P12, P13).
+func (m *hmWorld) deleteArmedAfterLook() {
+	mg, p, repl := m.merge, m.get(hmPred), m.get(hmRepl)
+	waits := func() bool {
+		return mg != nil && mg.owner == hmPred && !mg.afterTakeover && p != nil && p.DeletionTimestamp.IsZero() &&
+			!recordsMerge(p) && repl != nil && repl.DeletionTimestamp.IsZero()
+	}
+	if !m.lookDeleteArmed || !waits() {
+		return
+	}
+	if !replLookedAtPredHead(repl) {
+		if !endedBeforeTakeover(repl) || !ptr.Deref(repl.Status.HoldsTarget, false) {
+			return
+		}
+		m.lookDeleteArmed = false
+		m.logf("  the replacement looks at the merge of the predecessor's head before the predecessor records it")
+		m.reconcile(hmRepl)
+		m.observe()
+		p, repl = m.get(hmPred), m.get(hmRepl)
+		if !waits() || !replLookedAtPredHead(repl) {
+			return
+		}
+	}
+	m.lookDeleteArmed = false
+	m.reach["pred-head-looked-then-deleted"] = true
+	m.logf("  a person deletes the predecessor after the replacement looked at the merge of its head")
+	m.deleteRequest(hmPred)
+	// The deletion follows the checks of this step: what it leaves to the replacement is noted now.
+	m.notePredLeft(map[string]*api.RemediationRequest{hmPred: m.get(hmPred), hmRepl: m.get(hmRepl)})
+}
+
+// replLookedAtPredHead reports whether repl, before its takeover, shows a look at the merge of its predecessor's own
+// head that the predecessor did not record yet: it keeps the lock and waits for that record (TargetHeld with
+// MergeRecordPending), or it let go of the lock with its handoff Aborted and no record of its own (the release the
+// decision of 2026-11-20 on #870 withdrew; P13 fails on it).
+func replLookedAtPredHead(repl *api.RemediationRequest) bool {
+	if c := meta.FindStatusCondition(repl.Status.Conditions, api.ConditionTargetHeld); c != nil &&
+		c.Reason == ReasonMergeRecordPending {
+		return true
+	}
+	ho := repl.Status.Handoff
+	return ho != nil && ho.From != nil && ho.From.Phase == api.HandoffAborted && repl.Status.PullRequest == nil &&
+		!ptr.Deref(repl.Status.HoldsTarget, false) && !recordsMerge(repl)
 }
 
 // note records what the sequence reached and the shapes later checks excuse.
@@ -1730,6 +1801,28 @@ func (m *hmWorld) checkRelease(who string, x *api.RemediationRequest, reqs map[s
 		m.fail("P12", "the replacement released the lock on the merge of %s before it recorded it (%s)",
 			short(m.merge.head), describe(x))
 	}
+	m.checkReleaseRecorded(who, x, reqs, cr)
+}
+
+// checkReleaseRecorded checks P13 for who, which held the target lock before this step and no longer does: a
+// replacement before its takeover, not being deleted, that lets go of the lock on a merge of the pull request it was to
+// take over does so only while a request holds the record of that merge (its own, stored in the same write, or its
+// predecessor's), or one that is gone recorded it (decision of 2026-11-20 on #870, one rule over the state). Each
+// release it checks is counted (hmP13Reach), so a seed set that never reaches one fails the model.
+func (m *hmWorld) checkReleaseRecorded(who string, x *api.RemediationRequest, reqs map[string]*api.RemediationRequest,
+	cr providers.ChangeRequest) {
+	if who != hmRepl || cr.State != providers.ChangeRequestMerged || m.merge == nil || m.merge.afterTakeover ||
+		tookOver(x) || !x.DeletionTimestamp.IsZero() || x.Spec.Replaces == nil {
+		return
+	}
+	m.reach["release-on-merge-before-takeover"] = true
+	for w, y := range reqs {
+		if (y != nil && recordsOn(y, m.number)) || (y == nil && m.merge.recorded[w]) {
+			return
+		}
+	}
+	m.fail("P13", "the replacement released the lock on the merge of %s while no request holds its record "+
+		"(pred: %s, repl: %s)", short(m.merge.head), describe(reqs[hmPred]), describe(x))
 }
 
 // reconcile runs one reconcile of who and checks what it left.
@@ -1896,6 +1989,9 @@ func (m *hmWorld) deleteStep(s hmStep) {
 	case deleteRecorder:
 		m.recorderDeleteArmed = true
 		m.deleteArmedRecorder()
+	case deleteAfterLook:
+		m.lookDeleteArmed = true
+		m.deleteArmedAfterLook()
 	default:
 		m.deleteRequest(s.Obj)
 	}
@@ -2290,7 +2386,7 @@ func latest(a, b time.Time) time.Time {
 // checks what must hold once reads answer.
 func (m *hmWorld) settle() {
 	m.logf("settle")
-	m.claimDeleteArmed, m.recorderDeleteArmed = false, false
+	m.claimDeleteArmed, m.recorderDeleteArmed, m.lookDeleteArmed = false, false, false
 	m.mu.Lock()
 	m.sticky, m.once, m.lose, m.conflict, m.crashAt = nil, map[string]error{}, map[string]bool{}, map[string]bool{}, -1
 	m.mu.Unlock()
@@ -2583,7 +2679,7 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 	weights := []weighted{{6, hRecPred}, {6, hRecRepl}, {4, hClock}, {3, hFault}, {2, hAnswer}, {1, hLose},
 		{1, hConflict}, {1, hRestart}, {1, hCrash}, {1, hPause}, {1, hLift}, {1, hDelete}, {2, hMerge}, {1, hPush},
 		{1, hClose}, {1, hReopen}, {1, hBranch}, {1, hForce}, {1, hSettings}, {2, hDeleteClaim}, {1, hRestartLate},
-		{3, hInterleave}, {1, hStale}, {1, hDeleteRecorder}}
+		{3, hInterleave}, {1, hStale}, {1, hDeleteRecorder}, {1, hDeleteAfterLook}}
 	switch focus {
 	case 1:
 		weights = append(weights, weighted{3, hFault}, weighted{2, hClock}, weighted{2, hMerge}, weighted{3, hDeleteClaim})
@@ -2591,7 +2687,7 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 		weights = append(weights, weighted{2, hLose}, weighted{2, hClock}, weighted{2, hFault})
 	case 3:
 		weights = append(weights, weighted{2, hCrash}, weighted{2, hDelete}, weighted{3, hClock}, weighted{2, hDeleteClaim},
-			weighted{1, hForce}, weighted{2, hRestartLate}, weighted{2, hDeleteRecorder})
+			weighted{1, hForce}, weighted{2, hRestartLate}, weighted{2, hDeleteRecorder}, weighted{2, hDeleteAfterLook})
 	}
 	total := 0
 	for _, w := range weights {
@@ -2608,7 +2704,7 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 			}
 			n -= w.w
 		}
-		if k == hDeleteRecorder {
+		if k == hDeleteRecorder || k == hDeleteAfterLook {
 			// The shape of the step needs a merge of the predecessor's own head: a person puts it back and merges it,
 			// and the predecessor is deleted once it records that merge (record, delete, look; #870).
 			steps = append(steps, hmStep{Kind: hForce, Variant: forceDrop},
@@ -2638,6 +2734,8 @@ func hmDrawStep(rng *rand.Rand, k hmKind, focus uint64) hmStep {
 		s = hmStep{Kind: hDelete, Variant: deleteClaimHolder}
 	case hDeleteRecorder:
 		s = hmStep{Kind: hDelete, Variant: deleteRecorder}
+	case hDeleteAfterLook:
+		s = hmStep{Kind: hDelete, Variant: deleteAfterLook}
 	}
 	switch k {
 	case hClock:
@@ -2744,6 +2842,11 @@ func TestHandoffModel(t *testing.T) {
 				t.Errorf("P12: no seed of the default set reached %q", k)
 			}
 		}
+		for _, k := range hmP13Reach {
+			if counts["reach "+k] == 0 {
+				t.Errorf("P13: no seed of the default set reached %q", k)
+			}
+		}
 	})
 	for _, seed := range hmSeeds(t) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -2789,7 +2892,11 @@ func TestHandoffModel(t *testing.T) {
 
 // hmP12Reach are the shapes of P12 the default seed set must reach (TestHandoffModel): a merge of the predecessor's
 // own head it left to the replacement, and one it recorded and then was deleted (record, delete, look).
-var hmP12Reach = []string{"pred-head-merge-pred-left", "pred-head-recorded-then-deleted"}
+var hmP12Reach = []string{"pred-head-merge-pred-left", "pred-head-recorded-then-deleted", "pred-head-looked-then-deleted"}
+
+// hmP13Reach are the shapes of P13 the default seed set must reach: a replacement before its takeover that lets go of
+// the lock on a merge (each such release is checked).
+var hmP13Reach = []string{"release-on-merge-before-takeover"}
 
 // hmDirected runs a scripted sequence and fails with the violations.
 func hmDirected(t *testing.T, start string, steps []hmStep) *hmWorld {

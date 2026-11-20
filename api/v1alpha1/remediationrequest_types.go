@@ -1119,7 +1119,7 @@ type RemediationRequestStatus struct {
 	// replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all,
 	// and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the
 	// executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed,
-	// so a Declined hint stays as the record of what was asked. A replacement carries over those of its chain (#539).
+	// so a Declined hint stays as the record of what was asked. A replacement carries over those of its chain.
 	// +listType=map
 	// +listMapKey=source
 	// +listMapKey=commentID

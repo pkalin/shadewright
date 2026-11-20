@@ -187,3 +187,9 @@ func TestOtherHeadContentReadFailsWaitsThenRecords(t *testing.T) {
 	gotP, _ = reconcileOnce(t, r, p)
 	noRecordOnPredecessor(t, gotP)
 }
+
+// The content read of recordOtherHeadMerge is bounded by the MergeContent wait, the same entry and end as the read of
+// a retargeted merge (checkRetargeted): the bound is checked by that site's case.
+func init() {
+	gitReadSites["recoverywait.go:recordOtherHeadMerge:1"] = gitReadSites["branchchange.go:checkRetargeted:1"]
+}

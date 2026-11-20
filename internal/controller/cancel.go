@@ -31,7 +31,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -100,7 +99,7 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 	reconcile.Result, error) {
 	if s, ok := settleNeverHeld(rr); ok && rr.Status.HoldsTarget == nil {
 		// As for a refusal: false keeps it out of the limits' lock list (limitsSelectors).
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return reconcile.Result{}, err
 		}
 	}
@@ -584,12 +583,11 @@ func cancelPendingCondition(rr *remediationv1alpha1.RemediationRequest, reason, 
 	}
 }
 
-// cancelCheckRun is the failed check run shadewright/review of a cancelled request; onOtherBase as for
-// failedCheckRun.
-func cancelCheckRun(onOtherBase bool) providers.CheckRun {
+// cancelCheckRun is the failed check run shadewright/review of a cancelled request; where as for failedCheckRun.
+func cancelCheckRun(where checkWhere) providers.CheckRun {
 	return providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunFailure, Title: cancelCheckTitle,
 		Summary: "This request was cancelled (spec.cancel), so its change must not be merged. " +
-			failedSummaryEnd(onOtherBase)}
+			failedSummaryEnd(where)}
 }
 
 // failCancelCheck completes the check run shadewright/review on the recorded head of a cancelled request's pull

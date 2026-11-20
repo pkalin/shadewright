@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -847,7 +846,7 @@ func (r *RemediationRequestReconciler) endOnOtherMerge(ctx context.Context, rr *
 	cr providers.ChangeRequest) error {
 	rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
 	if s, ok := settleHandoffAborted(rr); ok {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return err
 		}
 	}
@@ -881,7 +880,7 @@ func (r *RemediationRequestReconciler) endMergedElsewhere(ctx context.Context, r
 	rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
 	s, released := settleHandoffAborted(rr)
 	if released {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return err
 		}
 	}
@@ -913,7 +912,7 @@ func (r *RemediationRequestReconciler) endWithoutCommit(ctx context.Context, rr 
 	cr providers.ChangeRequest) error {
 	rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
 	if s, ok := settleHandoffAborted(rr); ok {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return err
 		}
 	}

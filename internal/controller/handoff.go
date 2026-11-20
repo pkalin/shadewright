@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -747,7 +746,7 @@ const ReasonMergedForPredecessor = "MergedForPredecessor"
 func (r *RemediationRequestReconciler) leavePredecessorMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	v changeVerdict) error {
 	if s, ok := settlePredecessorMerge(v, ownerPredecessorRecords); ok && ptr.Deref(rr.Status.HoldsTarget, false) {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return err
 		}
 	}
@@ -899,7 +898,7 @@ func (r *RemediationRequestReconciler) leaveReplacementMerge(ctx context.Context
 		name = string(rr.Status.Handoff.To.Name)
 	}
 	if s, ok := settleReplacementMerge(v, owner); ok && ptr.Deref(rr.Status.HoldsTarget, false) {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return err
 		}
 	}
@@ -1274,7 +1273,7 @@ func (r *RemediationRequestReconciler) endHandoff(ctx context.Context, rr *remed
 			from.Phase = remediationv1alpha1.HandoffAborted
 		}
 		if s, ok := settleHandoffAborted(rr); ok {
-			if err := lockverdict.Release(&rr.Status, s); err != nil {
+			if err := releaseLock(ctx, rr, s); err != nil {
 				return err
 			}
 		}
@@ -1529,7 +1528,7 @@ func (r *RemediationRequestReconciler) supersedePredecessor(ctx context.Context,
 		h.State = remediationv1alpha1.HintConsumed
 	}
 	if s, ok := settleHandedOver(to, rr); ok {
-		if err := lockverdict.Release(&pred.Status, s); err != nil {
+		if err := releaseLock(ctx, pred, s); err != nil {
 			return err
 		}
 	}

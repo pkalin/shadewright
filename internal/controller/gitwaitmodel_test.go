@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -262,6 +263,8 @@ func modelSeeds(t *testing.T) []uint64 {
 
 func TestGitWaitModel(t *testing.T) {
 	schema := requestStatusSchema(t)
+	fixedSeeds := os.Getenv("SHADEWRIGHT_MODEL_SEED") == "" && os.Getenv("SHADEWRIGHT_MODEL_SEED_RANGE") == "" &&
+		os.Getenv("SHADEWRIGHT_MODEL_SEEDS") == ""
 	t.Cleanup(func() {
 		modelMoves.mu.Lock()
 		defer modelMoves.mu.Unlock()
@@ -271,6 +274,14 @@ func TestGitWaitModel(t *testing.T) {
 		modelGoneStops.mu.Lock()
 		defer modelGoneStops.mu.Unlock()
 		t.Logf("stops for a pull request read gone with reviewer hints on, checked: %d", modelGoneStops.count)
+		modelHeldChecks.mu.Lock()
+		defer modelHeldChecks.mu.Unlock()
+		t.Logf("looks of a stopped holder kept by another pull request from its branch, checked: %d",
+			modelHeldChecks.count)
+		if fixedSeeds && modelHeldChecks.count == 0 && !t.Failed() {
+			t.Errorf("property \"stopped holder\" was never reached on the fixed seeds: a change of the model's " +
+				"events no longer draws a stopped holder kept by another pull request (#925)")
+		}
 	})
 	for _, seed := range modelSeeds(t) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -328,6 +339,8 @@ type modelWorld struct {
 	liveFails bool
 	liveReads int
 	liveRng   *rand.Rand
+	// heldRng draws heldEvent, apart from rng, so the orders the seeds drew before it are kept.
+	heldRng *rand.Rand
 	// writeFaulted reports that this reconcile met an injected write fault or a stale read.
 	writeFaulted bool
 	// deleted hides the pull request from every read (gone from the host); gone are earlier pull requests of the
@@ -504,6 +517,7 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 		focus: st.focus, afterLift: -1, flap: st.flap}
 	// #nosec G404 -- a seeded generator, so a failing order can be run again from its seed.
 	m.liveRng = rand.New(rand.NewPCG(seed, seed^0x6a09e667f3bcc909))
+	m.heldRng = rand.New(rand.NewPCG(seed, seed^0xbb67ae8584caa73b))
 	start := st.start
 	phase := api.PhaseNeedsIntervention
 	switch start {
@@ -1077,6 +1091,24 @@ func (m *modelWorld) unmarkedEvent() {
 	m.logf("open #%d from the request's branch to %.12s without the marker", n, movedBranch)
 }
 
+// heldEvent is a person who opens a pull request from the branch of a stopped request whose own pull request is not
+// open (unmarkedEvent), in a third of the passes where that holds: the case of property "stopped holder" (decision of
+// 2026-11-20 on #925, "one rule"), which the draws of event reach too rarely to be checked on the fixed seeds. It
+// draws from heldRng, so the other events of a seed stay as they were.
+func (m *modelWorld) heldEvent() {
+	if m.unmarked != 0 || m.heldRng.IntN(3) != 0 {
+		return
+	}
+	live := m.live()
+	if progresses(live) || live.Status.PullRequest == nil || !holdsLock(live) {
+		return
+	}
+	if cr, found := m.pr(); found && !m.deleted && cr.State == providers.ChangeRequestOpen {
+		return
+	}
+	m.unmarkedEvent()
+}
+
 // unmarkedOpen reports whether the pull request of unmarkedEvent is open.
 func (m *modelWorld) unmarkedOpen() bool {
 	if m.unmarked == 0 {
@@ -1157,6 +1189,7 @@ func (m *modelWorld) checkEvent() {
 
 // event changes the world at random before a reconcile.
 func (m *modelWorld) event() {
+	m.heldEvent()
 	cr, _ := m.pr()
 	if m.focusEvent(cr) {
 		return
@@ -2008,6 +2041,57 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	m.noteProperty(live)
 	m.stopCheckProperty(live)
 	m.goneCheckProperty(live)
+	m.stoppedHolderProperty(live, err, faulted)
+}
+
+// modelHeldChecks counts, over every seed of a run, the looks of a stopped holder that stoppedHolderProperty checked,
+// so a run shows the property was reached; TestGitWaitModel fails on the fixed seed set when it is 0.
+var modelHeldChecks struct {
+	mu    sync.Mutex
+	count int
+}
+
+// stoppedHolderProperty: a stopped holder whose own pull request is not open (closed, merged, gone or never found)
+// while another open pull request from its branch holds the lock leaves, after a look whose reads and writes worked,
+// the failed review check last on its recorded head, or says why not with condition ReviewCheckNotFailed (stopped
+// holder, decision of 2026-11-20 on #925, "one rule"): that pull request has the branch head and could merge it on a
+// pass written before the stop. The look decides from the lock and the check on the head, never from the verdict of
+// its own pull request. The model reaches no new installation of the App, so that exception is the directed tests'.
+func (m *modelWorld) stoppedHolderProperty(live *api.RemediationRequest, err error, faulted bool) {
+	if !m.r.ReviewerHints || err != nil || faulted || m.lastFailedCalls > 0 || len(m.history) < 2 {
+		return
+	}
+	before := m.history[len(m.history)-2]
+	pr := live.Status.PullRequest
+	if progresses(before) || progresses(live) || !live.DeletionTimestamp.IsZero() || pr == nil ||
+		!ptr.Deref(live.Status.HoldsTarget, false) || !ptr.Deref(before.Status.HoldsTarget, false) ||
+		mergeRecorded(live) || handedOff(live) || intent(live) != nil || !m.unmarkedOpen() || m.repo != nil ||
+		meta.FindStatusCondition(live.Status.Conditions, api.ConditionPullRequestUnreadable) != nil {
+		// No look reads anything while the repository is out of the settings (PullRequestUnreadable says so).
+		return
+	}
+	if cr, found := m.pr(); found && !m.deleted && (cr.State == providers.ChangeRequestOpen ||
+		cr.State == providers.ChangeRequestMerged && cr.BaseBranch != movedBranch) {
+		// Open, or merged into a target branch: the merge path records it (its reads and waits), not this rule.
+		return
+	}
+	if len(live.Status.GitWaits) > 0 ||
+		meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry) != nil {
+		return
+	}
+	modelHeldChecks.mu.Lock()
+	modelHeldChecks.count++
+	modelHeldChecks.mu.Unlock()
+	if meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil {
+		// The write failed or the settings permit none (another target branch, a pause): the look says so.
+		return
+	}
+	if last := lastReviewCheck(m.g.CheckRuns(pr.HeadSHA)); last == nil || last.Status != providers.CheckRunFailure {
+		m.fatalf("stopped holder: the request stopped (phase %s) and keeps the lock through #%d from its branch while "+
+			"its own pull request is not open, and the last review check of its recorded head %.12s is not failed, "+
+			"and condition ReviewCheckNotFailed does not say so: %+v", live.Status.Phase, m.unmarked, pr.HeadSHA,
+			m.g.CheckRuns(pr.HeadSHA))
+	}
 }
 
 // modelGoneStops counts, over every seed of a run, the stops for a pull request read gone with reviewer hints on that

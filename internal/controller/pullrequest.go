@@ -1839,7 +1839,7 @@ func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr
 	if cancelRequested(rr) {
 		return errOpenElsewhere
 	}
-	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestOnOtherBase, stoppedCheckOpen); ctx.Err() != nil ||
+	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestOnOtherBase, false); ctx.Err() != nil ||
 		isClusterError(err) {
 		return err
 	}
@@ -1851,13 +1851,12 @@ func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr
 // NeedsIntervention with ChangeRequestGone, cancelled or not. In the same step the review check of the recorded head
 // is failed (failStoppedCheck, decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop,
 // ADR-0045): the head is the request's own commit, and another pull request from its branch could merge it on a pass
-// written before the stop. Through a new installation of the plan's repository nothing is written
-// (stoppedCheckUnlessReinstalled). A failed write does not hold the stop: its status write carries condition
+// written before the stop. Through a new installation of the plan's repository nothing is written. A failed write does not hold the stop: its status write carries condition
 // ReviewCheckNotFailed, and a look of the stopped holder that keeps the lock tries it again. A cancelled reconcile and
 // a failure of the Kubernetes API are returned, for the error backoff, before anything is written.
 func (r *RemediationRequestReconciler) stopGone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	v changeVerdict) error {
-	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestGone, v.rule().stoppedCheck); ctx.Err() != nil ||
+	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestGone, true); ctx.Err() != nil ||
 		isClusterError(err) {
 		return err
 	}

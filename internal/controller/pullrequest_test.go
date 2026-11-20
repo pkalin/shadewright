@@ -7522,8 +7522,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// The failed review check of a stale plan and of a cancel, with reviewer hints on (failCheckStep, decisions of
 		// 2026-11-20 on #925): what each verdict of its read of the recorded pull request writes on the recorded head.
 		// "target" is a failed check whose summary promises the close, "other base" one whose summary says nothing is
-		// closed on that base and a person decides, and "none" no check at all. Gone writes the check with the summary
-		// of another base, since the pull request is not read open on the target branch: it is the request's own
+		// closed on that base and a person decides, "gone" one whose summary says the pull request cannot be found and
+		// nothing is closed, and "none" no check at all. Gone writes the check, since the pull request is not read open
+		// on the target branch: it is the request's own
 		// recorded commit, and without the check an earlier pass there stays while another pull request from the
 		// branch is open (decision of 2026-11-20 on #925 replacing point 2). Through a new installation of the App
 		// (#290) gone writes nothing (failCheckNotOursReinstalled): goneReinstalled is that cell. "stop" is the stop's
@@ -7531,7 +7532,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// when it stops the request for its pull request read gone, as stale and cancel do (decision of 2026-11-20 on
 		// #925 extending the replacement of point 2 to the stop), and when it reads the pull request open on another base.
 		type checkCell struct{ written, summary string }
-		const target, otherBase, stop = "target", "other base", "stop"
+		const target, otherBase, goneSummary, stop = "target", "other base", "gone", "stop"
 		checkCases := []verdictCase{isOpen, isClosed, closedThere, isElsewhere, isGone, mergedThere, failedRead}
 		checkCallers := map[string]struct {
 			act             func(own, other int64)
@@ -7543,7 +7544,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				act:   func(own, other int64) { cleanUp(own, other) },
 				title: staleCheckTitle,
 				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
-					isElsewhere: otherBase, isGone: otherBase, mergedThere: none, failedRead: none},
+					isElsewhere: otherBase, isGone: goneSummary, mergedThere: none, failedRead: none},
 				goneReinstalled: none,
 			},
 			"cancel the request": {
@@ -7577,7 +7578,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				act:   func(own, other int64) { _ = reconciler().failCancelCheck(ctx, fetch()) },
 				title: cancelCheckTitle,
 				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
-					isElsewhere: otherBase, isGone: otherBase, mergedThere: none, failedRead: none},
+					isElsewhere: otherBase, isGone: goneSummary, mergedThere: none, failedRead: none},
 				goneReinstalled: none,
 			},
 		}
@@ -7633,6 +7634,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					got.written = stop
 				case strings.HasSuffix(run.Summary, otherBaseCheckSummary):
 					got.written = otherBase
+				case strings.HasSuffix(run.Summary, goneCheckSummary):
+					got.written = goneSummary
 				}
 				if got.written != stop {
 					Expect(run.Title).To(Equal(c.title), "the check of the caller's own path")
@@ -7643,6 +7646,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			case target:
 				Expect(got.summary).To(HaveSuffix(closeSummary))
 			case otherBase:
+				Expect(got.summary).NotTo(ContainSubstring("Shadewright closes the pull request"))
+			case goneSummary:
+				Expect(got.summary).NotTo(ContainSubstring("another base"), "a pull request read gone is on no base")
 				Expect(got.summary).NotTo(ContainSubstring("Shadewright closes the pull request"))
 			case stop:
 				reason := ReasonChangeRequestGone

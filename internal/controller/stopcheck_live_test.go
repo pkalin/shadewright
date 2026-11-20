@@ -259,7 +259,7 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 				looks = 2
 			}
 			for range looks {
-				err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention), stoppedCheckOpen)
+				err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention), false)
 				if err != nil && (!c.note || c.unread) {
 					t.Fatalf("failStoppedCheck: %v", err)
 				}
@@ -358,7 +358,7 @@ func TestFailedLiveReadLeavesTheStopsCheckWhileAnotherPullRequestHolds(t *testin
 	if err := g.Close(cr.Number); err != nil {
 		t.Fatal(err)
 	}
-	closed, err := g.GetChangeRequest(ctx, cr.Number)
+	_, err := g.GetChangeRequest(ctx, cr.Number)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +389,7 @@ func TestFailedLiveReadLeavesTheStopsCheckWhileAnotherPullRequestHolds(t *testin
 	if err := live.Get(ctx, client.ObjectKeyFromObject(p), stopped); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.failCheckAfterLook(ctx, stopped, changeVerdict{state: changeClosed, pr: closed}, &holding); err != nil {
+	if err := r.failCheckAfterLook(ctx, stopped, &holding); err != nil {
 		t.Fatal(err)
 	}
 	if got := g.CheckRuns(head); got[len(got)-1].Status != providers.CheckRunFailure {
@@ -398,11 +398,11 @@ func TestFailedLiveReadLeavesTheStopsCheckWhileAnotherPullRequestHolds(t *testin
 }
 
 // A stopped holder whose own pull request was moved by a person to another base and closed there, while another open
-// pull request from its branch keeps the lock and the failed check is still owed (ReviewCheckNotFailed set): its look
-// writes the failed check on the recorded head (decision of 2026-11-20 on #925, point 3, ADR-0045). The check belongs
-// to the request's own commit on its own branch, and the other pull request shows it. Its summary promises no close
-// (point 4): the stop's summary says only that the request stopped. Without the other pull request, or without the
-// note, the look writes nothing and ends the note.
+// pull request from its branch keeps the lock: its look writes the failed check on the recorded head, whether or not
+// an earlier write failed (decision of 2026-11-20 on #925, "one rule", ADR-0045). The check belongs to the request's
+// own commit on its own branch, and the other pull request shows it. Its summary promises no close (point 4): the
+// stop's summary says only that the request stopped. Without the other pull request the look released the lock, so
+// it writes nothing and ends the note.
 func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosedElsewhere(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -410,8 +410,8 @@ func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosed
 		writes        bool
 	}{
 		{name: "another open pull request holds and the check is owed", holding: true, note: true, writes: true},
-		{name: "no other open pull request", holding: false, note: true},
-		{name: "the check is not owed", holding: true, note: false},
+		{name: "another open pull request holds, nothing noted", holding: true, note: false, writes: true},
+		{name: "no other open pull request: the look released the lock", holding: false, note: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -427,7 +427,7 @@ func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosed
 			if err := g.Close(cr.Number); err != nil {
 				t.Fatal(err)
 			}
-			closed, err := g.GetChangeRequest(ctx, cr.Number)
+			_, err := g.GetChangeRequest(ctx, cr.Number)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -444,15 +444,14 @@ func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosed
 				holding = &other
 			}
 			p.Status.Phase = api.PhaseNeedsIntervention
-			p.Status.HoldsTarget = new(true)
+			p.Status.HoldsTarget = new(tc.holding)
 			if tc.note {
 				meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
 					Type: api.ConditionReviewCheckNotFailed, Status: metav1.ConditionTrue, Reason: ReasonGitFailed,
 					Message: notWrittenYet})
 			}
 			runs := len(g.CheckRuns(head))
-			v := changeVerdict{state: changeClosedElsewhere, pr: closed}
-			if err := r.failCheckAfterLook(ctx, p, v, holding); err != nil {
+			if err := r.failCheckAfterLook(ctx, p, holding); err != nil {
 				t.Fatal(err)
 			}
 			got := g.CheckRuns(head)[runs:]
@@ -484,7 +483,6 @@ func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosed
 // released the lock writes nothing and ends the note (lockverdict.Release), and so does one through a new
 // installation of the plan's repository (#290).
 func TestStoppedHolderLookOnGoneFailsItsCheck(t *testing.T) {
-	gone := changeVerdict{state: changeGone, gone: "missing"}
 	type look struct {
 		failWrite bool
 		// wantRuns is the number of check runs the look writes, wantNote whether ReviewCheckNotFailed is left.
@@ -554,7 +552,7 @@ func TestStoppedHolderLookOnGoneFailsItsCheck(t *testing.T) {
 					return nil
 				})
 				runs := len(g.CheckRuns(head))
-				if err := r.failCheckAfterLook(ctx, p, gone, holding); err != nil {
+				if err := r.failCheckAfterLook(ctx, p, holding); err != nil {
 					t.Fatalf("look %d: %v", i, err)
 				}
 				got := g.CheckRuns(head)[runs:]

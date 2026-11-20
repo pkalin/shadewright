@@ -801,9 +801,6 @@ func (r *RemediationRequestReconciler) afterHeldLook(ctx context.Context, rr *re
 	}
 	// The read ran through settings that are not paused: a pause that held an earlier look is over.
 	resume(rr)
-	if err := r.failCheckAfterLook(ctx, rr, v, holding); err != nil {
-		return err
-	}
 	if record := v.rule().heldRecord; record != heldRecordNone {
 		recordFound(rr, v.pr)
 		if cancelled {
@@ -816,7 +813,9 @@ func (r *RemediationRequestReconciler) afterHeldLook(ctx context.Context, rr *re
 			keepCancelReason(rr, reason, found)
 		}
 	}
-	return nil
+	// After the record of the pull request found: a look that adopts the request's own pull request (its status write
+	// was lost) fails the check on the head it records in the same write.
+	return r.failCheckAfterLook(ctx, rr, holding)
 }
 
 // settleReplacementOwned decides, for settleStopException, who records a merge of rr's pull request (stoppedMergeOwner)
@@ -879,7 +878,7 @@ func (r *RemediationRequestReconciler) releaseReplacementMerge(ctx context.Conte
 // PullRequestUnreadable; why says what proves it, for the log.
 func (r *RemediationRequestReconciler) releaseUnread(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	v *lockverdict.Verdict, why string) error {
-	if err := lockverdict.Release(&rr.Status, v); err != nil {
+	if err := releaseLock(ctx, rr, v); err != nil {
 		return err
 	}
 	clearReleasedRead(rr)
@@ -968,7 +967,7 @@ func (r *RemediationRequestReconciler) settleTargetLock(ctx context.Context, rr 
 		return v, holding, err
 	}
 	if s, ok := settleByRead(rr, v, holding); ok && !heldForVerification(rr, r.VerifyOutcomes) {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return v, holding, err
 		}
 	} else if holding != nil {
@@ -1275,49 +1274,48 @@ func (r *RemediationRequestReconciler) lockWaiters(ctx context.Context, obj clie
 	return out
 }
 
-// failCheckAfterLook fails the review check of a stopped holder whose look v read its own pull request open, on the
-// target branch or on another base (stoppedCheckOpen, #925), or gone while the lock is kept (stoppedCheckUnlessReinstalled,
-// decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop, ADR-0045): tried at every look while
-// it is pending, and recorded by the look's status write, with condition ReviewCheckNotFailed while it cannot be
-// written (failStoppedCheck). A look that released the lock ends the looks, and lockverdict.Release has removed the
-// condition, so a gone look then writes nothing. A look that reads it not open removes that condition (endCheckNote),
-// unless another open pull request from the request's branch keeps the lock (holding): that one has the branch head,
-// so the head of the failed check, and can merge on a check written before the stop. While it does and the condition
-// is set, the look keeps trying the failed check on the recorded head (decision of 2026-11-20 on #925, point 3,
-// ADR-0045), and the release of the lock ends the condition (lockverdict.Release). The stop's summary promises no
-// close (stoppedCheckRun), so it is the same on any base. Only a failure of the Kubernetes API is returned, for the
-// error backoff; any other failure is said in status and does not hold the look, whose pace stays
-// heldRecheckInterval.
+// releaseLock releases rr's lock in status for the verdict v (lockverdict.Release), for the caller's status write.
+// The release also ends condition ReviewCheckNotFailed, since only a holder's looks try the failed review check again
+// (#925): when it was set, a check written before the stop may stay the latest on the recorded head, so the release
+// says so in the log at Info, with the pull request and the head, before the condition goes. The release leaves no
+// open pull request from the branch that holds the lock, which is the case the rule writes the check for.
+func releaseLock(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, v *lockverdict.Verdict) error {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
+	if err := lockverdict.Release(&rr.Status, v); err != nil {
+		return err
+	}
+	if c != nil && rr.Status.PullRequest != nil {
+		logf.FromContext(ctx).Info("Released the target lock of a RemediationRequest whose failed review check was not "+
+			"written; a check written before the stop may stay the latest on its head", "remediationRequest",
+			client.ObjectKeyFromObject(rr), "pullRequest", rr.Status.PullRequest.Number, "head",
+			rr.Status.PullRequest.HeadSHA, "reason", c.Reason)
+	}
+	return nil
+}
+
+// failCheckAfterLook is the one rule for the failed review check of a stopped holder after its look (decision of
+// 2026-11-20 on #925, "one rule", ADR-0045 cases 4 and 5): while the look leaves the lock held, an open pull request
+// from the request's branch (its own on any base, or another one, marked or not) can still merge the recorded head,
+// so the look writes the failed check there unless the Git host already shows it last (failStoppedCheck reads it once
+// Stale is recorded). It decides from the lock and the check on the head, never from the verdict of the request's own
+// pull request: open elsewhere, closed on any base, merged elsewhere or gone, the same rule applies, so a new verdict
+// cannot reopen the gap. Through a new installation of the plan's repository nothing is written while the lock is
+// held by a pull request other than the recorded one: the new installation does not tie it to the request. A failed
+// write sets condition ReviewCheckNotFailed and is tried again at each look while the lock is held. A look that
+// released the lock, or a merge the status records, ends the looks and the condition (endCheckNote,
+// lockverdict.Release). The stop's summary promises no close (stoppedCheckRun), so it is the same on any base. Only a
+// failure of the Kubernetes API is returned, for the error backoff; any other failure is said in status and does not
+// hold the look, whose pace stays heldRecheckInterval.
 func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest, v changeVerdict, holding *providers.ChangeRequest) error {
+	rr *remediationv1alpha1.RemediationRequest, holding *providers.ChangeRequest) error {
 	pr := rr.Status.PullRequest
-	if mergeRecorded(rr) {
-		// The pull request is merged: no look tries its failed review check again (settleRecorded).
+	if mergeRecorded(rr) || pr == nil || !ptr.Deref(rr.Status.HoldsTarget, false) {
+		// Merged, nothing recorded to fail, or the look released the lock: the looks end, and so does the condition.
 		endCheckNote(rr)
 		return nil
 	}
-	rule := v.rule().stoppedCheck
-	switch rule {
-	case stoppedCheckOpen:
-		if pr == nil || v.pr.Number != pr.Number {
-			return nil
-		}
-	case stoppedCheckUnlessReinstalled:
-		if pr == nil || !ptr.Deref(rr.Status.HoldsTarget, false) {
-			// Gone, and the look released the lock: the looks end with it, and so does the condition.
-			endCheckNote(rr)
-			return nil
-		}
-	case stoppedCheckNone:
-		if holding == nil || pr == nil ||
-			meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed) == nil {
-			// The look read the request's own pull request not open (closed or merged, on any base), and no other
-			// open pull request keeps the lock, or the failed check was written: nothing is left to try.
-			endCheckNote(rr)
-			return nil
-		}
-	}
-	if err := r.failStoppedCheck(ctx, rr, string(rr.Status.Phase), rule); isClusterError(err) {
+	other := holding != nil && holding.Number != pr.Number
+	if err := r.failStoppedCheck(ctx, rr, string(rr.Status.Phase), other); isClusterError(err) {
 		return err
 	}
 	return nil

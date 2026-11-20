@@ -59,10 +59,20 @@ const staleCheckTitle = "The plan is stale"
 // tried again after the poll interval (refuseOrWait, endStaleClosed). It is not a final phase.
 var errStaleCheckPending = errors.New("the review check of the stale plan's closed pull request is not failed yet")
 
-// failedCheckRun builds the failed check run shadewright/review that failCheck writes: onOtherBase says that the read
-// of failCheckStep found the pull request on another base than the target branch, where nothing is closed, so the
-// summary must not promise a close (otherBaseCheckSummary).
-type failedCheckRun func(onOtherBase bool) providers.CheckRun
+// failedCheckRun builds the failed check run shadewright/review that failCheck writes, with the end of its summary
+// for where failCheckStep's read found the pull request (checkWhere).
+type failedCheckRun func(where checkWhere) providers.CheckRun
+
+// checkWhere is where failCheckStep's read found the pull request, for the summary of the failed check: on the target
+// branch, where the cleanup closes it (closeSummary); on another base, where nothing is closed (otherBaseCheckSummary);
+// or gone, where nothing can be closed (goneCheckSummary). No summary may promise a close that does not happen.
+type checkWhere int
+
+const (
+	checkOnTarget checkWhere = iota
+	checkOnOtherBase
+	checkGone
+)
 
 // closeSummary is the end of the summary of a stale plan's or a cancel's failed check on the target branch, which the
 // cleanup closes.
@@ -75,20 +85,29 @@ const closeSummary = "Shadewright closes the pull request; if the Git host refus
 const otherBaseCheckSummary = "This pull request is on another base than the target branch the request was made " +
 	"for: Shadewright closes nothing on that base, and a person decides what becomes of it. This check stays failed."
 
-// failedSummaryEnd is closeSummary, or otherBaseCheckSummary for a pull request on another base.
-func failedSummaryEnd(onOtherBase bool) string {
-	if onOtherBase {
+// goneCheckSummary is the end of the summary of a failed check written on the recorded head of a pull request read
+// gone (ADR-0045 case 5): the Git host no longer shows that pull request, so nothing is closed, and the check keeps
+// the commit from merging through another pull request from the branch. Fixed text, as otherBaseCheckSummary.
+const goneCheckSummary = "The pull request this check was written for cannot be found any more: Shadewright closes " +
+	"nothing, and another pull request with this commit must not be merged on an earlier check. This check stays failed."
+
+// failedSummaryEnd is the end of a failed check's summary for where (checkWhere).
+func failedSummaryEnd(where checkWhere) string {
+	switch where {
+	case checkOnOtherBase:
 		return otherBaseCheckSummary
+	case checkGone:
+		return goneCheckSummary
 	}
 	return closeSummary
 }
 
 // staleCheckRun is the failed check run shadewright/review of a plan found stale with reason, one of staleReasons;
-// onOtherBase as for failedCheckRun.
-func staleCheckRun(reason string, onOtherBase bool) providers.CheckRun {
+// where as for failedCheckRun.
+func staleCheckRun(reason string, where checkWhere) providers.CheckRun {
 	return providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunFailure, Title: staleCheckTitle,
 		Summary: "Shadewright found the plan of this pull request stale (" + reason + "): what it was decided on " +
-			"has changed since, so it must not be merged. " + failedSummaryEnd(onOtherBase)}
+			"has changed since, so it must not be merged. " + failedSummaryEnd(where)}
 }
 
 // staleCheckPending reports whether a stale plan's check run still has to be failed: reviewer hints on, a recorded
@@ -114,7 +133,7 @@ func staleOnHead(rr *remediationv1alpha1.RemediationRequest) bool {
 // failed and records state Stale (see above), with failCheck.
 func (r *RemediationRequestReconciler) failStaleCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	reason string) error {
-	return r.failCheck(ctx, rr, func(onOtherBase bool) providers.CheckRun { return staleCheckRun(reason, onOtherBase) })
+	return r.failCheck(ctx, rr, func(where checkWhere) providers.CheckRun { return staleCheckRun(reason, where) })
 }
 
 // failCheck writes run, a failed check run shadewright/review, on the recorded head of rr's pull request and records
@@ -137,7 +156,7 @@ func (r *RemediationRequestReconciler) failCheck(ctx context.Context, rr *remedi
 	}
 	logf.FromContext(ctx).Info("Could not fail the review check of RemediationRequest; tried again with the close",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "head", pr.HeadSHA,
-		"title", run(false).Title, "error", err.Error())
+		"title", run(checkOnTarget).Title, "error", err.Error())
 	return err
 }
 
@@ -150,8 +169,8 @@ func (r *RemediationRequestReconciler) failCheck(ctx context.Context, rr *remedi
 // branch, or reopened, the pull request must not merge on a check written before. So does one read gone without a
 // new installation (decision of 2026-11-20 on #925 replacing point 2): the check is on the request's own recorded
 // commit, and without it an earlier pass there stays while another pull request from the branch is open. A pull
-// request not read open on the target branch gets the summary that promises no close (run(true),
-// otherBaseCheckSummary).
+// request not read open on the target branch gets a summary that promises no close (otherBaseCheckSummary, or
+// goneCheckSummary for one read gone).
 func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, run failedCheckRun) error {
 	git, _, reinstalled, err := r.openPlanRepositoryFor(ctx, rr)
@@ -159,7 +178,7 @@ func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 		return err
 	}
 	v := r.changeOf(ctx, git, rr, changeQuery{marker: reinstalled})
-	onOtherBase := false
+	where := checkOnTarget
 	switch v.rule().failCheck {
 	case failCheckRetry:
 		return v.err
@@ -170,12 +189,12 @@ func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
 		if reinstalled {
 			return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
 		}
-		onOtherBase = true
+		where = checkGone
 	case failCheckWriteOtherBase:
-		onOtherBase = true
+		where = checkOnOtherBase
 	case failCheckWrite:
 	}
-	if err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run(onOtherBase)); err != nil {
+	if err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run(where)); err != nil {
 		return freshness.WrapProvider("write the check run", err)
 	}
 	return r.recordStaleCheck(ctx, rr)
@@ -219,18 +238,15 @@ func stoppedCheckRun(reason string) providers.CheckRun {
 // changes: a stopped request could not fail the review check of its open pull request (failStoppedCheck).
 const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 
-// failStoppedCheck fails the review check shadewright/review of a request that stopped while its own pull request is
-// open, on the target branch or on a base a person moved it to (#925, ADR-0043 limit (e)), and records state Stale in
-// rr's status in memory, for the caller's status write: moved back to the target branch, or left there, the pull
-// request cannot merge on a check written before the stop. Its callers have just read the pull request open or gone
-// (rule, the verdict's stoppedCheck): the step that stops the request for a pull request open on another base
-// (stopOpenElsewhere), the watch's stop for one read gone (ChangeRequestGone), and every look of a stopped holder that
-// reads it open, or gone while the lock is kept (failCheckAfterLook), so a stop for any other reason gets it at its
-// first look, and a failed write is tried again at the next. Gone gets it too since the check sits on the request's
-// own recorded commit, which another pull request from its branch could merge on a pass written before the stop
-// (decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop, ADR-0045); through a new
-// installation of the plan's repository (#290, stoppedCheckUnlessReinstalled) nothing is written for gone and
-// condition ReviewCheckNotFailed is removed. Once Stale is recorded on the head, such a look
+// failStoppedCheck fails the review check shadewright/review on the recorded head of a stopped request, and records
+// state Stale in rr's status in memory, for the caller's status write: no open pull request from the request's branch
+// can then merge that commit on a check written before the stop (#925, ADR-0045). Its callers: the step that stops
+// the request for its pull request open on another base (stopOpenElsewhere), the watch's stop for one read gone
+// (ChangeRequestGone), and every look of a stopped holder that leaves the lock held (failCheckAfterLook, the one rule
+// of the decision of 2026-11-20 on #925), so a stop for any other reason gets it at its first look, and a failed
+// write is tried again at the next. With skipReinstalled, a repository reached through a new installation of the App
+// (#290) gets nothing and condition ReviewCheckNotFailed is removed: the pull request read gone, or another one that
+// keeps the lock, is not tied to the request there. Once Stale is recorded on the head, such a look
 // reads the latest review check of the head (stoppedCheckShown) and writes the failed check again only when the Git
 // host shows another state last or none (decision of 2026-11-20 on #925): one read and at most one write per look,
 // bounded by those looks (heldRecheckInterval while the lock is held), with no polling of its own. Those looks run
@@ -247,7 +263,7 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // since a branch change permits reads only (#771): that is said the same way, until the entry names the branch again. A cancelled reconcile is only returned, and so is a
 // failure of the Kubernetes API (reading the settings), for the error backoff.
 func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	reason string, rule stoppedCheck) error {
+	reason string, skipReinstalled bool) error {
 	if !r.ownsReviewCheck(rr) {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 		return nil
@@ -259,9 +275,9 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
 	git, _, reinstalled, err := r.openPlanRepositoryFor(stepCtx, rr)
-	if err == nil && reinstalled && rule == stoppedCheckUnlessReinstalled {
-		// Read gone through a new installation of the plan's repository (#290): the pull request is not tied to the
-		// request there, so nothing is written and nothing is owed.
+	if err == nil && reinstalled && skipReinstalled {
+		// Through a new installation of the plan's repository (#290) the pull request read gone, or the one that
+		// keeps the lock, is not tied to the request there, so nothing is written and nothing is owed.
 		endCheckNote(rr)
 		r.stoppedCheckLooks.Delete(client.ObjectKeyFromObject(rr))
 		return nil

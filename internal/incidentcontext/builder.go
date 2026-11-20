@@ -275,6 +275,23 @@ func (b *Builder) call(ctx context.Context, f func(ctx context.Context) error) e
 	return f(cctx)
 }
 
+// withBudget gives the source calls made with the returned context a deadline d from now, shared by all of
+// them: a section's time budget. A build deadline that comes earlier stays.
+func withBudget(ctx context.Context, d time.Duration) context.Context {
+	deadline := time.Now().Add(d)
+	if bd, ok := ctx.Value(buildDeadlineKey{}).(time.Time); ok && bd.Before(deadline) {
+		return ctx
+	}
+	return context.WithValue(ctx, buildDeadlineKey{}, deadline)
+}
+
+// outOfTime reports whether the deadline of the source calls made with ctx, the build's or a section's, has
+// passed.
+func outOfTime(ctx context.Context) bool {
+	bd, ok := ctx.Value(buildDeadlineKey{}).(time.Time)
+	return ok && !time.Now().Before(bd)
+}
+
 // abandoned returns an error when ctx is done: a source call that failed then was cut short by the caller of
 // Build, not by the source, so the build stops instead of marking a source failed.
 func abandoned(ctx context.Context) error {

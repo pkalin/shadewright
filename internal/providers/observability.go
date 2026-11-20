@@ -18,6 +18,7 @@ package providers
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -160,10 +161,15 @@ func LeadingContinuation(s string) int {
 	return start
 }
 
+// ErrLogGone means the node no longer holds the log of the instance asked for: the kubelet removed that
+// container (it keeps one terminated instance per container, and not for long), and answered with its
+// sentence for that instead of a log. It wraps ErrNotFound.
+var ErrLogGone = fmt.Errorf("log of the instance is no longer held: %w", ErrNotFound)
+
 // LogSource reads logs.
 type LogSource interface {
 	// Logs returns the most recent lines within the query's bounds. ErrNotFound when the pod does not
-	// exist; ErrRejected when the source refuses the request itself, for example for a container the pod
+	// exist, ErrLogGone (which wraps it) when the node no longer holds the instance's log; ErrRejected when the source refuses the request itself, for example for a container the pod
 	// does not have, a previous instance that does not exist or a container that has not started (the
 	// Kubernetes API server answers all three with 400).
 	Logs(ctx context.Context, q LogQuery) (LogExcerpt, error)

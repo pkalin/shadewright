@@ -177,6 +177,9 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 	if err != nil {
 		return providers.LogExcerpt{}, err
 	}
+	if !over && goneAnswer(data, before.ContainerID) {
+		return providers.LogExcerpt{}, fmt.Errorf("logs request: %w", providers.ErrLogGone)
+	}
 	if over {
 		// The server cut the window at LimitBytes, from its start: the newest lines are missing. Ask again for
 		// fewer lines, so that they fit.
@@ -271,6 +274,32 @@ func boundedID(s string) (string, bool) {
 		}
 	}
 	return s, true
+}
+
+// goneSentence starts the kubelet's answer for a container whose log it no longer holds: it answers the logs
+// request with HTTP 200 and a body of this sentence and the container ID, "<runtime>://<id>", the form the pod
+// status gives (pkg/kubelet/kuberuntime, GetContainerLogs).
+const goneSentence = "unable to retrieve container logs for "
+
+// goneAnswer reports whether data, the whole body a logs request answered, is the kubelet's answer for a
+// container whose log it no longer holds rather than a log: the body is goneSentence followed by a container
+// ID, and nothing else but one newline at the end. When the pod status named the instance asked for (id is not
+// empty), the sentence must name that instance; otherwise the ID must have the form of one: a runtime, "://"
+// and an ID, at most providers.MaxLogInstanceIDLength bytes of letters, digits and ._:/+-. So a log that holds
+// the sentence among other lines, after a timestamp, with any other text on its line, or for another
+// container, is a log; a log made of nothing but the sentence for its own container is taken for the
+// kubelet's answer, which is what it would say.
+func goneAnswer(data []byte, id string) bool {
+	named, ok := strings.CutPrefix(strings.TrimSuffix(string(data), "\n"), goneSentence)
+	if !ok {
+		return false
+	}
+	if id != "" {
+		return named == id
+	}
+	scheme, local, ok := strings.Cut(named, "://")
+	valid, _ := boundedID(named)
+	return ok && scheme != "" && local != "" && valid != ""
 }
 
 // read sends one request and reads at most MaxReadBytes+1 of the stream. over reports that the stream held

@@ -59,7 +59,9 @@ import (
 // file, the opening of the repository), or reads work again; the repository leaves the settings or comes back; the
 // kill switch pauses writes or lifts the pause; a person cancels the request; the settings name another target
 // branch; the next status write is lost, meets a conflicting write, or is applied and reported failed; the cache
-// serves an older copy of the request at the next read; the executor restarts (nothing kept in memory); the executor
+// serves an older copy of the request at the next read through it (a reconcile starts from the API server's copy, so
+// this reaches only the later reads of the cache), and the second request, when there is one, is reconciled between
+// the next reconcile's read of the request and its first read of the Git host; the executor restarts (nothing kept in memory); the executor
 // is down for longer than a wait (no reconcile at all, then a restart: down). The clock
 // moves on by the wait each reconcile returns (a second after an error). Every status write is checked against the
 // schema of the CRD, as the API server does: a write it would refuse is a violation.
@@ -77,9 +79,13 @@ import (
 //   - requeue: a reconcile that leaves a stopped request holding its lock, without an error, asks to run again at a
 //     time (seventh decision, point 3);
 //   - waits (not while paused): every entry of status.gitWaits has not passed the end of its kind by more than one
-//     poll interval: the request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five
-//     minutes after its start (MergeCheck, MergeContent); an end that fell in a pause or while the executor was down
-//     is due when that gap ended (afterGap);
+//     poll interval: the request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace),
+//     recoveryWaitBound after the first refusal (HandoffRecovery, #786), five minutes after its start (MergeCheck,
+//     MergeContent); an end that fell in a pause or while the executor was down is due when that gap ended
+//     (afterGap);
+//   - own end (not while paused): a reconcile that could act (no write made to fail, no error, no stale read) leaves
+//     no RequestDeadline, HandoffGrace or HandoffRecovery entry that stood at its start past the end that entry
+//     records: no entry ends at another entry's end (third decision of 2026-11-18 on #786, point 1);
 //   - last read (not while paused): a reconcile that starts with a MergeCheck or MergeContent wait past its end and
 //     returns no error, with no write made to fail, ends it only on evidence about its last read (lastReadProperty):
 //     a failed read ends it (never a retry), a repository gone from the settings ends it, a pause met inside the
@@ -93,8 +99,8 @@ import (
 //     (MergeContentUnreadable or the merge recorded) by T plus mergeContentWait plus one poll interval, or when the
 //     gap it fell in ended (readWaitDue);
 //   - errors: no three reconciles in a row return an error while no write is made to fail;
-//   - pace: no three reconciles in a row ask to be run again within a second without an error (a wait that ends
-//     and is not ended runs hot, and the clock that bounds it never moves);
+//   - pace: no reconcile asks to be run again within a second without an error (a wait that ends and is not ended
+//     runs hot, and the clock that bounds it never moves);
 //   - record: a merge the status records names its pull request;
 //   - lock recorded: a request whose status records its merge (Merged, Succeeded, Inconclusive, Failed with its
 //     receipt, or its pull request marked merged) and that no verification holds holds no lock after a reconcile
@@ -106,9 +112,9 @@ import (
 //     not record, checked at the moment of the release (a merge into a branch the plan's change was not for, seen
 //     only after the settings moved, is recorded as released aside), and a lock once released never comes back
 //     while the request does not hold it;
-//   - ending: a reconcile that starts with a RequestDeadline or HandoffGrace wait past its end calls the Git host
-//     nothing before its first status write: the end decides from recorded state alone (fifth decision of 2026-11-18
-//     on #771, point 5 as the sixth kept it);
+//   - ending: a reconcile that starts with a RequestDeadline, HandoffGrace or HandoffRecovery wait past its end
+//     calls the Git host nothing before its first status write: the end decides from recorded state alone (fifth
+//     decision of 2026-11-18 on #771, point 5 as the sixth kept it);
 //   - schema: no status write is one the API server refuses.
 //
 // At the end the world heals (reads work, no write fails; the repository comes back in half of the runs; a pause is
@@ -289,7 +295,14 @@ type modelWorld struct {
 	passWrites int
 	// staleNext makes the cache serve stale at the next read of the request.
 	staleNext bool
-	stale     *api.RemediationRequest
+	// interleaveNext makes the second request change between the next reconcile's read of the request and its
+	// decisions: it is reconciled before that reconcile's first read of the Git host (decision of 2026-11-19 on #786,
+	// point 4: the reconcile reads the request from the API server, so the cache's older copy no longer starts one).
+	interleaveNext bool
+	// staleStart is what the next read of the request from the API server returns: a copy the request changes from
+	// before the reconcile that read it decides (scripted sequences only).
+	staleStart *api.RemediationRequest
+	stale      *api.RemediationRequest
 	// writeFaulted reports that this reconcile met an injected write fault or a stale read.
 	writeFaulted bool
 	// deleted hides the pull request from every read (gone from the host); gone are earlier pull requests of the
@@ -312,7 +325,7 @@ type modelWorld struct {
 	// the reconcile returns the error for a retry); zero when they work, or were never made. contentTried is the
 	// first failure of the reconcile running.
 	contentFailing, contentTried time.Time
-	errorsInRow, hotInRow        int
+	errorsInRow                  int
 	startAt                      time.Time
 	// released: the request's lock was seen released; recorded: the request's merge was seen recorded.
 	released, recorded bool
@@ -321,6 +334,11 @@ type modelWorld struct {
 	// handoff: the request is a replacement recovering a handoff; the pull request is its predecessor's, which
 	// holds the lock on it, so the lock properties about the request's own pull request do not apply.
 	handoff bool
+	// refusedAt: the first reconcile, not paused, of a replacement recovering a handoff that ran with its repository
+	// gone from the settings or with the settings naming another branch than its plan's (planBranch): the recovery
+	// waits on that refusal from then on (#786), and its HandoffRecovery wait ends recoveryWaitBound after it.
+	refusedAt  time.Time
+	planBranch string
 	// lost: the request started in PolicyChecked with the write recording its own pull request lost (and no handoff),
 	// so only its marker finds that pull request.
 	lost bool
@@ -595,7 +613,8 @@ func (m *modelWorld) recovering(rr *api.RemediationRequest) {
 	pred := &api.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Name: rr.Name + "-old", Namespace: rr.Namespace,
 		UID: "11111111-2222-4333-8444-555555555555"}, Spec: *rr.Spec.DeepCopy()}
 	h := api.Hint{Source: api.HintSourceGitHub, CommentID: 7, Digest: "sha256:" + strings.Repeat("b", 64),
-		State: api.HintReserved, Author: api.HintAuthor{ID: 1001, Login: "reviewer"}}
+		State: api.HintReserved, Author: api.HintAuthor{ID: 1001, Login: "reviewer"}, Text: "raise the limit",
+		UpdatedAt: metav1.NewTime(reconcilerClock), AcceptedAt: metav1.NewTime(reconcilerClock)}
 	if err := m.r.Create(ctx, pred); err != nil {
 		m.t.Fatal(err)
 	}
@@ -610,6 +629,7 @@ func (m *modelWorld) recovering(rr *api.RemediationRequest) {
 		m.t.Fatal(err)
 	}
 	rr.Spec.Replaces = &api.RequestReplacement{Name: api.Name(pred.Name), UID: api.UID(pred.UID), Hint: refOf(&h)}
+	rr.Spec.ChainRoot = chainRootOf(pred)
 	if err := m.r.Update(ctx, rr); err != nil {
 		m.t.Fatal(err)
 	}
@@ -620,10 +640,17 @@ func (m *modelWorld) recovering(rr *api.RemediationRequest) {
 	}
 	m.r.ReviewerHints = true
 	m.handoff = true
+	m.planBranch = m.configured
 }
 
-// setConfigured makes branch the target branch the settings name now (created on the host when missing).
+// setConfigured makes branch the target branch the settings name now (created on the host when missing). The count of
+// reconciles that settle a stopped holder after a lift (afterLift) starts again: until the settings name the plan's
+// branch again, a cancel only reads (the close waits), so the close and the look that settles it may come only now
+// (seed 199179).
 func (m *modelWorld) setConfigured(branch string) {
+	if m.afterLift > 0 {
+		m.afterLift = 0
+	}
 	ctx := context.Background()
 	if _, err := m.g.BranchHead(ctx, branch); err != nil {
 		head, err := m.g.BranchHead(ctx, mainBranch)
@@ -668,6 +695,33 @@ func (m *modelWorld) write(ctx context.Context, obj client.Object, do func() err
 		if errs := m.schema.validate(rr); len(errs) > 0 {
 			m.fatalf("schema: the API server refuses a status write of %s: %v", rr.Name, errs)
 			return apierrors.NewInvalid(api.GroupVersion.WithKind("RemediationRequest").GroupKind(), rr.Name, errs)
+		}
+		// The CRD's CEL rules, transition rules included, on what the write stores against what was stored before it:
+		// an entry of status.gitWaits whose start or end moved, or a handoff moved back, is refused as the API server
+		// refuses it. A write the store refuses (a conflict on the resourceVersion, which the API server checks before
+		// the rules) is not checked.
+		write := do
+		do = func() error {
+			old := &api.RemediationRequest{}
+			if err := m.base.Get(ctx, client.ObjectKeyFromObject(rr), old); err != nil {
+				return write()
+			}
+			if err := write(); err != nil {
+				return err
+			}
+			stored := &api.RemediationRequest{}
+			if err := m.base.Get(ctx, client.ObjectKeyFromObject(rr), stored); err != nil {
+				return err
+			}
+			if errs := m.schema.validateUpdate(old, stored); len(errs) > 0 {
+				m.fatalf("rules: the API server refuses a status write of %s: %v", rr.Name, errs)
+				old.ResourceVersion = stored.ResourceVersion
+				if err := m.base.Status().Update(ctx, old); err != nil {
+					return err
+				}
+				return apierrors.NewInvalid(api.GroupVersion.WithKind("RemediationRequest").GroupKind(), rr.Name, errs)
+			}
+			return nil
 		}
 	}
 	m.mu.Lock()
@@ -780,6 +834,7 @@ func (m *modelWorld) run() {
 	}
 	m.mu.Lock()
 	m.fault, m.loseNext, m.conflictNext, m.applyNext, m.staleNext, m.noCommit = faultNone, false, false, false, false, false
+	m.interleaveNext = false
 	m.lastingUntil, m.passWrites = time.Time{}, 0
 	m.mu.Unlock()
 	if m.paused && (m.focus == focusPause || m.rng.IntN(2) == 0) {
@@ -1312,6 +1367,17 @@ type flickerReader struct {
 }
 
 func (f *flickerReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if rr, ok := obj.(*api.RemediationRequest); ok && key == f.m.key {
+		f.m.mu.Lock()
+		stale := f.m.staleStart
+		f.m.staleStart = nil
+		f.m.mu.Unlock()
+		if stale != nil {
+			// The request read here changes into what the API server holds before the reconcile decides.
+			stale.DeepCopyInto(rr)
+			return nil
+		}
+	}
 	if err := f.WithWatch.Get(ctx, key, obj, opts...); err != nil {
 		return err
 	}
@@ -1443,6 +1509,7 @@ func (m *modelWorld) serveStale() {
 	}
 	m.mu.Lock()
 	m.stale, m.staleNext = older[m.rng.IntN(len(older))], true
+	m.interleaveNext = m.second.Name != ""
 	m.mu.Unlock()
 	m.logf("the cache serves an older copy of the request at the next read (phase %s, waits %d)",
 		m.stale.Status.Phase, len(m.stale.Status.GitWaits))
@@ -1530,12 +1597,8 @@ func (m *modelWorld) step() {
 	passed := ""
 	before := m.live()
 	m.mu.Lock()
-	staleRead := m.staleNext
+	armed := m.staleNext
 	m.mu.Unlock()
-	if staleRead {
-		// The reconcile reads an older copy: it cannot end a wait it does not see.
-		before.Status.GitWaits = nil
-	}
 	var readPassed []api.GitWaitKind
 	for _, w := range before.Status.GitWaits {
 		if end, ok := m.waitEnd(before, w); ok && !m.clock.at.Before(end) {
@@ -1550,6 +1613,9 @@ func (m *modelWorld) step() {
 	m.mu.Lock()
 	m.writeFaulted, m.calls, m.failedCalls, m.passed, m.ended = false, 0, 0, passed, false
 	m.mu.Unlock()
+	if m.handoff && !m.paused && (m.repo != nil || m.configured != m.planBranch) && m.refusedAt.IsZero() {
+		m.refusedAt = m.clock.at
+	}
 	paused, lifted, startedAt := m.paused, m.lifted, m.clock.at
 	m.lifted = false
 	m.mu.Lock()
@@ -1559,6 +1625,10 @@ func (m *modelWorld) step() {
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.key})
 	m.mu.Lock()
 	m.flickered = flick && !m.flicker
+	// The reconcile starts from the API server's copy; the cache's older copy reaches only a later read of it (the
+	// look at what is left to clear), and the properties that judge what the reconcile ended skip such a reconcile.
+	staleRead := armed && !m.staleNext
+	m.interleaveNext = false
 	m.mu.Unlock()
 	m.mu.Lock()
 	m.passed = ""
@@ -1592,6 +1662,7 @@ func (m *modelWorld) step() {
 	m.pauseProperties(before, live, paused, lifted && !staleRead, startedAt, faulted || err != nil)
 	if !paused && !staleRead {
 		m.lastReadProperty(readPassed, live, res, err, faulted, failedCalls)
+		m.ownEndProperty(before, live, startedAt, err, faulted)
 	}
 	m.properties(live, res, err, faulted, paused)
 	switch {
@@ -1664,15 +1735,48 @@ func (m *modelWorld) waitEnd(rr *api.RemediationRequest, w api.GitWait) (time.Ti
 		}
 		return w.Since.Time, true
 	case api.GitWaitHandoffGrace:
+		// Each wait of the recovery ends at its own end (third decision of 2026-11-18 on #786).
 		if rr.Status.Deadline != nil {
 			return rr.Status.Deadline.Add(handoffRecoveryGrace), true
 		}
 		return w.Since.Add(handoffRecoveryGrace), true
+	case api.GitWaitHandoffRecovery:
+		// recoveryWaitBound after the first refusal (#786).
+		if !m.refusedAt.IsZero() {
+			return m.refusedAt.Add(recoveryWaitBound), true
+		}
+		return w.Since.Add(recoveryWaitBound), true
 	case api.GitWaitMergeCheck, api.GitWaitMergeContent:
 		// From its own start (never from status.mergeCommitAwaitedSince).
 		return w.Since.Add(mergeCommitWait), true
 	}
 	return time.Time{}, false
+}
+
+// ownEndProperty: a reconcile not paused that started with a RequestDeadline, HandoffGrace or HandoffRecovery entry
+// past the end that entry records (before, at startedAt) and that could act (no error, no write made to fail) leaves
+// no such entry standing (live): every entry ends at its own end, never at one computed from another entry (third
+// decision of 2026-11-18 on #786, point 1).
+func (m *modelWorld) ownEndProperty(before, live *api.RemediationRequest, startedAt time.Time, err error, faulted bool) {
+	if err != nil || faulted {
+		return
+	}
+	for _, w := range before.Status.GitWaits {
+		switch w.Kind {
+		case api.GitWaitRequestDeadline, api.GitWaitHandoffGrace, api.GitWaitHandoffRecovery:
+		default:
+			continue
+		}
+		if w.Ends == nil || startedAt.Before(w.Ends.Time) {
+			continue
+		}
+		for _, l := range live.Status.GitWaits {
+			if l.Kind == w.Kind && l.Since.Equal(&w.Since) {
+				m.fatalf("own end: the %s entry stands %v past the end it records (%v)", w.Kind,
+					startedAt.Sub(w.Ends.Time), w.Ends.Time)
+			}
+		}
+	}
 }
 
 // properties checks the model's properties after a reconcile (see the top of this file).
@@ -1979,7 +2083,8 @@ func (m *modelWorld) pauseProperties(before, live *api.RemediationRequest, pause
 	}
 }
 
-// paceProperties: no three errors in a row with no write made to fail, and no three hot requeues in a row.
+// paceProperties: no three errors in a row with no write made to fail, and no reconcile that asks to run again within
+// a second (the floor of every time to run again).
 func (m *modelWorld) paceProperties(live *api.RemediationRequest, res reconcile.Result, err error, faulted bool) {
 	if err != nil && !faulted {
 		m.errorsInRow++
@@ -1990,13 +2095,8 @@ func (m *modelWorld) paceProperties(live *api.RemediationRequest, res reconcile.
 		m.errorsInRow = 0
 	}
 	if err == nil && res.RequeueAfter > 0 && res.RequeueAfter < time.Second {
-		m.hotInRow++
-		if m.hotInRow >= 3 {
-			m.fatalf("pace: three reconciles in a row asked to run again within a second (phase %s, waits %d)",
-				live.Status.Phase, len(live.Status.GitWaits))
-		}
-	} else {
-		m.hotInRow = 0
+		m.fatalf("pace: a reconcile asked to run again within a second (%v, phase %s, waits %d)",
+			res.RequeueAfter, live.Status.Phase, len(live.Status.GitWaits))
 	}
 }
 
@@ -2106,6 +2206,16 @@ var errModelOutage = &providers.RetryableError{Err: errors.New("outage")}
 
 // fail is the failure of op for the model now: nil, an outage, or the step's time run out.
 func (g *modelGit) fail(ctx context.Context, op string) error {
+	g.m.mu.Lock()
+	interleave := g.m.interleaveNext
+	g.m.interleaveNext = false
+	g.m.mu.Unlock()
+	if interleave {
+		// The other request changes between what this reconcile read and what it decides next.
+		g.m.logf("before %s, the second request is reconciled", op)
+		first := &api.RemediationRequest{}
+		g.m.stepSecond(context.WithoutCancel(ctx), first)
+	}
 	g.m.mu.Lock()
 	g.m.calls++
 	fault := g.m.fault

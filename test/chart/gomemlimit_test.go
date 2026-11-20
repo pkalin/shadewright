@@ -228,7 +228,7 @@ func TestChartRoundsAFractionalByteCountUp(t *testing.T) {
 	if 200<<20+room != 545259520 {
 		t.Fatalf("the budget of 200MiB is %d bytes, not 545259520: change the test's limit", 200<<20+room)
 	}
-	args := helmArgsWith(t, ciValues(t), "clusterId=chart-test", "executor.goMemLimit=200MiB")
+	args := helmArgsWith(t, ciValues(t), testCluster, "executor.goMemLimit=200MiB")
 	r := renderArgs(t, append(args, "--set-json", "executor.resources.limits.memory=545259519.1"))
 	if got := goMemLimit(t, r, executorDeployment); got != "200MiB" {
 		t.Errorf("GOMEMLIMIT = %s, want 200MiB", got)

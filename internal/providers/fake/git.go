@@ -474,6 +474,23 @@ func (g *Git) ForcePush(branch, sha string) error {
 	return nil
 }
 
+// DeleteBranch deletes branch as a person on the host would, and closes its open change requests, as the host
+// does when the head branch of an open pull request is deleted. Its commits stay readable.
+func (g *Git) DeleteBranch(branch string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.branches[branch]; !ok {
+		return fmt.Errorf("branch %q: %w", branch, providers.ErrNotFound)
+	}
+	delete(g.branches, branch)
+	for _, cr := range g.crs {
+		if cr.HeadBranch == branch && cr.State == providers.ChangeRequestOpen {
+			cr.State = providers.ChangeRequestClosed
+		}
+	}
+	return nil
+}
+
 // CheckBranch reports what a commit carries over the target branch (providers.GitProvider.CheckBranch).
 func (g *Git) CheckBranch(ctx context.Context, sha, path string) (providers.BranchState, error) {
 	if err := g.before("CheckBranch"); err != nil {
@@ -679,6 +696,10 @@ func (g *Git) Reopen(n int64) error {
 	}
 	if cr.State == providers.ChangeRequestMerged {
 		return fmt.Errorf("change request %d is merged: %w", n, providers.ErrConflict)
+	}
+	if _, ok := g.branches[cr.HeadBranch]; !ok {
+		// The host refuses to reopen a pull request whose head branch is deleted.
+		return fmt.Errorf("branch %q of change request %d: %w", cr.HeadBranch, n, providers.ErrConflict)
 	}
 	for _, o := range g.crs {
 		if o != cr && o.HeadBranch == cr.HeadBranch && o.State == providers.ChangeRequestOpen {

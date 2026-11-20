@@ -117,7 +117,7 @@ type LogRead int
 const (
 	// LogReadOK: the source answered within its bound.
 	LogReadOK LogRead = iota
-	// LogReadNotFound: the pod does not exist.
+	// LogReadNotFound: the pod does not exist, or the node no longer holds the instance's log.
 	LogReadNotFound
 	// LogReadRejected: the source refused the request (no such container, not started, no previous instance).
 	LogReadRejected
@@ -128,6 +128,15 @@ const (
 	// LogReadWithheld: redaction withheld the excerpt whole, in the source (providers.ErrWithheld) or here; nothing
 	// of it is shown.
 	LogReadWithheld
+	// LogReadEmpty: the source answered with no log lines.
+	LogReadEmpty
+)
+
+// Fixed header lines of a read that gave no excerpt. None quotes the cluster or the source's answer.
+const (
+	logGone      = "no logs: the node no longer holds the log of this instance"
+	logForbidden = "could not fetch: the API server refused the identity"
+	logEmpty     = "no log lines were returned"
 )
 
 // LogView is one log excerpt rendered for a reader: header lines naming the container and its instance, then
@@ -169,6 +178,9 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 	h.add("%s", title)
 	var body string
 	switch {
+	case errors.Is(err, providers.ErrLogGone):
+		v.Read = LogReadNotFound
+		h.add(logGone)
 	case errors.Is(err, providers.ErrNotFound):
 		v.Read = LogReadNotFound
 		h.add("no logs: the pod does not exist")
@@ -178,6 +190,9 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 	case errors.Is(err, providers.ErrWithheld):
 		v.Read = LogReadWithheld
 		h.add("could not fetch: withheld by redaction")
+	case errors.Is(err, providers.ErrForbidden):
+		v.Read = LogReadFailed
+		h.add(logForbidden)
 	case err != nil:
 		v.Read = LogReadFailed
 		h.add("could not fetch")
@@ -196,6 +211,11 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		}
 		h.add("instance: pod uid %s, container id %s, restarts %d, read at %s", podUID, containerID,
 			in.RestartCount, ex.CollectedAt.UTC().Format(time.RFC3339))
+		if ex.Text == "" {
+			v.Read = LogReadEmpty
+			h.add(logEmpty)
+			break
+		}
 		body, v.LeadingDropped = dropLeadingContinuation(ex.Text)
 		v.Truncated, v.EndMissing, v.InstanceUncertain = ex.Truncated, ex.EndMissing, ex.InstanceUncertain
 	}
@@ -203,7 +223,7 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 	if !refit || !ok {
 		header, okHeader := checkedTwice(red, h.String(), nil)
 		redacted, okBody := checkedTwice(red, body, nil)
-		if v.Read == LogReadOK && (!okHeader || !okBody) {
+		if v.Read != LogReadWithheld && (!okHeader || !okBody) {
 			return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 		}
 		header, redacted = strings.ToValidUTF8(header, "?"), strings.ToValidUTF8(redacted, "?")
@@ -213,7 +233,7 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		return v
 	}
 	header, okHeader := checkedTwice(red, h.String(), func(string) int { return 0 })
-	if v.Read == LogReadOK && !okHeader {
+	if v.Read != LogReadWithheld && !okHeader {
 		return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 	}
 	head, _ := keepHead(strings.ToValidUTF8(header, "?"), budget)
@@ -224,7 +244,7 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		return len(t) - len(kept)
 	}
 	redacted, okBody := checkedTwice(red, body, newest)
-	if v.Read == LogReadOK && !okBody {
+	if v.Read != LogReadWithheld && !okBody {
 		return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 	}
 	tail, cut := keepTail(strings.ToValidUTF8(redacted, "?"), n)

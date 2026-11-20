@@ -222,7 +222,7 @@ func TestVerifierImageFollowsItsOwnValues(t *testing.T) {
 		"ghcr.io/pkalin/shadewright-verifier@sha256:"+strings.Repeat("3", 64); got != want {
 		t.Errorf("image %s, want %s", got, want)
 	}
-	out, err := runErr(t, helmArgsWith(t, nil, "clusterId=chart-test", "image.allowTag=false", withVerifier,
+	out, err := runErr(t, helmArgsWith(t, nil, testCluster, "image.allowTag=false", withVerifier,
 		"executor.image.digest=sha256:"+strings.Repeat("1", 64),
 		"analyzer.image.digest=sha256:"+strings.Repeat("2", 64)))
 	if err == nil || !strings.Contains(out, "verifier.image.digest is empty") {

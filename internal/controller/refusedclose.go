@@ -377,14 +377,18 @@ func (r *RemediationRequestReconciler) refusedEvent(rr *remediationv1alpha1.Reme
 }
 
 // cleanupFailingCondition is condition CleanupFailing for err, a failure of a deleted request's cleanup. The reason
-// is the refusal's (GitForbidden, GitRejected), RecordedMissingOtherListed for that read, or CleanupFailed. The
-// message names the step and the recorded pull request, never the Git host's answer.
+// is the refusal's (GitForbidden, GitRejected), RecordedMissingOtherListed for that read, RepositoryUnusable for a
+// settings entry that cannot be used, or CleanupFailed. The message names the step and the recorded pull request,
+// never the Git host's answer.
 func cleanupFailingCondition(rr *remediationv1alpha1.RemediationRequest, err error) metav1.Condition {
 	reason, _, ok := refusal(err)
 	if !ok {
 		reason = ReasonCleanupFailed
 		if _, listed := errors.AsType[*ownListedError](err); listed {
 			reason = ReasonRecordedMissingOtherListed
+		}
+		if errors.Is(err, freshness.ErrRepositoryUnusable) {
+			reason = reasonRepositoryUnusable
 		}
 	}
 	return metav1.Condition{

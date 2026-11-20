@@ -191,6 +191,8 @@ Takes the root context. Renders nothing.
 {{- $set := list -}}
 {{- if ne (int ($e.replicas | default 1)) 1 -}}{{- $set = append $set "executor.replicas" -}}{{- end -}}
 {{- if dig "identity" "azure" "clientId" "" $e -}}{{- $set = append $set "executor.identity.azure.clientId" -}}{{- end -}}
+{{- if dig "identity" "azure" "projectToken" false $e -}}{{- $set = append $set "executor.identity.azure.projectToken" -}}{{- end -}}
+{{- if dig "identity" "azure" "tenantId" "" $e -}}{{- $set = append $set "executor.identity.azure.tenantId" -}}{{- end -}}
 {{- if dig "serviceAccount" "annotations" dict $e -}}{{- $set = append $set "executor.serviceAccount.annotations" -}}{{- end -}}
 {{- if $e.goMemLimit -}}{{- $set = append $set "executor.goMemLimit" -}}{{- end -}}
 {{- if dig "reviewerHints" "enabled" false $e -}}{{- $set = append $set "executor.reviewerHints.enabled" -}}{{- end -}}
@@ -214,6 +216,48 @@ leader-elect health-probe-bind-address metrics-bind-address metrics-secure metri
 {{- end }}
 
 {{/*
+Renders "true" when the component projects its own Azure workload identity token (identity.azure.projectToken),
+for a cluster without the workload identity webhook, and nothing otherwise. Takes the component's values.
+*/}}
+{{- define "shadewright.azureProjectToken" -}}
+{{- if dig "identity" "azure" "projectToken" false . -}}true{{- end -}}
+{{- end }}
+
+{{/*
+The volume, mount and environment the workload identity webhook would inject, rendered by the chart with
+identity.azure.projectToken. The token file name and path are what AZURE_FEDERATED_TOKEN_FILE names: the
+binaries read that variable and nothing else for the path. The audience is the one Entra ID federated
+credentials use by default.
+*/}}
+{{- define "shadewright.azureTokenVolume" -}}
+name: azure-identity-token
+projected:
+  defaultMode: 0444
+  sources:
+  - serviceAccountToken:
+      audience: api://AzureADTokenExchange
+      expirationSeconds: 3600
+      path: azure-identity-token
+{{- end }}
+
+{{- define "shadewright.azureTokenMount" -}}
+name: azure-identity-token
+mountPath: /var/run/secrets/azure/tokens
+readOnly: true
+{{- end }}
+
+{{- define "shadewright.azureTokenEnv" -}}
+- name: AZURE_CLIENT_ID
+  value: {{ .identity.azure.clientId | quote }}
+- name: AZURE_TENANT_ID
+  value: {{ .identity.azure.tenantId | quote }}
+- name: AZURE_FEDERATED_TOKEN_FILE
+  value: /var/run/secrets/azure/tokens/azure-identity-token
+- name: AZURE_AUTHORITY_HOST
+  value: https://login.microsoftonline.com/
+{{- end }}
+
+{{/*
 Refuses values that would weaken the separate identities (invariant 6) or the flags and labels the chart sets.
 Takes a dict with .component ("executor", "analyzer" or "verifier") and .context. Renders nothing.
 */}}
@@ -227,6 +271,16 @@ Takes a dict with .component ("executor", "analyzer" or "verifier") and .context
 {{- fail "executor.identity.azure.clientId and analyzer.identity.azure.clientId are equal: the executor and the analyzer must have separate identities, never one for both" -}}
 {{- end -}}
 {{- if ne .component "verifier" -}}
+{{- if include "shadewright.azureProjectToken" $c -}}
+{{- if not (dig "identity" "azure" "clientId" "" $c) -}}
+{{- fail (printf "%s.identity.azure.projectToken needs %s.identity.azure.clientId: the token is projected for that identity" $.component $.component) -}}
+{{- end -}}
+{{- if not (dig "identity" "azure" "tenantId" "" $c) -}}
+{{- fail (printf "%s.identity.azure.projectToken needs %s.identity.azure.tenantId: the chart sets AZURE_TENANT_ID, which the webhook would take from its own configuration" $.component $.component) -}}
+{{- end -}}
+{{- else if dig "identity" "azure" "tenantId" "" $c -}}
+{{- fail (printf "%s.identity.azure.tenantId is used only with %s.identity.azure.projectToken: set projectToken or leave tenantId empty" $.component $.component) -}}
+{{- end -}}
 {{- range $k, $_ := $c.serviceAccount.annotations -}}
 {{- if hasPrefix "azure.workload.identity/" $k -}}
 {{- fail (printf "%s.serviceAccount.annotations may not set %q: use %s.identity.azure.clientId" $.component $k $.component) -}}

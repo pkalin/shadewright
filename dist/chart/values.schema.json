@@ -1006,7 +1006,7 @@
                   "type": "object",
                   "maxProperties": 8,
                   "additionalProperties": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "maxLength": 63,
                     "pattern": "^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$"
                   }
@@ -1034,7 +1034,7 @@
                   "type": "object",
                   "maxProperties": 8,
                   "additionalProperties": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "maxLength": 63,
                     "pattern": "^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$"
                   }

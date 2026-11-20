@@ -56,6 +56,15 @@ type Input struct {
 	Probes []string
 }
 
+// Size returns the bytes of the fields.
+func (in Input) Size() int {
+	n := 0
+	for _, f := range in.Fields {
+		n += len(f)
+	}
+	return n
+}
+
 // Joined returns the fields joined by sep.
 func (in Input) Joined(sep string) string { return strings.Join(in.Fields, sep) }
 
@@ -417,7 +426,7 @@ func sortStrings(s []string) {
 }
 
 // KnownFailure is an input of a fuzz target that fails one property on the current build: Property is its name
-// ("P1" to "P4"), Reason says what the input is.
+// ("P1" to "P6"), Reason says what the input is.
 type KnownFailure struct {
 	Property, Reason string
 }
@@ -455,9 +464,9 @@ func CheckKnown(t testing.TB, k KnownFailure, counted bool, fails []string) {
 	case len(other) > 0:
 		t.Fatal(strings.Join(other, "\n"))
 	case len(own) > 0:
-		t.Skipf("known: #845 fifteenth decision, %s (%s)", k.Reason, Clip(own[0]))
+		t.Skipf("known failure: %s (%s)", k.Reason, Clip(own[0]))
 	case k.Property == "P3" && !counted:
-		t.Skipf("known: #845 fifteenth decision, %s (P3 is checked only with -tags redactwork)", k.Reason)
+		t.Skipf("known failure: %s (P3 is checked only with -tags redactwork)", k.Reason)
 	default:
 		t.Fatalf("known failing input passes %s now (%s): remove it from the known failures", k.Property, k.Reason)
 	}

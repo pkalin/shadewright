@@ -113,11 +113,13 @@ type windowed struct {
 	idx int
 	// onRead, when not nil, is told the length of each part of a text the expression reads (tests).
 	onRead func(n int)
+	// expr is re with the bytes its engine reads charged attempt by attempt (#873).
+	expr *meter.Expr
 }
 
 // newWindowed returns re with its alphabet and start characters.
 func newWindowed(_ *meter.Meter, re *regexp.Regexp) *windowed {
-	w := &windowed{re: re, whole: true}
+	w := &windowed{re: re, whole: true, expr: meter.NewExpr(re)}
 	tree, err := syntax.Parse(re.String(), syntax.Perl)
 	if err != nil {
 		return w
@@ -569,7 +571,7 @@ func (w *windowed) findAllIn(wm *meter.Meter, s string, runs []longRun, ids *win
 		if w.onRead != nil {
 			w.onRead(len(t))
 		}
-		return w.re.FindAllStringSubmatchIndex(counted(wm, t), -1)
+		return findAllCharged(wm, w.expr, t)
 	}
 	// part reads the bytes [from, to) of s with the character before from (starting at lo) and the one at to.
 	part := func(lo, from, to int) {
@@ -627,7 +629,15 @@ func (w *windowed) readWhole(wm *meter.Meter, s string) [][]int {
 	if w.onRead != nil {
 		w.onRead(len(s))
 	}
-	return w.re.FindAllStringSubmatchIndex(counted(wm, s), -1)
+	return findAllCharged(wm, w.expr, s)
+}
+
+// findAllCharged returns e.Regexp().FindAllStringSubmatchIndex(s, -1), with each byte the engine reads charged to
+// wm as the work of an expression, attempt by attempt (meter.Expr): an expression that reads the rest of the text
+// on every match attempt (a.*z|a on a run of a) costs the square of the text, and the budget stops it there
+// instead of after the call (#873, decision of 2026-11-20).
+func findAllCharged(wm *meter.Meter, e *meter.Expr, s string) [][]int {
+	return e.FindAll(s, func(n int) { tickExpression(wm, n) })
 }
 
 // shifted returns the match m, found in a text that starts at byte by of another, as a match of the other.

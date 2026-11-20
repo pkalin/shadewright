@@ -43,6 +43,11 @@ import (
 //	    empty), never a part of it. A withheld entry shows nothing, so P1 holds of it without the release's
 //	    reading, which is then not run: on the inputs where its own work outgrows the text ("--token,}" repeated,
 //	    released.tokenEnd) that oracle alone would hold a fuzzing worker past its limit.
+//	P6: no entry of an input under redacttest.SmallInput (64 KiB) is withheld for work (#873, decision of
+//	    2026-11-20). P3 cannot find a shape whose work grows faster than the text, since the budget stops the work
+//	    where P3 would see it pass and P5 accepts the entry withheld; such a shape is withheld at a size the
+//	    budget's factor makes small, so P6 fails it and the fuzzer keeps it. It needs no build tag (it reads the
+//	    counter shadewright_redaction_withheld_total).
 //	P4: the output is valid UTF-8 when the input is, and nothing panics. Valid UTF-8 whatever the input is a
 //	    property of the tool results and the incident context (decided 2026-11-19): these entry points keep the
 //	    bytes they do not hide, invalid ones included, as the release's String does (released.String("a\xffb")
@@ -51,8 +56,36 @@ import (
 // The inputs known to fail (knownDiffFailures) are seeds in testdata/fuzz: they skip, naming the property, until
 // the rule is fixed, and fail once they pass, so that the fix removes them.
 
-// knownDiffFailures are the known failing inputs of the targets of this package, by target and input bytes.
-var knownDiffFailures = map[string]map[string]redacttest.KnownFailure{}
+// knownDiffFailures are the known failing inputs of the targets of this package, by target and input bytes:
+// shapes on which the reading of the release before (package released) grows faster than the text, so the budget
+// withholds them under redacttest.SmallInput (P6).
+var knownDiffFailures = map[string]map[string]redacttest.KnownFailure{
+	"FuzzDiffString":      {string(seedTokenRepeat): knownTokenRepeat},
+	"FuzzDiffStringTwice": {string(seedTokenRepeat): knownTokenRepeat},
+	"FuzzDiffStrings": {
+		string(seedTokenRepeat):           knownTokenRepeat,
+		string(seedPairsBeforeABlankLine): knownPairsBeforeABlankLine,
+	},
+	"FuzzDiffReplaceFrom": {
+		string(seedTokenRepeat): knownTokenRepeat,
+		// found-845-0fe50aa1ef3f463b in testdata/fuzz: "-password," repeated, 10,250 bytes.
+		"10\x060\x052<12": knownTokenRepeat,
+	},
+}
+
+// knownTokenRepeat is a flag and a comma repeated ("--token,}", "-password,"): the release's reading reads each
+// value to the end of the run (released.tokenEnd), about 950 steps per byte at 4 KiB and more with the size (#962).
+var knownTokenRepeat = redacttest.KnownFailure{Property: "P6", Reason: "#962, the release's reading of a flag repeated"}
+
+// knownPairsBeforeABlankLine is TOKEN="a" repeated before a long blank line, as Strings reads it: the release's
+// reading takes 53, 237 and 868 steps per byte at 3, 6 and 13 KB (measured 2026-11-20 with -tags redactwork),
+// four times the work for twice the text.
+var knownPairsBeforeABlankLine = redacttest.KnownFailure{
+	Property: "P6", Reason: "the release's reading of key pairs before a long blank line grows with the square of the text",
+}
+
+// seedTokenRepeat is "--token,}" repeated to 36 KiB, a seed of diffSeeds.
+var seedTokenRepeat = redacttest.RawSeed(0, strings.Repeat("--token,}", 4096))
 
 // checkDiff ends a fuzz input of target ([redacttest.Check]).
 func checkDiff(t *testing.T, target string, data []byte, counted bool, fails []string) {
@@ -132,7 +165,7 @@ var diffSeeds = [][]byte{
 	{0xf1, 0, 242, 0, 7, 0},   // a run of one invalid byte and an "x", 3,150 times
 	// "--token,}" repeated to 36 KiB (#873): the release's reading reads each value to the end of the run
 	// (released.tokenEnd), about 4,500 steps per byte there, so the entry is withheld (P3, P5).
-	redacttest.RawSeed(0, strings.Repeat("--token,}", 4096)),
+	seedTokenRepeat,
 }
 
 // seedPairsBeforeABlankLine is the input of TestStringWorkOnRepeatedPairsBeforeALongBlankLine in the grammar (the
@@ -168,8 +201,10 @@ func diffString(data []byte) ([]string, bool) {
 	in := redacttest.Decode(data, 1).Joined("")
 	var out string
 	var ok bool
+	before := redacttest.WorkWithheld()
 	total, release, counted := measureWork(func() { out, ok = StringChecked(in) })
 	fails := workFails("String", total, release, len(in))
+	fails = append(fails, redacttest.SmallWithheldFails("String", len(in), before)...)
 	if fails = append(fails, withheldFails("String", in, []string{out}, ok)...); !ok {
 		return fails, counted
 	}
@@ -188,8 +223,10 @@ func diffStringTwice(data []byte) ([]string, bool) {
 	in := redacttest.Decode(data, 1).Joined("")
 	var out string
 	var ok bool
+	before := redacttest.WorkWithheld()
 	total, release, counted := measureWork(func() { out, ok = StringTwiceChecked(in, nil) })
 	fails := workFails("StringTwice", total, release, len(in))
+	fails = append(fails, redacttest.SmallWithheldFails("StringTwice", len(in), before)...)
 	if fails = append(fails, withheldFails("StringTwice", in, []string{out}, ok)...); !ok {
 		return fails, counted
 	}
@@ -212,8 +249,10 @@ func diffStrings(data []byte) ([]string, bool) {
 	joined := strings.Join(items, "\n")
 	var out []string
 	var ok bool
+	before := redacttest.WorkWithheld()
 	total, release, counted := measureWork(func() { out, ok = StringsChecked(items) })
 	fails := workFails("Strings", total, release, stringsSize(items))
+	fails = append(fails, redacttest.SmallWithheldFails("Strings", stringsSize(items), before)...)
 	if len(out) != len(items) {
 		fails = append(fails, fmt.Sprintf("P4: Strings returned %d strings for %d", len(out), len(items)))
 	}
@@ -248,10 +287,12 @@ func diffReplaceFrom(data []byte) ([]string, bool) {
 	from := excerptFrom([]byte(in), 64*(int(dec.Knob)+1))
 	var out string
 	ok := true
+	before := redacttest.WorkWithheld()
 	total, release, counted := measureWork(func() {
 		out = strings.ToValidUTF8(excerptOf(in, from, defaultRedactor.replaceFromFunc(from, &ok), Marker), "?")
 	})
 	fails := workFails("ReplaceFrom", total, release, len(in))
+	fails = append(fails, redacttest.SmallWithheldFails("ReplaceFrom", len(in), before)...)
 	if fails = append(fails, withheldFails("the excerpt", in, []string{out}, ok)...); !ok {
 		return fails, counted
 	}
@@ -429,7 +470,11 @@ func TestDiffPairsBeforeABlankLine(t *testing.T) {
 				for _, sep := range []byte{7, 0} { // fullwidth colon, ":"
 					data := []byte{0xf1, 0, 240, key, n, m, sep}
 					for _, target := range slices.Sorted(maps.Keys(diffBodies)) {
-						if fails, _ := diffBodies[target](data); len(fails) > 0 {
+						fails, _ := diffBodies[target](data)
+						// P6 is the known failure of this class (knownPairsBeforeABlankLine): the release's
+						// reading grows with the square of the text, and the budget withholds it.
+						fails = slices.DeleteFunc(fails, func(f string) bool { return strings.HasPrefix(f, "P6:") })
+						if len(fails) > 0 {
 							t.Errorf("%s(%v): %s", target, data, strings.Join(fails, "\n"))
 						}
 					}

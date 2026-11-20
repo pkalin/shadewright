@@ -388,7 +388,7 @@ func (r *Redactor) spans(wm *meter.Meter, s string) []span {
 				spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i})
 			}
 		}
-		for _, m := range ru.re.FindAllStringSubmatchIndex(counted(wm, s), -1) {
+		for _, m := range ru.findAll(wm, s) {
 			tick(wm, 1)
 			if ru.spansLines != nil {
 				prevEnd = ru.spansLines(wm, s, m, prevEnd, add, lines)

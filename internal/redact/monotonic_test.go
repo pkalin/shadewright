@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 	"github.com/pkalin/shadewright/internal/redact/testdata/mainredact"
 )
 
@@ -184,6 +185,8 @@ func FuzzMonotonicAgainstMain(f *testing.F) {
 		f.Add(in)
 	}
 	f.Fuzz(func(t *testing.T, in string) {
+		before := redacttest.WorkWithheld()
+		defer redacttest.FailSmallWithheld(t, "String", len(in), before)
 		if i := lostMainBytes(in); i >= 0 {
 			t.Fatalf("main removed byte %d of %q, now kept: %q", i, in, String(in))
 		}

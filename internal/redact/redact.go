@@ -180,6 +180,9 @@ type rule struct {
 // windows when the rule has them (New) and runs holds the long windows of s (longRuns of the redactor's wins).
 func (ru *rule) find(wm *meter.Meter, s string, runs [][]longRun, ids *windowIDs) [][]int {
 	if ru.win == nil || runs == nil {
+		if ru.win != nil {
+			return findAllCharged(wm, ru.win.expr, s)
+		}
 		return ru.re.FindAllStringSubmatchIndex(counted(wm, s), -1)
 	}
 	return ru.win.findAllIn(wm, s, runs[ru.win.idx], ids)

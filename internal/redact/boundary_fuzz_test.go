@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 // A replacement begins and ends on a character boundary of the original: valid UTF-8 in gives valid UTF-8 out
@@ -117,6 +119,8 @@ func FuzzReplacementBoundaries(f *testing.F) {
 		f.Add(boundaryInput(r, 12))
 	}
 	f.Fuzz(func(t *testing.T, in string) {
+		before := redacttest.WorkWithheld()
+		defer redacttest.FailSmallWithheld(t, "the replacement", len(in), before)
 		if msg := checkBoundaries(in); msg != "" {
 			t.Fatalf("%q: %s", in, msg)
 		}

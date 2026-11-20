@@ -347,15 +347,15 @@ func (r *RemediationRequestReconciler) reviewCheckWritable(rr *remediationv1alph
 	return rc == nil || rc.State != remediationv1alpha1.ReviewCheckStale
 }
 
-// errReviewCheckLiveRead is the failure to read the request live before a passing review check write
-// (syncReviewCheck): no check is written in that reconcile, and the look returns it like any other failure of the check (watchReviewCheck:
+// errReviewCheckLiveRead is the failure to read the request live before a review check write that is not the
+// downgrade of a pass (syncReviewCheck): no check is written in that reconcile, and the look returns it like any other failure of the check (watchReviewCheck:
 // logged, counted towards ReviewCheckStuck, the look keeps its pace), and shows it in condition Approved while it
 // lasts (noteLiveRead).
 var errReviewCheckLiveRead = errors.New("read the request live before writing its review check")
 
 // ReasonReviewCheckLiveReadFailed is the reason of condition Approved (False) while the read of the request from the
-// API server that comes before a passing write of the review check (liveReviewCheckWritable) fails, so the check is
-// not brought in line with the reviews (noteLiveRead).
+// API server that comes before a write of the review check (liveReviewCheckWritable) fails, so the check is not
+// brought in line with the reviews (noteLiveRead); only a pass on the head is still taken down without that read.
 const ReasonReviewCheckLiveReadFailed = "ReviewCheckLiveReadFailed"
 
 // noteLiveRead shows in status what a look of watchReviewCheck found about the live read before a check write
@@ -380,8 +380,9 @@ func (r *RemediationRequestReconciler) noteLiveRead(ctx context.Context, rr *rem
 	upd := rr.DeepCopy()
 	if failed {
 		setApprovedFalse(upd, ReasonReviewCheckLiveReadFailed, "The request could not be read from the API server "+
-			"before the passing review check shadewright/review was written, so the check does not pass yet although "+
-			"the reviews approve the head; a check that does not pass is still written. The next look tries again")
+			"before the review check shadewright/review was written, so the check is not brought in line with the "+
+			"reviews yet; without that read only a passing check on the head is still taken down. The next look "+
+			"tries again")
 	} else {
 		setWaitingForReview(upd)
 	}
@@ -405,7 +406,7 @@ func (r *RemediationRequestReconciler) noteLiveRead(ctx context.Context, rr *rem
 // released or deleted request in the API server gets nothing. A request the API server no longer has (NotFound) is
 // gone, not a failed read: it is not writable, for every state, and no request is left to write a stop's failed
 // check again over a pending one (decision of 2026-11-20 on #925, after the fourth pass). Any other failed read is
-// returned, wrapped in errReviewCheckLiveRead; syncReviewCheck then writes no passing check.
+// returned, wrapped in errReviewCheckLiveRead; syncReviewCheck then writes only the downgrade of a pass.
 func (r *RemediationRequestReconciler) liveReviewCheckWritable(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (bool, error) {
 	live := &remediationv1alpha1.RemediationRequest{}
@@ -566,13 +567,14 @@ const (
 // the host and then records the state: the order on a restart between the two does not matter, as the next look
 // compares again. Right before the host write the request is read live (liveReviewCheckWritable): a request that
 // the live read shows stopped, released, being deleted or gone (NotFound) gets no check from a reconcile that read an
-// older copy (#925). When the live read fails, a passing check is not written (errReviewCheckLiveRead is returned), while a
-// pending or failed one still is, as neither lets a merge through and a pass that no longer rests on an approval
-// must not stay on the head (decision of 2026-11-20 on #925); a stop's failed check that such a write covers is
-// written again by the stopped request's next look (failStoppedCheck). A Refused check whose backoff has not run
-// out is not written again (refusalBackoff); a final refusal is recorded Refused (recordRefusal). A failed read or
-// write changes nothing and is returned for a retry; a pull request closed or merged meanwhile (a conflict)
-// records nothing and returns errCheckRunConflict. The provider passes the kill switch right before the host
+// older copy (#925). When the live read fails, the only write left is the downgrade of a pass: a pending or failed
+// check is written when the head's last check shows success, as a pass that no longer rests on an approval must not
+// stay on the head; anything else (a pass, or a check over a failed or pending one or on a head with none) is not
+// written and errReviewCheckLiveRead is returned, so a stop's failed check is never covered by a check written from a
+// copy the API server may no longer hold (decision of 2026-11-20 on #925, after the fifth pass). A Refused check
+// whose backoff has not run out is not written again (refusalBackoff); a final refusal is recorded Refused
+// (recordRefusal). A failed read or write changes nothing and is returned for a retry; a pull request closed or
+// merged meanwhile (a conflict) records nothing and returns errCheckRunConflict. The provider passes the kill switch right before the host
 // write, so nothing is written to the host while writes are not allowed.
 func (r *RemediationRequestReconciler) syncReviewCheck(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, want providers.CheckRunStatus) (checkLook, error) {
@@ -596,11 +598,11 @@ func (r *RemediationRequestReconciler) syncReviewCheck(ctx context.Context, git 
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr), "head", pr.HeadSHA,
 		"want", want)
 	switch ok, err := r.liveReviewCheckWritable(ctx, rr); {
-	case err != nil && want == providers.CheckRunSuccess:
+	case err != nil && (want == providers.CheckRunSuccess || !found || shows != providers.CheckRunSuccess):
 		return checkUntouched, err
 	case err != nil:
-		log.Info("Could not read RemediationRequest live before its review check; writing the check that "+
-			"does not pass all the same", "error", err.Error())
+		log.Info("Could not read RemediationRequest live before its review check; taking the pass on the head "+
+			"down all the same", "error", err.Error())
 	case !ok:
 		log.Info("RemediationRequest no longer waits for review in the API server, or is gone; its review check " +
 			"is not written from an older copy")

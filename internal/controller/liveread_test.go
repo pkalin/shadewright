@@ -47,9 +47,7 @@ func TestFailedLiveReadStillTakesThePassDown(t *testing.T) {
 	}{
 		{name: "changes requested", want: providers.CheckRunInProgress, state: api.ReviewCheckInProgress,
 			world: func(t *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, number int64, head string) {
-				g.AddReview(number, providers.Feedback{ID: 91, Author: providers.FeedbackAuthor{ID: 3003,
-					Login: "reviewer-3003", Kind: providers.AuthorPerson}, ReviewState: "CHANGES_REQUESTED",
-					CommitID: head, CreatedAt: hostClock.Add(time.Minute)})
+				requestChanges(g, number, head)
 			}},
 		{name: "list too long", want: providers.CheckRunFailure, state: api.ReviewCheckFailed,
 			world: func(t *testing.T, r *RemediationRequestReconciler, g *fakegit.Git, _ int64, _ string) {
@@ -204,4 +202,83 @@ func TestStoppedCheckRefusalIsNotGitFailed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Without the live read the only review check written is the downgrade of a pass (decision of 2026-11-20 on #925,
+// after the fifth pass): pending or failed goes on the head only when its last check shadewright/review is a
+// success. Over a failed or a pending check, or on a head with no check, a failed live read writes nothing and is
+// returned for a retry, so a stop's failed check is never covered by a check written from a copy the API server may
+// no longer hold.
+func TestFailedLiveReadWritesOnlyOverAPass(t *testing.T) {
+	cases := []struct {
+		name string
+		// last is the check written on the passed head before the look, "" for none; fresh: a head with no check.
+		last  providers.CheckRunStatus
+		fresh bool
+		// listTooLong makes the gate want the check failed instead of pending.
+		listTooLong bool
+		// want is the check the look writes, "" for none.
+		want providers.CheckRunStatus
+	}{
+		{name: "pending over a pass", want: providers.CheckRunInProgress},
+		{name: "failed over a pass", listTooLong: true, want: providers.CheckRunFailure},
+		{name: "pending over a failed check", last: providers.CheckRunFailure},
+		{name: "failed over a pending check", last: providers.CheckRunInProgress, listTooLong: true},
+		{name: "pending on a head with no check", fresh: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			var (
+				r    *RemediationRequestReconciler
+				g    *fakegit.Git
+				p    *api.RemediationRequest
+				head string
+			)
+			if c.fresh {
+				r, g, p, _, _, head = gateWorld(t)
+				plainWaiting(t, r, p, head)
+			} else {
+				var number int64
+				r, g, p, number, head = passedWorld(t)
+				requestChanges(g, number, head)
+			}
+			if c.last != "" {
+				if err := g.CreateCheckRun(ctx, head, checkRunFor(c.last)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if c.listTooLong {
+				r.OpenRepository = func(context.Context, api.GitRepository) (providers.GitProvider, error) {
+					return pagedReviews{g}, nil
+				}
+			}
+			r.APIReader = failingRequestReader{Reader: r.Client, name: p.Name}
+			runs := g.CheckRuns(head)
+			err := r.reviewCheck(ctx, p)
+			got := g.CheckRuns(head)
+			if c.want == "" {
+				if !errors.Is(err, errReviewCheckLiveRead) {
+					t.Fatalf("a failed live read returned %v: want errReviewCheckLiveRead for a retry", err)
+				}
+				if len(got) != len(runs) {
+					t.Fatalf("a check was written without the live read over %q: %+v", c.last, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the downgrade of a pass after a failed live read returned %v", err)
+			}
+			if len(got) != len(runs)+1 || got[len(got)-1].Status != c.want {
+				t.Fatalf("check runs %+v after a failed live read over a pass: want %q written", got, c.want)
+			}
+		})
+	}
+}
+
+// requestChanges adds a review by reviewer 3003 that requests changes on head, after passedWorld's approval.
+func requestChanges(g *fakegit.Git, number int64, head string) {
+	g.AddReview(number, providers.Feedback{ID: 91, Author: providers.FeedbackAuthor{ID: 3003,
+		Login: "reviewer-3003", Kind: providers.AuthorPerson}, ReviewState: "CHANGES_REQUESTED",
+		CommitID: head, CreatedAt: hostClock.Add(time.Minute)})
 }

@@ -80,9 +80,9 @@ func (c cachedCopy) Get(ctx context.Context, key client.ObjectKey, obj client.Ob
 
 // A reconcile that works from an older cached copy of a request (waiting for review, or with its pull request just
 // opened) never writes a pending or passing review check over the failed one a stop wrote: the live request is read
-// before the write, and a stopped, released or deleted one gets nothing (model seed 35217). A failed live read writes
-// no passing check and is returned; a pending check is still written then (decision of 2026-11-20 on #925), and the
-// stopped request's next look writes its failed check again (TestStoppedHolderWritesItsFailedCheckAgain). A live
+// before the write, and a stopped, released or deleted one gets nothing (model seed 35217). A failed live read over
+// the stop's failed check writes nothing, a pending check no more than a pass, and is returned for a retry: without
+// the live read only a pass on the head is taken down (decision of 2026-11-20 on #925, after the fifth pass). A live
 // request that still waits gets the write.
 func TestReviewCheckFromAStaleCopyLeavesTheStopsCheck(t *testing.T) {
 	cases := []struct {
@@ -129,8 +129,8 @@ func TestReviewCheckFromAStaleCopyLeavesTheStopsCheck(t *testing.T) {
 		{name: "pending over a stop, then deleted", phase: api.PhaseAwaitingApproval, live: deleteLive},
 		{name: "passing over a stop, then deleted", phase: api.PhaseAwaitingApproval, approved: true, live: deleteLive},
 		{name: "live read fails before a pass", phase: api.PhaseAwaitingApproval, approved: true, readFails: true},
-		{name: "live read fails before a pending check", phase: api.PhaseAwaitingApproval, readFails: true,
-			writes: true},
+		{name: "live read fails before a pending check", phase: api.PhaseAwaitingApproval, readFails: true},
+		{name: "live read fails on a just opened pull request", phase: api.PhasePRCreated, readFails: true},
 		{name: "still waiting", phase: api.PhaseAwaitingApproval, writes: true, live: func(t *testing.T,
 			r *RemediationRequestReconciler, p *api.RemediationRequest) {
 			p.Status.Phase, p.Status.PullRequest.ReviewCheck = api.PhaseAwaitingApproval, nil
@@ -175,21 +175,6 @@ func TestReviewCheckFromAStaleCopyLeavesTheStopsCheck(t *testing.T) {
 			if c.writes {
 				if len(got) != runs+1 || got[len(got)-1].Status != providers.CheckRunInProgress {
 					t.Fatalf("no pending check was written: %+v", got)
-				}
-				if !c.readFails {
-					return
-				}
-				// The pending check covers the stop's failed one only until the stopped request's next look.
-				r.Client, r.APIReader = live, live
-				stopped := &api.RemediationRequest{}
-				if err := live.Get(ctx, client.ObjectKeyFromObject(p), stopped); err != nil {
-					t.Fatal(err)
-				}
-				if err := r.failStoppedCheck(ctx, stopped, string(api.PhaseNeedsIntervention)); err != nil {
-					t.Fatal(err)
-				}
-				if got := g.CheckRuns(head); got[len(got)-1].Status != providers.CheckRunFailure {
-					t.Fatalf("the stopped request's next look left the pending check last: %+v", got)
 				}
 				return
 			}
@@ -352,5 +337,58 @@ func TestLiveReadThatKeepsFailingShowsInStatus(t *testing.T) {
 	}
 	if runs := g.CheckRuns(head); len(runs) != 1 {
 		t.Fatalf("check runs %+v: want the check written once the live read works", runs)
+	}
+}
+
+// The fifth overwritten verdict on #925: a stop writes the failed check and records Stale; the recorded pull request
+// closes while another open pull request from the branch, on the same head, keeps the lock; a reconcile from an
+// older copy meets a failed live read. It writes nothing over the failed check (decision of 2026-11-20 on #925, after
+// the fifth pass): the stopped holder's looks no longer try the failed check once the recorded pull request is
+// closed and nothing is noted (failCheckAfterLook), so a pending check written then would stay last while the other
+// pull request is open.
+func TestFailedLiveReadLeavesTheStopsCheckWhileAnotherPullRequestHolds(t *testing.T) {
+	r, g, p, _, cr, head := gateWorld(t)
+	ctx := context.Background()
+	plainWaiting(t, r, p, head)
+	older := stopLive(t, r, g, p)
+	if err := g.Close(cr.Number); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := g.GetChangeRequest(ctx, cr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := g.AddOpenChangeRequest(cr.HeadBranch, mainBranch, "opened by a person")
+	if err != nil {
+		t.Fatal(err)
+	}
+	holding, err := g.GetChangeRequest(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holding.HeadSHA != head {
+		t.Fatalf("the other pull request is on %s: want the stopped head %s", holding.HeadSHA, head)
+	}
+	live := r.Client
+	r.Client = cachedCopy{Client: live, copy: older}
+	r.APIReader = failingRequestReader{Reader: live, name: p.Name}
+	runs := len(g.CheckRuns(head))
+	if err := r.reviewCheck(ctx, older); !errors.Is(err, errReviewCheckLiveRead) {
+		t.Fatalf("a failed live read returned %v: want errReviewCheckLiveRead for a retry", err)
+	}
+	if got := g.CheckRuns(head); len(got) != runs {
+		t.Fatalf("a reconcile from an older copy wrote over the stop's failed check without the live read: %+v", got)
+	}
+	// The stopped holder's look reads its own pull request closed and the other one open: it tries nothing more.
+	r.Client, r.APIReader = live, live
+	stopped := &api.RemediationRequest{}
+	if err := live.Get(ctx, client.ObjectKeyFromObject(p), stopped); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.failCheckAfterLook(ctx, stopped, changeVerdict{state: changeClosed, pr: closed}, &holding); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.CheckRuns(head); got[len(got)-1].Status != providers.CheckRunFailure {
+		t.Fatalf("the stop's failed check is not last while another pull request of the branch is open: %+v", got)
 	}
 }

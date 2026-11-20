@@ -111,11 +111,11 @@ import (
 //     on #771, point 5 as the sixth kept it);
 //   - stop check kept: once a reconcile leaves a stopped request whose own pull request is open with the last review
 //     check of its head failed, that check stays the last one on the head while the request stays stopped and the
-//     pull request open, also when a reconcile works from an older copy of the request whose live read works
-//     (decisions of 2026-11-20 on #925). With the live read failed, such a reconcile still writes a pending check,
-//     which covers the failed one only until the stopped request's next look; the model draws no failed live read of
-//     the request (and no approval, so no passing check), and directed tests hold that case
-//     (TestReviewCheckFromAStaleCopyLeavesTheStopsCheck, TestFailedLiveReadStillTakesThePassDown);
+//     pull request open, also when a reconcile works from an older copy of the request, whether its live read works
+//     or fails: without the live read only a pass is taken down (decisions of 2026-11-20 on #925, the last after the
+//     fifth pass). The model fails the live read of the request in half of the reconciles that read an older copy
+//     (liveFails); it draws no approval, so no passing check, and directed tests hold that case
+//     (TestFailedLiveReadWritesOnlyOverAPass, TestFailedLiveReadStillTakesThePassDown);
 //   - schema: no status write is one the API server refuses.
 //
 // At the end the world heals (reads work, no write fails; the repository comes back in half of the runs; a pause is
@@ -304,6 +304,10 @@ type modelWorld struct {
 	// staleNext makes the cache serve stale at the next read of the request.
 	staleNext bool
 	stale     *api.RemediationRequest
+	// liveFails makes every live read of the request (APIReader) fail in the reconcile that reads stale; liveRng
+	// draws it, apart from rng, so the orders the seeds drew before it are kept.
+	liveFails bool
+	liveRng   *rand.Rand
 	// writeFaulted reports that this reconcile met an injected write fault or a stale read.
 	writeFaulted bool
 	// deleted hides the pull request from every read (gone from the host); gone are earlier pull requests of the
@@ -471,6 +475,8 @@ func newModel(t *testing.T, seed uint64, schema *statusSchema) *modelWorld {
 func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchema, st modelStart) *modelWorld {
 	m := &modelWorld{t: t, seed: seed, rng: rng, fault: faultNone, schema: schema, configured: freshOtherBranch,
 		focus: st.focus, afterLift: -1, flap: st.flap}
+	// #nosec G404 -- a seeded generator, so a failing order can be run again from its seed.
+	m.liveRng = rand.New(rand.NewPCG(seed, seed^0x6a09e667f3bcc909))
 	start := st.start
 	phase := api.PhaseNeedsIntervention
 	switch start {
@@ -815,6 +821,7 @@ func (m *modelWorld) run() {
 	}
 	m.mu.Lock()
 	m.fault, m.loseNext, m.conflictNext, m.applyNext, m.staleNext, m.noCommit = faultNone, false, false, false, false, false
+	m.liveFails = false
 	m.lastingUntil, m.passWrites, m.checkFails = time.Time{}, 0, false
 	m.mu.Unlock()
 	if m.paused && (m.focus == focusPause || m.rng.IntN(2) == 0) {
@@ -1455,6 +1462,17 @@ type flickerReader struct {
 }
 
 func (f *flickerReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*api.RemediationRequest); ok && key == f.m.key {
+		f.m.mu.Lock()
+		fails := f.m.liveFails
+		if fails {
+			f.m.writeFaulted = true
+		}
+		f.m.mu.Unlock()
+		if fails {
+			return apierrors.NewServiceUnavailable("the API server is not available")
+		}
+	}
 	if err := f.WithWatch.Get(ctx, key, obj, opts...); err != nil {
 		return err
 	}
@@ -1586,9 +1604,10 @@ func (m *modelWorld) serveStale() {
 	}
 	m.mu.Lock()
 	m.stale, m.staleNext = older[m.rng.IntN(len(older))], true
+	m.liveFails = m.liveRng.IntN(2) == 0
 	m.mu.Unlock()
-	m.logf("the cache serves an older copy of the request at the next read (phase %s, waits %d)",
-		m.stale.Status.Phase, len(m.stale.Status.GitWaits))
+	m.logf("the cache serves an older copy of the request at the next read (phase %s, waits %d, live read fails %t)",
+		m.stale.Status.Phase, len(m.stale.Status.GitWaits), m.liveFails)
 }
 
 // stop stops the request from outside: the kill switch, a person's cancel, or another target branch in the
@@ -1703,6 +1722,7 @@ func (m *modelWorld) step() {
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.key})
 	m.mu.Lock()
 	m.flickered = flick && !m.flicker
+	m.liveFails = false
 	m.mu.Unlock()
 	m.mu.Lock()
 	m.passed = ""
@@ -1881,10 +1901,9 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 // is no longer open (stop check kept, decision of 2026-11-20 on #925). Once a reconcile leaves a stopped request whose
 // own pull request is open with the last review check of its head failed, no later reconcile leaves another state
 // last on that head while the request stays stopped and that pull request open with that head: a reconcile working
-// from an older copy of the request (the stale cache) whose live read works must not write a pending or passing check
-// over the failed one. Paused or not, with any fault: nothing the model injects writes a check run. The model fails
-// no live read of the request: with one, a pending check may cover the failed one until the stopped request's next
-// look (decision of 2026-11-20 on #925, point 2), which directed tests check.
+// from an older copy of the request (the stale cache) must not write a pending or passing check over the failed one,
+// whether its live read works or fails (liveFails): without it only a pass is taken down (decision of 2026-11-20 on
+// #925, after the fifth pass). Paused or not, with any fault: nothing the model injects writes a check run.
 func (m *modelWorld) stopCheckProperty(live *api.RemediationRequest) {
 	pr := live.Status.PullRequest
 	cr, found := m.pr()

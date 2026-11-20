@@ -54,14 +54,16 @@ import (
 //     it, but only when it closes an open window or names another reason than the last reset (resetWindow);
 //     the window lives in status.verification. A reset whose status write failed is kept in memory
 //     (unwrittenResets) and applied again by the next check, so the retry, which reads the window from before
-//     it, cannot end the request across that bad check. A restart or a leader change loses that memory, so no
-//     window counts time from before this process began reconciling (counted): every open window then needs a
-//     full stableFor again. Before RolledOut is True nothing opens or resets the window.
+//     it, cannot end the request across that bad check. A restart or a leader change loses that memory, so the
+//     first check of a new process resets every open window that opened before it began reconciling, with
+//     ExecutorRestarted (restarted), and stores that reset like any other: the window then needs a full
+//     stableFor again, and status.verification shows why. Before RolledOut is True nothing opens or resets the
+//     window.
 //   - Success (clearing.Succeeds) needs a good check, a report whose sample counter rose since a check at most
 //     one poll interval earlier by the executor's clock, taken again after the report read (the counter is
 //     kept in memory, like the start of reconciling), and both spans at least the effective stableFor plus the
-//     node grace, each on its own writer's clock, the executor's counted from the later of its windowStart and
-//     the start of reconciling. One status write then sets Succeeded, Cleared True
+//     node grace, each on its own writer's clock, the executor's counted from its stored windowStart. One status
+//     write then sets Succeeded, Cleared True
 //     (NoRecurrence) and Verified True. A request whose spec.verification.checks names QueueBacklogDecreasing
 //     ends Inconclusive with CheckNotAvailable instead, since no metrics are read.
 //   - A ScaledObject has no pods of its own: its window is good while it is ready by the KedaReady rule (else
@@ -189,27 +191,31 @@ func (m sinceMarker) Start(ctx context.Context) error {
 // NeedLeaderElection makes the moment the start of leadership on a standby that becomes leader later.
 func (sinceMarker) NeedLeaderElection() bool { return true }
 
-// counted returns the executor's window w as this process counts its span (ADR-0030 section 4, amendment of
-// 2026-11-13): an open window that opened before this process began reconciling counts from that moment. A
-// reset this process recorded but could not store, and an earlier process lost with its memory
-// (unwrittenResets), may lie in the stored window; no check of this process does, so after a restart or a
-// leader change every open window needs a full stableFor again. Only the span changes: a closed window stays
-// closed and the stored windowStart is never rewritten (storeWindow gets w, not this).
-func (r *RemediationRequestReconciler) counted(w verification.Window) verification.Window {
-	since := r.since.mark(r.now())
+// restarted records, in the executor's window w read from status, the restart of the executor (ADR-0030 section
+// 4, amendment of 2026-11-20, #895): an open window that opened before this process began reconciling is reset
+// with ExecutorRestarted. A reset an earlier process recorded but could not store is lost with its memory
+// (unwrittenResets) and may lie in that window, and no check ran while no process reconciled, so no window
+// carries time over from before this process. The reset is stored like any other, so status.verification shows
+// it and the stored window is the one that decides: after it no open window starts before this process, and the
+// next good check opens it again. Its time is the second before the start of reconciling, so a good check in
+// the same second still opens the window. Both times are on the executor's clock and compared at the precision
+// the API keeps; a window opened in the second this process began is kept, as it can count less than a second
+// from before it. A closed window stays as it is: it counts nothing until a good check of this process.
+func (r *RemediationRequestReconciler) restarted(w *verification.Window) {
+	since := r.since.mark(r.now()).Truncate(time.Second)
 	if w.Open() && w.Start.Time.Before(since) {
-		start := metav1.NewTime(since)
-		w.Start = &start
+		w.Reset(remediationv1alpha1.ResetExecutorRestarted, since.Add(-time.Second))
 	}
-	return w
 }
 
-// checkWindow returns the executor's window a check starts from: the stored one, with a reset of an earlier
-// check whose write was lost applied again. resetWindow keeps the times from moving back, so a reset already
-// stored changes nothing, and one older than a later windowStart closes that window too, which can only delay
-// an end.
+// checkWindow returns the executor's window a check starts from: the stored one, with the restart of the
+// executor recorded (restarted) and a reset of an earlier check of this process whose write was lost applied
+// again. resetWindow keeps the times from moving back, so a reset already stored changes nothing, and one older
+// than a later windowStart closes that window too, which can only delay an end. The restart comes first: a kept
+// reset is of this process, so it is never older than the restart.
 func (r *RemediationRequestReconciler) checkWindow(rr *remediationv1alpha1.RemediationRequest) verification.Window {
 	w := executorWindow(rr)
+	r.restarted(&w)
 	if lost, ok := r.unwrittenResets.get(rr); ok {
 		resetWindow(&w, lost.Reason, lost.Time.Time)
 	}
@@ -399,7 +405,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 	changed = storeWindow(rr, w) || changed
 	r.unwrittenResets.note(rr, w)
 	if good && verification.Succeeds(verification.Success{Report: sampled, Contract: contract, Freshness: fresh,
-		Executor: r.counted(w), Now: now, StableFor: stableFor, NodeGrace: r.nodeGrace()}) {
+		Executor: w, Now: now, StableFor: stableFor, NodeGrace: r.nodeGrace()}) {
 		if namesBacklogCheck(rr) {
 			return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
 				ReasonCheckNotAvailable, fmt.Sprintf("No restart or OOM kill for %s, but the check "+
@@ -420,7 +426,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 	}
 	if sampled != nil && good {
 		st := &sampled.Status
-		if verification.ReportWindow(st).Span(st.SampledAt.Time) >= need && r.counted(w).Span(now) >= need {
+		if verification.ReportWindow(st).Span(st.SampledAt.Time) >= need && w.Span(now) >= need {
 			interval = verification.FastPollInterval
 		}
 	}
@@ -567,7 +573,7 @@ func (r *RemediationRequestReconciler) clearScaledStep(ctx context.Context,
 	changed = storeWindow(rr, w) || changed
 	r.unwrittenResets.note(rr, w)
 	revert := remediationv1alpha1.IsRevert(rr)
-	if r.counted(w).Span(now) >= stableFor {
+	if w.Span(now) >= stableFor {
 		reason, message := ReasonClearingNotChecked, fmt.Sprintf("The %s was rolled out and configured for %s; "+
 			"its symptom is not visible in container status, so clearing is not checked", ref.Kind, stableFor)
 		switch {
@@ -636,7 +642,7 @@ func (r *RemediationRequestReconciler) clearRevertStep(ctx context.Context,
 	}
 	changed = storeWindow(rr, w) || changed
 	r.unwrittenResets.note(rr, w)
-	if good && r.counted(w).Span(now) >= stableFor {
+	if good && w.Span(now) >= stableFor {
 		return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
 			remediationv1alpha1.ReasonRevertApplied, revertAppliedMessage(rr.Spec.TargetRef.Kind, stableFor))
 	}

@@ -255,8 +255,8 @@ type RemediationRequestReconciler struct {
 	// field the executor sent (crdoutdated.go, #866): later status writes of the request in that reconcile are
 	// refused with it, and Reconcile returns it. Dropped at the start and the end of each reconcile.
 	outdatedCRD sync.Map
-	// since is when this process began reconciling, on its clock (clearing.go): no window counts time before
-	// it. Memory only, set once.
+	// since is when this process began reconciling, on its clock (clearing.go): the first check of an open window
+	// that opened before it resets that window (restarted). Memory only, set once.
 	since reconcilingSince
 }
 

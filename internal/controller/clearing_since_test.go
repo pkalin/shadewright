@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -27,42 +28,60 @@ import (
 	verification "github.com/pkalin/shadewright/internal/verification/clearing"
 )
 
-// A window counts no time from before the process began reconciling (ADR-0030 section 4, amendment of
-// 2026-11-13). A window opened after that moment counts as stored, and a closed one stays closed.
-func TestCountedStartsNoWindowBeforeReconciling(t *testing.T) {
-	since := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
-	at := func(d time.Duration) *metav1.Time { m := metav1.NewTime(since.Add(d)); return &m }
+// The first check of a new process resets every open window that opened before the process began reconciling,
+// with ExecutorRestarted, in the window it stores (ADR-0030 section 4, amendment of 2026-11-20, #895). The reset
+// is the second before that moment, so a good check of the new process opens the window again at once. A window
+// opened since, or in the same second, and a closed one stay as they are.
+func TestRestartedResetsWindowsFromBeforeReconciling(t *testing.T) {
+	since := time.Date(2026, 11, 13, 12, 0, 0, 500_000_000, time.UTC)
+	second := since.Truncate(time.Second)
+	at := func(d time.Duration) *metav1.Time { m := metav1.NewTime(second.Add(d)); return &m }
 	reset := func(d time.Duration) *remediationv1alpha1.WindowReset {
 		return &remediationv1alpha1.WindowReset{Reason: remediationv1alpha1.ResetNotAvailable, Time: *at(d)}
 	}
-	now := since.Add(5 * time.Minute)
+	restartReset := &remediationv1alpha1.WindowReset{Reason: remediationv1alpha1.ResetExecutorRestarted,
+		Time: *at(-time.Second)}
 	cases := []struct {
 		name string
 		w    verification.Window
-		span time.Duration
+		want verification.Window
 	}{
-		{"open before the start counts from the start", verification.Window{Start: at(-time.Hour)}, 5 * time.Minute},
-		{"open before the start after a reset", verification.Window{Start: at(-time.Hour), LastReset: reset(-2 * time.Hour)},
-			5 * time.Minute},
-		{"open after the start is unaffected", verification.Window{Start: at(time.Minute)}, 4 * time.Minute},
-		{"open at the start is unaffected", verification.Window{Start: at(0)}, 5 * time.Minute},
-		{"closed before the start stays closed", verification.Window{Start: at(-time.Hour), LastReset: reset(-time.Minute)}, 0},
-		{"never opened", verification.Window{}, 0},
+		{"open before the start is reset", verification.Window{Start: at(-time.Hour), Resets: 2},
+			verification.Window{Start: at(-time.Hour), LastReset: restartReset, Resets: 3}},
+		{"open before the start after a reset is reset",
+			verification.Window{Start: at(-time.Hour), LastReset: reset(-2 * time.Hour), Resets: 1},
+			verification.Window{Start: at(-time.Hour), LastReset: restartReset, Resets: 2}},
+		{"open one second before the start is reset at its start",
+			verification.Window{Start: at(-time.Second)},
+			verification.Window{Start: at(-time.Second), LastReset: restartReset, Resets: 1}},
+		{"open in the second of the start is kept", verification.Window{Start: at(0)},
+			verification.Window{Start: at(0)}},
+		{"open after the start is kept", verification.Window{Start: at(time.Minute)},
+			verification.Window{Start: at(time.Minute)}},
+		{"closed before the start is kept",
+			verification.Window{Start: at(-time.Hour), LastReset: reset(-time.Minute), Resets: 1},
+			verification.Window{Start: at(-time.Hour), LastReset: reset(-time.Minute), Resets: 1}},
+		{"never opened is kept", verification.Window{}, verification.Window{}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			r := &RemediationRequestReconciler{Now: func() time.Time { return since }}
+			r := &RemediationRequestReconciler{Now: func() time.Time { return since.Add(time.Hour) }}
 			r.since.mark(since)
-			stored := c.w.Start.DeepCopy()
-			got := r.counted(c.w)
-			if s := got.Span(now); s != c.span {
-				t.Errorf("span = %s, want %s", s, c.span)
+			got := c.w
+			r.restarted(&got)
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("window = %+v, want %+v", got, c.want)
 			}
-			if got.Open() != c.w.Open() {
-				t.Errorf("open = %t, want %t", got.Open(), c.w.Open())
+			// A second check of the same process changes nothing more, and a good check opens the window at
+			// once: the window is never open from before the start of reconciling.
+			again := got
+			r.restarted(&again)
+			if !reflect.DeepEqual(again, got) {
+				t.Errorf("a second check changed the window to %+v", again)
 			}
-			if !c.w.Start.Equal(stored) {
-				t.Errorf("the window passed in changed its start to %v", c.w.Start)
+			again.Good(since)
+			if !again.Open() || again.Start.Before(at(0)) {
+				t.Errorf("after a good check at the start the window is %+v, want open from the start", again)
 			}
 		})
 	}
@@ -93,8 +112,9 @@ func TestReconcilingSinceIsTakenOnce(t *testing.T) {
 	}
 	clock = elected.Add(time.Hour)
 	w := verification.Window{Start: &metav1.Time{Time: elected.Add(-time.Hour)}}
-	if s := r.counted(w).Span(clock); s != time.Hour {
-		t.Errorf("span = %s, want 1h counted from the election", s)
+	r.restarted(&w)
+	if w.LastReset == nil || !w.LastReset.Time.Equal(&metav1.Time{Time: elected.Add(-time.Second)}) {
+		t.Errorf("last reset = %+v, want the second before the election", w.LastReset)
 	}
 
 	first := &RemediationRequestReconciler{Now: func() time.Time { return elected }}

@@ -63,7 +63,15 @@ var boundedLoops = map[string]string{
 	"(*chunker).finish#0": windowExprCount,
 	"chunkCut#0":          "chunkHashBytes bytes, counted by its caller",
 	"shifted#0":           matchPairs,
+	// The size of an entry, read once before its decision to set its budget (budget.go, #873): no meter exists yet,
+	// and a step counted there would be one no budget holds.
+	"(*Redactor).Strings#0":       entrySize,
+	"(*Redactor).meteredPieces#0": entrySize,
+	"PiecesWithheld#0":            "the strings an entry point returned, one per string or piece of the entry",
 }
+
+// entrySize is the bound of a loop that adds up the lengths of the strings or pieces of one entry.
+const entrySize = "the strings or pieces of the entry, once, to size its budget before any work"
 
 // exprSyntax is the bound of a loop over the syntax tree of one expression of the package or of an extra pattern.
 const exprSyntax = "the syntax of one expression, read once when the redactor is made"

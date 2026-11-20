@@ -314,7 +314,13 @@ func TestBudgetDecidesWholeOrWithholdsWhole(t *testing.T) {
 	for _, e := range budgetEntries {
 		t.Run(e.name, func(t *testing.T) {
 			t.Parallel()
-			for i, n := range []int{8, 200, 3000} {
+			sizes := []int{8, 200, 3000}
+			if raceDetector {
+				// The race detector makes each decision 10 to 20 times slower; make test runs this package again
+				// without it, on every size.
+				sizes = sizes[:2]
+			}
+			for i, n := range sizes {
 				in, secret, kept := budgetKnown(n, i)
 				want := e.run(nil, in)
 				if e.name != "Clean" {

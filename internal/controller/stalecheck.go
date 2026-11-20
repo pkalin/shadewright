@@ -70,12 +70,20 @@ func staleCheckRun(reason string) providers.CheckRun {
 // staleCheckPending reports whether a stale plan's check run still has to be failed: reviewer hints on, a recorded
 // pull request this request still owns (not handed over, no handoff intent), and no state Stale on its head.
 func (r *RemediationRequestReconciler) staleCheckPending(rr *remediationv1alpha1.RemediationRequest) bool {
+	return r.ownsReviewCheck(rr) && !staleOnHead(rr)
+}
+
+// ownsReviewCheck reports whether rr writes the review check of its recorded pull request at all: reviewer hints on,
+// a recorded pull request this request still owns (not handed over, no handoff intent).
+func (r *RemediationRequestReconciler) ownsReviewCheck(rr *remediationv1alpha1.RemediationRequest) bool {
+	return r.ReviewerHints && rr.Status.PullRequest != nil && !handedOff(rr) && intent(rr) == nil
+}
+
+// staleOnHead reports whether rr records state Stale for the review check of its recorded pull request's head.
+func staleOnHead(rr *remediationv1alpha1.RemediationRequest) bool {
 	pr := rr.Status.PullRequest
-	if !r.ReviewerHints || pr == nil || handedOff(rr) || intent(rr) != nil {
-		return false
-	}
 	rc := pr.ReviewCheck
-	return rc == nil || rc.Head != pr.HeadSHA || rc.State != remediationv1alpha1.ReviewCheckStale
+	return rc != nil && rc.Head == pr.HeadSHA && rc.State == remediationv1alpha1.ReviewCheckStale
 }
 
 // failStaleCheck completes the check run shadewright/review on the recorded head of a stale plan's pull request as
@@ -183,35 +191,48 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // rr's status in memory, for the caller's status write: moved back to the target branch, or left there, the pull
 // request cannot merge on a check written before the stop. Its callers have just read the pull request open
 // (stoppedCheck): the step that stops the request for a pull request open on another base (stopOpenElsewhere), and
-// every look of a stopped holder (checkHeld) while the check is pending (staleCheckPending, reviewer hints on), so a
-// stop for any other reason gets it at its first look, and a failed write is tried again at the next. Those looks run
+// every look of a stopped holder that reads it open (failCheckAfterLook), so a stop for any other reason gets it at
+// its first look, and a failed write is tried again at the next. Once Stale is recorded on the head, such a look
+// reads the latest review check of the head (stoppedCheckShown) and writes the failed check again only when the Git
+// host shows another state last or none (decision of 2026-11-20 on #925): one read and at most one write per look,
+// bounded by those looks (heldRecheckInterval while the lock is held), with no polling of its own. Those looks run
 // while the request keeps its lock, which an open pull request keeps. It reads no pull request itself, so it never
 // changes what a look concludes (a first look at a missing number, goneLooks). A lost status write leaves the check
 // pending, and the next look writes the same failed run again.
 //
 // The stop goes on whatever it returns, since a final phase waits for nothing, so a check that is not written is said
 // in status, in the same write: condition ReviewCheckNotFailed, with the reason of the failure (checkNotFailed), and a
-// Warning Event when it is set or its reason changes, not at each look. The write that records Stale removes it, and
-// so does every write that ends the looks (endCheckNote). A repository entry that names another target branch writes
-// nothing, since a branch change permits reads only (#771): that is said the same way, until the entry names the
-// branch again. A cancelled reconcile is only returned, and so
-// is a failure of the Kubernetes API (reading the settings), for the error backoff.
+// Warning Event when it is set or its reason changes, not at each look. The write that records Stale removes it, so
+// does a look that sees the failed check last, and so does every write that ends the looks (endCheckNote); a failed
+// read of the check on a head recorded Stale leaves it as it is and is logged (stoppedCheckUnread). A repository
+// entry that names another target branch writes nothing, since a branch change permits reads only (#771): that is
+// said the same way, until the entry names the branch again. A cancelled reconcile is only returned, and so is a
+// failure of the Kubernetes API (reading the settings), for the error backoff.
 func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	reason string) error {
-	if !r.staleCheckPending(rr) {
+	if !r.ownsReviewCheck(rr) {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 		return nil
 	}
+	recorded := staleOnHead(rr)
 	pr := rr.Status.PullRequest
+	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest",
+		pr.Number, "head", pr.HeadSHA)
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
 	git, _, _, err := r.openPlanRepositoryFor(stepCtx, rr)
+	if recorded {
+		var again bool
+		if again, err = stoppedCheckShown(stepCtx, git, pr.HeadSHA, err); !again {
+			return r.stoppedCheckUnread(ctx, stepCtx, rr, err)
+		}
+		log.Info("The failed review check of a stopped RemediationRequest is no longer the latest on its head; " +
+			"writing it again")
+	}
 	if err == nil {
 		err = git.CreateCheckRun(stepCtx, pr.HeadSHA, stoppedCheckRun(reason))
 		err = boundErr(ctx, stepCtx, "write the check run", err)
 	}
-	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest",
-		pr.Number, "head", pr.HeadSHA)
 	switch {
 	case err == nil:
 		pr.ReviewCheck = &remediationv1alpha1.ReviewCheck{Head: pr.HeadSHA, State: remediationv1alpha1.ReviewCheckStale}
@@ -240,6 +261,49 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 		r.Recorder.Event(rr, corev1.EventTypeWarning, EventReviewCheckNotFailed, message)
 	}
 	return err
+}
+
+// stoppedCheckShown is the look of a stopped holder whose failed check is recorded Stale on the head (failStoppedCheck,
+// decision of 2026-11-20 on #925): it reads the latest review check of head and reports whether the failed check has
+// to be written again, because the Git host shows another state last or none. A failure to open the repository
+// (opened) or to read is returned with again false: nothing is written in that look.
+func stoppedCheckShown(ctx context.Context, git providers.GitProvider, head string, opened error) (again bool,
+	err error) {
+	if opened != nil {
+		return false, opened
+	}
+	shows, found, err := git.ReviewCheckRun(ctx, head)
+	if err != nil {
+		return false, freshness.WrapProvider("read the check run", err)
+	}
+	return !found || shows != providers.CheckRunFailure, nil
+}
+
+// stoppedCheckUnread ends failStoppedCheck's look at a check recorded Stale that wrote nothing (stoppedCheckShown):
+// with no error the host shows the failed check last, and condition ReviewCheckNotFailed is removed; a cancelled
+// reconcile and a failure of the Kubernetes API are returned, and any other failure is logged and tried at the next
+// look. A failed read leaves the condition as it is: set by an earlier look whose write failed, it stays until a
+// look sees the failed check last; not set, it is not set, as the failed check was written and nothing shows it was
+// written over.
+func (r *RemediationRequestReconciler) stoppedCheckUnread(ctx, stepCtx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, err error) error {
+	pr := rr.Status.PullRequest
+	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest",
+		pr.Number, "head", pr.HeadSHA)
+	switch {
+	case err == nil:
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
+		return nil
+	case ctx.Err() != nil:
+		return err
+	case isClusterError(err):
+		log.Error(err, "Could not read the settings to look at the review check of a stopped RemediationRequest")
+		return err
+	}
+	err = boundErr(ctx, stepCtx, "read the check run", err)
+	log.Info("Could not look at the failed review check of a stopped RemediationRequest; looked at again at its "+
+		"next look", "error", err.Error())
+	return nil
 }
 
 // endCheckNote removes condition ReviewCheckNotFailed from rr's status in memory, for the write that ends the looks

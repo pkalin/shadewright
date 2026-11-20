@@ -312,7 +312,9 @@ const (
 // before it closes the pull request, and for any request that stops while its own pull request is open, on the
 // target branch or on a base a person moved it to (#925): in the step that stops it for a pull request open on
 // another base, and at each later look of the stopped request until it is recorded (condition ReviewCheckNotFailed
-// says while it cannot be written).
+// says while it cannot be written); once recorded, a look of the stopped request that finds another state last on
+// the head writes it again. Before any write of the check, the executor reads the request live, so a reconcile that
+// worked from an older copy writes nothing over a stop, a release or a deletion.
 // +kubebuilder:validation:Enum=InProgress;Passed;Failed;Refused;Stale
 type ReviewCheckState string
 

@@ -304,16 +304,11 @@ func (r *RemediationRequestReconciler) reviewCheck(ctx context.Context, rr *reme
 // reviewCheckLook is reviewCheck after a look at the comments that caught up or not (caughtUp).
 func (r *RemediationRequestReconciler) reviewCheckLook(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, caughtUp bool) (written bool, err error) {
+	if !r.reviewCheckWritable(rr) {
+		return false, nil
+	}
 	pr := rr.Status.PullRequest
-	if !r.ReviewerHints || pr == nil || intent(rr) != nil || !progresses(rr) ||
-		(rr.Status.Phase != remediationv1alpha1.PhasePRCreated && rr.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval) {
-		return false, nil
-	}
 	rc := pr.ReviewCheck
-	if rc != nil && rc.State == remediationv1alpha1.ReviewCheckStale {
-		// The plan was found stale and its check failed (failStaleCheck, #713): this request never writes it again.
-		return false, nil
-	}
 	current := rc != nil && rc.Head == pr.HeadSHA
 	gate := caughtUp && rr.Status.Phase == remediationv1alpha1.PhaseAwaitingApproval
 	if current && (!gate || rc.State == remediationv1alpha1.ReviewCheckFailed) {
@@ -329,6 +324,45 @@ func (r *RemediationRequestReconciler) reviewCheckLook(ctx context.Context,
 		return r.syncReviewCheck(stepCtx, git, rr, providers.CheckRunInProgress)
 	}
 	return r.reviewGateLook(stepCtx, git, rr)
+}
+
+// reviewCheckWritable reports whether rr, as read, may get a review check written by reviewCheckLook: reviewer hints
+// on, a recorded pull request this request still owns (no handoff intent), a request that progresses in PRCreated or
+// AwaitingApproval, holds its lock and is not being deleted, and no check recorded Stale: a plan found stale, a
+// cancel or a stop failed the check (failCheck, failStoppedCheck), and this request never writes it again, on any
+// head. reviewCheckLook asks it of the request the reconcile read, and syncReviewCheck asks it again of the live
+// request before every check run write (liveReviewCheckWritable).
+func (r *RemediationRequestReconciler) reviewCheckWritable(rr *remediationv1alpha1.RemediationRequest) bool {
+	pr := rr.Status.PullRequest
+	if !r.ReviewerHints || pr == nil || intent(rr) != nil || !progresses(rr) || !rr.DeletionTimestamp.IsZero() ||
+		!holdsLock(rr) ||
+		(rr.Status.Phase != remediationv1alpha1.PhasePRCreated && rr.Status.Phase != remediationv1alpha1.PhaseAwaitingApproval) {
+		return false
+	}
+	rc := pr.ReviewCheck
+	return rc == nil || rc.State != remediationv1alpha1.ReviewCheckStale
+}
+
+// errReviewCheckLiveRead is the failure to read the request live before a review check write (syncReviewCheck): no
+// check is written in that reconcile, and the look returns it like any other failure of the check (watchReviewCheck:
+// logged, counted towards ReviewCheckStuck, the look keeps its pace).
+var errReviewCheckLiveRead = errors.New("read the request live before writing its review check")
+
+// liveReviewCheckWritable reads rr live, from the API server and not the cache, once before every check run write of
+// syncReviewCheck (decision of 2026-11-20 on #925), and reports whether that request may still get it: the same
+// request (UID), reviewCheckWritable, and the pull request and head rr records. A reconcile that works from an older
+// cached copy may otherwise write a pending check over the failed one a stop wrote (model seed 35217): the stopped,
+// released or deleted request in the API server gets nothing. A failed read is returned, wrapped in
+// errReviewCheckLiveRead, and nothing is written.
+func (r *RemediationRequestReconciler) liveReviewCheckWritable(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (bool, error) {
+	live := &remediationv1alpha1.RemediationRequest{}
+	if err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+		return false, fmt.Errorf("%w: %w", errReviewCheckLiveRead, err)
+	}
+	pr, lpr := rr.Status.PullRequest, live.Status.PullRequest
+	return live.UID == rr.UID && r.reviewCheckWritable(live) && lpr.Number == pr.Number && lpr.HeadSHA == pr.HeadSHA,
+		nil
 }
 
 // recordReviewCheck records state for the recorded head in rr's status, through the kill switch, without a
@@ -464,7 +498,9 @@ func (r *RemediationRequestReconciler) reviewGateLook(ctx context.Context, git p
 // state (#748). It reads the App's own run there first. When the host already shows want, it only records the
 // state, so a status write lost after an earlier host write is made good without another one. Otherwise it writes
 // the host and then records the state: the order on a restart between the two does not matter, as the next look
-// compares again. A Refused check whose backoff has not run out is not written again (refusalBackoff); a final
+// compares again. Right before the host write the request is read live (liveReviewCheckWritable): a request that
+// is stopped, released or being deleted in the API server gets no check from a reconcile that read an older copy
+// (#925). A Refused check whose backoff has not run out is not written again (refusalBackoff); a final
 // refusal is recorded Refused (recordRefusal). A failed read or write changes nothing and is returned for a retry;
 // a pull request closed or merged meanwhile (a conflict) records nothing and returns errCheckRunConflict. The
 // provider passes the kill switch right before the host write, so nothing is written to the host while writes
@@ -485,6 +521,15 @@ func (r *RemediationRequestReconciler) syncReviewCheck(ctx context.Context, git 
 		if wait := refusalBackoff(rc, r.now()); wait > 0 {
 			return false, nil
 		}
+	}
+	// No check goes over a stop, a release or a deletion the cached copy does not show yet (#925).
+	if ok, err := r.liveReviewCheckWritable(ctx, rr); err != nil || !ok {
+		if err == nil {
+			logf.FromContext(ctx).Info("RemediationRequest no longer waits for review in the API server; "+
+				"its review check is not written from an older copy", "remediationRequest",
+				client.ObjectKeyFromObject(rr), "head", pr.HeadSHA, "want", want)
+		}
+		return false, err
 	}
 	err = git.CreateCheckRun(ctx, pr.HeadSHA, checkRunFor(want))
 	_, _, final := refusal(err)

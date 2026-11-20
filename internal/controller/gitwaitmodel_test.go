@@ -109,6 +109,10 @@ import (
 //   - ending: a reconcile that starts with a RequestDeadline or HandoffGrace wait past its end calls the Git host
 //     nothing before its first status write: the end decides from recorded state alone (fifth decision of 2026-11-18
 //     on #771, point 5 as the sixth kept it);
+//   - stop check kept: once a reconcile leaves a stopped request whose own pull request is open with the last review
+//     check of its head failed, that check stays the last one on the head while the request stays stopped and the
+//     pull request open, also when a reconcile works from an older copy of the request (decision of 2026-11-20 on
+//     #925);
 //   - schema: no status write is one the API server refuses.
 //
 // At the end the world heals (reads work, no write fails; the repository comes back in half of the runs; a pause is
@@ -120,7 +124,7 @@ import (
 // failed (settled check) or, where the settings permit no write (another target branch named), says so with condition
 // ReviewCheckNotFailed (settled note, #925); a request whose own pull request is not open (closed, merged or gone,
 // on any base) carries no such condition (note cleared). After every reconcile, no request whose failed check is
-// recorded as Stale carries it (note cleared), nor one whose lock is released or whose merge is recorded (note
+// recorded as Stale, and still shown failed last on its head, carries it (note cleared), nor one whose lock is released or whose merge is recorded (note
 // ended).
 //
 // Each seed has a focus (seed modulo the number of focuses, modelFocuses): none, or one that makes an order of the
@@ -343,6 +347,9 @@ type modelWorld struct {
 	// checkFails: the Git host fails every write of a check run (CreateCheckRun) with a 5xx (checkEvent): a write
 	// made to fail (writeFaulted), no failed read.
 	checkFails bool
+	// stopFailedHead is the head whose last review check a reconcile left failed while the request stopped with its
+	// own pull request open on that head (property "stop check kept"); empty otherwise.
+	stopFailedHead string
 	// history is every copy of the request the API server held after a reconcile, for the stale cache.
 	history    []*api.RemediationRequest
 	violations []string
@@ -1820,6 +1827,7 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 		m.lockProperties(live)
 		m.recordedProperty(live, faulted)
 		m.noteProperty(live)
+		m.stopCheckProperty(live)
 		return
 	}
 	for _, w := range live.Status.GitWaits {
@@ -1862,12 +1870,57 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	m.lockProperties(live)
 	m.recordedProperty(live, faulted)
 	m.noteProperty(live)
+	m.stopCheckProperty(live)
+}
+
+// stopCheckProperty: after a stop, the last review check written for the head is the failed one, or the pull request
+// is no longer open (stop check kept, decision of 2026-11-20 on #925). Once a reconcile leaves a stopped request whose
+// own pull request is open with the last review check of its head failed, no later reconcile leaves another state
+// last on that head while the request stays stopped and that pull request open with that head: a reconcile working
+// from an older copy of the request (the stale cache) must not write a pending or passing check over the failed one.
+// Paused or not, with any fault: nothing the model injects writes a check run.
+func (m *modelWorld) stopCheckProperty(live *api.RemediationRequest) {
+	pr := live.Status.PullRequest
+	cr, found := m.pr()
+	if pr == nil || progresses(live) || !found || m.deleted || cr.State != providers.ChangeRequestOpen ||
+		cr.Number != pr.Number || cr.HeadSHA != pr.HeadSHA {
+		m.stopFailedHead = ""
+		return
+	}
+	last := lastReviewCheck(m.g.CheckRuns(cr.HeadSHA))
+	switch {
+	case last != nil && last.Status == providers.CheckRunFailure:
+		m.stopFailedHead = cr.HeadSHA
+	case m.stopFailedHead == cr.HeadSHA:
+		m.fatalf("stop check kept: the request stopped (phase %s) with its pull request open on %.12s and the failed "+
+			"review check written, and a later check run on the head is not failed: %+v", live.Status.Phase,
+			cr.BaseBranch, m.g.CheckRuns(cr.HeadSHA))
+		m.stopFailedHead = ""
+	}
+}
+
+// failedLast reports whether the last review check run on the head live records is failed.
+func (m *modelWorld) failedLast(live *api.RemediationRequest) bool {
+	last := lastReviewCheck(m.g.CheckRuns(live.Status.PullRequest.HeadSHA))
+	return last != nil && last.Status == providers.CheckRunFailure
+}
+
+// lastReviewCheck is the last check run named providers.CheckRunName in runs, oldest first, or nil.
+func lastReviewCheck(runs []providers.CheckRun) *providers.CheckRun {
+	var last *providers.CheckRun
+	for i := range runs {
+		if runs[i].Name == providers.CheckRunName {
+			last = &runs[i]
+		}
+	}
+	return last
 }
 
 // noteProperty: condition ReviewCheckNotFailed says the failed review check is tried again at the next look of a
 // stopped holder, so no request carries it after its lock is released or once its merge is recorded (note ended,
 // #925): the write that ends the looks removes it; nor once its failed check is recorded as Stale (note cleared):
-// the write that records it removes it.
+// the write that records it removes it, unless the Git host no longer shows that failed check last on the head: a
+// later look writes it again and says so while that write fails (decision of 2026-11-20 on #925).
 func (m *modelWorld) noteProperty(live *api.RemediationRequest) {
 	c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
 	switch {
@@ -1878,7 +1931,7 @@ func (m *modelWorld) noteProperty(live *api.RemediationRequest) {
 	case mergeRecorded(live):
 		m.fatalf("note ended: the merge is recorded (phase %s) and condition ReviewCheckNotFailed is still set: %s",
 			live.Status.Phase, conditionsOf(live))
-	case staleRecorded(live):
+	case staleRecorded(live) && m.failedLast(live):
 		m.fatalf("note cleared: the failed review check is recorded, and condition ReviewCheckNotFailed is still "+
 			"set: %s", conditionsOf(live))
 	}
@@ -2260,12 +2313,7 @@ func (m *modelWorld) uncheckedStop(live *api.RemediationRequest, cr providers.Ch
 		handedOff(live) || intent(live) != nil {
 		return false
 	}
-	var last *providers.CheckRun
-	for _, run := range m.g.CheckRuns(cr.HeadSHA) {
-		if run.Name == providers.CheckRunName {
-			last = &run
-		}
-	}
+	last := lastReviewCheck(m.g.CheckRuns(cr.HeadSHA))
 	return last == nil || last.Status != providers.CheckRunFailure
 }
 
@@ -2302,12 +2350,7 @@ func (m *modelWorld) unsaidStop(live *api.RemediationRequest, cr providers.Chang
 		cr.HeadSHA != pr.HeadSHA || handedOff(live) || intent(live) != nil {
 		return false
 	}
-	var last *providers.CheckRun
-	for _, run := range m.g.CheckRuns(cr.HeadSHA) {
-		if run.Name == providers.CheckRunName {
-			last = &run
-		}
-	}
+	last := lastReviewCheck(m.g.CheckRuns(cr.HeadSHA))
 	if last != nil && last.Status == providers.CheckRunFailure {
 		return false
 	}

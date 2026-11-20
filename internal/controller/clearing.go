@@ -55,7 +55,7 @@ import (
 //     the window lives in status.verification. A reset whose status write failed is kept in memory
 //     (unwrittenResets) and applied again by the next check, so the retry, which reads the window from before
 //     it, cannot end the request across that bad check. A restart or a leader change loses that memory, so the
-//     first check of a new process resets every open window that opened before it began reconciling, with
+//     first check of a new process resets every open window that no check of its own opened (ownWindows), with
 //     ExecutorRestarted (restarted), and stores that reset like any other: the window then needs a full
 //     stableFor again, and status.verification shows why. Before RolledOut is True nothing opens or resets the
 //     window.
@@ -191,35 +191,120 @@ func (m sinceMarker) Start(ctx context.Context) error {
 // NeedLeaderElection makes the moment the start of leadership on a standby that becomes leader later.
 func (sinceMarker) NeedLeaderElection() bool { return true }
 
-// restarted records, in the executor's window w read from status, the restart of the executor (ADR-0030 section
-// 4, amendment of 2026-11-20, #895): an open window that opened before this process began reconciling is reset
-// with ExecutorRestarted. A reset an earlier process recorded but could not store is lost with its memory
-// (unwrittenResets) and may lie in that window, and no check ran while no process reconciled, so no window
-// carries time over from before this process. The reset is stored like any other, so status.verification shows
-// it and the stored window is the one that decides: after it no open window starts before this process, and the
-// next good check opens it again. Its time is the second before the start of reconciling, so a good check in
-// the same second still opens the window. Both times are on the executor's clock and compared at the precision
-// the API keeps; a window opened in the second this process began is kept, as it can count less than a second
-// from before it. A closed window stays as it is: it counts nothing until a good check of this process.
-func (r *RemediationRequestReconciler) restarted(w *verification.Window) {
-	since := r.since.mark(r.now()).Truncate(time.Second)
-	if w.Open() && w.Start.Time.Before(since) {
-		w.Reset(remediationv1alpha1.ResetExecutorRestarted, since.Add(-time.Second))
+// ownWindows keeps, per request in Verifying, what this process knows of the executor's window from its own
+// checks: the start of the last open window a check of its own left (start), and what it read of the report at the check
+// that recorded its restart (restart). Memory only, so a new process has neither: dropped when the request ends,
+// is being deleted or is gone, like reportCounters. A request is reconciled by one worker at a time.
+type ownWindows struct {
+	m sync.Map
+}
+
+// ownWindow is one entry of ownWindows, for the request with uid.
+type ownWindow struct {
+	uid     types.UID
+	start   *metav1.Time
+	restart *verification.Restart
+}
+
+// load returns the entry of rr. An entry of an earlier request with the same name (another UID) is dropped.
+func (o *ownWindows) load(rr *remediationv1alpha1.RemediationRequest) ownWindow {
+	key := client.ObjectKeyFromObject(rr)
+	if v, ok := o.m.Load(key); ok {
+		if e := v.(ownWindow); e.uid == rr.UID {
+			return e
+		}
+		o.m.Delete(key)
 	}
+	return ownWindow{uid: rr.UID}
+}
+
+// owns reports whether the open window w is the last one a check of this process left open. Only the start this process
+// stored in memory is compared with w's, a value it wrote itself: no time of another process is compared.
+func (o *ownWindows) owns(rr *remediationv1alpha1.RemediationRequest, w verification.Window) bool {
+	e := o.load(rr)
+	return w.Open() && e.start != nil && e.start.Equal(w.Start)
+}
+
+// note remembers the start of w when the check left it open, whether its write is stored or lost: a lost one
+// leaves another window in status, which is then not this process's. A check that closed w keeps the start: when
+// its write is lost, status still holds the window this process opened, which the next check must not take for
+// an earlier process's (the reset kept in unwrittenResets closes it again).
+func (o *ownWindows) note(rr *remediationv1alpha1.RemediationRequest, w verification.Window) {
+	if !w.Open() {
+		return
+	}
+	e := o.load(rr)
+	e.start = w.Start.DeepCopy()
+	o.m.Store(client.ObjectKeyFromObject(rr), e)
+}
+
+// noteRestart remembers what the check that recorded the restart read of the report: its UID and reset count, a
+// zero UID for a missing report. Only the first is kept: a later check that records the restart again (its first
+// write was lost) read the report later, and a reset in between must still count as after the restart.
+func (o *ownWindows) noteRestart(rr *remediationv1alpha1.RemediationRequest, report *remediationv1alpha1.VerificationReport) {
+	e := o.load(rr)
+	if e.restart != nil {
+		return
+	}
+	e.restart = &verification.Restart{}
+	if report != nil {
+		e.restart.Report, e.restart.Resets = report.UID, report.Status.Resets
+	}
+	o.m.Store(client.ObjectKeyFromObject(rr), e)
+}
+
+// restart returns what this process read of the report when it recorded its restart, nil when it recorded none.
+func (o *ownWindows) restart(rr *remediationv1alpha1.RemediationRequest) *verification.Restart {
+	return o.load(rr).restart
+}
+
+// forget drops the entry of the request with key.
+func (o *ownWindows) forget(key types.NamespacedName) {
+	o.m.Delete(key)
+}
+
+// restarted records, in the executor's window w read from status, the restart of the executor (ADR-0030 section
+// 4, amendments of 2026-11-20, #895): an open window that no check of this process left open (ownWindows) is
+// reset with ExecutorRestarted, and restarted reports whether it did. A reset an earlier process recorded but
+// could not store is lost with its memory (unwrittenResets) and may lie in that window, and no check ran while no
+// process reconciled, so no window carries time over from before this process. The reset is stored like any
+// other, so status.verification shows it and the stored window is the one that decides; the next good check
+// opens it again. A closed window stays as it is: it counts nothing until a good check of this process.
+//
+// Which window is this process's is decided by its own memory, never by comparing the stored windowStart, written
+// on the clock of the process that opened it, with the start of reconciling on this one: a new leader whose clock
+// is behind the old one's would keep a window the old leader opened. The reset's time is the second before the
+// start of reconciling on this process's clock, so a good check in the same second still opens the window; it is
+// never earlier than the stored windowStart (clearing.Window.Reset), so an old leader's clock ahead of this one
+// keeps the window closed until this clock passes that start, which can only delay an end.
+func (r *RemediationRequestReconciler) restarted(rr *remediationv1alpha1.RemediationRequest, w *verification.Window) bool {
+	if !w.Open() || r.ownWindows.owns(rr, *w) {
+		return false
+	}
+	since := r.since.mark(r.now()).Truncate(time.Second)
+	w.Reset(remediationv1alpha1.ResetExecutorRestarted, since.Add(-time.Second))
+	return true
 }
 
 // checkWindow returns the executor's window a check starts from: the stored one, with the restart of the
-// executor recorded (restarted) and a reset of an earlier check of this process whose write was lost applied
-// again. resetWindow keeps the times from moving back, so a reset already stored changes nothing, and one older
-// than a later windowStart closes that window too, which can only delay an end. The restart comes first: a kept
-// reset is of this process, so it is never older than the restart.
-func (r *RemediationRequestReconciler) checkWindow(rr *remediationv1alpha1.RemediationRequest) verification.Window {
+// executor recorded (restarted, whose result it returns) and a reset of an earlier check of this process whose
+// write was lost applied again. resetWindow keeps the times from moving back, so a reset already stored changes
+// nothing, and one older than a later windowStart closes that window too, which can only delay an end. The
+// restart comes first: a kept reset is of this process, so it is never older than the restart.
+func (r *RemediationRequestReconciler) checkWindow(rr *remediationv1alpha1.RemediationRequest) (verification.Window, bool) {
 	w := executorWindow(rr)
-	r.restarted(&w)
+	restart := r.restarted(rr, &w)
 	if lost, ok := r.unwrittenResets.get(rr); ok {
 		resetWindow(&w, lost.Reason, lost.Time.Time)
 	}
-	return w
+	return w, restart
+}
+
+// noteWindow keeps in memory what a check left of the executor's window w: a reset its write may lose
+// (unwrittenResets) and the open window that is this process's (ownWindows).
+func (r *RemediationRequestReconciler) noteWindow(rr *remediationv1alpha1.RemediationRequest, w verification.Window) {
+	r.unwrittenResets.note(rr, w)
+	r.ownWindows.note(rr, w)
 }
 
 // executorWindow returns the executor's own window from the request's status.
@@ -327,7 +412,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 	ref := rr.Spec.TargetRef
 	stableFor := verification.StableFor(rr.Spec.Verification.StableFor, rr.Spec.Action.Type)
 	need := stableFor + r.nodeGrace()
-	w := r.checkWindow(rr)
+	w, restart := r.checkWindow(rr)
 	interval := verification.PollInterval
 	if rolloutTarget(ref) == nil {
 		return r.clearScaledStep(ctx, rr, target, now, deadline, stableFor, changed, stuck)
@@ -369,6 +454,11 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 			"remediationRequest", key, "error", err.Error())
 		readFailed = true
 	}
+	if restart && !readFailed {
+		// The report as this check read it is the line between resets before the restart and after it, counted by
+		// the report's own reset counter (clearing.AtTimeout).
+		r.ownWindows.noteRestart(rr, report)
+	}
 	exp := expectedReport(rr, target)
 	if verification.OOMFails(report, exp) {
 		k := report.Status.OOMKill
@@ -403,7 +493,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 		}
 	}
 	changed = storeWindow(rr, w) || changed
-	r.unwrittenResets.note(rr, w)
+	r.noteWindow(rr, w)
 	if good && verification.Succeeds(verification.Success{Report: sampled, Contract: contract, Freshness: fresh,
 		Executor: w, Now: now, StableFor: stableFor, NodeGrace: r.nodeGrace()}) {
 		if namesBacklogCheck(rr) {
@@ -417,7 +507,7 @@ func (r *RemediationRequestReconciler) clearStep(ctx, stepCtx context.Context,
 	}
 	if !now.Before(deadline) {
 		verdict, reason := verification.AtTimeout(verification.Timeout{RolledOut: stuckRecorded(rr) == nil,
-			Report: report, Expected: exp, Executor: w})
+			Report: report, Expected: exp, Executor: w, Restart: r.ownWindows.restart(rr)})
 		note := ""
 		if readFailed {
 			note = " (the verifier's report could not be read at the end; the executor log has the error)"
@@ -523,6 +613,7 @@ func (r *RemediationRequestReconciler) succeed(ctx context.Context, rr *remediat
 		return err
 	}
 	r.reportCounters.forget(client.ObjectKeyFromObject(rr))
+	r.ownWindows.forget(client.ObjectKeyFromObject(rr))
 	r.unwrittenResets.forget(client.ObjectKeyFromObject(rr))
 	r.mergeReadings.forget(client.ObjectKeyFromObject(rr))
 	if r.Recorder != nil {
@@ -558,7 +649,7 @@ func (r *RemediationRequestReconciler) clearScaledStep(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, target client.Object, now, deadline time.Time,
 	stableFor time.Duration, changed bool, stuck *rollout.Result) (reconcile.Result, error) {
 	ref := rr.Spec.TargetRef
-	w := r.checkWindow(rr)
+	w, _ := r.checkWindow(rr)
 	interval := verification.PollInterval
 	state := kedaready.Ready
 	if isScaledObject(ref) {
@@ -571,7 +662,7 @@ func (r *RemediationRequestReconciler) clearScaledStep(ctx context.Context,
 		resetWindow(&w, remediationv1alpha1.ResetNotAvailable, now)
 	}
 	changed = storeWindow(rr, w) || changed
-	r.unwrittenResets.note(rr, w)
+	r.noteWindow(rr, w)
 	revert := remediationv1alpha1.IsRevert(rr)
 	if w.Span(now) >= stableFor {
 		reason, message := ReasonClearingNotChecked, fmt.Sprintf("The %s was rolled out and configured for %s; "+
@@ -626,7 +717,7 @@ func revertAppliedMessage(kind string, stableFor time.Duration) string {
 func (r *RemediationRequestReconciler) clearRevertStep(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, target client.Object, now, deadline time.Time,
 	stableFor time.Duration, changed bool, stuck *rollout.Result) (reconcile.Result, error) {
-	w := r.checkWindow(rr)
+	w, _ := r.checkWindow(rr)
 	good := false
 	desired, available := replicasOf(target)
 	switch {
@@ -641,7 +732,7 @@ func (r *RemediationRequestReconciler) clearRevertStep(ctx context.Context,
 		good = true
 	}
 	changed = storeWindow(rr, w) || changed
-	r.unwrittenResets.note(rr, w)
+	r.noteWindow(rr, w)
 	if good && w.Span(now) >= stableFor {
 		return reconcile.Result{}, r.endVerification(ctx, rr, remediationv1alpha1.PhaseInconclusive,
 			remediationv1alpha1.ReasonRevertApplied, revertAppliedMessage(rr.Spec.TargetRef.Kind, stableFor))

@@ -1502,6 +1502,37 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseSucceeded))
 	})
 
+	// Clock skew between two leaders (decided 2026-11-20 on #895): the old leader opened the window at start on its
+	// clock, and the new one's clock is 10 seconds behind, so the stored windowStart looks later than the moment
+	// the new process began reconciling. The window is still not this process's: its first check resets it with
+	// ExecutorRestarted, at that windowStart (a reset never moves before it), and opens it again only once its own
+	// clock has passed it, so no time from before the restart counts.
+	It("records an executor restart when the old leader's clock was ahead of the new one's", func() {
+		w := newWorldWith(nil, func(rr *remediationv1alpha1.RemediationRequest) {
+			rr.Spec.Verification.Timeout = &metav1.Duration{Duration: time.Hour}
+		})
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		_, n := drive(w, start, start.Add(time.Second), verification.PollInterval, 1, quiet(w, start))
+		opened := fetch(w).Status.Verification
+		Expect(opened.WindowStart.Time).To(BeTemporally("==", start))
+		w.r = w.reconciler()
+		behind := start.Add(-10 * time.Second)
+		putReport(w, n, behind, start, nil)
+		mustReconcileAt(w, behind)
+		v := fetch(w).Status.Verification
+		Expect(v.LastReset).NotTo(BeNil())
+		Expect(v.LastReset.Reason).To(Equal(remediationv1alpha1.ResetExecutorRestarted))
+		Expect(v.LastReset.Time.Time).To(BeTemporally("==", start), "a reset never moves before windowStart")
+		Expect(v.Resets).To(Equal(opened.Resets + 1))
+		next := behind.Add(verification.PollInterval)
+		putReport(w, n+1, next, start, nil)
+		mustReconcileAt(w, next)
+		v = fetch(w).Status.Verification
+		Expect(v.WindowStart.Time).To(BeTemporally("==", next), "opened again on the new process's clock")
+		Expect(v.Resets).To(Equal(opened.Resets+1), "the new process's own window is kept")
+	})
+
 	// The restart's reset is written like any other: a lost write is computed again from the stored window by the
 	// next check, with the same reset, so it is stored once and counted once.
 	It("stores the reset of an executor restart once when its first write is lost", func() {
@@ -1553,6 +1584,58 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, string(remediationv1alpha1.ResetExecutorRestarted))
 		Expect(rr.Status.Verification.WindowStart.Time).To(BeTemporally(">", opened))
 	})
+
+	// At the timeout the newest reset gives the reason (decided 2026-11-20 on #895): a reset the report counted
+	// before the check that recorded the restart is older than the restart, so the request ends with
+	// ExecutorRestarted; one the report counted after it ends it with the report's reason. The report's own
+	// reset counter, as the executor read it at that check, tells them apart.
+	for _, after := range []bool{false, true} {
+		name := "ends with ExecutorRestarted when the report's last reset came before the restart"
+		if after {
+			name = "ends with the report's reason when the report counted a reset after the restart"
+		}
+		It(name, func() {
+			w := newWorld(nil)
+			applied := verifying(w)
+			deadline := fetch(w).Status.Deadline.Time
+			start := deadline.Add(-need)
+			t, n := drive(w, applied.Add(verification.PollInterval), start, verification.PollInterval, 1, nil)
+			podReset := func(at time.Time, resets int64) func(*remediationv1alpha1.VerificationReport) {
+				return func(vr *remediationv1alpha1.VerificationReport) {
+					vr.Status.LastReset = &remediationv1alpha1.WindowReset{
+						Reason: remediationv1alpha1.ResetPodNotReady, Time: metav1.NewTime(at)}
+					vr.Status.Resets = resets
+				}
+			}
+			reportStart := t
+			early := podReset(applied.Add(verification.PollInterval), 1)
+			t, n = drive(w, t, deadline.Add(-need/2), verification.PollInterval, n,
+				func(at time.Time, n int64) { putReport(w, n, at, reportStart, early) })
+			w.r = w.reconciler()
+			restart := t
+			t, n = drive(w, t, deadline, verification.PollInterval, n,
+				func(at time.Time, n int64) {
+					edit := early
+					if after && at.After(restart) {
+						edit = podReset(at, 2)
+					}
+					putReport(w, n, at, reportStart, edit)
+				})
+			Expect(t).To(BeTemporally("==", deadline))
+			edit := early
+			if after {
+				edit = podReset(t, 2)
+			}
+			putReport(w, n, t, reportStart, edit)
+			mustReconcileAt(w, t)
+			reason := string(remediationv1alpha1.ResetExecutorRestarted)
+			if after {
+				reason = string(remediationv1alpha1.ResetPodNotReady)
+			}
+			rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, reason)
+			Expect(rr.Status.Verification.LastReset.Reason).To(Equal(remediationv1alpha1.ResetExecutorRestarted))
+		})
+	}
 
 	// The executor's own window only moves forward (validation rules on the object).
 	It("refuses a status.verification that moves back", func() {

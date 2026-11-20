@@ -337,6 +337,89 @@ func TestTimeoutVerdict(t *testing.T) {
 	}
 }
 
+// At the timeout the newest reset gives the reason: the executor's ExecutorRestarted wins over a report reset the
+// report counted before the check that recorded the restart, and loses to one it counted after (decided
+// 2026-11-20 on #895). Which is newer is decided by the report's own reset counter as the executor read it at
+// that check (Timeout.Restart), never by comparing a time of the report with one of the executor. Without that
+// read (an earlier process recorded the restart) the order of the table above applies, and recorded trouble
+// still fails the request.
+func TestTimeoutVerdictAfterRestart(t *testing.T) {
+	withReset := func(reason v1alpha1.ResetReason, reopen bool) *v1alpha1.VerificationReport {
+		r := report(samples(t, 2))
+		w := ReportWindow(&r.Status)
+		w.Reset(reason, r.Status.SampledAt.Time)
+		if reopen {
+			w.Good(r.Status.SampledAt.Add(PollInterval))
+		}
+		w.store(&r.Status)
+		return r
+	}
+	restarted := func(reopen bool) Window {
+		w := Window{Start: mt(e0.Add(-time.Hour))}
+		w.Reset(v1alpha1.ResetExecutorRestarted, e0)
+		if reopen {
+			w.Good(e0.Add(PollInterval))
+		}
+		return w
+	}
+	at := func(r *v1alpha1.VerificationReport) *Restart {
+		return &Restart{Report: r.UID, Resets: r.Status.Resets}
+	}
+	podNotReady := withReset(v1alpha1.ResetPodNotReady, false)
+	podNotReadyOpen := withReset(v1alpha1.ResetPodNotReady, true)
+	later := podNotReady.DeepCopy()
+	lw := ReportWindow(&later.Status)
+	lw.Reset(v1alpha1.ResetEvidenceMissing, later.Status.SampledAt.Add(PollInterval))
+	lw.store(&later.Status)
+	recreated := podNotReady.DeepCopy()
+	recreated.UID = "e0000000-0000-4000-8000-000000000002"
+	troubled := withReset(v1alpha1.ResetRestarted, false)
+	afterRestart := restarted(true)
+	afterRestart.Reset(v1alpha1.ResetNotAvailable, e0.Add(2*PollInterval))
+	restartedEnd := string(v1alpha1.ResetExecutorRestarted)
+	cases := []struct {
+		name    string
+		in      Timeout
+		verdict Verdict
+		reason  string
+	}{
+		{"the restart is newer than the report's closed window", Timeout{RolledOut: true, Report: podNotReady,
+			Executor: restarted(true), Restart: at(podNotReady)}, VerdictInconclusive, restartedEnd},
+		{"the restart is newer than the report's open window", Timeout{RolledOut: true, Report: podNotReadyOpen,
+			Executor: restarted(true), Restart: at(podNotReadyOpen)}, VerdictInconclusive, restartedEnd},
+		{"the restart is newer, executor window still closed", Timeout{RolledOut: true, Report: podNotReadyOpen,
+			Executor: restarted(false), Restart: at(podNotReadyOpen)}, VerdictInconclusive, restartedEnd},
+		{"the report counted a reset since the restart", Timeout{RolledOut: true, Report: later,
+			Executor: restarted(true), Restart: at(podNotReady)}, VerdictInconclusive,
+			string(v1alpha1.ResetEvidenceMissing)},
+		{"a report recreated since with a reset", Timeout{RolledOut: true, Report: recreated,
+			Executor: restarted(true), Restart: at(podNotReady)}, VerdictInconclusive,
+			string(v1alpha1.ResetPodNotReady)},
+		{"a report missing at the restart, with a reset since", Timeout{RolledOut: true, Report: podNotReady,
+			Executor: restarted(true), Restart: &Restart{}}, VerdictInconclusive, string(v1alpha1.ResetPodNotReady)},
+		{"no report at the timeout", Timeout{RolledOut: true, Executor: restarted(true), Restart: at(podNotReady)},
+			VerdictInconclusive, restartedEnd},
+		{"an earlier process recorded the restart", Timeout{RolledOut: true, Report: podNotReady,
+			Executor: restarted(true)}, VerdictInconclusive, string(v1alpha1.ResetPodNotReady)},
+		{"an executor reset after the restart", Timeout{RolledOut: true, Report: podNotReadyOpen,
+			Executor: afterRestart, Restart: at(podNotReadyOpen)}, VerdictInconclusive,
+			string(v1alpha1.ResetNotAvailable)},
+		{"recorded trouble still fails", Timeout{RolledOut: true, Report: troubled, Executor: restarted(true),
+			Restart: at(troubled)}, VerdictFailed, string(v1alpha1.ResetRestarted)},
+		{"a stuck rollout still fails", Timeout{RolledOut: false, Executor: restarted(true), Restart: &Restart{}},
+			VerdictFailed, ReasonRolloutStuck},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.in.Expected = expected()
+			v, reason := AtTimeout(c.in)
+			if v != c.verdict || reason != c.reason {
+				t.Fatalf("AtTimeout = %s %s, want %s %s", v, reason, c.verdict, c.reason)
+			}
+		})
+	}
+}
+
 // A crash loop ends Failed at the timeout: one restart followed by samples where the pod is only not Ready
 // leaves a no-evidence reset last, but the trouble stays recorded for the window.
 func TestCrashLoopFailsAtTimeout(t *testing.T) {

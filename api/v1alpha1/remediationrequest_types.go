@@ -765,7 +765,8 @@ type VerificationReset struct {
 	// stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision
 	// or container), PartialRollout (the report does not cover every desired replica, or a revert is checked
 	// before RolledOut is True) or ExecutorRestarted (a new executor process, after a restart or a leader change,
-	// found the window open since before it began reconciling; its time is the second before that moment).
+	// found the window open and opened by no check of its own; its time is the second before it began
+	// reconciling, or windowStart when that is later).
 	// Every one is a reset of the no-evidence class.
 	// +kubebuilder:validation:Enum=NotAvailable;StaleReport;ReportMismatch;PartialRollout;ExecutorRestarted
 	// +required
@@ -780,9 +781,9 @@ type VerificationReset struct {
 // VerificationWindow is the executor's own stable window of a Verifying request (ADR-0030 section 4), kept next
 // to the verifier's window in the VerificationReport. Every time in it is on the executor's clock, and it is
 // never compared with a time of the report. No window counts time from before the executor process began
-// reconciling: after a restart or a leader change the first check resets every open window that opened earlier,
-// with ExecutorRestarted, so it needs a full stableFor again and the window stored is the one that decides. A
-// lastReset is counted: resets is at least 1 when it is set.
+// reconciling: after a restart or a leader change the first check resets every open window no check of the new
+// process opened, with ExecutorRestarted, so it needs a full stableFor again and the window stored is the one
+// that decides. A lastReset is counted: resets is at least 1 when it is set.
 // +kubebuilder:validation:XValidation:rule="!has(self.lastReset) || (has(self.resets) && self.resets >= 1)",message="lastReset requires resets of at least 1"
 type VerificationWindow struct {
 	// windowStart is when the current window opened: the first good check after the last reset. It only moves

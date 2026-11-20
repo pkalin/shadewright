@@ -59,8 +59,8 @@ const (
 	// ResetReportMismatch: the report's spec names another request, merge commit, target or template revision
 	// (executor). No evidence.
 	ResetReportMismatch ResetReason = "ReportMismatch"
-	// ResetExecutorRestarted: a new executor process (a restart or a leader change) found the window open since
-	// before it began reconciling, a span no check of its own covers (executor, #895). No evidence.
+	// ResetExecutorRestarted: a new executor process (a restart or a leader change) found the window open and
+	// opened by no check of its own, a span no check of its own covers (executor, #895). No evidence.
 	ResetExecutorRestarted ResetReason = "ExecutorRestarted"
 )
 

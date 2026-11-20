@@ -1828,7 +1828,8 @@ spec:
                           stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision
                           or container), PartialRollout (the report does not cover every desired replica, or a revert is checked
                           before RolledOut is True) or ExecutorRestarted (a new executor process, after a restart or a leader change,
-                          found the window open since before it began reconciling; its time is the second before that moment).
+                          found the window open and opened by no check of its own; its time is the second before it began
+                          reconciling, or windowStart when that is later).
                           Every one is a reset of the no-evidence class.
                         enum:
                         - NotAvailable

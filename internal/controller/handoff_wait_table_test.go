@@ -749,14 +749,9 @@ func waitOutcome(cluster bool, kind failureKind) (wait, keep bool) {
 
 // Every call of the watch after the abort, crossed with every kind of failure: the request never ends, and the
 // outcome is the one the rule gives (waitOutcome).
-//
-// Each path and each row builds its own world (fake client, fake Git host, reconciler and call log), so they run in
-// parallel: a row of a step deadline spends its waitStepTimeout waiting, and run one after the other the table took
-// over half a minute of the package's time limit (#961).
 func TestRecoveryWaitSortsEachFailureByItsSource(t *testing.T) {
 	for _, path := range recoveryPaths {
 		t.Run(path.name, func(t *testing.T) {
-			t.Parallel()
 			// The look that works makes exactly the listed calls, and ends as the path says.
 			l := &callLog{}
 			r, base, rr := waitingWorld(t, path, l)
@@ -782,7 +777,6 @@ func TestRecoveryWaitSortsEachFailureByItsSource(t *testing.T) {
 			for _, call := range rows {
 				for _, kind := range failureKinds {
 					t.Run(call+"/"+string(kind), func(t *testing.T) {
-						t.Parallel()
 						recoveryWaitRow(t, path, call, kind)
 					})
 				}

@@ -821,6 +821,11 @@ func TestStopOnMovedBaseFailsTheCheckAndMovedBackKeepsLock(t *testing.T) {
 		t.Fatalf("phase %s, conditions %s: want NeedsIntervention with ChangeRequestOnOtherBase", live.Status.Phase,
 			conditionsOf(live))
 	}
+	// The stop's message says what it wrote to the pull request there: a failed review check, nothing else.
+	if !hasReason(live, ReasonChangeRequestOnOtherBase, "nothing more to it there but a failed review check") {
+		t.Fatalf("conditions %+v: want the stop's message to name the failed review check it wrote",
+			live.Status.Conditions)
+	}
 	if !failedOnly(g.CheckRuns(head)) {
 		t.Fatalf("check runs of the head %+v: want the review check failed in the step that stopped the request",
 			g.CheckRuns(head))
@@ -1172,8 +1177,9 @@ func TestStopOnMovedBaseSaysTheCheckWasNotFailed(t *testing.T) {
 // When the repository is no longer in the settings nothing can be closed, and the deletion says so with a Warning
 // Event PullRequestLeftOpen. On main both pull requests stayed open and no Event was recorded.
 func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
-	for _, gone := range []bool{false, true} {
-		t.Run(fmt.Sprintf("repository gone %v", gone), func(t *testing.T) {
+	for _, mode := range []string{"settings reach it", "repository gone", "settings gone"} {
+		t.Run(mode, func(t *testing.T) {
+			gone := mode != "settings reach it"
 			// settlementWorld leaves the settings naming freshOtherBranch, not the recorded main.
 			r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
 			ctx := context.Background()
@@ -1195,8 +1201,13 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if gone {
+			switch mode {
+			case "repository gone":
 				dropRepository(t, r)
+			case "settings gone":
+				if err := r.Delete(ctx, &api.RemediationSettings{ObjectMeta: metav1.ObjectMeta{Name: api.SettingsName}}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
 				return []string{obj.(*api.RemediationRequest).Status.BreakerClearedBy}
@@ -1231,6 +1242,12 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 				if len(events) != 1 || !strings.Contains(events[0], EventPullRequestLeftOpen) ||
 					!strings.Contains(events[0], fmt.Sprintf("#%d", n)) {
 					t.Fatalf("events %q: want one Warning Event %s naming #%d", events, EventPullRequestLeftOpen, n)
+				}
+				// The Event says what is missing: the entry of the repository, or the settings object itself.
+				says := map[string]string{"repository gone": "no usable entry for the repository",
+					"settings gone": "RemediationSettings " + api.SettingsName + " does not exist"}[mode]
+				if !strings.Contains(events[0], says) {
+					t.Fatalf("event %q: want it saying %q", events[0], says)
 				}
 				return
 			}

@@ -27,7 +27,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
+	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 )
 
 // noteWorld is a stopped holder (NeedsIntervention) with reviewer hints on whose failed review check the Git host does
@@ -35,6 +37,14 @@ import (
 // an error for an operation, fails it as well. act closes the pull request, or merges it.
 func noteWorld(t *testing.T, verify bool, writes func(op string) error) (*RemediationRequestReconciler,
 	func() *api.RemediationRequest, func(merge bool) error) {
+	t.Helper()
+	r, _, get, act := noteWorldGit(t, verify, writes)
+	return r, get, act
+}
+
+// noteWorldGit is noteWorld that also returns the Git host.
+func noteWorldGit(t *testing.T, verify bool, writes func(op string) error) (*RemediationRequestReconciler,
+	*fakegit.Git, func() *api.RemediationRequest, func(merge bool) error) {
 	t.Helper()
 	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
 	ctx := context.Background()
@@ -73,7 +83,7 @@ func noteWorld(t *testing.T, verify bool, writes func(op string) error) (*Remedi
 		_, err := g.MergeWithCommit(rr.Status.PullRequest.Number)
 		return err
 	}
-	return r, get, act
+	return r, g, get, act
 }
 
 // #925, second fix round: condition ReviewCheckNotFailed says the failed check is tried again at the next look, so it
@@ -139,5 +149,94 @@ func TestCheckNoteEndsWithTheDeletion(t *testing.T) {
 	live = get()
 	if cond := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed); cond != nil {
 		t.Fatalf("ReviewCheckNotFailed %+v while the deletion closes the pull request: want it absent", cond)
+	}
+}
+
+// #925, third fix round: the recorded pull request closed while another open pull request from the request's branch
+// keeps the lock (it has the branch head, so the same head as the failed check): condition ReviewCheckNotFailed stays,
+// and the look keeps trying the failed check on that head, which removes the condition once the Git host takes it. The
+// release of the lock alone ends it then. On the build before this round the look removed the condition while the
+// lock was kept, and nothing failed the check the other pull request can merge on.
+func TestCheckNoteStaysWhileAnotherPullRequestKeepsTheLock(t *testing.T) {
+	for _, hostTakes := range []bool{false, true} {
+		name := "the write keeps failing"
+		if hostTakes {
+			name = "the write goes through"
+		}
+		t.Run(name, func(t *testing.T) {
+			r, g, get, act := noteWorldGit(t, false, nil)
+			ctx := context.Background()
+			rr := get()
+			other, err := g.AddOpenChangeRequest(freshness.BranchName(rr), mainBranch, "a person's")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := act(false); err != nil {
+				t.Fatal(err)
+			}
+			if hostTakes {
+				g.SetFail(func(string) error { return nil })
+			}
+			for range 2 {
+				if _, err := r.checkHeld(ctx, get()); err != nil {
+					t.Fatalf("checkHeld: %v", err)
+				}
+			}
+			live := get()
+			if !holdsLock(live) {
+				t.Fatalf("the lock was released while pull request #%d is open on the branch", other)
+			}
+			cond := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
+			runs := g.CheckRuns(rr.Status.PullRequest.HeadSHA)
+			failed := len(runs) > 0 && runs[len(runs)-1].Status == providers.CheckRunFailure
+			if hostTakes {
+				if cond != nil || !failed {
+					t.Fatalf("ReviewCheckNotFailed %+v, check runs %+v: want the failed check written and the "+
+						"condition removed", cond, runs)
+				}
+				return
+			}
+			if cond == nil || failed {
+				t.Fatalf("ReviewCheckNotFailed %+v, check runs %+v: want the condition kept while pull request #%d "+
+					"keeps the lock", cond, runs, other)
+			}
+		})
+	}
+}
+
+// #925, third fix round (finding 9): a stopped holder whose look names another pull request than the recorded one
+// writes no failed check in that look. The only such look is one with none recorded (the write that recorded it was
+// lost) that finds its own pull request open on another base by its marker: the look records it, and the next look,
+// which reads it by its number, fails the check. With a number recorded the read by number names that number.
+func TestStoppedHolderWithoutRecordFailsTheCheckAtTheNextLook(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	ctx := context.Background()
+	r.ReviewerHints = true
+	setTargetMain(t, r)
+	n, head := rr.Status.PullRequest.Number, rr.Status.PullRequest.HeadSHA
+	moveTo(t, g, n, movedBranch)
+	rr.Status.PullRequest = nil
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKeyFromObject(rr)
+	live := &api.RemediationRequest{}
+	for range 2 {
+		if err := r.Get(ctx, key, live); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.checkHeld(ctx, live); err != nil {
+			t.Fatalf("checkHeld: %v", err)
+		}
+	}
+	if err := r.Get(ctx, key, live); err != nil {
+		t.Fatal(err)
+	}
+	if pr := live.Status.PullRequest; pr == nil || pr.Number != n || !holdsLock(live) {
+		t.Fatalf("status.pullRequest %+v, holds %t: want #%d recorded with the lock kept", pr, holdsLock(live), n)
+	}
+	if !failedOnly(g.CheckRuns(head)) {
+		t.Fatalf("check runs of the head %+v: want the failed check after the look that recorded the pull request",
+			g.CheckRuns(head))
 	}
 }

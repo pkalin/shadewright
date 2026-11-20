@@ -225,6 +225,9 @@ func (r *RemediationRequestReconciler) watchReviewCheck(ctx context.Context, rr 
 	case written:
 		r.reviewCheckConflicts.Delete(key)
 	}
+	if err := r.noteLiveRead(ctx, rr, err); err != nil {
+		return err
+	}
 	if err == nil || errors.Is(err, freshness.ErrPaused) || pr == nil {
 		if err == nil {
 			r.reviewCheckFailures.Delete(key)
@@ -331,7 +334,7 @@ func (r *RemediationRequestReconciler) reviewCheckLook(ctx context.Context,
 // AwaitingApproval, holds its lock and is not being deleted, and no check recorded Stale: a plan found stale, a
 // cancel or a stop failed the check (failCheck, failStoppedCheck), and this request never writes it again, on any
 // head. reviewCheckLook asks it of the request the reconcile read, and syncReviewCheck asks it again of the live
-// request before every check run write (liveReviewCheckWritable).
+// request before every check run write of syncReviewCheck (liveReviewCheckWritable).
 func (r *RemediationRequestReconciler) reviewCheckWritable(rr *remediationv1alpha1.RemediationRequest) bool {
 	pr := rr.Status.PullRequest
 	if !r.ReviewerHints || pr == nil || intent(rr) != nil || !progresses(rr) || !rr.DeletionTimestamp.IsZero() ||
@@ -345,8 +348,52 @@ func (r *RemediationRequestReconciler) reviewCheckWritable(rr *remediationv1alph
 
 // errReviewCheckLiveRead is the failure to read the request live before a review check write (syncReviewCheck): no
 // check is written in that reconcile, and the look returns it like any other failure of the check (watchReviewCheck:
-// logged, counted towards ReviewCheckStuck, the look keeps its pace).
+// logged, counted towards ReviewCheckStuck, the look keeps its pace), and shows it in condition Approved while it
+// lasts (noteLiveRead).
 var errReviewCheckLiveRead = errors.New("read the request live before writing its review check")
+
+// ReasonReviewCheckLiveReadFailed is the reason of condition Approved (False) while the read of the request from the
+// API server that comes before every write of the review check (liveReviewCheckWritable) fails, so the check is not
+// brought in line with the reviews (noteLiveRead).
+const ReasonReviewCheckLiveReadFailed = "ReviewCheckLiveReadFailed"
+
+// noteLiveRead shows in status what a look of watchReviewCheck found about the live read before a check write
+// (errReviewCheckLiveRead in err): while it fails, condition Approved False with reason
+// ReasonReviewCheckLiveReadFailed, set once and not written again at each look; a look that wrote or needed no write
+// (err nil) sets it back to WaitingForReview. It is a status write of rr as read, so a copy older than the API server
+// meets a conflict and changes nothing, and the next look tries again; such a failed write is logged, never returned,
+// and neither is the failed live read, so the look keeps its pace. The one Warning Event stays ReviewCheckStuck,
+// after reviewCheckStuckLooks failed looks. A cancelled reconcile is returned. The write does not wake the request
+// (onlyOwnMarksChanged).
+func (r *RemediationRequestReconciler) noteLiveRead(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error) error {
+	failed := errors.Is(err, errReviewCheckLiveRead)
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
+	noted := c != nil && c.Reason == ReasonReviewCheckLiveReadFailed
+	if failed == noted || !failed && err != nil {
+		return nil
+	}
+	upd := rr.DeepCopy()
+	if failed {
+		setApprovedFalse(upd, ReasonReviewCheckLiveReadFailed, "The request could not be read from the API server "+
+			"before the review check shadewright/review was written, so the check was not brought in line with the "+
+			"reviews and keeps what the Git host shows, which may be a pass that no longer rests on an approval. The "+
+			"next look tries again")
+	} else {
+		setWaitingForReview(upd)
+	}
+	if werr := r.Status().Update(ctx, upd); werr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		logf.FromContext(ctx).Info("Could not record the live read before the review check of RemediationRequest; "+
+			"the next look tries again", "remediationRequest", client.ObjectKeyFromObject(rr), "failed", failed,
+			"error", werr.Error())
+		return nil
+	}
+	upd.DeepCopyInto(rr)
+	return nil
+}
 
 // liveReviewCheckWritable reads rr live, from the API server and not the cache, once before every check run write of
 // syncReviewCheck (decision of 2026-11-20 on #925), and reports whether that request may still get it: the same
@@ -716,13 +763,14 @@ func reviewCheckWarning(state remediationv1alpha1.ReviewCheckState) (reason, mes
 	return "", ""
 }
 
-// staleReviewCheckWarning reports whether condition Approved of rr carries ReasonReviewCheckRefused or
-// ReasonReviewListTooLong. Called when a state that needs neither (InProgress, Passed) is recorded: the reason was
-// set on an earlier head (Failed changes only to Stale on its head), or by a refusal on this head that the Git host's answer
+// staleReviewCheckWarning reports whether condition Approved of rr carries ReasonReviewCheckRefused,
+// ReasonReviewListTooLong or ReasonReviewCheckLiveReadFailed (noteLiveRead). Called when a state that needs none of
+// them (InProgress, Passed) is recorded: the reason was set on an earlier head (Failed changes only to Stale on its head), or by a refusal on this head that the Git host's answer
 // now ends (#748). Either way it no longer says why this head is blocked.
 func staleReviewCheckWarning(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
-	return c != nil && (c.Reason == ReasonReviewCheckRefused || c.Reason == ReasonReviewListTooLong)
+	return c != nil && (c.Reason == ReasonReviewCheckRefused || c.Reason == ReasonReviewListTooLong ||
+		c.Reason == ReasonReviewCheckLiveReadFailed)
 }
 
 // steeredReviews is what steeredCommented holds per request: the reviews of hint authors whose comment was

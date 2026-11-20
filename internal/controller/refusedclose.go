@@ -563,18 +563,23 @@ func (r *RemediationRequestReconciler) leftOpen(ctx context.Context, rr *remedia
 		"reason", s.reason)
 }
 
-// leftUnreachable reports a deleted request that the finalizer lets go because the settings hold no usable entry for
-// the repository of its plan (errRepositoryGone, freshness.ErrRepositoryUnusable), so its pull requests could not be
-// read or closed (#925): a Warning Event PullRequestLeftOpen and a log line saying that the state of the recorded pull
-// request, or of any pull request of its branch, is not known and that it may be open.
-func (r *RemediationRequestReconciler) leftUnreachable(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) {
+// leftUnreachable reports a deleted request that the finalizer lets go because err says the settings reach no
+// repository of its plan: the RemediationSettings object does not exist (errNoSettings), or it holds no usable entry
+// for that repository (errRepositoryGone, freshness.ErrRepositoryUnusable), so its pull requests could not be read
+// or closed (#925): a Warning Event PullRequestLeftOpen and a log line saying which, and that the state of the
+// recorded pull request, or of any pull request of its branch, is not known and that it may be open.
+func (r *RemediationRequestReconciler) leftUnreachable(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	err error) {
 	which := "any pull request of branch " + freshness.BranchName(rr)
 	if pr := rr.Status.PullRequest; pr != nil {
 		which = "pull request " + pullRequestName(pr.Number, pr.URL)
 	}
-	message := fmt.Sprintf("The settings hold no usable entry for the repository of the deleted request, so nothing "+
-		"could be read or closed; the deleted request was let go: the state of %s is not known and it may be open, "+
-		"check it and close it by hand", which)
+	missing := "The settings hold no usable entry for the repository of the deleted request"
+	if errors.Is(err, errNoSettings) {
+		missing = "RemediationSettings " + remediationv1alpha1.SettingsName + " does not exist"
+	}
+	message := fmt.Sprintf("%s, so nothing could be read or closed; the deleted request was let go: the state of %s "+
+		"is not known and it may be open, check it and close it by hand", missing, which)
 	if r.Recorder != nil {
 		r.Recorder.Event(rr, corev1.EventTypeWarning, EventPullRequestLeftOpen, message)
 	}

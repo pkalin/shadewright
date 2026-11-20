@@ -203,10 +203,10 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // The stop goes on whatever it returns, since a final phase waits for nothing, so a check that is not written is said
 // in status, in the same write: condition ReviewCheckNotFailed, with the reason of the failure (checkNotFailed), and a
 // Warning Event when it is set or its reason changes, not at each look. The write that records Stale removes it, so
-// does a look that sees the failed check last, and so does every write that ends the looks (endCheckNote); a failed
-// read of the check on a head recorded Stale leaves it as it is and is logged (stoppedCheckUnread). A repository
-// entry that names another target branch writes nothing, since a branch change permits reads only (#771): that is
-// said the same way, until the entry names the branch again. A cancelled reconcile is only returned, and so is a
+// does a look that sees the failed check last, and so does every write that ends the looks (endCheckNote); a look on
+// a head recorded Stale that cannot read the check leaves it as it is and records the Warning Event
+// StoppedCheckUnread once (stoppedCheckUnread). A repository entry that names another target branch writes nothing,
+// since a branch change permits reads only (#771): that is said the same way, until the entry names the branch again. A cancelled reconcile is only returned, and so is a
 // failure of the Kubernetes API (reading the settings), for the error backoff.
 func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	reason string) error {
@@ -237,6 +237,7 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 	case err == nil:
 		pr.ReviewCheck = &remediationv1alpha1.ReviewCheck{Head: pr.HeadSHA, State: remediationv1alpha1.ReviewCheckStale}
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
+		r.stoppedCheckLooks.Delete(client.ObjectKeyFromObject(rr))
 		log.Info("Failed the review check of a stopped RemediationRequest")
 		return nil
 	case ctx.Err() != nil:
@@ -248,11 +249,20 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 	why, text := checkNotFailed(err)
 	log.Info("Could not fail the review check of a stopped RemediationRequest; tried again at its next look",
 		"reason", why, "error", err.Error())
+	r.noteCheckNotFailed(rr, why, fmt.Sprintf("The review check shadewright/review of pull request #%d could not "+
+		"be failed after the request stopped: %s. A check written before the stop may still show on the pull "+
+		"request; do not merge it on that check. The write is tried again at the next look of the request",
+		pr.Number, text))
+	return err
+}
+
+// noteCheckNotFailed sets condition ReviewCheckNotFailed of rr in memory with reason why and message, for the
+// caller's status write, and records the Warning Event ReviewCheckNotFailed when the condition is set or its reason
+// changes, not at each look.
+func (r *RemediationRequestReconciler) noteCheckNotFailed(rr *remediationv1alpha1.RemediationRequest, why,
+	message string) {
 	before := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 	changed := before == nil || before.Reason != why
-	message := fmt.Sprintf("The review check shadewright/review of pull request #%d could not be failed after the "+
-		"request stopped: %s. A check written before the stop may still show on the pull request; do not merge it "+
-		"on that check. The write is tried again at the next look of the request", pr.Number, text)
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type: remediationv1alpha1.ConditionReviewCheckNotFailed, Status: metav1.ConditionTrue, Reason: why,
 		Message: message, ObservedGeneration: rr.Generation,
@@ -260,7 +270,6 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 	if changed && r.Recorder != nil {
 		r.Recorder.Event(rr, corev1.EventTypeWarning, EventReviewCheckNotFailed, message)
 	}
-	return err
 }
 
 // stoppedCheckShown is the look of a stopped holder whose failed check is recorded Stale on the head (failStoppedCheck,
@@ -279,19 +288,28 @@ func stoppedCheckShown(ctx context.Context, git providers.GitProvider, head stri
 	return !found || shows != providers.CheckRunFailure, nil
 }
 
+// EventStoppedCheckUnread is the Warning Event recorded when a look of a stopped holder whose failed review check is
+// recorded Stale cannot tell whether that check is still the latest on the head (stoppedCheckUnread): once when such
+// looks start failing on a head, not at each look.
+const EventStoppedCheckUnread = "StoppedCheckUnread"
+
 // stoppedCheckUnread ends failStoppedCheck's look at a check recorded Stale that wrote nothing (stoppedCheckShown):
 // with no error the host shows the failed check last, and condition ReviewCheckNotFailed is removed; a cancelled
-// reconcile and a failure of the Kubernetes API are returned, and any other failure is logged and tried at the next
-// look. A failed read leaves the condition as it is: set by an earlier look whose write failed, it stays until a
-// look sees the failed check last; not set, it is not set, as the failed check was written and nothing shows it was
-// written over.
+// reconcile and a failure of the Kubernetes API are returned. Any other failure (the settings permit no read or write
+// of the repository of the plan, a pause, or the Git host failed the read of the check) means the look cannot tell
+// whether the failed check is still the latest on the head. It is logged at Info and, once when such looks start on
+// a head, recorded as the Warning Event StoppedCheckUnread (kept in memory, stoppedCheckLooks of the reconciler, and
+// started again by a look that reads the check or writes it), and nil is returned, so the look keeps its pace
+// (heldRecheckInterval) and is tried again at the next one. Condition ReviewCheckNotFailed is left as it is: it says
+// the failed check could not be written, which such a look does not know.
 func (r *RemediationRequestReconciler) stoppedCheckUnread(ctx, stepCtx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, err error) error {
 	pr := rr.Status.PullRequest
-	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest",
-		pr.Number, "head", pr.HeadSHA)
+	key := client.ObjectKeyFromObject(rr)
+	log := logf.FromContext(ctx).WithValues("remediationRequest", key, "pullRequest", pr.Number, "head", pr.HeadSHA)
 	switch {
 	case err == nil:
+		r.stoppedCheckLooks.Delete(key)
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 		return nil
 	case ctx.Err() != nil:
@@ -301,15 +319,26 @@ func (r *RemediationRequestReconciler) stoppedCheckUnread(ctx, stepCtx context.C
 		return err
 	}
 	err = boundErr(ctx, stepCtx, "read the check run", err)
+	why, text := checkNotFailed(err)
+	if why == ReasonGitFailed {
+		text = "the Git host did not answer the read of the latest check on its head"
+	}
 	log.Info("Could not look at the failed review check of a stopped RemediationRequest; looked at again at its "+
-		"next look", "error", err.Error())
+		"next look", "reason", why, "error", err.Error())
+	if countLook(&r.stoppedCheckLooks, key, rr.UID, pr.HeadSHA) == 1 {
+		r.warn(rr, EventStoppedCheckUnread, fmt.Sprintf("The review check shadewright/review of pull request #%d "+
+			"could not be looked at after the request stopped: %s. The failed check written at the stop may no "+
+			"longer be the latest on its head; do not merge the pull request on another check. Each look of the "+
+			"request tries again", pr.Number, text))
+	}
 	return nil
 }
 
 // endCheckNote removes condition ReviewCheckNotFailed from rr's status in memory, for the write that ends the looks
 // of a stopped request: the condition says the failed check is tried again at the next look, so it is True only
-// while the request's own pull request is open and its failed check is not written (#925). Its callers: a look that
-// reads the pull request not open (failCheckAfterLook), a write that records the merge (settleRecorded), every
+// while the request's own pull request, or another open pull request from its branch that keeps the lock, is open
+// and its failed check is not written (#925). Its callers: a look that reads the pull request not open while no other
+// open pull request keeps the lock (failCheckAfterLook), a write that records the merge (settleRecorded), every
 // release of the lock (lockverdict.Release, which removes it itself) and the first write of a deletion (finalize).
 func endCheckNote(rr *remediationv1alpha1.RemediationRequest) bool {
 	return meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)

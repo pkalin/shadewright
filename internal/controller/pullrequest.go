@@ -212,9 +212,11 @@ func mergedElsewhereText(cr providers.ChangeRequest) string {
 }
 
 // messageOpenElsewhere is the tail of every message that ends a stop on the request's own pull request open on
-// another base (#892): nothing is written to it there, and the lock stays while it is open.
-const messageOpenElsewhere = "; Shadewright writes nothing more to it there, and the target stays locked until it " +
-	"is closed or merged (condition TargetHeld)"
+// another base (#892): nothing is written to it there but a failed review check on its head (with reviewer hints on,
+// #925), and the lock stays while it is open.
+const messageOpenElsewhere = "; Shadewright writes nothing more to it there but a failed review check " +
+	"shadewright/review on its head (with reviewer hints on), and the target stays locked until it is closed or " +
+	"merged (condition TargetHeld)"
 
 // openElsewhereOf returns the pull request of err when err is or wraps an *openElsewhereError, the zero one otherwise.
 func openElsewhereOf(err error) providers.ChangeRequest {
@@ -2335,7 +2337,7 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		defer freeSlot()
 	}
 	var left *cleanupRelease
-	unreachable := false
+	var unreachable error
 	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err := r.closeOnDeleteOf(cleanCtx, rr)
@@ -2355,7 +2357,9 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 			// Closed, nothing reachable to close (said by leftUnreachable below, #925), the open ones closed and a
 			// merged one read as merged, or not ours to close. A close refused as a conflict is not a merge until a
 			// read says so: it is retried.
-			unreachable = errors.Is(err, errRepositoryGone) || errors.Is(err, freshness.ErrRepositoryUnusable)
+			if errors.Is(err, errRepositoryGone) || errors.Is(err, freshness.ErrRepositoryUnusable) {
+				unreachable = err
+			}
 			if err := r.clearCleanupConditions(ctx, rr); err != nil {
 				return reconcile.Result{}, err
 			}
@@ -2393,15 +2397,15 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 }
 
 // reportLetGo reports a deleted request the finalizer lets go without a finished cleanup: left, when a bound of the
-// cleanup released it (reportRelease), or unreachable, when its repository has no usable entry in the settings
-// (leftUnreachable). It does nothing for a cleanup that finished.
+// cleanup released it (reportRelease), or unreachable, the answer of the close when the settings object is missing or
+// its repository has no usable entry in it (leftUnreachable). It does nothing for a cleanup that finished.
 func (r *RemediationRequestReconciler) reportLetGo(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	left *cleanupRelease, unreachable bool) {
+	left *cleanupRelease, unreachable error) {
 	switch {
 	case left != nil:
 		r.reportRelease(ctx, rr, *left)
-	case unreachable:
-		r.leftUnreachable(ctx, rr)
+	case unreachable != nil:
+		r.leftUnreachable(ctx, rr, unreachable)
 	}
 }
 

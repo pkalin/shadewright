@@ -123,7 +123,8 @@ import (
 // request that stopped while its own pull request is open, with its repository in the settings, has its review check
 // failed (settled check) or, where the settings permit no write (another target branch named), says so with condition
 // ReviewCheckNotFailed (settled note, #925); a request whose own pull request is not open (closed, merged or gone,
-// on any base) carries no such condition (note cleared). After every reconcile, no request whose failed check is
+// on any base), while no other open pull request from its branch keeps the lock, carries no such condition (note
+// cleared). After every reconcile, no request whose failed check is
 // recorded as Stale, and still shown failed last on its head, carries it (note cleared), nor one whose lock is released or whose merge is recorded (note
 // ended).
 //
@@ -2329,8 +2330,9 @@ func (m *modelWorld) settledNote(live *api.RemediationRequest, cr providers.Chan
 		return true
 	case meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) == nil:
 	case m.repo == nil && (!found || m.deleted || pr == nil || cr.Number != pr.Number ||
-		cr.State != providers.ChangeRequestOpen):
-		// With the repository in the settings the looks read the pull request: one that is not open ends them.
+		cr.State != providers.ChangeRequestOpen) && !m.unmarkedOpen():
+		// With the repository in the settings the looks read the pull request: one that is not open ends them,
+		// unless another open pull request from the branch keeps the lock (third fix round of #925).
 		m.fatalf("note cleared: the request's pull request is not open (found %t, gone %t, #%d %s), and condition "+
 			"ReviewCheckNotFailed is still set: %s", found, m.deleted, cr.Number, cr.State, conditionsOf(live))
 		return true

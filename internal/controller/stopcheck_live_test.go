@@ -24,6 +24,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
@@ -166,8 +167,10 @@ func TestReviewCheckFromAStaleCopyLeavesTheStopsCheck(t *testing.T) {
 // A stopped holder whose failed check is recorded Stale looks at the latest review check of the head at each look
 // that reads its pull request open (failStoppedCheck): the failed check is written again when the Git host shows
 // another state last, and nothing is written when it shows the failed one, which also ends condition
-// ReviewCheckNotFailed. A failed read writes nothing and leaves that condition as it was; a failed write again says
-// so with it (decision of 2026-11-20 on #925).
+// ReviewCheckNotFailed. A failed write says so with that condition (decision of 2026-11-20 on #925). A look that
+// cannot read the check (a failed read, or settings that permit no write to the repository) writes nothing, leaves
+// that condition as it was, returns no error, so the look keeps its pace, and records one Warning Event
+// StoppedCheckUnread over two such looks; on the build before this round it was only logged.
 func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 	cases := []struct {
 		name string
@@ -176,15 +179,20 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 		fail string
 		// noted: condition ReviewCheckNotFailed is set before the look, by an earlier look whose write failed.
 		noted bool
-		// writes: a failed check is written; note: condition ReviewCheckNotFailed is set; err: an error is returned.
-		writes, note bool
+		// branchChanged: the settings name another target branch, which permits no write.
+		branchChanged bool
+		// writes: a failed check is written; note: condition ReviewCheckNotFailed is set; unread: the look cannot
+		// read the check and says so in one Event over two looks.
+		writes, note, unread bool
 	}{
 		{name: "pending last", over: true, writes: true},
 		{name: "failed last"},
-		{name: "read fails", over: true, fail: "ReviewCheckRun"},
+		{name: "read fails", over: true, fail: "ReviewCheckRun", unread: true},
+		{name: "read fails on the failed check", fail: "ReviewCheckRun", unread: true},
+		{name: "settings name another branch", branchChanged: true, unread: true},
 		{name: "write fails", over: true, fail: "CreateCheckRun", note: true},
 		{name: "failed last ends the note", noted: true},
-		{name: "read fails keeps the note", over: true, fail: "ReviewCheckRun", noted: true, note: true},
+		{name: "read fails keeps the note", over: true, fail: "ReviewCheckRun", noted: true, note: true, unread: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -208,9 +216,28 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 				}
 				return nil
 			})
+			if c.branchChanged {
+				settings := &api.RemediationSettings{}
+				if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+					t.Fatal(err)
+				}
+				settings.Spec.Repositories[0].TargetBranch = "release"
+				if err := r.Update(ctx, settings); err != nil {
+					t.Fatal(err)
+				}
+			}
+			recorder := record.NewFakeRecorder(10)
+			r.Recorder = recorder
 			runs := len(g.CheckRuns(head))
-			if err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention)); err != nil && !c.note {
-				t.Fatalf("failStoppedCheck: %v", err)
+			looks := 1
+			if c.unread {
+				looks = 2
+			}
+			for range looks {
+				err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention))
+				if err != nil && (!c.note || c.unread) {
+					t.Fatalf("failStoppedCheck: %v", err)
+				}
 			}
 			got := g.CheckRuns(head)
 			if c.writes != (len(got) == runs+1) {
@@ -220,13 +247,73 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 				last.Title != stoppedCheckTitle) {
 				t.Fatalf("the check written again is %+v: want the stop's failed check", last)
 			}
-			note := meta.FindStatusCondition(p.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil
-			if note != c.note {
+			if note := meta.FindStatusCondition(p.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil; note != c.note {
 				t.Fatalf("condition ReviewCheckNotFailed set %t: want %t", note, c.note)
+			}
+			want := 0
+			if c.unread {
+				want = 1
+			}
+			if n := warningsOf(recorder, EventStoppedCheckUnread); n != want {
+				t.Fatalf("%d Warning Events %s over %d looks: want %d", n, EventStoppedCheckUnread, looks, want)
 			}
 			if rc := p.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale {
 				t.Fatalf("review check %+v: want Stale kept", rc)
 			}
 		})
+	}
+}
+
+// A live read before the review check write that keeps failing shows in status while it lasts, not only in the one
+// ReviewCheckStuck Event after ten looks: condition Approved False with reason ReviewCheckLiveReadFailed, written once
+// over two looks, and set back to WaitingForReview by the look whose live read works. The look returns no error, so
+// its pace is kept, and the write of the note does not wake the request (onlyOwnMarksChanged).
+func TestLiveReadThatKeepsFailingShowsInStatus(t *testing.T) {
+	r, g, p, _, _, head := gateWorld(t)
+	ctx := context.Background()
+	plainWaiting(t, r, p, head)
+	live := r.Client
+	r.APIReader = failingRequestReader{Reader: live, name: p.Name}
+	key := client.ObjectKeyFromObject(p)
+	var versions []string
+	for range 2 {
+		before := p.DeepCopy()
+		if err := r.watchReviewCheck(ctx, p, commentsCaughtUp); err != nil {
+			t.Fatalf("a look whose live read failed returned %v: want nil, so the look keeps its pace", err)
+		}
+		got := &api.RemediationRequest{}
+		if err := live.Get(ctx, key, got); err != nil {
+			t.Fatal(err)
+		}
+		versions = append(versions, got.ResourceVersion)
+		c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionApproved)
+		if c == nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonReviewCheckLiveReadFailed {
+			t.Fatalf("Approved %+v: want False with reason %s while the live read fails", c,
+				ReasonReviewCheckLiveReadFailed)
+		}
+		if len(versions) == 1 && !onlyOwnMarksChanged(before, got) {
+			t.Fatal("the write of the note wakes the request")
+		}
+	}
+	if versions[0] != versions[1] {
+		t.Fatalf("the note was written again on the second look (%v): want it once", versions)
+	}
+	if runs := g.CheckRuns(head); len(runs) != 0 {
+		t.Fatalf("check runs %+v: want none written without the live read", runs)
+	}
+	r.APIReader = live
+	if err := r.watchReviewCheck(ctx, p, commentsCaughtUp); err != nil {
+		t.Fatal(err)
+	}
+	got := &api.RemediationRequest{}
+	if err := live.Get(ctx, key, got); err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionApproved); c == nil ||
+		c.Reason != ReasonWaitingForReview {
+		t.Fatalf("Approved %+v: want WaitingForReview once the live read works", c)
+	}
+	if runs := g.CheckRuns(head); len(runs) != 1 {
+		t.Fatalf("check runs %+v: want the check written once the live read works", runs)
 	}
 }

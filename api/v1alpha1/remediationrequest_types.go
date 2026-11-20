@@ -472,9 +472,10 @@ const (
 	// spec.paused holds Git writes, and GitFailed when the Git host failed the write. The message names the pull
 	// request, never the Git host's answer. The write is tried again at each look of the stopped request, every 10
 	// minutes while it holds the lock; the condition is removed when the failed check is written and recorded as
-	// Stale, and by the write that ends the looks: a look that finds the pull request closed, merged or gone, the
-	// release of the lock, a recorded merge, or the first write of a deletion. One Warning Event,
-	// ReviewCheckNotFailed, is recorded when it is set or its reason changes.
+	// Stale, and by the write that ends the looks: a look that finds the pull request closed, merged or gone while
+	// no other open pull request from the request's branch keeps the lock (one that does has the same head, and the
+	// write is tried on), the release of the lock, a recorded merge, or the first write of a deletion. One Warning
+	// Event, ReviewCheckNotFailed, is recorded when it is set or its reason changes.
 	ConditionReviewCheckNotFailed = "ReviewCheckNotFailed"
 )
 

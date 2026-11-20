@@ -203,6 +203,10 @@ type RemediationRequestReconciler struct {
 	// dropped with checked.
 	reviewCommentsBehind sync.Map
 	reviewCheckConflicts sync.Map
+	// stoppedCheckLooks holds, per request name, the looks in a row of a stopped holder on one head that could not
+	// tell whether its failed review check is still the latest (stoppedCheckUnread, #925), so they raise one Warning
+	// Event. Memory only, dropped with checked.
+	stoppedCheckLooks sync.Map
 	// rewritten holds, per request name, the answer of the Git host to the rewrite after a handoff whose status
 	// write has not gone through (followHandoff), so a retry records it without sending the rewrite again.
 	// Memory only, dropped with checked: after a restart the rewrite is sent again, which is idempotent.
@@ -270,6 +274,7 @@ func (r *RemediationRequestReconciler) forget(key types.NamespacedName) {
 	r.reviewCheckFailures.Delete(key)
 	r.reviewCommentsBehind.Delete(key)
 	r.reviewCheckConflicts.Delete(key)
+	r.stoppedCheckLooks.Delete(key)
 	r.rewritten.Delete(key)
 	r.replyAttempts.Delete(key)
 	r.renderEnds.forget(key)
@@ -2200,6 +2205,10 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 	}
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
+	case apierrors.IsNotFound(err) && deleting:
+		// Still errRepositoryGone for the finalizer, which lets the request go on it; errNoSettings so that its
+		// Warning Event names the settings object that is missing, not an entry (leftUnreachable).
+		return errNoSettings
 	case apierrors.IsNotFound(err):
 		return errRepositoryGone
 	case err != nil:

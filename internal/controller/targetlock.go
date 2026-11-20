@@ -684,7 +684,7 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	if res, done, err := r.settleStopException(ctx, rr, v); done {
 		return res, err
 	}
-	if err := r.afterHeldLook(ctx, rr, v); err != nil {
+	if err := r.afterHeldLook(ctx, rr, v, holding); err != nil {
 		return reconcile.Result{}, err
 	}
 	free := !ptr.Deref(rr.Status.HoldsTarget, false)
@@ -702,7 +702,7 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 // stopped holder (failCheckAfterLook), and the pull request the look found. Only a failure of the Kubernetes API is
 // returned, for the error backoff.
 func (r *RemediationRequestReconciler) afterHeldLook(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	v changeVerdict) error {
+	v changeVerdict, holding *providers.ChangeRequest) error {
 	// No pull request of an expired request's own is open on the target branch any more: a close that was failing is
 	// over (one open on another base is not closed there, #892).
 	closeNoLongerFailing(rr)
@@ -714,7 +714,7 @@ func (r *RemediationRequestReconciler) afterHeldLook(ctx context.Context, rr *re
 	}
 	// The read ran through settings that are not paused: a pause that held an earlier look is over.
 	resume(rr)
-	if err := r.failCheckAfterLook(ctx, rr, v); err != nil {
+	if err := r.failCheckAfterLook(ctx, rr, v, holding); err != nil {
 		return err
 	}
 	if record := v.rule().heldRecord; record != heldRecordNone {
@@ -1135,20 +1135,25 @@ func (r *RemediationRequestReconciler) lockWaiters(ctx context.Context, obj clie
 
 // failCheckAfterLook fails the review check of a stopped holder whose look v read its own pull request open, on the
 // target branch or on another base (stoppedCheck, #925): tried at every look while it is pending, and recorded by the
-// look's status write, with condition ReviewCheckNotFailed while it cannot be written (failStoppedCheck); a look
-// that reads it not open removes that condition (endCheckNote). Only a failure of the Kubernetes API is returned, for
-// the error backoff; any other failure is said in status and does not hold the look, whose pace stays
-// heldRecheckInterval.
+// look's status write, with condition ReviewCheckNotFailed while it cannot be written (failStoppedCheck). A look that
+// reads it not open removes that condition (endCheckNote), unless another open pull request from the request's branch
+// keeps the lock (holding): that one has the branch head, so the head of the failed check, and can merge on a check
+// written before the stop. While it does and the condition is set, the look keeps trying the failed check on the
+// recorded head, and the release of the lock ends the condition (lockverdict.Release). Only a failure of the
+// Kubernetes API is returned, for the error backoff; any other failure is said in status and does not hold the look,
+// whose pace stays heldRecheckInterval.
 func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest, v changeVerdict) error {
+	rr *remediationv1alpha1.RemediationRequest, v changeVerdict, holding *providers.ChangeRequest) error {
 	pr := rr.Status.PullRequest
 	if !v.rule().stoppedCheck {
-		// The look read the request's own pull request not open (closed, merged or gone, on any base): no look writes
-		// its failed check any more, whether or not another pull request keeps the lock (#925).
-		endCheckNote(rr)
-		return nil
-	}
-	if pr == nil || v.pr.Number != pr.Number {
+		if holding == nil || pr == nil ||
+			meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed) == nil {
+			// The look read the request's own pull request not open (closed, merged or gone, on any base), and no
+			// other open pull request keeps the lock, or the failed check was written: nothing is left to try.
+			endCheckNote(rr)
+			return nil
+		}
+	} else if pr == nil || v.pr.Number != pr.Number {
 		return nil
 	}
 	if err := r.failStoppedCheck(ctx, rr, string(rr.Status.Phase)); isClusterError(err) {

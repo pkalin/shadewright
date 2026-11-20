@@ -313,8 +313,10 @@ const (
 // target branch or on a base a person moved it to (#925): in the step that stops it for a pull request open on
 // another base, and at each later look of the stopped request until it is recorded (condition ReviewCheckNotFailed
 // says while it cannot be written); once recorded, a look of the stopped request that finds another state last on
-// the head writes it again. Before any write of the check, the executor reads the request live, so a reconcile that
-// worked from an older copy writes nothing over a stop, a release or a deletion.
+// the head writes it again. Before the merge gate writes the check (InProgress, Passed, or Failed on too many reviews),
+// the executor reads the request live, so a reconcile that worked from an older copy writes nothing over a stop, a
+// release or a deletion; the failed check of a stale plan, a cancel or a stop is written without that read, as
+// nothing it can go over passes a merge.
 // +kubebuilder:validation:Enum=InProgress;Passed;Failed;Refused;Stale
 type ReviewCheckState string
 

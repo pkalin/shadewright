@@ -512,8 +512,8 @@ type hmMerge struct {
 	// replHeld: the replacement, before its takeover, held the target lock, existed and was not being deleted when
 	// the merge was made, so it records a merge of any head that is not the predecessor's own (P12, #870).
 	replHeld bool
-	// predLeft: the predecessor's own head was merged before the takeover, and the predecessor was gone or being
-	// deleted, without a record of the merge, while the replacement held the target lock before its takeover, existed
+	// predLeft: the predecessor's own head was merged before the takeover, and the predecessor was gone, being
+	// deleted, or released its lock on a verdict with no intent (mayStillRecord false), without a record or a claim, while the replacement held the target lock before its takeover, existed
 	// and was not being deleted: the replacement records it (P12, third case of the decision of 2026-11-20 on #870).
 	predLeft bool
 	// recordedTwice: P12 found the predecessor's record of the merge of its own head and one on the replacement
@@ -525,7 +525,8 @@ type hmMerge struct {
 func (m *hmWorld) notePredLeft(reqs map[string]*api.RemediationRequest) {
 	mg, p := m.merge, reqs[hmPred]
 	if mg == nil || mg.owner != hmPred || mg.afterTakeover || mg.predLeft || mg.recorded[hmPred] || recordsMerge(p) ||
-		(p != nil && p.DeletionTimestamp.IsZero()) || !m.replHoldsBeforeTakeover() {
+		(p != nil && p.DeletionTimestamp.IsZero() && (mayStillRecord(p) || holdsOnlyClaim(p, m.number))) ||
+		!m.replHoldsBeforeTakeover() {
 		return
 	}
 	mg.predLeft = true

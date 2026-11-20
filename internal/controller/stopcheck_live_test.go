@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -390,5 +391,84 @@ func TestFailedLiveReadLeavesTheStopsCheckWhileAnotherPullRequestHolds(t *testin
 	}
 	if got := g.CheckRuns(head); got[len(got)-1].Status != providers.CheckRunFailure {
 		t.Fatalf("the stop's failed check is not last while another pull request of the branch is open: %+v", got)
+	}
+}
+
+// A stopped holder whose own pull request was moved by a person to another base and closed there, while another open
+// pull request from its branch keeps the lock and the failed check is still owed (ReviewCheckNotFailed set): its look
+// writes the failed check on the recorded head (decision of 2026-11-20 on #925, point 3, ADR-0045). The check belongs
+// to the request's own commit on its own branch, and the other pull request shows it. Its summary promises no close
+// (point 4): the stop's summary says only that the request stopped. Without the other pull request, or without the
+// note, the look writes nothing and ends the note.
+func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosedElsewhere(t *testing.T) {
+	cases := []struct {
+		name          string
+		holding, note bool
+		writes        bool
+	}{
+		{name: "another open pull request holds and the check is owed", holding: true, note: true, writes: true},
+		{name: "no other open pull request", holding: false, note: true},
+		{name: "the check is not owed", holding: true, note: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, p, _, cr, head := gateWorld(t)
+			ctx := context.Background()
+			plainWaiting(t, r, p, head)
+			if err := g.CreateBranch(ctx, "hotfix", head); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.SetBase(cr.Number, "hotfix"); err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Close(cr.Number); err != nil {
+				t.Fatal(err)
+			}
+			closed, err := g.GetChangeRequest(ctx, cr.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var holding *providers.ChangeRequest
+			if tc.holding {
+				n, err := g.AddOpenChangeRequest(cr.HeadBranch, mainBranch, "opened by a person")
+				if err != nil {
+					t.Fatal(err)
+				}
+				other, err := g.GetChangeRequest(ctx, n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				holding = &other
+			}
+			p.Status.Phase = api.PhaseNeedsIntervention
+			p.Status.HoldsTarget = new(true)
+			if tc.note {
+				meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
+					Type: api.ConditionReviewCheckNotFailed, Status: metav1.ConditionTrue, Reason: ReasonGitFailed,
+					Message: "not written yet"})
+			}
+			runs := len(g.CheckRuns(head))
+			v := changeVerdict{state: changeClosedElsewhere, pr: closed}
+			if err := r.failCheckAfterLook(ctx, p, v, holding); err != nil {
+				t.Fatal(err)
+			}
+			got := g.CheckRuns(head)[runs:]
+			noted := meta.FindStatusCondition(p.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil
+			if !tc.writes {
+				if len(got) != 0 || noted {
+					t.Fatalf("wrote %+v (note left: %v): want nothing written and the note ended", got, noted)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Status != providers.CheckRunFailure || got[0].Title != stoppedCheckTitle {
+				t.Fatalf("check runs written: %+v: want the stop's failed check", got)
+			}
+			if strings.Contains(got[0].Summary, "closes") || strings.Contains(got[0].Summary, "hotfix") {
+				t.Fatalf("the summary promises a close or shows host text: %q", got[0].Summary)
+			}
+			if noted || !staleOnHead(p) {
+				t.Fatalf("note left: %v, Stale on head: %v: want the note removed and Stale recorded", noted, staleOnHead(p))
+			}
+		})
 	}
 }

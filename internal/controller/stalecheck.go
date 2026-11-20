@@ -59,12 +59,36 @@ const staleCheckTitle = "The plan is stale"
 // tried again after the poll interval (refuseOrWait, endStaleClosed). It is not a final phase.
 var errStaleCheckPending = errors.New("the review check of the stale plan's closed pull request is not failed yet")
 
-// staleCheckRun is the failed check run shadewright/review of a plan found stale with reason, one of staleReasons.
-func staleCheckRun(reason string) providers.CheckRun {
+// failedCheckRun builds the failed check run shadewright/review that failCheck writes: onOtherBase says that the read
+// of failCheckStep found the pull request on another base than the target branch, where nothing is closed, so the
+// summary must not promise a close (otherBaseCheckSummary).
+type failedCheckRun func(onOtherBase bool) providers.CheckRun
+
+// closeSummary is the end of the summary of a stale plan's or a cancel's failed check on the target branch, which the
+// cleanup closes.
+const closeSummary = "Shadewright closes the pull request; if the Git host refuses the close, a person closes it. " +
+	"This check stays failed."
+
+// otherBaseCheckSummary is the end of the summary of a failed check written while the pull request is on another
+// base than the target branch (decision of 2026-11-20 on #925, point 4): nothing is closed there. It is fixed text:
+// no base, title or other text of the Git host goes into a summary.
+const otherBaseCheckSummary = "This pull request is on another base than the target branch the request was made " +
+	"for: Shadewright closes nothing on that base, and a person decides what becomes of it. This check stays failed."
+
+// failedSummaryEnd is closeSummary, or otherBaseCheckSummary for a pull request on another base.
+func failedSummaryEnd(onOtherBase bool) string {
+	if onOtherBase {
+		return otherBaseCheckSummary
+	}
+	return closeSummary
+}
+
+// staleCheckRun is the failed check run shadewright/review of a plan found stale with reason, one of staleReasons;
+// onOtherBase as for failedCheckRun.
+func staleCheckRun(reason string, onOtherBase bool) providers.CheckRun {
 	return providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunFailure, Title: staleCheckTitle,
 		Summary: "Shadewright found the plan of this pull request stale (" + reason + "): what it was decided on " +
-			"has changed since, so it must not be merged. Shadewright closes the pull request; if the Git host " +
-			"refuses the close, a person closes it. This check stays failed."}
+			"has changed since, so it must not be merged. " + failedSummaryEnd(onOtherBase)}
 }
 
 // staleCheckPending reports whether a stale plan's check run still has to be failed: reviewer hints on, a recorded
@@ -90,7 +114,7 @@ func staleOnHead(rr *remediationv1alpha1.RemediationRequest) bool {
 // failed and records state Stale (see above), with failCheck.
 func (r *RemediationRequestReconciler) failStaleCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	reason string) error {
-	return r.failCheck(ctx, rr, staleCheckRun(reason))
+	return r.failCheck(ctx, rr, func(onOtherBase bool) providers.CheckRun { return staleCheckRun(reason, onOtherBase) })
 }
 
 // failCheck writes run, a failed check run shadewright/review, on the recorded head of rr's pull request and records
@@ -99,7 +123,7 @@ func (r *RemediationRequestReconciler) failStaleCheck(ctx context.Context, rr *r
 // failure is logged and returned, but for a cancelled reconcile and a pause, which are only returned. The step has a
 // deadline of its own, so it never eats the close's.
 func (r *RemediationRequestReconciler) failCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	run providers.CheckRun) error {
+	run failedCheckRun) error {
 	if !r.staleCheckPending(rr) {
 		return nil
 	}
@@ -113,36 +137,37 @@ func (r *RemediationRequestReconciler) failCheck(ctx context.Context, rr *remedi
 	}
 	logf.FromContext(ctx).Info("Could not fail the review check of RemediationRequest; tried again with the close",
 		"remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", pr.Number, "head", pr.HeadSHA,
-		"title", run.Title, "error", err.Error())
+		"title", run(false).Title, "error", err.Error())
 	return err
 }
 
 // failCheckStep is failCheck's work: it reads the recorded pull request by its number, writes the failed check, then
-// records Stale. It writes nothing when that read fails (returned for a retry) or finds the pull request merged into a
-// base a person moved it to. One open on a base a person moved it to gets the failed check too (#925): the check run
-// belongs to the head commit, and moved back to the target branch the pull request must not merge on a check written
-// before. Through a new installation of the plan's repository (#290) the read also asks for this request's
-// marker, and nothing is written either when the pull request is not this request's.
+// records Stale. What the read allows is the verdict table's (verdictRow.failCheck): nothing is written when that
+// read fails (returned for a retry), finds the pull request merged into a base a person moved it to, or finds it gone
+// (the Git host does not tie that number to the request, decision of 2026-11-20 on #925, point 2), and through a new
+// installation of the plan's repository (#290) the read also asks for this request's marker. One open or closed on a
+// base a person moved it to gets the failed check too (#925, ADR-0045): the check run belongs to the head commit, and
+// moved back to the target branch, or reopened, the pull request must not merge on a check written before. Its
+// summary then promises no close (run(true), otherBaseCheckSummary).
 func (r *RemediationRequestReconciler) failCheckStep(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest, run providers.CheckRun) error {
+	rr *remediationv1alpha1.RemediationRequest, run failedCheckRun) error {
 	git, _, reinstalled, err := r.openPlanRepositoryFor(ctx, rr)
 	if err != nil {
 		return err
 	}
 	v := r.changeOf(ctx, git, rr, changeQuery{marker: reinstalled})
+	onOtherBase := false
 	switch v.rule().failCheck {
 	case failCheckRetry:
 		return v.err
 	case failCheckNotOurs:
-		// Merged into another base: nothing is written to it there, as for gone.
+		// Gone, or merged into another base: nothing is written for it.
 		return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
-	case failCheckNotOursReinstalled:
-		if reinstalled {
-			return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
-		}
+	case failCheckWriteOtherBase:
+		onOtherBase = true
 	case failCheckWrite:
 	}
-	if err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run); err != nil {
+	if err := git.CreateCheckRun(ctx, rr.Status.PullRequest.HeadSHA, run(onOtherBase)); err != nil {
 		return freshness.WrapProvider("write the check run", err)
 	}
 	return r.recordStaleCheck(ctx, rr)

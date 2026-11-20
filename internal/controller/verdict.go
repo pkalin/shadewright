@@ -74,7 +74,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundGone, keepsLockMoved: false, lookConfirmGone: true, lookYields: true,
 		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: true, lockLooksElsewhere: true, fromOtherBases: otherBaseNone,
 		yieldsToClosed: true, handed: handedGone, recover: recoverNothing, mergedInto: false,
-		retargetCancel: retargetCancelClosed, failCheck: failCheckNotOursReinstalled, stoppedCheck: false, cancelLook: cancelLookEnd,
+		retargetCancel: retargetCancelClosed, failCheck: failCheckNotOurs, stoppedCheck: false, cancelLook: cancelLookEnd,
 		adopt: adoptNone, refuseOpened: refuseClose, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGone,
 		closeRecorded: closeRecordedNotOurs, closeUnrecorded: closeUnrecordedLookElsewhere,
 		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing,
@@ -84,7 +84,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundOther, keepsLockMoved: true, lookConfirmGone: false, lookYields: false,
 		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: false, lockLooksElsewhere: false, fromOtherBases: otherBaseOpen,
 		yieldsToClosed: false, handed: handedMoved, recover: recoverRetry, mergedInto: false,
-		retargetCancel: retargetCancelMoved, failCheck: failCheckWrite, stoppedCheck: true, cancelLook: cancelLookMoved,
+		retargetCancel: retargetCancelMoved, failCheck: failCheckWriteOtherBase, stoppedCheck: true, cancelLook: cancelLookMoved,
 		adopt: adoptElsewhere, refuseOpened: refuseMoved, mergedUnrecorded: mergedUnrecordedNothing, watch: watchMoved,
 		closeRecorded: closeRecordedMoved, closeUnrecorded: closeUnrecordedGoOn, stopOnOtherBase: stopOnOtherMoved,
 		finalize: finalizeCloseAnyBase,
@@ -104,7 +104,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundClosed, keepsLockMoved: false, lookConfirmGone: false, lookYields: false,
 		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: true, lockLooksElsewhere: true, fromOtherBases: otherBaseClosed,
 		yieldsToClosed: false, handed: handedIt, recover: recoverFromPullRequest, mergedInto: false,
-		retargetCancel: retargetCancelClosed, failCheck: failCheckWrite, stoppedCheck: false, cancelLook: cancelLookEnd, adopt: adoptIt,
+		retargetCancel: retargetCancelClosed, failCheck: failCheckWriteOtherBase, stoppedCheck: false, cancelLook: cancelLookEnd, adopt: adoptIt,
 		refuseOpened: refuseEnded, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGoOn,
 		closeRecorded: closeRecordedNothing, closeUnrecorded: closeUnrecordedLookElsewhere,
 		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing,
@@ -168,8 +168,11 @@ type verdictRow struct {
 	retargetCancel retargetCancel
 
 	// failCheck is what failCheckStep does before it writes a failed review check. The check run belongs to the head
-	// commit, so it is written also for a pull request open on a base a person moved it to (#925): moved back, it
-	// cannot merge on a check written before the request stopped.
+	// commit, so it is written also for a pull request open or closed on a base a person moved it to (#925, ADR-0045):
+	// moved back or reopened, it cannot merge on a check written before the request stopped. There the check's
+	// summary promises no close (failCheckWriteOtherBase). A pull request read gone gets nothing, with or without a
+	// new installation (decision of 2026-11-20 on #925, point 2): a check on a commit the Git host does not tie to
+	// the request is not the request's to write.
 	failCheck failCheck
 	// stoppedCheck: the request's own pull request is open, on the target branch or on a base a person moved it to,
 	// so a stopped request fails its review check (failStoppedCheck, #925).
@@ -270,10 +273,15 @@ const (
 type failCheck int
 
 const (
+	// failCheckRetry writes nothing: the read failed, and the error is returned for a retry.
 	failCheckRetry failCheck = iota
+	// failCheckNotOurs writes nothing and returns errChangeRequestNotOurs: gone, or merged into another base.
 	failCheckNotOurs
-	failCheckNotOursReinstalled
+	// failCheckWrite writes the failed check with the summary of a read on the target branch.
 	failCheckWrite
+	// failCheckWriteOtherBase writes the failed check with the summary of a pull request on another base: nothing is
+	// closed there and a person decides (otherBaseCheckSummary).
+	failCheckWriteOtherBase
 )
 
 // cancelLook is verdictRow.cancelLook.

@@ -118,10 +118,10 @@ func (r *RemediationRequestReconciler) cancelUndecided(ctx context.Context, rr *
 // Cancelled is final only when the pull request cannot merge any more: it is known closed, or known never opened.
 // Before each close, and before the end on a pull request found closed, the check run shadewright/review of the
 // recorded head is failed (failCancelCheck, as for a stale plan, #713), so a pull request reopened later cannot be
-// merged on a check that is still green. The check reads the recorded pull request by its number first: one open on a
-// base a person moved it to gets no check, and the request ends Cancelled saying so. A closed pull request ends the
-// request even when that check cannot be
-// written: at once on a refusal, after cleanupFailingBound on a failure worth a retry, with a Warning Event that
+// merged on a check that is still green. The check reads the recorded pull request by its number first: one open or
+// closed on a base a person moved it to gets the failed check too, with a summary that promises no close there
+// (failCheckStep, ADR-0045), one open there ends the request Cancelled saying so, and one read gone gets no check.
+// A closed pull request ends the request even when that check cannot be written: at once on a refusal, after cleanupFailingBound on a failure worth a retry, with a Warning Event that
 // says so (endCancelClosed).
 //
 //   - The recorded pull request is closed already (by a person, or by an earlier close of this cancel whose status
@@ -583,11 +583,12 @@ func cancelPendingCondition(rr *remediationv1alpha1.RemediationRequest, reason, 
 	}
 }
 
-// cancelCheckRun is the failed check run shadewright/review of a cancelled request.
-func cancelCheckRun() providers.CheckRun {
+// cancelCheckRun is the failed check run shadewright/review of a cancelled request; onOtherBase as for
+// failedCheckRun.
+func cancelCheckRun(onOtherBase bool) providers.CheckRun {
 	return providers.CheckRun{Name: providers.CheckRunName, Status: providers.CheckRunFailure, Title: cancelCheckTitle,
-		Summary: "This request was cancelled (spec.cancel), so its change must not be merged. Shadewright closes " +
-			"the pull request; if the Git host refuses the close, a person closes it. This check stays failed."}
+		Summary: "This request was cancelled (spec.cancel), so its change must not be merged. " +
+			failedSummaryEnd(onOtherBase)}
 }
 
 // failCancelCheck completes the check run shadewright/review on the recorded head of a cancelled request's pull
@@ -595,7 +596,7 @@ func cancelCheckRun() providers.CheckRun {
 // write changes). It does nothing when the check is not pending (reviewer hints off, no recorded pull request, a
 // handoff, or the state already recorded on the head).
 func (r *RemediationRequestReconciler) failCancelCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	return r.failCheck(ctx, rr, cancelCheckRun())
+	return r.failCheck(ctx, rr, cancelCheckRun)
 }
 
 // endCancelled ends rr Cancelled with reason CancelRequested and message, in one status write (stop). The request

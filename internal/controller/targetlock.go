@@ -1139,7 +1139,8 @@ func (r *RemediationRequestReconciler) lockWaiters(ctx context.Context, obj clie
 // reads it not open removes that condition (endCheckNote), unless another open pull request from the request's branch
 // keeps the lock (holding): that one has the branch head, so the head of the failed check, and can merge on a check
 // written before the stop. While it does and the condition is set, the look keeps trying the failed check on the
-// recorded head, and the release of the lock ends the condition (lockverdict.Release). Only a failure of the
+// recorded head (decision of 2026-11-20 on #925, point 3, ADR-0045), and the release of the lock ends the condition
+// (lockverdict.Release). The stop's summary promises no close (stoppedCheckRun), so it is the same on any base. Only a failure of the
 // Kubernetes API is returned, for the error backoff; any other failure is said in status and does not hold the look,
 // whose pace stays heldRecheckInterval.
 func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,

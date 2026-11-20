@@ -7518,6 +7518,72 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(c.act(own, other)).To(Equal(expect(isGone, recorded, want)))
 			}
 		}, entries)
+
+		// The failed review check of a stale plan and of a cancel, with reviewer hints on (failCheckStep, decisions of
+		// 2026-11-20 on #925): what each verdict of its read of the recorded pull request writes on the recorded head.
+		// "target" is a failed check whose summary promises the close, "other base" one whose summary says nothing is
+		// closed on that base and a person decides, and "none" no check at all. Gone writes nothing: a check on a commit
+		// the Git host does not tie to the request is not the request's to write.
+		type checkCell struct{ written, summary string }
+		const target, otherBase = "target", "other base"
+		checkCases := []verdictCase{isOpen, isClosed, closedThere, isElsewhere, isGone, mergedThere, failedRead}
+		checkCallers := map[string]struct {
+			act  func(own, other int64)
+			want map[verdictCase]string
+		}{
+			"cleanUpStale": {
+				act: func(own, other int64) { cleanUp(own, other) },
+				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
+					isElsewhere: otherBase, isGone: none, mergedThere: none, failedRead: none},
+			},
+			"cancel the request": {
+				act: func(own, other int64) {
+					cancelIt()
+					_, _ = reconcileResult()
+				},
+				// Open on another base, the cancel's look ends it Cancelled with the lock kept and writes no check in
+				// that reconcile: the stopped holder's later looks write the stop's check (failStoppedCheck), whose
+				// summary promises no close.
+				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
+					isElsewhere: none, isGone: none, mergedThere: none, failedRead: none},
+			},
+		}
+		checkEntries := make([]TableEntry, 0, len(checkCallers)*len(checkCases))
+		for _, caller := range slices.Sorted(maps.Keys(checkCallers)) {
+			for i, c := range checkCases {
+				checkEntries = append(checkEntries, Entry(caller+" on "+name(c), caller, i))
+			}
+		}
+		DescribeTable("writes the failed review check of a stale plan or a cancel as the verdict's rule says", func(caller string, i int) {
+			c, vc := checkCallers[caller], checkCases[i]
+			recorder = record.NewFakeRecorder(50)
+			hints = true
+			own, other := recorded(vc)
+			head := fetch().Status.PullRequest.HeadSHA
+			before := len(git.CheckRuns(head))
+			c.act(own, other)
+			git.SetFail(nil)
+			runs := git.CheckRuns(head)[before:]
+			got := checkCell{written: none}
+			for _, run := range runs {
+				Expect(run.Status).To(Equal(providers.CheckRunFailure), "only a failed check is written")
+				Expect(run.Summary).NotTo(ContainSubstring("hotfix"), "no text of the Git host in a summary")
+				got.written = target
+				if strings.HasSuffix(run.Summary, otherBaseCheckSummary) {
+					got.written = otherBase
+				}
+				got.summary = run.Summary
+			}
+			want := checkCell{written: c.want[vc]}
+			switch want.written {
+			case target:
+				Expect(got.summary).To(HaveSuffix(closeSummary))
+			case otherBase:
+				Expect(got.summary).NotTo(ContainSubstring("Shadewright closes the pull request"))
+			}
+			got.summary = ""
+			Expect(got).To(Equal(want), "check runs written: %+v", runs)
+		}, checkEntries)
 	})
 
 })

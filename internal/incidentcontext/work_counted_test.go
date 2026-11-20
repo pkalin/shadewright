@@ -166,3 +166,28 @@ func TestBuildWorkIsLinear(t *testing.T) {
 		}
 	}
 }
+
+// repeatedLabelWorkPerByte bounds the work of a whole Build per byte of one label name that every metric template
+// answers in its one series (the shape of FuzzDiffBuild input 81e201e983440dcc, metricsKey): each expression of
+// the rules reads a long window of the label once, alone and in its answer (redact's windows.go), and the
+// release's reading reads the label at two passes, not at each of 16 (#873, second round). Measured at that build:
+// 840, 804 and 801 steps per byte at 4 KiB, 40 KiB and 400 KiB; at 842c2015, before it, 1,180 at 40 KiB (403 of
+// them the release's reading).
+const repeatedLabelWorkPerByte = 900
+
+// The work of a whole Build on one label name repeated by every metric template stays within
+// repeatedLabelWorkPerByte per byte of the label at 4 KiB, 40 KiB and 400 KiB (#873, second round).
+func TestBuildWorkOfARepeatedLabel(t *testing.T) {
+	for _, size := range []int{4 << 10, 40 << 10, 400 << 10} {
+		key := metricsKey(size / len("aws_secret_access_key"))
+		b := newBuilder(t, reader(t, webObjects()...), metricsKeyScene(key, 1), nil)
+		total, release := redact.WorkOfReleased(func() { build(t, b, incident(deploymentRef())) })
+		perByte := float64(total) / float64(len(key))
+		t.Logf("%d bytes of label: %.0f steps per byte, the release's reading %.0f", len(key), perByte,
+			float64(release)/float64(len(key)))
+		if perByte > repeatedLabelWorkPerByte {
+			t.Errorf("a %d byte label repeated by every template: Build takes %.0f steps per byte, over %d", len(key),
+				perByte, repeatedLabelWorkPerByte)
+		}
+	}
+}

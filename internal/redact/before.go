@@ -91,6 +91,10 @@ type releasedReading struct {
 	// span of this package's rules names the merged range, as it did before the reading was added.
 	rule   int
 	hidden []span
+	// read holds what each text a pass read was found to hold: a value repeated in the pieces of an answer (a
+	// label in the series of every metric template) is read by that release's rules once (#873, second round).
+	// The spans depend on the text only.
+	read map[string][]released.Span
 }
 
 // releasedReading returns a reading with the redactor of the release before that has r's extra patterns, or
@@ -105,7 +109,16 @@ func (r *Redactor) releasedReading() *releasedReading {
 // pass is one call of String of the release before on t: the spans it finds are hidden, and the text it returns
 // has its markers in place.
 func (x *releasedReading) pass(t trace) trace {
-	found := x.r.Spans(t.text)
+	found, ok := x.read[t.text]
+	if !ok {
+		found = x.r.Spans(t.text)
+		if x.read == nil {
+			x.read = make(map[string][]released.Span)
+		}
+		x.read[t.text] = found
+	} else {
+		tick(len(t.text)) // the lookup hashes the text
+	}
 	if len(found) == 0 {
 		return t
 	}

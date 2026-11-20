@@ -112,6 +112,8 @@ func TestWriteReleasedTable(t *testing.T) {
 // The kept reading alone reproduces String of the release before byte for byte on every input of the table: the
 // code in package released is that release's, unchanged (#845, thirteenth decision of 2026-11-18).
 func TestReleasedReproducesTheReleaseBefore(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	f, err := os.Open(releasedTable)
 	if err != nil {
 		t.Fatal(err)

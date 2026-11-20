@@ -30,6 +30,8 @@ import (
 // the same inputs is checked against the release's stored results by TestReleasedReproducesTheReleaseBefore.
 // Under -race a seeded sample of the inputs is compared (raceKeeps), without it all of them.
 func TestReleasedSpansMatchKeptCopy(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	seen := map[string]bool{}
 	fails := 0
 	for i, in := range releasedInputs(t) {

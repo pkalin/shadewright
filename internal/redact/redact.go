@@ -170,6 +170,17 @@ type rule struct {
 	// scan, when set, replaces re and the functions above: a rule that reads the whole text on the canonical
 	// view (view.go) and calls add for each range to redact.
 	scan func(s string, add func(start, end int))
+	// win is re with its alphabet, read by windows (windows.go).
+	win *windowed
+}
+
+// find returns the matches of the rule's expression in s, as FindAllStringSubmatchIndex(s, -1) does, read by
+// windows when the rule has them (New) and runs holds the long windows of s (longRuns of the redactor's wins).
+func (ru *rule) find(s string, runs [][]longRun, ids *windowIDs) [][]int {
+	if ru.win == nil || runs == nil {
+		return ru.re.FindAllStringSubmatchIndex(counted(s), -1)
+	}
+	return ru.win.findAllIn(s, runs[ru.win.idx], ids)
 }
 
 // Redactor replaces sensitive data in text. It is safe for concurrent use.
@@ -178,6 +189,8 @@ type Redactor struct {
 	// before is the redactor of the release before, with the same extra patterns: the reading kept in package
 	// released (before.go). nil only for a redactor made of some rules alone, in a test.
 	before *released.Redactor
+	// wins are the expressions of the rules with their alphabets, read by windows (windows.go).
+	wins []*windowed
 }
 
 var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -211,7 +224,16 @@ func New(extra ...Pattern) (*Redactor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the reading of the release before: %w", err)
 	}
-	return &Redactor{rules: rules, before: before}, nil
+	r := &Redactor{rules: rules, before: before}
+	for i := range rules {
+		tick(1)
+		if rules[i].re != nil {
+			rules[i].win = newWindowed(rules[i].re)
+			rules[i].win.idx = len(r.wins)
+			r.wins = append(r.wins, rules[i].win)
+		}
+	}
+	return r, nil
 }
 
 var defaultRedactor = func() *Redactor {
@@ -442,8 +464,11 @@ func (r *Redactor) spans(s string) []span {
 
 // ownSpans is spans without the reading of the release before: the rules of this package alone, as Pieces reads
 // each piece (it applies the reading of the release before as that release's tools did, releasedPieces).
-func (r *Redactor) ownSpans(s string) []span {
-	return settle(s, r.ruleMatches(s))
+func (r *Redactor) ownSpans(s string) []span { return r.ownSpansWith(s, &windowIDs{}) }
+
+// ownSpansWith is ownSpans with the long windows read before in ids.
+func (r *Redactor) ownSpansWith(s string, ids *windowIDs) []span {
+	return settle(s, r.ruleMatchesWith(s, ids))
 }
 
 // settle merges matches found on s (mergeSpans) and gives each merged range the invisible characters right
@@ -473,10 +498,14 @@ func settle(s string, matches []span) []span {
 
 // ruleMatches returns the matches of every rule in s and in its folded view (mapped to the bytes of s), unsorted
 // and not merged, each with the kind of the rule that found it.
-func (r *Redactor) ruleMatches(s string) []span {
-	spans := r.ruleSpans(s, nil, false)
+func (r *Redactor) ruleMatches(s string) []span { return r.ruleMatchesWith(s, &windowIDs{}) }
+
+// ruleMatchesWith is ruleMatches with the long windows read before in ids (windows.go): the reads of one decision
+// share them, so a value read alone and again in its answer is read once by each expression.
+func (r *Redactor) ruleMatchesWith(s string, ids *windowIDs) []span {
+	spans := r.ruleSpans(s, nil, false, ids)
 	if f, ok := foldView(s); ok {
-		spans = r.ruleSpans(f.text, spans, true)
+		spans = r.ruleSpans(f.text, spans, true, ids)
 		for i := len(spans) - 1; i >= 0 && spans[i].folded; i-- {
 			tick(1)
 			spans[i].start, spans[i].end, spans[i].folded = f.from[spans[i].start], f.to[spans[i].end-1], false
@@ -515,7 +544,12 @@ func mergeSpans(spans []span) []span {
 }
 
 // ruleSpans appends the matches of every rule in s to spans, unsorted, marked folded when s is a folded view.
-func (r *Redactor) ruleSpans(s string, spans []span, folded bool) []span {
+func (r *Redactor) ruleSpans(s string, spans []span, folded bool, ids *windowIDs) []span {
+	var runs [][]longRun
+	if len(s) >= windowMinText {
+		runs = longRuns(s, r.wins)
+	}
+	ids.newText()
 	for i, ru := range r.rules {
 		tick(1)
 		if folded && ru.kind == KindIP {
@@ -539,7 +573,7 @@ func (r *Redactor) ruleSpans(s string, spans []span, folded bool) []span {
 		if ru.spanFor != nil {
 			oneSpan = ru.spanFor()
 		}
-		for _, m := range ru.re.FindAllStringSubmatchIndex(counted(s), -1) {
+		for _, m := range ru.find(s, runs, ids) {
 			tick(1)
 			if spanFn != nil {
 				prevEnd = spanFn(s, m, prevEnd, add)
@@ -1007,6 +1041,9 @@ var blockScalarHeader = regexp.MustCompile(
 	`(?im)^[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:[ \t]*([|>][1-9+-]{0,2})[ \t]*(?:#[^\r\n]*)?\r?$`)
 
 // blockScalarScan redacts the content of each YAML literal or folded block scalar whose header line
+// blockScalarHeaderWindows is blockScalarHeader read by windows (windows.go).
+var blockScalarHeaderWindows = newWindowed(blockScalarHeader)
+
 // blockScalarHeader matches: the following lines that are blank or indented deeper than the key, up to the last
 // non-blank one. With no content, the indicator itself (group 2) is redacted. Headers inside a block already
 // redacted are skipped, so each byte is scanned once. Under a bare short key (bareShortColon) the content
@@ -1019,7 +1056,7 @@ var blockScalarHeader = regexp.MustCompile(
 // one more than the last, all "pass: |", are read once, not once per header.
 func blockScalarScan(s string, add func(start, end int)) {
 	prevEnd, refused := 0, -1
-	for _, m := range blockScalarHeader.FindAllStringSubmatchIndex(counted(s), -1) {
+	for _, m := range blockScalarHeaderWindows.findAll(s) {
 		tick(1)
 		if m[0] < prevEnd || keepReference(s, m) || sasRefused(s, m, true) {
 			continue

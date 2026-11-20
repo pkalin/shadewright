@@ -127,6 +127,8 @@ func FuzzReplacementBoundaries(f *testing.F) {
 const boundarySample = 20000
 
 func TestReplacementsEndOnCharacterBoundaries(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	r := rand.New(rand.NewPCG(845, 3)) // #nosec G404 -- test data from a fixed seed, not a secret
 	inputs := append([]string(nil), boundarySeeds...)
 	for range boundarySample {

@@ -105,6 +105,8 @@ func TestWriteExtentMainTable(t *testing.T) {
 // of every grammar piece, each byte main redacted is still redacted. The rule takes the union of main's value
 // and its own extent, so this holds by construction; a change that narrows a value fails here.
 func TestExtentStillRedactsWhatMainRedacted(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	f, err := os.Open(extentMainTable)
 	if err != nil {
 		t.Fatal(err)
@@ -383,6 +385,8 @@ func knownExtentCorpus(n int) []knownValue {
 // as literal text, quoted arguments, and YAML flow sequences with apostrophes in plain scalars. No byte of a
 // word of the value survives, and the token after the value stays.
 func TestExtentTakesTheKnownValue(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	failed := 0
 	for _, k := range knownExtentCorpus(4000) {
 		in := k.b.String()
@@ -418,6 +422,8 @@ func TestExtentTakesTheKnownValue(t *testing.T) {
 // The lists are JSON, YAML single-quoted, and JSON escaped inside a JSON string. "--password=" is left out: the
 // connection string rule (older than #708) takes "Password=" to the line end.
 func TestExtentKeepsTheArgumentsAfterAQuotedSecret(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	rng := rand.New(rand.NewPCG(708, 4)) //nolint:gosec // a fixed seed keeps the corpus the same on every run
 	openers := []string{"$(", "`", "${", "[", "{", "(", " ", ")", "]", "}", "$("}
 	tails := []string{"EVIDENCE)", "EV`", "EV}", "EV]", regionFlag, "west", "a b)", "$(x)", "x'y"}

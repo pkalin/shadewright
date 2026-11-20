@@ -46,6 +46,8 @@ type mainRedaction struct {
 // range the redactor replaces now. A rule change that narrows a value (such as a reference suffix applied to
 // a form it does not belong to) fails here. It guards against regressions and is expected to pass on main.
 func TestStillRedactsWhatMainRedactedForKeyNames(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	f, err := os.Open(mainRedactionTable)
 	if err != nil {
 		t.Fatal(err)

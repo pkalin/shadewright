@@ -321,6 +321,9 @@ func viewLooksLikeSecret(s string, start, end int) bool {
 // indicator after it if there is one (group 2): the keys the block-value rule reads on a line.
 var viewKey = regexp.MustCompile(`(?i)(` + secretKeyExpr + `)` + keySpaceExpr + `*:(?:` + keySpaceExpr + `*([|>][1-9+-]{0,2}))?`)
 
+// viewKeyWindows is viewKey read by windows (windows.go).
+var viewKeyWindows = newWindowed(viewKey)
+
 // neighbourKey matches a secret key of any form inside a value the block-value rule redacts: a key and ":"
 // or "=" (also in quotes, plain or escaped), or a secret-named flag. Its name (group 1, or group 2 for a flag)
 // is left out of the value, as every key-value rule shows a key's name, so a neighbouring key stays readable
@@ -353,6 +356,8 @@ type viewKeyAt struct {
 // so each line is read a fixed number of times.
 func viewBlockSpans(s string, add func(start, end int)) {
 	refused := -1
+	// The windows of the keys read on the lines before (windows.go): a long line repeated is read once.
+	ids := &windowIDs{}
 	for pos := 0; pos < len(s); {
 		tick(1)
 		l := readLine(s, pos)
@@ -361,7 +366,7 @@ func viewBlockSpans(s string, add func(start, end int)) {
 			continue
 		}
 		viewEnvLine(s, l, add)
-		if e := viewKeyLine(s, l, refused, add, &refused); e > pos {
+		if e := viewKeyLine(s, l, refused, add, &refused, ids); e > pos {
 			pos = e
 		}
 	}
@@ -382,8 +387,8 @@ func viewBlockSpans(s string, add func(start, end int)) {
 //     the key stay. A closing bracket inside the value does not end it: brackets are followed to the line's
 //     end, not to the first that could close (#845).
 //   - Inside the value, the names of other secret keys stay (neighbourKey); everything else goes.
-func viewKeyLine(s string, l viewLine, refused int, add func(start, end int), refusedOut *int) int {
-	ms := viewKey.FindAllStringSubmatchIndex(counted(s[l.text:l.end]), -1)
+func viewKeyLine(s string, l viewLine, refused int, add func(start, end int), refusedOut *int, ids *windowIDs) int {
+	ms := viewKeyWindows.findAllWith(s[l.text:l.end], ids)
 	if len(ms) == 0 {
 		return 0
 	}
@@ -1030,14 +1035,33 @@ func seqValues(items []string) []int {
 	)
 	out := make([]int, len(items))
 	pending, bare, block, inBlock := none, false, false, false
+	// A string repeated in the sequence (a label in the series of every metric template) is folded and matched
+	// once (#873, second round): what is read of it depends on its text only.
+	folded := map[string]string{}
+	found := map[seqFound][]int{}
+	find := func(re *regexp.Regexp, t string) []int {
+		k := seqFound{re, t}
+		tick(len(t)) // the lookup hashes the text
+		m, ok := found[k]
+		if !ok {
+			m = re.FindStringSubmatchIndex(counted(t))
+			found[k] = m
+		}
+		return m
+	}
 	for i, it := range items {
 		tick(1)
 		out[i] = -1
-		t := seqTrim(it)
-		if f, ok := foldView(t); ok {
-			// What a reader sees: an invisible character inside a key or before its separator, a colon
-			// look-alike, a separator of other characters.
-			t = seqTrim(f.text)
+		tick(len(it)) // the lookup hashes the text
+		t, ok := folded[it]
+		if !ok {
+			t = seqTrim(it)
+			if f, ok := foldView(t); ok {
+				// What a reader sees: an invisible character inside a key or before its separator, a colon
+				// look-alike, a separator of other characters.
+				t = seqTrim(f.text)
+			}
+			folded[it] = t
 		}
 		if t == "" {
 			continue
@@ -1080,30 +1104,36 @@ func seqValues(items []string) []int {
 				take(start+m[1], it[start+m[1]:])
 			}
 		}
-		if m := viewEnvName.FindStringSubmatchIndex(counted(t)); m != nil {
+		if m := find(viewEnvName, t); m != nil {
 			if !isReference(t[m[2]:m[3]]) {
 				pending, bare = env, false
 			}
 			continue
 		}
-		if m := seqKeyEnd.FindStringSubmatchIndex(counted(t)); m != nil {
+		if m := find(seqKeyEnd, t); m != nil {
 			if !isReference(t[m[2]:m[3]]) {
 				// A colon may have a block below it, with an indicator or with nothing after it.
 				pending, bare, block = value, isBareShortKey(t[m[2]:m[3]]), t[len(t)-1] != '='
 			}
 			continue
 		}
-		if m := seqFlagEnd.FindStringSubmatchIndex(counted(t)); m != nil {
+		if m := find(seqFlagEnd, t); m != nil {
 			if !referenceKey(t[m[2]:m[3]], true) {
 				pending, bare, block = value, false, false
 			}
 			continue
 		}
-		if m := seqWordEnd.FindStringSubmatchIndex(counted(t)); m != nil && !isReference(t[m[2]:m[3]]) {
+		if m := find(seqWordEnd, t); m != nil && !isReference(t[m[2]:m[3]]) {
 			pending, bare = word, isBareShortKey(t[m[2]:m[3]])
 		}
 	}
 	return out
+}
+
+// seqFound is an expression and a string seqValues matched it on.
+type seqFound struct {
+	re *regexp.Regexp
+	t  string
 }
 
 // Strings redacts the strings of a sequence, such as a container's arguments, with the one decision Pieces

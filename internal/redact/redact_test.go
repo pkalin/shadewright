@@ -1061,6 +1061,8 @@ const seeds = 1000
 // prose, and at the start, in the middle or at the end of a path or a URL, also after a long lower-case path.
 // The path around it stays (#525).
 func TestSlashSplitBase64IsRedacted(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	contexts := []struct{ name, before, after string }{
 		{"aws configure set", "aws configure set aws_secret_access_key ", "\nnext: field"},
 		{"cli flag", "run --aws-secret-access-key ", flagAfter},
@@ -1143,6 +1145,8 @@ func seededName(seed uint64, n int, alphabet string) string {
 // Paths, image references, hosts and URLs stay readable next to the slash-split base64 rule (#525): path
 // words, GUIDs, Kubernetes names with hash suffixes and generated temp names, each with seeded random parts.
 func TestSlashSplitRuleKeepsPaths(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	const hex, upperHex, lowerAlnum = "0123456789abcdef", "0123456789ABCDEF", "bcdfghjklmnpqrstvwxz2456789"
 	guid := func(s uint64, a string) string {
 		g := seededName(s, 32, a)
@@ -1610,6 +1614,8 @@ func seededEntraSecret(seed uint64) string {
 // precedes it (a CLI flag, prose, a JSON value under an unrelated key); its "~" and "." do not cut it into
 // parts the long-token rule keeps, and the text around it stays (#581).
 func TestEntraClientSecretIsRedacted(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	contexts := []struct{ name, before, after string }{
 		{"az login flag", "az login --service-principal -u app -p ", " --tenant t"},
 		{"az set", "az webapp config appsettings set --settings X=1 --password ", "\nnext: field"},

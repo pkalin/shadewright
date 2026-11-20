@@ -426,6 +426,9 @@ func invisibleLen(s string, i int) int {
 // separator fold looks for a separator.
 var sepKey = regexp.MustCompile(`(?i)` + bareKeyExpr + `(?:\\*["'])?`)
 
+// sepKeyWindows is sepKey read by windows (windows.go): a key repeated in a long text is read once.
+var sepKeyWindows = newWindowed(sepKey)
+
 // maxSepRun bounds the marks, controls and invisible characters of a separator run, so that a long run of
 // punctuation after a key is no separator (a heading underlined with "=" after "Password"). A key followed by a
 // longer run keeps its value. Blanks do not count (#845, decision of 2026-11-18): a column-aligned key
@@ -528,7 +531,7 @@ func (r sepRun) foldsAsSeparator() bool {
 // anything folds.
 func sepWalk(s string, emit func(text string, from, to int, copied bool)) bool {
 	changed, pos, prevRunEnd := false, 0, -1
-	for _, m := range sepKey.FindAllStringIndex(counted(s), -1) {
+	for _, m := range sepKeyWindows.findAll(s) {
 		tick(1)
 		at := m[1]
 		if s[at-1] == '-' && at < len(s) && s[at] == '>' {

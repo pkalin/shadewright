@@ -117,6 +117,8 @@ func TestWriteCommaFieldsMainTable(t *testing.T) {
 // by a comma, each byte main redacted is still redacted, so a secret-named key after the comma keeps its
 // value redacted at least as well as on main.
 func TestCommaFieldsStillRedactWhatMainRedacted(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	f, err := os.Open(commaFieldsMainTable)
 	if err != nil {
 		t.Fatal(err)

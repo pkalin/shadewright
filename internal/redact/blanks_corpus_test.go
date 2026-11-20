@@ -106,6 +106,8 @@ func TestWriteBlanksMainTable(t *testing.T) {
 // Nothing main redacted is lost by #769: on every input of a generated corpus of the contexts #769 changes,
 // each byte main redacted is still redacted.
 func TestBlanksStillRedactsWhatMainRedacted(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	f, err := os.Open(blanksMainTable)
 	if err != nil {
 		t.Fatal(err)
@@ -295,6 +297,8 @@ func checkKnownExtent(t *testing.T, corpus []knownValue, classes int) {
 // The classes #769 closes, against values whose extent is known by construction: no byte of a word of the
 // value survives, and the token after the value stays.
 func TestBlanksTakeTheKnownValue(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	checkKnownExtent(t, blanksKnownCorpus(3000), 6)
 }
 

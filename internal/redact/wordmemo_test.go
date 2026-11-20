@@ -122,6 +122,8 @@ var oldCommaSecretKey = regexp.MustCompile(`(?i)^(?:` + bareKeyExpr + `)(?:[ \t]
 // every comma of the generated texts as origin/main's did, at every limit; and when it says it did not read up
 // to the limit, a larger limit decides the same.
 func TestFieldAfterCommaMatchesMain(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	rng := rand.New(rand.NewPCG(845, 16)) // #nosec G404 -- reproducible generated texts
 	names := []string{passwordKey, "PASSWORD", "db_pass", "api-key", userKey, "next", "a", "to\u212aen", "\u017fecret", sasKeyName, "blobSas", "x.y"}
 	seps := []string{"=", ":", ":=", " ", "\t=", "  ", "==", "= ", "", ",", "\u212a"}

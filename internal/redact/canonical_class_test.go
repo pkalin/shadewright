@@ -31,6 +31,8 @@ import (
 // of the class and the end of the text or of the line, every byte of the run is redacted and the next line
 // stays.
 func TestInvisibleAfterValueGoesWithIt(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	n, failed := 0, 0
 	for ki, key := range canonGlyphKeys {
 		for ci, x := range canonInvisibles {

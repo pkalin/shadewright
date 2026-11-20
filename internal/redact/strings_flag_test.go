@@ -54,6 +54,8 @@ func flagAfterFlagCases() (cases [][]string, flags []string) {
 }
 
 func TestStringsTakesAFlagAfterAFlagAsItsValue(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	cases, flags := flagAfterFlagCases()
 	failed := 0
 	for i, items := range cases {

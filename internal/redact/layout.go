@@ -182,6 +182,9 @@ func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool, fits func([]
 	// (a label in the series lines of several metric templates) is read once: ownSpans depends on the text only.
 	own := make([][]span, len(ps))
 	read := make(map[string][]span)
+	// The long windows the rules read in the values alone, read again in the answer only where something else
+	// stands around them (windows.go).
+	ids := &windowIDs{}
 	k := 0
 	for i, p := range ps {
 		tick(1)
@@ -194,7 +197,7 @@ func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool, fits func([]
 		} else {
 			found, ok := read[p.Text]
 			if !ok {
-				found = r.ownSpans(p.Text)
+				found = r.ownSpansWith(p.Text, ids)
 				read[p.Text] = found
 			}
 			for _, sp := range found {
@@ -210,7 +213,7 @@ func (r *Redactor) piecesWithin(ps []Piece, limit int, joined bool, fits func([]
 	// Reading 2: the answer as the tool writes it, each match ended at the line breaks of the values.
 	wsize := func(i int) int { return len(ws[i].text) }
 	answer := raw.String()
-	matches := r.ruleMatches(answer)
+	matches := r.ruleMatchesWith(answer, ids)
 	widen := func(i int, sp span) span { return ws[i].widen(sp) }
 	text := func(i int) string { return ws[i].text }
 	if joined {

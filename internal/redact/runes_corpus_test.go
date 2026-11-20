@@ -275,6 +275,8 @@ const runeOutputsDivisor = 10
 // Every span of every reading starts and ends on a character boundary on the generated canonical corpus, and
 // the entry points write valid UTF-8 on a share of it.
 func TestSpansOnRuneBoundariesCanonCorpus(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	cases, _ := canonSample(canonCorpus())
 	for i, c := range cases {
 		checkRunes(t, c.name, c.in, i%runeOutputsDivisor == 0)
@@ -285,6 +287,8 @@ func TestSpansOnRuneBoundariesCanonCorpus(t *testing.T) {
 // by String and StringTwice, each kept piece kept by String, and each byte the release's String hides still
 // hidden by String.
 func TestSpansOnRuneBoundariesMultiByteCorpus(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	cases, sampled := canonSample(runeCorpus())
 	bound := 0
 	for _, c := range cases {

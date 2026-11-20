@@ -313,6 +313,8 @@ var canonCorpusLeaks = sync.OnceValues(func() (struct {
 // piece of secret survives in any output, except the leaks listed in redact.CanonEntryLeaks. A listed leak
 // that stops leaking fails too, so the table shrinks with the fix of #845.
 func TestCanonCorpusThroughEveryEntryPoint(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	corpus, found := canonCorpusLeaks()
 	cases, sampled, got, first := corpus.cases, corpus.sampled, found.leaks, found.first
 	if redact.CanonWriteTables(t, sampled) {

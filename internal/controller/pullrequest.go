@@ -1598,8 +1598,7 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	case watchRetry:
 		return hintLook{}, v.err
 	case watchGone:
-		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
-			"The recorded pull request cannot be found any more ("+v.gone+"); automation stopped")
+		return hintLook{}, r.stopGone(ctx, rr, v)
 	case watchMoved:
 		return hintLook{}, r.stopOpenElsewhere(ctx, rr, v.pr)
 	case watchMergedElsewhere:
@@ -1669,11 +1668,30 @@ func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr
 	if cancelRequested(rr) {
 		return errOpenElsewhere
 	}
-	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestOnOtherBase); ctx.Err() != nil || isClusterError(err) {
+	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestOnOtherBase, stoppedCheckOpen); ctx.Err() != nil ||
+		isClusterError(err) {
 		return err
 	}
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestOnOtherBase,
 		"The recorded "+openElsewhereText(cr)+"; automation stopped"+messageOpenElsewhere)
+}
+
+// stopGone is the watch's answer to the request's own pull request read gone, v: the request stops in
+// NeedsIntervention with ChangeRequestGone, cancelled or not. In the same step the review check of the recorded head
+// is failed (failStoppedCheck, decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop,
+// ADR-0045): the head is the request's own commit, and another pull request from its branch could merge it on a pass
+// written before the stop. Through a new installation of the plan's repository nothing is written
+// (stoppedCheckUnlessReinstalled). A failed write does not hold the stop: its status write carries condition
+// ReviewCheckNotFailed, and a look of the stopped holder that keeps the lock tries it again. A cancelled reconcile and
+// a failure of the Kubernetes API are returned, for the error backoff, before anything is written.
+func (r *RemediationRequestReconciler) stopGone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	v changeVerdict) error {
+	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestGone, v.rule().stoppedCheck); ctx.Err() != nil ||
+		isClusterError(err) {
+		return err
+	}
+	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
+		"The recorded pull request cannot be found any more ("+v.gone+"); automation stopped")
 }
 
 // stopMergedElsewhere is the watch's and the adoption's answer to the request's own pull request, cr, merged into a

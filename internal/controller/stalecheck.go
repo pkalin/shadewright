@@ -222,10 +222,15 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // failStoppedCheck fails the review check shadewright/review of a request that stopped while its own pull request is
 // open, on the target branch or on a base a person moved it to (#925, ADR-0043 limit (e)), and records state Stale in
 // rr's status in memory, for the caller's status write: moved back to the target branch, or left there, the pull
-// request cannot merge on a check written before the stop. Its callers have just read the pull request open
-// (stoppedCheck): the step that stops the request for a pull request open on another base (stopOpenElsewhere), and
-// every look of a stopped holder that reads it open (failCheckAfterLook), so a stop for any other reason gets it at
-// its first look, and a failed write is tried again at the next. Once Stale is recorded on the head, such a look
+// request cannot merge on a check written before the stop. Its callers have just read the pull request open or gone
+// (rule, the verdict's stoppedCheck): the step that stops the request for a pull request open on another base
+// (stopOpenElsewhere), the watch's stop for one read gone (ChangeRequestGone), and every look of a stopped holder that
+// reads it open, or gone while the lock is kept (failCheckAfterLook), so a stop for any other reason gets it at its
+// first look, and a failed write is tried again at the next. Gone gets it too since the check sits on the request's
+// own recorded commit, which another pull request from its branch could merge on a pass written before the stop
+// (decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop, ADR-0045); through a new
+// installation of the plan's repository (#290, stoppedCheckUnlessReinstalled) nothing is written for gone and
+// condition ReviewCheckNotFailed is removed. Once Stale is recorded on the head, such a look
 // reads the latest review check of the head (stoppedCheckShown) and writes the failed check again only when the Git
 // host shows another state last or none (decision of 2026-11-20 on #925): one read and at most one write per look,
 // bounded by those looks (heldRecheckInterval while the lock is held), with no polling of its own. Those looks run
@@ -242,7 +247,7 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // since a branch change permits reads only (#771): that is said the same way, until the entry names the branch again. A cancelled reconcile is only returned, and so is a
 // failure of the Kubernetes API (reading the settings), for the error backoff.
 func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	reason string) error {
+	reason string, rule stoppedCheck) error {
 	if !r.ownsReviewCheck(rr) {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 		return nil
@@ -253,7 +258,14 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 		pr.Number, "head", pr.HeadSHA)
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
-	git, _, _, err := r.openPlanRepositoryFor(stepCtx, rr)
+	git, _, reinstalled, err := r.openPlanRepositoryFor(stepCtx, rr)
+	if err == nil && reinstalled && rule == stoppedCheckUnlessReinstalled {
+		// Read gone through a new installation of the plan's repository (#290): the pull request is not tied to the
+		// request there, so nothing is written and nothing is owed.
+		endCheckNote(rr)
+		r.stoppedCheckLooks.Delete(client.ObjectKeyFromObject(rr))
+		return nil
+	}
 	if recorded {
 		var again bool
 		if again, err = stoppedCheckShown(stepCtx, git, pr.HeadSHA, err); !again {

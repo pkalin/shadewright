@@ -34,6 +34,9 @@ import (
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 )
 
+// notWrittenYet is the message of a ReviewCheckNotFailed condition a test sets before a look.
+const notWrittenYet = "not written yet"
+
 // stopLive stops p in the API server the way a stop does (decision of 2026-11-20 on #925): the failed review check
 // on its head, state Stale recorded, phase NeedsIntervention, the lock kept for its open pull request. It returns the
 // copy of p from before the stop, which a cache can still serve.
@@ -256,7 +259,7 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 				looks = 2
 			}
 			for range looks {
-				err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention))
+				err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention), stoppedCheckOpen)
 				if err != nil && (!c.note || c.unread) {
 					t.Fatalf("failStoppedCheck: %v", err)
 				}
@@ -445,7 +448,7 @@ func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosed
 			if tc.note {
 				meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
 					Type: api.ConditionReviewCheckNotFailed, Status: metav1.ConditionTrue, Reason: ReasonGitFailed,
-					Message: "not written yet"})
+					Message: notWrittenYet})
 			}
 			runs := len(g.CheckRuns(head))
 			v := changeVerdict{state: changeClosedElsewhere, pr: closed}
@@ -470,5 +473,130 @@ func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosed
 				t.Fatalf("note left: %v, Stale on head: %v: want the note removed and Stale recorded", noted, staleOnHead(p))
 			}
 		})
+	}
+}
+
+// A stopped holder whose look reads its own pull request gone (decision of 2026-11-20 on #925 extending the
+// replacement of point 2 to the stop, ADR-0045): while the lock is kept, here by another open pull request from the
+// branch, the look writes the stop's failed check on the recorded head (stoppedCheckUnlessReinstalled), and a failed
+// write sets condition ReviewCheckNotFailed and is tried again at the next look. Once written and still last, a look
+// writes nothing; when the Git host shows another state last, it writes the failed check once more. A look that
+// released the lock writes nothing and ends the note (lockverdict.Release), and so does one through a new
+// installation of the plan's repository (#290).
+func TestStoppedHolderLookOnGoneFailsItsCheck(t *testing.T) {
+	gone := changeVerdict{state: changeGone, gone: "missing"}
+	type look struct {
+		failWrite bool
+		// wantRuns is the number of check runs the look writes, wantNote whether ReviewCheckNotFailed is left.
+		wantRuns int
+		wantNote bool
+	}
+	cases := []struct {
+		name string
+		// written: the stop's failed check is written and Stale recorded before the looks; passAfter: a passing
+		// check is written on the head after it; released: the look released the lock; reinstalled: the plan's
+		// repository is reached through a new installation of the App.
+		written, passAfter, released, reinstalled bool
+		looks                                     []look
+	}{
+		{name: "not written yet", looks: []look{{wantRuns: 1}}},
+		{name: "a failed write is tried again at the next look",
+			looks: []look{{failWrite: true, wantRuns: 0, wantNote: true}, {wantRuns: 1}}},
+		{name: "written and still last", written: true, looks: []look{{wantRuns: 0}, {wantRuns: 0}}},
+		{name: "written and another state last", written: true, passAfter: true, looks: []look{{wantRuns: 1}, {wantRuns: 0}}},
+		{name: "the look released the lock", released: true, looks: []look{{wantRuns: 0}}},
+		{name: "through a new installation", reinstalled: true, looks: []look{{wantRuns: 0}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, p, _, cr, head := gateWorld(t)
+			ctx := context.Background()
+			plainWaiting(t, r, p, head)
+			if tc.written {
+				stopLive(t, r, g, p)
+			}
+			if tc.passAfter {
+				if err := g.CreateCheckRun(ctx, head, providers.CheckRun{Name: providers.CheckRunName,
+					Status: providers.CheckRunSuccess, Title: "passed before the stop was seen"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := g.Close(cr.Number); err != nil {
+				t.Fatal(err)
+			}
+			var holding *providers.ChangeRequest
+			if !tc.released {
+				n, err := g.AddOpenChangeRequest(cr.HeadBranch, mainBranch, "opened by a person")
+				if err != nil {
+					t.Fatal(err)
+				}
+				other, err := g.GetChangeRequest(ctx, n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				holding = &other
+			}
+			p.Status.Phase = api.PhaseNeedsIntervention
+			p.Status.HoldsTarget = new(!tc.released)
+			if tc.released {
+				meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
+					Type: api.ConditionReviewCheckNotFailed, Status: metav1.ConditionTrue, Reason: ReasonGitFailed,
+					Message: notWrittenYet})
+			}
+			if tc.reinstalled {
+				reinstallLive(t, r, p)
+			}
+			for i, l := range tc.looks {
+				g.SetFail(func(op string) error {
+					if l.failWrite && op == opCreateCheckRun {
+						return fmt.Errorf("status 502: %w", providers.ErrRetryable)
+					}
+					return nil
+				})
+				runs := len(g.CheckRuns(head))
+				if err := r.failCheckAfterLook(ctx, p, gone, holding); err != nil {
+					t.Fatalf("look %d: %v", i, err)
+				}
+				got := g.CheckRuns(head)[runs:]
+				noted := meta.FindStatusCondition(p.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil
+				if len(got) != l.wantRuns || noted != l.wantNote {
+					t.Fatalf("look %d wrote %+v, note %v: want %d runs, note %v", i, got, noted, l.wantRuns, l.wantNote)
+				}
+				for _, run := range got {
+					if run.Status != providers.CheckRunFailure || run.Title != stoppedCheckTitle ||
+						strings.Contains(run.Summary, "closes") {
+						t.Fatalf("look %d wrote %+v: want the stop's failed check, which promises no close", i, run)
+					}
+				}
+				if all := g.CheckRuns(head); (l.wantRuns > 0 || tc.written) &&
+					(all[len(all)-1].Status != providers.CheckRunFailure || !staleOnHead(p)) {
+					t.Fatalf("look %d: the failed check is not last or Stale is not recorded: %+v", i, all)
+				}
+			}
+		})
+	}
+}
+
+// reinstallLive marks p, stopped, as a stale plan's cleanup refused for good (PlanFresh False with GitForbidden,
+// staleCleanupStopped, under which the plan's repository may be reached through a new installation,
+// cleanupRepository) and moves the settings entry of the plan's repository to a new installation of the GitHub App.
+func reinstallLive(t *testing.T, r *RemediationRequestReconciler, p *api.RemediationRequest) {
+	t.Helper()
+	ctx := context.Background()
+	meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{Type: api.ConditionPlanFresh,
+		Status: metav1.ConditionFalse, Reason: ReasonGitForbidden, Message: "the close was refused"})
+	if !staleCleanupStopped(p) {
+		t.Fatal("the request is not a stopped stale cleanup")
+	}
+	s := &api.RemediationSettings{}
+	if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, s); err != nil {
+		t.Fatal(err)
+	}
+	s.Spec.Repositories[0].GitHub.InstallationID++
+	if err := r.Update(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	if _, reinstalled, ok := cleanupRepository(s, p, true); !ok || !reinstalled {
+		t.Fatal("the request needs its repository through a new installation")
 	}
 }

@@ -34,7 +34,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundOther, keepsLockMoved: false, lookConfirmGone: false, lookYields: true,
 		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: false, lockLooksElsewhere: false, fromOtherBases: otherBaseFailed,
 		yieldsToClosed: false, handed: handedRetry, recover: recoverRetry, mergedInto: false,
-		retargetCancel: retargetCancelNone, failCheck: failCheckRetry, stoppedCheck: false, cancelLook: cancelLookNone, adopt: adoptRetry,
+		retargetCancel: retargetCancelNone, failCheck: failCheckRetry, stoppedCheck: stoppedCheckNone, cancelLook: cancelLookNone, adopt: adoptRetry,
 		refuseOpened: refuseClose, mergedUnrecorded: mergedUnrecordedRetry, watch: watchRetry,
 		closeRecorded: closeRecordedRetry, closeUnrecorded: closeUnrecordedRetry, stopOnOtherBase: stopOnOtherRetry,
 		finalize: finalizeRetry,
@@ -44,7 +44,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundOther, keepsLockMoved: false, lookConfirmGone: false, lookYields: false,
 		lookWins: false, ownOpenOnTarget: true, adoptLooksElsewhere: false, lockLooksElsewhere: false, fromOtherBases: otherBaseNone,
 		yieldsToClosed: false, handed: handedIt, recover: recoverRetry, mergedInto: false,
-		retargetCancel: retargetCancelNone, failCheck: failCheckWrite, stoppedCheck: true, cancelLook: cancelLookNone, adopt: adoptIt,
+		retargetCancel: retargetCancelNone, failCheck: failCheckWrite, stoppedCheck: stoppedCheckOpen, cancelLook: cancelLookNone, adopt: adoptIt,
 		refuseOpened: refuseClose, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGoOn,
 		closeRecorded: closeRecordedClose, closeUnrecorded: closeUnrecordedGoOn, stopOnOtherBase: stopOnOtherNothing,
 		finalize: finalizeClose,
@@ -54,7 +54,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundMerged, keepsLockMoved: false, lookConfirmGone: false, lookYields: false,
 		lookWins: true, ownOpenOnTarget: false, adoptLooksElsewhere: false, lockLooksElsewhere: true, fromOtherBases: otherBaseNone,
 		yieldsToClosed: false, handed: handedIt, recover: recoverFromPullRequest, mergedInto: true,
-		retargetCancel: retargetCancelNone, failCheck: failCheckWrite, stoppedCheck: false, cancelLook: cancelLookMerged, adopt: adoptIt,
+		retargetCancel: retargetCancelNone, failCheck: failCheckWrite, stoppedCheck: stoppedCheckNone, cancelLook: cancelLookMerged, adopt: adoptIt,
 		refuseOpened: refuseEnded, mergedUnrecorded: mergedUnrecordedMerged, watch: watchGoOn,
 		closeRecorded: closeRecordedClose, closeUnrecorded: closeUnrecordedGoOn, stopOnOtherBase: stopOnOtherNothing,
 		finalize: finalizeNothing,
@@ -64,7 +64,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundClosed, keepsLockMoved: false, lookConfirmGone: false, lookYields: false,
 		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: true, lockLooksElsewhere: true, fromOtherBases: otherBaseClosed,
 		yieldsToClosed: false, handed: handedIt, recover: recoverFromPullRequest, mergedInto: false,
-		retargetCancel: retargetCancelClosed, failCheck: failCheckWrite, stoppedCheck: false, cancelLook: cancelLookEnd, adopt: adoptIt,
+		retargetCancel: retargetCancelClosed, failCheck: failCheckWrite, stoppedCheck: stoppedCheckNone, cancelLook: cancelLookEnd, adopt: adoptIt,
 		refuseOpened: refuseEnded, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGoOn,
 		closeRecorded: closeRecordedClose, closeUnrecorded: closeUnrecordedLookElsewhere,
 		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing,
@@ -74,7 +74,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundGone, keepsLockMoved: false, lookConfirmGone: true, lookYields: true,
 		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: true, lockLooksElsewhere: true, fromOtherBases: otherBaseNone,
 		yieldsToClosed: true, handed: handedGone, recover: recoverNothing, mergedInto: false,
-		retargetCancel: retargetCancelClosed, failCheck: failCheckNotOursReinstalled, stoppedCheck: false, cancelLook: cancelLookEnd,
+		retargetCancel: retargetCancelClosed, failCheck: failCheckNotOursReinstalled, stoppedCheck: stoppedCheckUnlessReinstalled, cancelLook: cancelLookEnd,
 		adopt: adoptNone, refuseOpened: refuseClose, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGone,
 		closeRecorded: closeRecordedNotOurs, closeUnrecorded: closeUnrecordedLookElsewhere,
 		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing,
@@ -84,7 +84,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundOther, keepsLockMoved: true, lookConfirmGone: false, lookYields: false,
 		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: false, lockLooksElsewhere: false, fromOtherBases: otherBaseOpen,
 		yieldsToClosed: false, handed: handedMoved, recover: recoverRetry, mergedInto: false,
-		retargetCancel: retargetCancelMoved, failCheck: failCheckWriteOtherBase, stoppedCheck: true, cancelLook: cancelLookMoved,
+		retargetCancel: retargetCancelMoved, failCheck: failCheckWriteOtherBase, stoppedCheck: stoppedCheckOpen, cancelLook: cancelLookMoved,
 		adopt: adoptElsewhere, refuseOpened: refuseMoved, mergedUnrecorded: mergedUnrecordedNothing, watch: watchMoved,
 		closeRecorded: closeRecordedMoved, closeUnrecorded: closeUnrecordedGoOn, stopOnOtherBase: stopOnOtherMoved,
 		finalize: finalizeCloseAnyBase,
@@ -94,7 +94,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundGone, keepsLockMoved: false, lookConfirmGone: false, lookYields: false,
 		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: false, lockLooksElsewhere: true, fromOtherBases: otherBaseMerged,
 		yieldsToClosed: false, handed: handedGone, recover: recoverNothing, mergedInto: false,
-		retargetCancel: retargetCancelMergedElsewhere, failCheck: failCheckNotOurs, stoppedCheck: false,
+		retargetCancel: retargetCancelMergedElsewhere, failCheck: failCheckNotOurs, stoppedCheck: stoppedCheckNone,
 		cancelLook: cancelLookMergedElsewhere, adopt: adoptMergedElsewhere, refuseOpened: refuseMergedElsewhere,
 		mergedUnrecorded: mergedUnrecordedNothing, watch: watchMergedElsewhere, closeRecorded: closeRecordedNotOurs,
 		closeUnrecorded: closeUnrecordedGoOn, stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing,
@@ -104,7 +104,7 @@ var verdictTable = map[changeState]verdictRow{
 		lockFound: lockverdict.FoundClosed, keepsLockMoved: false, lookConfirmGone: false, lookYields: false,
 		lookWins: false, ownOpenOnTarget: false, adoptLooksElsewhere: true, lockLooksElsewhere: true, fromOtherBases: otherBaseClosed,
 		yieldsToClosed: false, handed: handedIt, recover: recoverFromPullRequest, mergedInto: false,
-		retargetCancel: retargetCancelClosed, failCheck: failCheckWriteOtherBase, stoppedCheck: false, cancelLook: cancelLookEnd, adopt: adoptIt,
+		retargetCancel: retargetCancelClosed, failCheck: failCheckWriteOtherBase, stoppedCheck: stoppedCheckNone, cancelLook: cancelLookEnd, adopt: adoptIt,
 		refuseOpened: refuseEnded, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGoOn,
 		closeRecorded: closeRecordedNothing, closeUnrecorded: closeUnrecordedLookElsewhere,
 		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing,
@@ -176,9 +176,10 @@ type verdictRow struct {
 	// own commit, so it can only keep that commit from merging through another pull request from the request's
 	// branch. Through a new installation of the plan's repository nothing is written for it.
 	failCheck failCheck
-	// stoppedCheck: the request's own pull request is open, on the target branch or on a base a person moved it to,
-	// so a stopped request fails its review check (failStoppedCheck, #925).
-	stoppedCheck bool
+	// stoppedCheck is whether a stopped request fails its review check on the recorded head (failStoppedCheck,
+	// #925): its own pull request read open, on the target branch or on a base a person moved it to, or read gone
+	// (decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop, ADR-0045).
+	stoppedCheck stoppedCheck
 	// cancelLook is what the read-only look of a cancel after a branch change does (cancelLook).
 	cancelLook cancelLook
 
@@ -288,6 +289,23 @@ const (
 	// failCheckWriteOtherBase writes the failed check with the summary of a pull request on another base: nothing is
 	// closed there and a person decides (otherBaseCheckSummary).
 	failCheckWriteOtherBase
+)
+
+// stoppedCheck is verdictRow.stoppedCheck.
+type stoppedCheck int
+
+const (
+	// stoppedCheckNone writes nothing for the request's own pull request: a stopped holder's look writes the check
+	// only while another open pull request from the branch keeps the lock and the check is still owed
+	// (failCheckAfterLook).
+	stoppedCheckNone stoppedCheck = iota
+	// stoppedCheckOpen writes the failed check: the request's own pull request is open, on the target branch or on
+	// another base, and can merge on a check written before the stop.
+	stoppedCheckOpen
+	// stoppedCheckUnlessReinstalled is gone: the failed check is written on the recorded head, the request's own
+	// commit, so no other pull request from its branch can merge it on a pass written before the stop. Through a new
+	// installation of the plan's repository (#290) nothing is written, as for failCheckNotOursReinstalled.
+	stoppedCheckUnlessReinstalled
 )
 
 // cancelLook is verdictRow.cancelLook.

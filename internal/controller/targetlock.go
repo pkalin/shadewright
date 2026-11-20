@@ -1134,30 +1134,48 @@ func (r *RemediationRequestReconciler) lockWaiters(ctx context.Context, obj clie
 }
 
 // failCheckAfterLook fails the review check of a stopped holder whose look v read its own pull request open, on the
-// target branch or on another base (stoppedCheck, #925): tried at every look while it is pending, and recorded by the
-// look's status write, with condition ReviewCheckNotFailed while it cannot be written (failStoppedCheck). A look that
-// reads it not open removes that condition (endCheckNote), unless another open pull request from the request's branch
-// keeps the lock (holding): that one has the branch head, so the head of the failed check, and can merge on a check
-// written before the stop. While it does and the condition is set, the look keeps trying the failed check on the
-// recorded head (decision of 2026-11-20 on #925, point 3, ADR-0045), and the release of the lock ends the condition
-// (lockverdict.Release). The stop's summary promises no close (stoppedCheckRun), so it is the same on any base. Only a failure of the
-// Kubernetes API is returned, for the error backoff; any other failure is said in status and does not hold the look,
-// whose pace stays heldRecheckInterval.
+// target branch or on another base (stoppedCheckOpen, #925), or gone while the lock is kept (stoppedCheckUnlessReinstalled,
+// decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop, ADR-0045): tried at every look while
+// it is pending, and recorded by the look's status write, with condition ReviewCheckNotFailed while it cannot be
+// written (failStoppedCheck). A look that released the lock ends the looks, and lockverdict.Release has removed the
+// condition, so a gone look then writes nothing. A look that reads it not open removes that condition (endCheckNote),
+// unless another open pull request from the request's branch keeps the lock (holding): that one has the branch head,
+// so the head of the failed check, and can merge on a check written before the stop. While it does and the condition
+// is set, the look keeps trying the failed check on the recorded head (decision of 2026-11-20 on #925, point 3,
+// ADR-0045), and the release of the lock ends the condition (lockverdict.Release). The stop's summary promises no
+// close (stoppedCheckRun), so it is the same on any base. Only a failure of the Kubernetes API is returned, for the
+// error backoff; any other failure is said in status and does not hold the look, whose pace stays
+// heldRecheckInterval.
 func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, v changeVerdict, holding *providers.ChangeRequest) error {
 	pr := rr.Status.PullRequest
-	if !v.rule().stoppedCheck {
-		if holding == nil || pr == nil ||
-			meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed) == nil {
-			// The look read the request's own pull request not open (closed, merged or gone, on any base), and no
-			// other open pull request keeps the lock, or the failed check was written: nothing is left to try.
+	if mergeRecorded(rr) {
+		// The pull request is merged: no look tries its failed review check again (settleRecorded).
+		endCheckNote(rr)
+		return nil
+	}
+	rule := v.rule().stoppedCheck
+	switch rule {
+	case stoppedCheckOpen:
+		if pr == nil || v.pr.Number != pr.Number {
+			return nil
+		}
+	case stoppedCheckUnlessReinstalled:
+		if pr == nil || !ptr.Deref(rr.Status.HoldsTarget, false) {
+			// Gone, and the look released the lock: the looks end with it, and so does the condition.
 			endCheckNote(rr)
 			return nil
 		}
-	} else if pr == nil || v.pr.Number != pr.Number {
-		return nil
+	case stoppedCheckNone:
+		if holding == nil || pr == nil ||
+			meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed) == nil {
+			// The look read the request's own pull request not open (closed or merged, on any base), and no other
+			// open pull request keeps the lock, or the failed check was written: nothing is left to try.
+			endCheckNote(rr)
+			return nil
+		}
 	}
-	if err := r.failStoppedCheck(ctx, rr, string(rr.Status.Phase)); isClusterError(err) {
+	if err := r.failStoppedCheck(ctx, rr, string(rr.Status.Phase), rule); isClusterError(err) {
 		return err
 	}
 	return nil

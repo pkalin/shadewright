@@ -129,7 +129,9 @@ import (
 // on any base), while no other open pull request from its branch keeps the lock, carries no such condition (note
 // cleared). After every reconcile, no request whose failed check is
 // recorded as Stale, and still shown failed last on its head, carries it (note cleared), nor one whose lock is released or whose merge is recorded (note
-// ended).
+// ended); and a request that stops because its pull request is read gone (ChangeRequestGone), with reviewer hints on,
+// leaves the failed review check last on its recorded head, or condition ReviewCheckNotFailed, in that reconcile (gone
+// check).
 //
 // Each seed has a focus (seed modulo the number of focuses, modelFocuses): none, or one that makes an order of the
 // fourth or fifth decision of 2026-11-18 on #771 likely (a deadline that passes while the repository cannot be
@@ -260,6 +262,9 @@ func TestGitWaitModel(t *testing.T) {
 		t.Logf("moves to another base and back: %d, in %d sequences; deleted while moved: %d; closed or merged while "+
 			"moved before a lost write was adopted: %d", modelMoves.moves, modelMoves.sequences,
 			modelMoves.movedBeforeDelete, modelMoves.endedWhileMoved)
+		modelGoneStops.mu.Lock()
+		defer modelGoneStops.mu.Unlock()
+		t.Logf("stops for a pull request read gone with reviewer hints on, checked: %d", modelGoneStops.count)
 	})
 	for _, seed := range modelSeeds(t) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -355,6 +360,8 @@ type modelWorld struct {
 	// checkFails: the Git host fails every write of a check run (CreateCheckRun) with a 5xx (checkEvent): a write
 	// made to fail (writeFaulted), no failed read.
 	checkFails bool
+	// goneStopSeen says goneCheckProperty saw this sequence's stop for a pull request read gone (ChangeRequestGone).
+	goneStopSeen bool
 	// stopFailedHead is the head whose last review check a reconcile left failed while the request stopped with its
 	// own pull request open on that head (property "stop check kept"); empty otherwise.
 	stopFailedHead string
@@ -1895,6 +1902,40 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	m.recordedProperty(live, faulted)
 	m.noteProperty(live)
 	m.stopCheckProperty(live)
+	m.goneCheckProperty(live)
+}
+
+// modelGoneStops counts, over every seed of a run, the stops for a pull request read gone with reviewer hints on that
+// goneCheckProperty checked, so a run shows the property was reached.
+var modelGoneStops struct {
+	mu    sync.Mutex
+	count int
+}
+
+// goneCheckProperty: a request that stops because its pull request is read gone (ChangeRequestGone) with reviewer
+// hints on fails the review check on its recorded head in the same reconcile, or says why not with condition
+// ReviewCheckNotFailed (gone check, decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop,
+// ADR-0045): otherwise another pull request from its branch could merge that commit on a pass written before the
+// stop. The model reaches no new installation of the App, so the exception for it is the directed tests'.
+func (m *modelWorld) goneCheckProperty(live *api.RemediationRequest) {
+	if m.goneStopSeen || live.Status.Phase != api.PhaseNeedsIntervention || !slices.ContainsFunc(live.Status.Conditions,
+		func(c metav1.Condition) bool { return c.Reason == ReasonChangeRequestGone }) {
+		return
+	}
+	m.goneStopSeen = true
+	pr := live.Status.PullRequest
+	if !m.r.ReviewerHints || pr == nil || handedOff(live) || intent(live) != nil ||
+		meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil {
+		return
+	}
+	modelGoneStops.mu.Lock()
+	modelGoneStops.count++
+	modelGoneStops.mu.Unlock()
+	if last := lastReviewCheck(m.g.CheckRuns(pr.HeadSHA)); last == nil || last.Status != providers.CheckRunFailure {
+		m.fatalf("gone check: the request stopped with ChangeRequestGone and the last review check of its recorded "+
+			"head %.12s is not failed, and condition ReviewCheckNotFailed does not say so: %+v", pr.HeadSHA,
+			m.g.CheckRuns(pr.HeadSHA))
+	}
 }
 
 // stopCheckProperty: after a stop, the last review check written for the head is the failed one, or the pull request

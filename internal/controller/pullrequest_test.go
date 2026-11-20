@@ -7526,9 +7526,12 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// of another base, since the pull request is not read open on the target branch: it is the request's own
 		// recorded commit, and without the check an earlier pass there stays while another pull request from the
 		// branch is open (decision of 2026-11-20 on #925 replacing point 2). Through a new installation of the App
-		// (#290) gone writes nothing (failCheckNotOursReinstalled): goneReinstalled is that cell.
+		// (#290) gone writes nothing (failCheckNotOursReinstalled): goneReinstalled is that cell. "stop" is the stop's
+		// check (failStoppedCheck, stoppedCheckTitle), whose summary promises no close on any base: the watch writes it
+		// when it stops the request for its pull request read gone, as stale and cancel do (decision of 2026-11-20 on
+		// #925 extending the replacement of point 2 to the stop), and when it reads the pull request open on another base.
 		type checkCell struct{ written, summary string }
-		const target, otherBase = "target", "other base"
+		const target, otherBase, stop = "target", "other base", "stop"
 		checkCases := []verdictCase{isOpen, isClosed, closedThere, isElsewhere, isGone, mergedThere, failedRead}
 		checkCallers := map[string]struct {
 			act             func(own, other int64)
@@ -7552,10 +7555,21 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				// Open on another base, the cancel's look ends it Cancelled with the lock kept and writes no check in
 				// that reconcile: the stopped holder's later looks write the stop's check (failStoppedCheck), whose
 				// summary promises no close. Gone never reaches the cancel's check: the look at the pull request
-				// before the cancel reads it gone and stops the request with ChangeRequestGone, so no check is
-				// written, through a new installation or not. "the check step of a cancel" proves the row for it.
+				// before the cancel reads it gone and stops the request with ChangeRequestGone, which writes the
+				// stop's check; through a new installation nothing. "the check step of a cancel" proves the row for
+				// the cancel's own check.
 				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
-					isElsewhere: none, isGone: none, mergedThere: none, failedRead: none},
+					isElsewhere: none, isGone: stop, mergedThere: none, failedRead: none},
+				goneReinstalled: none,
+			},
+			pathWatch: {
+				// The watch of an open request: it stops the request for its pull request read gone
+				// (ChangeRequestGone) or open on another base (ChangeRequestOnOtherBase), each with the stop's check;
+				// closed, merged there or a failed read write nothing in that reconcile.
+				act: func(own, other int64) { _, _ = reconcileResult() },
+				want: map[verdictCase]string{isOpen: none, isClosed: none, closedThere: none,
+					isElsewhere: stop, isGone: stop, mergedThere: none, failedRead: none},
+				goneReinstalled: none,
 			},
 			"the check step of a cancel": {
 				// failCancelCheck on its own, as cancelOpen calls it before the close: a pull request that goes
@@ -7594,7 +7608,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					caller, slices.Index(checkCases, isGone), true))
 			}
 		}
-		DescribeTable("writes the failed review check of a stale plan or a cancel as the verdict's rule says", func(caller string, i int, reinstalled bool) {
+		DescribeTable("writes the failed review check of a stale plan, a cancel or a stop as the verdict's rule says", func(caller string, i int, reinstalled bool) {
 			c, vc := checkCallers[caller], checkCases[i]
 			recorder = record.NewFakeRecorder(50)
 			hints = true
@@ -7612,11 +7626,16 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			got := checkCell{written: none}
 			for _, run := range runs {
 				Expect(run.Status).To(Equal(providers.CheckRunFailure), "only a failed check is written")
-				Expect(run.Title).To(Equal(c.title), "the check of the caller's own path")
 				Expect(run.Summary).NotTo(ContainSubstring("hotfix"), "no text of the Git host in a summary")
 				got.written = target
-				if strings.HasSuffix(run.Summary, otherBaseCheckSummary) {
+				switch {
+				case run.Title == stoppedCheckTitle:
+					got.written = stop
+				case strings.HasSuffix(run.Summary, otherBaseCheckSummary):
 					got.written = otherBase
+				}
+				if got.written != stop {
+					Expect(run.Title).To(Equal(c.title), "the check of the caller's own path")
 				}
 				got.summary = run.Summary
 			}
@@ -7625,6 +7644,14 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(got.summary).To(HaveSuffix(closeSummary))
 			case otherBase:
 				Expect(got.summary).NotTo(ContainSubstring("Shadewright closes the pull request"))
+			case stop:
+				reason := ReasonChangeRequestGone
+				if vc == isElsewhere {
+					reason = ReasonChangeRequestOnOtherBase
+				}
+				Expect(got.summary).To(Equal(stoppedCheckRun(reason).Summary))
+				Expect(got.summary).NotTo(ContainSubstring("closes"), "the stop's check promises no close")
+				got.written = stop
 			}
 			got.summary = ""
 			Expect(got).To(Equal(want), "check runs written: %+v", runs)

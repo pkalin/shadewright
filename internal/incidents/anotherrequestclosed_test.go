@@ -28,8 +28,9 @@ import (
 
 // The executor's AnotherRequestClosed message (internal/controller, supersedeMessage, checked there by
 // TestAnotherRequestClosedMessageMatchesTheIncidentsNextStep) states the Incident's next step: unless a newer
-// request names it, it moves to Escalated, and it is not analyzed again while the symptom continues (#930). This
-// test holds the rules to that statement; a change here that makes it false must change the message too.
+// request names it, it moves to Escalated, and it is not analyzed again while the symptom continues, while one
+// not yet analyzed (Open) gets its first analysis (#930). These tests hold the rules to that statement; a change
+// here that makes it false must change the message too.
 func TestAnotherRequestClosedIncidentIsEscalatedAndNotAnalyzedAgain(t *testing.T) {
 	inc := closureIncident(remediationv1alpha1.IncidentProposed, time.Minute)
 	inc.Status.LastAnalysisTime = ago(2 * time.Hour)
@@ -61,5 +62,23 @@ func TestAnotherRequestClosedIncidentIsEscalatedAndNotAnalyzedAgain(t *testing.T
 		if due, why := Due(seen, Memory{}, triggerNow.Add(later), triggerSettings, 0); due {
 			t.Errorf("the Escalated Incident is due %s later (%s); the AnotherRequestClosed message says it is not", later, why)
 		}
+	}
+}
+
+// An Incident still Open (never analyzed, for example a hand-applied request while the analysis budget is 0)
+// does not move to Escalated when its request is superseded, and it is due FirstAnalysis: the message must not
+// say flatly that no analysis follows.
+func TestAnotherRequestClosedOpenIncidentGetsItsFirstAnalysis(t *testing.T) {
+	inc := closureIncident(remediationv1alpha1.IncidentOpen, 10*time.Minute)
+	waiter := request("waiter", time.Hour, remediationv1alpha1.PhaseSuperseded)
+	waiter.Status.Conditions = []metav1.Condition{{Type: remediationv1alpha1.ConditionPlanFresh,
+		Status: metav1.ConditionFalse, Reason: remediationv1alpha1.ReasonAnotherRequestClosed}}
+
+	if phase, reason, ok := Closure(inc.DeepCopy(), []remediationv1alpha1.RemediationRequest{waiter}, time.Time{},
+		triggerNow); ok {
+		t.Errorf("the Open Incident moved to %s (%s)", phase, reason)
+	}
+	if due, why := Due(inc, Memory{}, triggerNow, triggerSettings, 0); !due || why != ReasonFirstAnalysis {
+		t.Errorf("the Open Incident is due %v (%s), want due with %s", due, why, ReasonFirstAnalysis)
 	}
 }

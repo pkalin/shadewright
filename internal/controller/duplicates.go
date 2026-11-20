@@ -64,8 +64,9 @@ import (
 // status.queuedBehind, in the status write that queues it (waitForLimits). It ends Superseded with reason AnotherRequestClosed when a
 // recorded holder for the same target and field ended with its pull request closed without a merge: a reviewer
 // who closed that proposal said no to the change, and the waiting one was planned without knowing it. It does
-// not go back to the analyzer, and the Incident is not analyzed again: unless a newer request names it, the
-// closure rules move it to Escalated (#930), and a person applies a new request if the change is still wanted.
+// not go back to the analyzer, and an analyzed Incident is not analyzed again: unless a newer request names it,
+// the closure rules move it to Escalated (#930), and a person applies a new request if the change is still wanted;
+// one not yet analyzed (Open) gets its first analysis.
 // Before #643 it took the lock and opened a second pull request for the same
 // field (lab run of 2026-11-10).
 //
@@ -364,8 +365,10 @@ func (r *RemediationRequestReconciler) endingRequestOf(ctx context.Context, rr *
 // supersedeMessage is the PlanFresh message of a request superseded because of w with reason: it names w and its
 // pull request for AnotherRequestMerged, AnotherRequestClosed and AnotherRequestSucceeded, and w only for any
 // other reason. The AnotherRequestClosed message states the closure rule of a Superseded request
-// (incidents.Closure): unless a newer request names the Incident, it moves to Escalated, which is not analyzed
-// again (incidents.Due), so the message points to a person and a new request, never to an analysis (#930).
+// (incidents.Closure): an analyzed Incident (Proposed, Escalated, Resolved) is not analyzed again and, unless a
+// newer request names it, moves to Escalated; one still Open stays Open and gets its first analysis
+// (incidents.Due). The message holds for both without reading the Incident, and points to a person and a new
+// request, never to a repeat analysis (#930).
 func supersedeMessage(reason string, w *remediationv1alpha1.RemediationRequest) string {
 	pr := "its pull request"
 	if w.Status.PullRequest != nil {
@@ -377,9 +380,10 @@ func supersedeMessage(reason string, w *remediationv1alpha1.RemediationRequest) 
 			"after this one was created; this one is not needed", w.Name, pr)
 	case remediationv1alpha1.ReasonAnotherRequestClosed:
 		return fmt.Sprintf("This one waited behind RemediationRequest %s for the same target and field, whose %s "+
-			"was closed without a merge; this one opens no pull request for that field. The Incident is not "+
-			"analyzed again: unless a newer request names it, it moves to Escalated for a person, who applies a "+
-			"new request if the symptom continues and the change is still wanted", w.Name, pr)
+			"was closed without a merge; this one opens no pull request for that field. An Incident that was "+
+			"analyzed is not analyzed again: unless a newer request names it, it moves to Escalated for a person, "+
+			"who applies a new request if the symptom continues and the change is still wanted; one not yet "+
+			"analyzed gets its first analysis as usual", w.Name, pr)
 	case remediationv1alpha1.ReasonAnotherRequestSucceeded:
 		return fmt.Sprintf("This one waited behind RemediationRequest %s, which changed the same field from the "+
 			"same previous value in the same direction; its %s was merged and the request ended Succeeded, so this "+

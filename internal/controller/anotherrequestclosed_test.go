@@ -26,9 +26,10 @@ import (
 )
 
 // The AnotherRequestClosed message says what happens to the Incident next, as the analyzer's rules do it (#930):
-// unless a newer request names the Incident, it moves to Escalated, which is not analyzed again, so a person
-// applies a new request. Those rules are held to this statement by
-// TestAnotherRequestClosedIncidentIsEscalatedAndNotAnalyzedAgain in internal/incidents (not imported here: its
+// an analyzed Incident is not analyzed again and, unless a newer request names it, moves to Escalated, so a
+// person applies a new request; one not yet analyzed (Open) gets its first analysis. Those rules are held to
+// this statement by TestAnotherRequestClosedIncidentIsEscalatedAndNotAnalyzedAgain and
+// TestAnotherRequestClosedOpenIncidentGetsItsFirstAnalysis in internal/incidents (not imported here: its
 // metrics would join the executor's registry). Before #930 the message promised "a new analysis of the
 // Incident" that never came.
 func TestAnotherRequestClosedMessageMatchesTheIncidentsNextStep(t *testing.T) {
@@ -36,8 +37,8 @@ func TestAnotherRequestClosedMessageMatchesTheIncidentsNextStep(t *testing.T) {
 		Status: remediationv1alpha1.RemediationRequestStatus{PullRequest: &remediationv1alpha1.PullRequestStatus{Number: 7}}}
 	message := supersedeMessage(remediationv1alpha1.ReasonAnotherRequestClosed, holder)
 
-	for _, want := range []string{"closed-holder", "pull request #7", "not analyzed again", "Escalated", "a person",
-		"unless a newer request names it", "new request"} {
+	for _, want := range []string{"closed-holder", "pull request #7", "was analyzed is not analyzed again", "Escalated",
+		"a person", "unless a newer request names it", "new request", "not yet analyzed gets its first analysis"} {
 		if !strings.Contains(message, want) {
 			t.Errorf("message %q does not say %q", message, want)
 		}

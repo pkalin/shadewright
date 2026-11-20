@@ -11,7 +11,7 @@ The three things:
 
 - A read. `GetChangeRequest` (by number) and `ListChangeRequestsAnyBase` answer a pull request from the request's own `shadewright/` branch on every base branch of the configured repository, where `GetChangeRequest` and `ListChangeRequests` answered only on the target branch.
 - One write. `CloseChangeRequestAnyBase` closes the executor's own marked pull request on a base other than the target branch. Its callers are both in the finalizer of a deleted request: `closeOwnOnOtherBases` (every open pull request with the request's marker on another base, with or without a recorded number) and `closeAllOwn` (the recorded number, where the read finds it open on another base). The kill switch gates it like `CloseChangeRequest`.
-- A second write, added by the amendment of 2026-11-19 and confirmed by the maintainer as a widened write on 2026-11-20. With reviewer hints on, the failed review check `shadewright/review` on the head commit of the request's own pull request while it is open on another base, written by a stale plan, a cancel or a stop. The decision as first accepted listed every check run on another base under "never" (below); this write is that exception. It is a failed check run, which can only stop a merge.
+- A second write, added by the amendment of 2026-11-19 and confirmed by the maintainer as a widened write on 2026-11-20. With reviewer hints on, the failed review check `shadewright/review` on the head commit of the request's own pull request, in the cases ADR-0045 lists, written by a stale plan, a cancel or a stop. The decision as first accepted listed every check run on another base under "never" (below); this write is that exception. It is a failed check run, which can only stop a merge.
 
 ## Decision
 
@@ -55,7 +55,7 @@ Known limits:
 
 ### 2026-11-19: one verdict table, the lock on any open pull request, a failed check at a stop (#925)
 
-Built in [#925](https://github.com/pkalin/shadewright/issues/925). Limit (a) is removed, the second half of limit (e) is removed with reviewer hints on, and limit (c) is narrowed. One write is widened, the failed review check on the request's own pull request open on another base, written by a stale plan, a cancel or a stop, only with reviewer hints on; the maintainer confirmed it as a widened write on 2026-11-20, and ADR-0045 (`0045-the-failed-review-check-on-a-pull-request-on-another-base.md`) records it:
+Built in [#925](https://github.com/pkalin/shadewright/issues/925). Limit (a) is removed, the second half of limit (e) is removed with reviewer hints on, and limit (c) is narrowed. One write is widened, the failed review check in the cases ADR-0045 lists, written by a stale plan, a cancel or a stop, only with reviewer hints on; the maintainer confirmed it as a widened write on 2026-11-20, and ADR-0045 (`0045-the-failed-review-check-on-a-pull-request-on-another-base.md`) records it:
 
 - **One verdict table.** Every caller reads what a verdict means from one table in the executor (`verdictTable`), with a row for each verdict and a column for each decision; a test built from the list of verdicts fails when a row or a cell is missing, and another fails when code outside the table compares verdicts. Closed on another base is now a verdict of its own (closed elsewhere), which the callers handle like closed: a close on the target branch has nothing to close there.
 - **Gone only after every base.** A recorded number read as not found concludes gone only after the listing of every base found nothing; until then the lock is kept.

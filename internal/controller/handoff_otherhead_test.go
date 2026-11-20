@@ -17,6 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -536,5 +540,88 @@ func TestPredecessorRecordUnderPauseEndsTheReplacementLater(t *testing.T) {
 		ended.Status.Handoff.From.Phase != api.HandoffAborted || recordsMerge(ended) {
 		t.Fatalf("replacement %q, handoff %q, lock %v: want it ended on the predecessor's record once writes resume",
 			ended.Status.Phase, ended.Status.Handoff.From.Phase, ptr.Deref(ended.Status.HoldsTarget, false))
+	}
+}
+
+// A failed status write of the replacement (here a conflict) while the predecessor ends it on its record of the merge
+// of its own head (endReplacementAfterRecord) keeps the predecessor's answer: no error replaces it, a wait of its own
+// is kept, and a reconcile with none is requeued within freshRecheckDelay, so the step is tried again. The replacement
+// keeps the lock until a later attempt ends it.
+func TestPredecessorRecordFailedReplacementWriteKeepsTheAnswer(t *testing.T) {
+	r, p, rr, _, _ := predecessorHeadMerged(t)
+	recorded := storedRR(t, r, p)
+	now := metav1.NowMicro()
+	recorded.Status.PullRequest.MergedAt = &now
+	base := r.Client
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if obj.GetName() == rr.Name {
+				return apierrors.NewConflict(api.GroupVersion.WithResource("remediationrequests").GroupResource(),
+					obj.GetName(), errors.New("the object has been modified"))
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	for _, c := range []struct {
+		in, want time.Duration
+	}{{in: 30 * time.Second, want: 30 * time.Second}, {in: time.Hour, want: freshRecheckDelay},
+		{in: 0, want: freshRecheckDelay}} {
+		res, err := reconcile.Result{RequeueAfter: c.in}, error(nil)
+		r.endReplacementAfterRecord(t.Context(), recorded, &res, &err)
+		if err != nil || res.RequeueAfter != c.want {
+			t.Fatalf("wait %v: result %+v, error %v; want a requeue after %v without an error", c.in, res, err, c.want)
+		}
+	}
+	if held := storedRR(t, r, rr); !ptr.Deref(held.Status.HoldsTarget, false) {
+		t.Fatal("the replacement let go of the lock although its status write failed")
+	}
+	r.Client = base
+	res, err := reconcile.Result{}, error(nil)
+	r.endReplacementAfterRecord(t.Context(), recorded, &res, &err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ended := storedRR(t, r, rr); ptr.Deref(ended.Status.HoldsTarget, false) ||
+		ended.Status.Handoff.From.Phase != api.HandoffAborted {
+		t.Fatalf("replacement %q, handoff %q: want it ended on the predecessor's record once the write works",
+			ended.Status.Phase, ended.Status.Handoff.From.Phase)
+	}
+}
+
+// endOnOtherMerge logs the release of the target lock only after the status write that releases it went through: a
+// write that fails (here a conflict) logs no release, and the next attempt, whose write works, logs it.
+func TestEndOnOtherMergeLogsTheReleaseAfterItsWrite(t *testing.T) {
+	r, p, rr, cr, _ := predecessorHeadMerged(t)
+	pred := storedRR(t, r, p)
+	now := metav1.NowMicro()
+	pred.Status.PullRequest.MergedAt = &now
+	cr.HeadSHA = pred.Status.PullRequest.HeadSHA
+	base := r.Client
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			return apierrors.NewConflict(api.GroupVersion.WithResource("remediationrequests").GroupResource(),
+				obj.GetName(), errors.New("the object has been modified"))
+		},
+	})
+	released := func(lines []string) bool {
+		return slices.ContainsFunc(lines, func(l string) bool { return strings.Contains(l, "Released the target lock") })
+	}
+	ctx, lines := loggedCtx()
+	if err := r.endOnOtherMerge(ctx, storedRR(t, r, rr), pred, cr); err == nil {
+		t.Fatal("the conflicting write returned no error")
+	}
+	if released(*lines) {
+		t.Fatalf("logged a release whose write failed: %q", *lines)
+	}
+	r.Client = base
+	ctx, lines = loggedCtx()
+	if err := r.endOnOtherMerge(ctx, storedRR(t, r, rr), pred, cr); err != nil {
+		t.Fatal(err)
+	}
+	if got := storedRR(t, r, rr); ptr.Deref(got.Status.HoldsTarget, false) || !released(*lines) {
+		t.Fatalf("lock %v, log %q: want the lock released and the release logged", ptr.Deref(got.Status.HoldsTarget,
+			false), *lines)
 	}
 }

@@ -125,7 +125,8 @@ import (
 //	   nothing to read: after a reconcile with every read answering that leaves it in that wait, it shows no
 //	   refusal of its recovery (condition PullRequestUnreadable with a reason of recoveryWaitReasons), its
 //	   HandoffRecovery entry says it has nothing to read (recoveryNothingToRead), and the entry keeps its start and
-//	   end (review pass 14 of #786, 2026-11-20);
+//	   end (review pass 14 of #786, 2026-11-20); a replacement that holds a claim on a merge of another head (its
+//	   MergeContent wait, #870) reads that merge on and is not checked;
 //	P12 a merge whose head is neither request's own commit (further commits on top of the replacement's commit, or a
 //	   head without it) is recorded once (decision of 2026-11-20 on #870): when the replacement, before its takeover,
 //	   held the target lock, existed and was not being deleted at the merge, the replacement records it (no receipt,
@@ -166,7 +167,7 @@ import (
 // to 500, 1 to 100 under the race detector or -short; the code was checked against the seeds 1 to 9,000 and then
 // 9,001 to 13,000, in the fifth round of #786 against 1 to 24,000, for #880 against 1 to 60,000, and for its second decision (a wait is a claim) against 1 to 260,000 with the
 // deletion of the claim holder drawn, and for the live copies of the requests (decision of 2026-11-19 on #786) against 1 to
-// 260,000 with the cache lagging behind a change of the other request drawn. For #870 (P12) it was checked against 1 to 120,000, and for its third case (predLeft) against 1 to 36,000 (seed 59 broke P12 without the change, seed 175 without its part for a predecessor that is gone, both drawn before the record-then-delete step existed). With that step (decision of 2026-11-20 on #870 replacing the third row), seed 10 breaks P12 when the predecessor does not end the replacement on its record. With the step for look, delete, look and P13 (decision of 2026-11-20 on #870, one rule over the state), seed 47 breaks P13 when the replacement releases at its look without the predecessor's record (seeds 4, 55 and 75 too, among the seeds 1 to 100 under the race detector). SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
+// 260,000 with the cache lagging behind a change of the other request drawn. For #870 (P12) it was checked against 1 to 120,000, and for its third case (predLeft) against 1 to 36,000 (seed 59 broke P12 without the change, seed 175 without its part for a predecessor that is gone, both drawn before the record-then-delete step existed). With that step (decision of 2026-11-20 on #870 replacing the third row), seed 10 breaks P12 when the predecessor does not end the replacement on its record. With the step for look, delete, look and P13 (decision of 2026-11-20 on #870, one rule over the state), seed 47 breaks P13 when the replacement releases at its look without the predecessor's record (seeds 4, 55 and 75 too, among the seeds 1 to 100 under the race detector). The seeds of hmFixedSeeds run with the default set: 45273 breaks P5 when the watch after a refusal goes idle with the predecessor gone while it holds a claim on a merge of another head (seeds 52328 and 52693 too, found in the run of 2,501 to 60,000). SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
 // to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1 prints the trace of every seed
 // (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile). The log of every run (go test -v)
 // holds the count of failures per property, of the exclusions, and of what the sequences reached.
@@ -1841,6 +1842,7 @@ func (m *hmWorld) reconcile(who string) {
 	m.mu.Unlock()
 	p10 := m.p10Applies(who, before)
 	p11 := m.p11Applies(who, before)
+	m.noteClaimWithPredGone(who, before)
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.keys[who]})
 	m.mu.Lock()
 	m.actor = ""
@@ -2327,15 +2329,26 @@ func (m *hmWorld) checkEndedOnOtherBase(after *api.RemediationRequest) {
 	}
 }
 
+// noteClaimWithPredGone notes the reach of a reconcile of the replacement that starts in the watch after a refusal
+// holding a claim on a merge of another head (otherHeadClaim) while the predecessor is gone: P5 checks that the claim
+// still ends at its own end (#870, seed 45273).
+func (m *hmWorld) noteClaimWithPredGone(who string, before *api.RemediationRequest) {
+	if who == hmRepl && before != nil && abortedOnRefusal(before) && otherHeadClaim(before) && m.get(hmPred) == nil {
+		m.reach["other-head-claim-pred-gone"] = true
+	}
+}
+
 // p11Applies reports whether P11 checks the reconcile of who about to start from before: the replacement in its
-// recovery wait, its predecessor gone or not naming it (namesReplacement false), and nothing armed against the
-// reconcile, as for P10.
+// recovery wait, its predecessor gone or not naming it (namesReplacement false), holding no claim on a merge of another
+// head (otherHeadClaim: that content wait is read on through the chain's branch, so there is something to read, #870),
+// and nothing armed against the reconcile, as for P10.
 func (m *hmWorld) p11Applies(who string, before *api.RemediationRequest) bool {
 	m.mu.Lock()
 	quiet := m.sticky == nil && len(m.once) == 0 && len(m.lose) == 0 && len(m.conflict) == 0 && m.interleave == "" &&
 		m.crashAt < 0 && !m.paused && m.settings == ""
 	m.mu.Unlock()
-	return who == hmRepl && quiet && before != nil && abortedOnRefusal(before) && !m.namesReplacement()
+	return who == hmRepl && quiet && before != nil && abortedOnRefusal(before) && !m.namesReplacement() &&
+		!otherHeadClaim(before)
 }
 
 // checkNothingToRead checks P11 on the replacement as stored after a reconcile that began in its recovery wait with
@@ -2811,6 +2824,7 @@ func hmSeeds(t *testing.T) []uint64 {
 	if testing.Short() || raceDetector {
 		to = 100
 	}
+	extra := hmFixedSeeds
 	if s := os.Getenv("SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE"); s != "" {
 		a, b, _ := strings.Cut(s, "-")
 		x, errA := strconv.ParseUint(a, 10, 64)
@@ -2818,14 +2832,25 @@ func hmSeeds(t *testing.T) []uint64 {
 		if errA != nil || errB != nil || y < x {
 			t.Fatalf("SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=%q; want from-to", s)
 		}
-		from, to = x, y
+		from, to, extra = x, y, nil
 	}
-	seeds := make([]uint64, 0, to-from+1)
+	seeds := make([]uint64, 0, to-from+1+uint64(len(extra)))
 	for s := from; s <= to; s++ {
 		seeds = append(seeds, s)
 	}
+	for _, s := range extra {
+		if s > to {
+			seeds = append(seeds, s)
+		}
+	}
 	return seeds
 }
+
+// hmFixedSeeds run with the default set (CI's, under the race detector too): seeds past it that reach a shape the
+// default set does not. 45273 (#870): the watch after a refusal holds a claim on a merge of the predecessor's own head
+// (its MergeContent wait, the Git host reporting no merge commit ID) when the predecessor is gone; the claim stood
+// about a day past its end (P5) while the watch read nothing with the predecessor gone.
+var hmFixedSeeds = []uint64{45273}
 
 func TestHandoffModel(t *testing.T) {
 	schema := requestStatusSchema(t)
@@ -2843,6 +2868,11 @@ func TestHandoffModel(t *testing.T) {
 		for _, k := range hmP12Reach {
 			if counts["reach "+k] == 0 {
 				t.Errorf("P12: no seed of the default set reached %q", k)
+			}
+		}
+		for _, k := range hmP5Reach {
+			if counts["reach "+k] == 0 {
+				t.Errorf("P5: no seed of the default set reached %q", k)
 			}
 		}
 		for _, k := range hmP13Reach {
@@ -2900,6 +2930,10 @@ var hmP12Reach = []string{"pred-head-merge-pred-left", "pred-head-recorded-then-
 // hmP13Reach are the shapes of P13 the default seed set must reach: a replacement before its takeover that lets go of
 // the lock on a merge (each such release is checked).
 var hmP13Reach = []string{"release-on-merge-before-takeover"}
+
+// hmP5Reach are the shapes of P5 the default seed set (with hmFixedSeeds) must reach: a claim on a merge of another
+// head held by the watch after a refusal once the predecessor is gone (#870).
+var hmP5Reach = []string{"other-head-claim-pred-gone"}
 
 // hmDirected runs a scripted sequence and fails with the violations.
 func hmDirected(t *testing.T, start string, steps []hmStep) *hmWorld {
@@ -3126,5 +3160,18 @@ func TestHandoffModelOtherHeadClaimSurvivesALostRecordWrite(t *testing.T) {
 		{Kind: hMerge}, stRecRepl, stRecRepl, {Kind: hConflict, Obj: hmRepl}, stRecRepl})
 	if m.merge == nil || m.merge.firstRead != hmRepl || !m.merge.recorded[hmRepl] {
 		t.Fatalf("the merge is not read first and recorded by the replacement: %+v", m.merge)
+	}
+}
+
+// #870, seed 45273 (minimal sequence): the predecessor's own commit is put back and merged, the Git host reports no
+// merge commit ID, the replacement's handoff is aborted at a refused read, and the predecessor is deleted without a
+// record. The replacement's watch claims the merge (its MergeContent wait for the merge commit ID), and once the
+// predecessor is gone it reads that merge on through the chain's branch, so the claim ends at its own end
+// (MergeContentUnreadable) instead of about a day later at the end of the watch (P5).
+func TestHandoffModelOtherHeadClaimEndsWithThePredecessorGone(t *testing.T) {
+	m := hmDirected(t, hmStartPushed, []hmStep{{Kind: hForce, Variant: forceDrop}, stMergeNoID,
+		{Kind: hFault, Code: 403, Op: opBranchHead}, stRecRepl, {Kind: hDelete, Obj: hmPred}, stRecRepl})
+	if !m.reach["other-head-claim-pred-gone"] {
+		t.Fatal("the sequence did not reach a claim on a merge of another head with the predecessor gone")
 	}
 }

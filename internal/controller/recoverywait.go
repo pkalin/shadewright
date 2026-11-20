@@ -367,7 +367,10 @@ func (r *RemediationRequestReconciler) recordRefusalEntry(ctx context.Context, r
 // request is read again after the poll interval, never later than the end of its waits, which ends it
 // (endPassedWait). With spec.cancel set, a read that works and finds no merge of its commit returns done false, so the
 // cancel finishes. A predecessor that is gone, made again, or no longer names this request has nothing to read: the
-// request waits for the end. A failure is returned (observeFailed).
+// request waits for the end. The one exception is a claim on a merge of another head (otherHeadClaim, the content
+// wait recordOtherHeadMerge started) once the predecessor is gone: that merge is read on through the chain's branch
+// (recordMergeAlone), so the claim's read wait ends at its own end (endAfterLastRead) and not at the end of the watch.
+// A failure is returned (observeFailed).
 func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, bool, error) {
 	if res, err := r.abortPredecessor(ctx, rr); err != nil || res.RequeueAfter > 0 {
@@ -391,6 +394,21 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 		return wait()
 	}
 	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred); {
+	case apierrors.IsNotFound(err) && otherHeadClaim(rr):
+		// A claim on a merge of another head (the content wait recordOtherHeadMerge started, often while the
+		// predecessor was being deleted) is read on through the chain's branch: a read wait ends only after a read
+		// made once its end passed (endAfterLastRead), so going idle here would hold it until the end of the watch.
+		git, err := r.openRecovery(ctx, rr)
+		if err != nil {
+			return reconcile.Result{}, true, err
+		}
+		switch _, recorded, err := r.recordMergeAlone(ctx, git, rr); {
+		case err != nil:
+			return reconcile.Result{}, true, err
+		case recorded:
+			return reconcile.Result{RequeueAfter: stepDelay}, true, nil
+		}
+		return idle()
 	case apierrors.IsNotFound(err):
 		return idle()
 	case err != nil:
@@ -431,6 +449,15 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 		return reconcile.Result{}, true, err
 	}
 	return wait()
+}
+
+// otherHeadClaim reports whether rr, a replacement that watches after a refusal (observeStep), holds a content wait
+// about a merged pull request (MergeContent with its pull request in status.gitWaits): the claim recordOtherHeadMerge
+// starts on a merge of another head while rr holds the target lock. A replacement before its takeover records no pull
+// request of its own, so no other path starts that wait on it.
+func otherHeadClaim(rr *remediationv1alpha1.RemediationRequest) bool {
+	w := gitWait(rr, waitMergeContent)
+	return w != nil && w.PullRequest != nil && ptr.Deref(rr.Status.HoldsTarget, false)
 }
 
 // recoveryNothingToRead is the operation of a HandoffRecovery entry whose watch has nothing to read
@@ -877,52 +904,25 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 	return res, true, err
 }
 
-// heldRecoveryAlone is heldRecovery's read once the predecessor is gone (NotFound), so neither its recorded pull
-// request nor its intent can be read: the pull requests of the chain's branch are read through changeOf, as rr would
-// read them had it taken the pull request over (the predecessor's marker counts as its own, inheritsMarker, in memory
-// only), and one merged whose head is rr's handoff commit (isOwnCommitAlone, the commit alone) is recorded on rr with
-// its receipt (recordFoundMerge); one merged with any other head, the predecessor's own included, is recorded on rr
-// as a foreign change (recordOtherHeadMerge, decisions of 2026-11-20 on #870), since rr holds the lock and nobody
-// else can: a predecessor that recorded the merge of its own head ended rr in that pass (supersedeReplacementAfterMerge),
-// so rr still holds the lock here only when the predecessor went without a record. An open one keeps the lock, as in heldRecoveryRead, since it may still deliver rr's commit. Anything else
-// settles nothing here (done false), and the verdict of the look decides. A failure is returned;
-// a failure of the Kubernetes API is marked so (a *clusterError).
+// heldRecoveryAlone is heldRecovery's read once the predecessor is gone (NotFound): a merge found on the chain's
+// branch is recorded on rr (recordMergeAlone: with its receipt when the head is rr's handoff commit, as a foreign
+// change for any other head, the predecessor's own included). A predecessor that recorded the merge of its own head
+// ended rr in that pass (supersedeReplacementAfterMerge), so rr still holds the lock here only when the predecessor
+// went without a record. An open one keeps the lock, as in heldRecoveryRead, since it may still deliver rr's commit.
+// Anything else settles nothing here (done false), and the verdict of the look decides. A failure is returned; a
+// failure of the Kubernetes API is marked so (a *clusterError).
 func (r *RemediationRequestReconciler) heldRecoveryAlone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, bool, error) {
 	git, err := r.openStoppedRead(ctx, rr)
 	if err != nil {
 		return reconcile.Result{}, true, err
 	}
-	inheriting := rr.DeepCopy()
-	inheriting.Status.Handoff.From.Phase = remediationv1alpha1.HandoffDone
-	v := r.changeOf(ctx, git, inheriting, changeQuery{})
-	// changeOf may record PullRequestUnreadable through the copy: rr takes that write, never the copy's handoff.
-	rr.ResourceVersion, rr.Status.Conditions = inheriting.ResourceVersion, inheriting.Status.Conditions
-	if v.state == changeUnknown {
-		return reconcile.Result{}, true, v.err
-	}
-	var other *providers.ChangeRequest
-	pred := &remediationv1alpha1.RemediationRequest{}
-	pred.Name, pred.Namespace = string(rr.Status.Handoff.From.Name), rr.Namespace
-	for i, cr := range v.own {
-		if cr.State != providers.ChangeRequestMerged {
-			continue
-		}
-		switch ours, err := r.isOwnCommitAlone(ctx, git, rr, cr.HeadSHA); {
-		case err != nil:
-			return reconcile.Result{}, true, err
-		case ours:
-			return reconcile.Result{RequeueAfter: stepDelay}, true, r.recordFoundMerge(ctx, rr, pred, cr)
-		case other == nil:
-			other = &v.own[i]
-		}
-	}
-	if v.state == changeMerged && other != nil {
-		// Merged with any other head while this request holds the lock, the predecessor gone: this request records it
-		// as a foreign change (decisions of 2026-11-20 on #870), the predecessor's own head included, since nobody
-		// else can. One writer of the merge record, the one that holds the lock.
-		return reconcile.Result{RequeueAfter: stepDelay}, true,
-			r.ignoreStopped(r.recordOtherHeadMerge(ctx, git, rr, pred, *other))
+	v, recorded, err := r.recordMergeAlone(ctx, git, rr)
+	switch {
+	case err != nil:
+		return reconcile.Result{}, true, err
+	case recorded:
+		return reconcile.Result{RequeueAfter: stepDelay}, true, nil
 	}
 	if v.state != changeOpen {
 		return reconcile.Result{}, false, nil
@@ -943,6 +943,51 @@ func (r *RemediationRequestReconciler) heldRecoveryAlone(ctx context.Context, rr
 	return res, true, err
 }
 
+// recordMergeAlone is the read of a replacement whose predecessor is gone (NotFound), so neither its recorded pull
+// request nor its intent can be read: the pull requests of the chain's branch are read through changeOf, as rr would
+// read them had it taken the pull request over (the predecessor's marker counts as its own, inheritsMarker, in memory
+// only). One merged whose head is rr's handoff commit (isOwnCommitAlone, the commit alone) is recorded on rr with its
+// receipt (recordFoundMerge); one merged with any other head, the predecessor's own included, is recorded on rr as a
+// foreign change (recordOtherHeadMerge, decisions of 2026-11-20 on #870), since rr holds the lock and nobody else can.
+// recorded says a record was written (or went through as a stop); v is the verdict of the read for the caller's
+// other cases. heldRecoveryAlone (after the end of the watch) and observeStep (during the watch, while rr holds a
+// claim on such a merge) both decide through it. A failure is returned; a failure of the Kubernetes API is marked so
+// (a *clusterError).
+func (r *RemediationRequestReconciler) recordMergeAlone(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest) (changeVerdict, bool, error) {
+	inheriting := rr.DeepCopy()
+	inheriting.Status.Handoff.From.Phase = remediationv1alpha1.HandoffDone
+	v := r.changeOf(ctx, git, inheriting, changeQuery{})
+	// changeOf may record PullRequestUnreadable through the copy: rr takes that write, never the copy's handoff.
+	rr.ResourceVersion, rr.Status.Conditions = inheriting.ResourceVersion, inheriting.Status.Conditions
+	if v.state == changeUnknown {
+		return v, false, v.err
+	}
+	var other *providers.ChangeRequest
+	pred := &remediationv1alpha1.RemediationRequest{}
+	pred.Name, pred.Namespace = string(rr.Status.Handoff.From.Name), rr.Namespace
+	for i, cr := range v.own {
+		if cr.State != providers.ChangeRequestMerged {
+			continue
+		}
+		switch ours, err := r.isOwnCommitAlone(ctx, git, rr, cr.HeadSHA); {
+		case err != nil:
+			return v, false, err
+		case ours:
+			return v, true, r.recordFoundMerge(ctx, rr, pred, cr)
+		case other == nil:
+			other = &v.own[i]
+		}
+	}
+	if v.state == changeMerged && other != nil {
+		// Merged with any other head while this request holds the lock, the predecessor gone: this request records it
+		// as a foreign change (decisions of 2026-11-20 on #870), the predecessor's own head included, since nobody
+		// else can. One writer of the merge record, the one that holds the lock.
+		return v, true, r.ignoreStopped(r.recordOtherHeadMerge(ctx, git, rr, pred, *other))
+	}
+	return v, false, nil
+}
+
 // endOnOtherMerge settles rr, a replacement that ended before it took the pull request over (endedBeforeTakeover),
 // once that pull request, cr, is found merged with a head that is not its commit and pred, its predecessor, holds the
 // record of that merge (mayReleaseOnMerge; errNoMergeRecord otherwise, with nothing written). The handoff did not happen and can no longer happen through that pull request, so rr's handoff moves
@@ -958,26 +1003,35 @@ func (r *RemediationRequestReconciler) endOnOtherMerge(ctx context.Context, rr, 
 			cr.Number, errNoMergeRecord)
 	}
 	rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
-	if s, ok := settleHandoffAborted(rr); ok {
+	s, released := settleHandoffAborted(rr)
+	if released {
 		if err := lockverdict.Release(&rr.Status, s); err != nil {
 			return err
 		}
 	}
 	clearReleasedRead(rr)
-	logf.FromContext(ctx).Info("Released the target lock of RemediationRequest: the pull request it was to take over "+
-		"was merged with a head that is not its commit", "remediationRequest", client.ObjectKeyFromObject(rr),
-		"pullRequest", cr.Number, "head", cr.HeadSHA)
 	if breakerOutcome(rr) != outcomeFailure {
 		if err := r.Status().Update(ctx, rr); err != nil {
 			return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 		}
-		return nil
+	} else {
+		// It leaves its final phase, so the breaker's counts of that end go with it (classifyBreaker counts the new
+		// end).
+		rr.Status.BreakerCounts = nil
+		if err := r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled,
+			remediationv1alpha1.ReasonHandoffAborted, fmt.Sprintf("Pull request #%d, which this request was to take "+
+				"over, was merged with head %s, which is not this request's commit; nothing was taken over",
+				cr.Number, cr.HeadSHA))); err != nil {
+			return err
+		}
 	}
-	// It leaves its final phase, so the breaker's counts of that end go with it (classifyBreaker counts the new end).
-	rr.Status.BreakerCounts = nil
-	return r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseCancelled, remediationv1alpha1.ReasonHandoffAborted,
-		fmt.Sprintf("Pull request #%d, which this request was to take over, was merged with head %s, which is not "+
-			"this request's commit; nothing was taken over", cr.Number, cr.HeadSHA)))
+	// Logged once the write that releases the lock went through, never before it.
+	if released {
+		logf.FromContext(ctx).Info("Released the target lock of RemediationRequest: the pull request it was to take "+
+			"over was merged with a head that is not its commit", "remediationRequest", client.ObjectKeyFromObject(rr),
+			"pullRequest", cr.Number, "head", cr.HeadSHA)
+	}
+	return nil
 }
 
 // endMergedElsewhere ends rr, a replacement whose handoff was aborted at a refusal and that watches for a merge of its

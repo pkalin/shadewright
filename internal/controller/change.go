@@ -1079,10 +1079,15 @@ func repositoryRead(rr *remediationv1alpha1.RemediationRequest, err error) *meta
 }
 
 // putUnreadable sets condition PullRequestUnreadable to want in conds (nil removes it) and reports whether that
-// changed it.
+// changed it. A want with a lastTransitionTime (abortOnRefusal, the first refusal of a recovery) replaces the
+// condition's time too; without one, the time is kept while the condition stays True.
 func putUnreadable(conds *[]metav1.Condition, want *metav1.Condition) bool {
 	if want == nil {
 		return meta.RemoveStatusCondition(conds, remediationv1alpha1.ConditionPullRequestUnreadable)
+	}
+	if was := meta.FindStatusCondition(*conds, want.Type); was != nil && !want.LastTransitionTime.IsZero() &&
+		!was.LastTransitionTime.Equal(&want.LastTransitionTime) {
+		meta.RemoveStatusCondition(conds, want.Type)
 	}
 	return meta.SetStatusCondition(conds, *want)
 }
@@ -1106,7 +1111,8 @@ func (r *RemediationRequestReconciler) unreadableEvent(rr *remediationv1alpha1.R
 
 // setUnreadable writes condition PullRequestUnreadable as want (nil removes it), alone, when it changes. The
 // patch is made against the request as the API server has it, at the resourceVersion of rr, so it never carries
-// a caller's unsaved status; a request changed since rr was read is a conflict, returned for a retry. rr gets the
+// a caller's unsaved status; a request changed since rr was read is a conflict, returned for a retry. Every failure
+// is the Kubernetes API's, and is marked so (a *clusterError). rr gets the
 // condition and the new resourceVersion.
 func (r *RemediationRequestReconciler) setUnreadable(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	want *metav1.Condition) error {
@@ -1123,23 +1129,23 @@ func (r *RemediationRequestReconciler) setUnreadable(ctx context.Context, rr *re
 	}
 	live := &remediationv1alpha1.RemediationRequest{}
 	if err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
-		return fmt.Errorf("read RemediationRequest %s/%s to record whether its pull requests can be read: %w",
-			rr.Namespace, rr.Name, err)
+		return &clusterError{err: fmt.Errorf("read RemediationRequest %s/%s to record whether its pull requests can "+
+			"be read: %w", rr.Namespace, rr.Name, err)}
 	}
 	if live.UID != rr.UID || live.ResourceVersion != rr.ResourceVersion {
-		return fmt.Errorf("record whether the pull requests of RemediationRequest %s/%s can be read: %w",
-			rr.Namespace, rr.Name, apierrors.NewConflict(remediationv1alpha1.GroupVersion.WithResource(
-				"remediationrequests").GroupResource(), rr.Name, errors.New("it changed since it was read")))
+		return &clusterError{err: fmt.Errorf("record whether the pull requests of RemediationRequest %s/%s can be "+
+			"read: %w", rr.Namespace, rr.Name, apierrors.NewConflict(remediationv1alpha1.GroupVersion.WithResource(
+			"remediationrequests").GroupResource(), rr.Name, errors.New("it changed since it was read")))}
 	}
 	base := live.DeepCopy()
 	putUnreadable(&live.Status.Conditions, want)
 	if err := r.Status().Patch(ctx, live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-		return fmt.Errorf("record whether the pull requests of RemediationRequest %s/%s can be read: %w",
-			rr.Namespace, rr.Name, err)
+		return &clusterError{err: fmt.Errorf("record whether the pull requests of RemediationRequest %s/%s can be "+
+			"read: %w", rr.Namespace, rr.Name, err)}
 	}
 	rr.ResourceVersion = live.ResourceVersion
 	if c := meta.FindStatusCondition(live.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable); c != nil {
-		meta.SetStatusCondition(&rr.Status.Conditions, *c)
+		putUnreadable(&rr.Status.Conditions, c)
 	} else {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
 	}

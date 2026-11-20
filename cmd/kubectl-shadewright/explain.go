@@ -127,6 +127,7 @@ var troubleshootingSections = map[string][]string{
 	"GitNotFound":                       {secPullRequest},
 	"GitReadFailed":                     {secPullRequest},
 	"GitReadFailedBeforeContentWait":    {secPullRequest},
+	"PersonCommitOnPullRequest":         {secPullRequest},
 	"GitReadFailedBeforeDeadline":       {secPullRequest},
 	"GitReadFailedBeforeHandoffGrace":   {secPullRequest},
 	"GitReadFailedBeforeMergeWait":      {secPullRequest},
@@ -161,6 +162,9 @@ var troubleshootingSections = map[string][]string{
 	"KustomizationSuspended":            {secFlux},
 	"KustomizationTransforms":           {secFlux},
 	"MergedBeforeVerification":          {secReceipt},
+	"MergedForReplacement":              {secPhases},
+	"MergedForPredecessor":              {secPhases},
+	"MergeRecordPending":                {secPullRequest},
 	"MergedWithForeignChange":           {secPullRequest},
 	"MergeContentUnreadable":            {secPullRequest},
 	"MergeNotCheckable":                 {secPullRequest},
@@ -197,6 +201,8 @@ var troubleshootingSections = map[string][]string{
 	"PullRequestDeadlineCleanupRefused": {secPullRequest},
 	"PullRequestOpened":                 {secPullRequest},
 	"PullRequestRewriteRefused":         {secPullRequest},
+	"RecoveryReadFailed":                {secPullRequest},
+	"RecoveryWaitExpired":               {secPullRequest},
 	"RemoteCluster":                     {secFlux},
 	"RenderFailed":                      {secRender},
 	"RenderNeverFinished":               {secRender},
@@ -258,6 +264,9 @@ var troubleshootingSections = map[string][]string{
 	"VerificationDisabled":              {secAfterMerge},
 	"WaitingForReview":                  {secPullRequest},
 	"WithinApprovedBounds":              {secRequest},
+
+	// In a block of its own, so the longer key does not realign the table above.
+	"GitReadFailedBeforeHandoffRecovery": {secPullRequest},
 }
 
 // conditionSections is the section a reason on that condition belongs to when the reason is listed in more

@@ -307,8 +307,13 @@ func TestCancelWatchesARefusedRecovery(t *testing.T) {
 	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != ReasonGitForbidden {
 		t.Fatalf("CancelPending = %+v", c)
 	}
-	if e := <-rec.Events; !strings.HasPrefix(e, "Warning "+EventCancelPending+" ") {
-		t.Errorf("Event = %q", e)
+	// The refusal starts the recovery's own wait too, whose bound holds for a cancelled request (#786).
+	if u := watchedRecovery(got); u == nil || u.Reason != ReasonGitForbidden {
+		t.Fatalf("PullRequestUnreadable = %+v, want the wait of the recovery recorded", u)
+	}
+	if ev := drain(rec); !containsPrefix(ev, "Warning "+EventCancelPending+" ") ||
+		!containsPrefix(ev, "Warning "+EventPullRequestUnreadable+" ") {
+		t.Errorf("Events = %q", ev)
 	}
 
 	g.SetFail(nil)

@@ -1441,6 +1441,14 @@ func (m *hmWorld) observeMerge(reqs map[string]*api.RemediationRequest) {
 	}
 }
 
+// replHoldsBeforeTakeover reports whether the replacement exists, is not being deleted and holds the target lock before
+// its takeover (its handoff Reserved, its commit possibly pushed): the model's own reading, for P12.
+func (m *hmWorld) replHoldsBeforeTakeover() bool {
+	repl := m.get(hmRepl)
+	return repl != nil && repl.DeletionTimestamp.IsZero() && mayCarryHandoffCommit(repl) &&
+		repl.Status.Handoff.From.Phase == api.HandoffReserved && ptr.Deref(repl.Status.HoldsTarget, false)
+}
+
 // otherMerge reports whether a person merged a head that is neither request's own commit (P12).
 func (m *hmWorld) otherMerge() bool {
 	return m.merge != nil && m.merge.owner != hmPred && m.merge.owner != hmRepl
@@ -1996,10 +2004,7 @@ func (m *hmWorld) personEvent(s hmStep) {
 				m.merge.failed[who] = true
 			}
 		}
-		if repl := m.get(hmRepl); repl != nil && repl.DeletionTimestamp.IsZero() && mayCarryHandoffCommit(repl) &&
-			repl.Status.Handoff.From.Phase == api.HandoffReserved && ptr.Deref(repl.Status.HoldsTarget, false) {
-			m.merge.replHeld = true
-		}
+		m.merge.replHeld = m.replHoldsBeforeTakeover()
 		m.logf("  merged head %s, the %s's commit", short(cr.HeadSHA), m.merge.owner)
 		m.reach["merge"] = true
 		if m.merge.owner == hmPred || m.merge.owner == hmRepl {

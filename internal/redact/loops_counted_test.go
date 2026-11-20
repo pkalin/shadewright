@@ -42,7 +42,36 @@ var boundedLoops = map[string]string{
 	"viewEnvLine#0":         matchPairs,
 	"viewEnvValueFirst#1":   matchPairs,
 	"viewKeyLine#1":         matchPairs,
+	// The syntax of an expression is read once, when the redactor is made (newWindowed): never the text.
+	"alphabet#0":      exprSyntax,
+	"asserts#0":       exprSyntax,
+	"laterAlphabet#0": exprSyntax,
+	"laterAlphabet#1": exprSyntax,
+	"literalRunes#0":  exprSyntax,
+	"literalRunes#1":  exprSyntax,
+	"minLen#0":        exprSyntax,
+	"minLen#1":        exprSyntax,
+	"newRuneSet#0":    exprSyntax,
+	"newRuneSet#1":    exprSyntax,
+	"newRuneSet#2":    exprSyntax,
+	// The expressions read by windows, at most 64 (a bit each), and the ASCII characters.
+	"longRuns#0": windowExprCount,
+	"longRuns#1": "utf8.RuneSelf ASCII characters per expression",
+	"longRuns#2": windowExprCount,
+	"longRuns#4": windowExprCount + ", once per distinct character of the text",
+	"longRuns#5": windowExprCount + " per character, in the counted loop over the text",
+	"longRuns#6": windowExprCount + " per character, in the counted loop over the text",
+	"longRuns#7": windowExprCount,
+	"longRuns#8": windowExprCount,
+	"chunkCut#0": "chunkHashBytes bytes, counted by its caller",
+	"shifted#0":  matchPairs,
 }
+
+// exprSyntax is the bound of a loop over the syntax tree of one expression of the package or of an extra pattern.
+const exprSyntax = "the syntax of one expression, read once when the redactor is made"
+
+// windowExprCount is the bound of a loop over the expressions one pass of longRuns reads by windows.
+const windowExprCount = "the expressions read by windows, at most 64"
 
 // matchPairs is the bound of a loop over the index pairs of one regular expression match.
 const matchPairs = "the index pairs of one regular expression match, fixed by the expression"
@@ -195,7 +224,12 @@ func TestEveryLoopCountsItsWork(t *testing.T) {
 // with the constant that bounds it.
 
 // boundedCycles are the recursions and backward gotos that do not count their turns, each with its bound.
-var boundedCycles = map[string]string{}
+var boundedCycles = map[string]string{
+	"alphabet#-1":      exprSyntax,
+	"asserts#-1":       exprSyntax,
+	"laterAlphabet#-1": exprSyntax,
+	"minLen#-1":        exprSyntax,
+}
 
 // parsePackage parses the non-test files of the package.
 func parsePackage(t *testing.T) []*ast.File {

@@ -21,6 +21,7 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -243,5 +244,114 @@ func TestWindowedLeadOfAStartCharacter(t *testing.T) {
 				t.Errorf("%s on %.40q (%d bytes): windows found %v, the whole text %v", re, s, len(s), got, want)
 			}
 		}
+	}
+}
+
+// shortWindowLabel is the label name of FuzzDiffBuild input 22905eb52eae1385 (#873, third round): a unit of short
+// key words, separators and values, repeated to n bytes and more, so that no expression finds a long window in it.
+func shortWindowLabel(n int) string {
+	const unit = "TOKEN=\"a\",b,DB_PASSWORD: |+\n  SECRETPROBE0001"
+	return strings.Repeat(unit, n/len(unit)+1)
+}
+
+// chunkText generates a label made of short windows (fragments of keys, separators, values, look-alike, invisible
+// and invalid characters, repeated as a unit or not) and an answer that writes it, or a copy with one fragment
+// changed, on several lines with other characters around it, as the metric lines of a context do.
+func chunkText(rng *rand.Rand) (label, answer string) {
+	frags := []string{passwordKey, "aws_secret_access_key", "x_token", "apiKey", authKey, "Bearer ", "name", "value",
+		"DB_PASS", "AccountKey", clientSecretKey, ":", "=", ": ", "=\"", "\"", "'", ",", "{", "}", "[", "]", " ", "\t",
+		"\n", "\r\n", "  ", "- ", "|+\n  ", ">", "#", "?", "&", "@", `\"`, `\n`, "x://u:", "\ufe55", "\uff1a", "\ufeff",
+		"\u200b", "\xbf", "\u00e9", "\u2028", "a", "b", "0001", "10.1.2.3", "fe80::1", "eyJhbGciOi"}
+	pick := func() string { return frags[rng.IntN(len(frags))] }
+	var unit strings.Builder
+	for range 3 + rng.IntN(12) {
+		unit.WriteString(pick())
+	}
+	var b strings.Builder
+	size := windowMinText + rng.IntN(3*windowMinText)
+	for b.Len() < size {
+		if rng.IntN(3) == 0 {
+			b.WriteString(pick()) // a text that is not one unit repeated
+			continue
+		}
+		b.WriteString(unit.String())
+	}
+	label = b.String()
+	var a strings.Builder
+	for i := range 2 + rng.IntN(7) {
+		l := label
+		if rng.IntN(4) == 0 {
+			at := rng.IntN(len(l))
+			l = l[:at] + pick() + l[at:]
+		}
+		fmt.Fprintf(&a, "template_%d{%s%s=\"%s\",pod=\"web-%d\"} 1\n", i, pick(), l, pick(), i)
+	}
+	return label, a.String()
+}
+
+// Every expression read by windows finds in the labels of short windows and their answers what it finds read whole,
+// read alone and with one windowIDs for the label and then its answer (as Pieces reads a value and its answer).
+func TestWindowedChunksFindWhatTheExpressionFinds(t *testing.T) {
+	exprs := windowExprs(t)
+	for i := range 160 {
+		if !raceKeeps("windowed chunks", i) {
+			continue
+		}
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			t.Parallel()
+			label, answer := chunkText(rand.New(rand.NewPCG(8733, uint64(i)))) // #nosec G404 G115 -- reproducible generated texts; i is below 160
+			for name, re := range exprs {
+				w := newWindowed(re)
+				ids := &windowIDs{}
+				for _, s := range []string{label, answer, answer + label} {
+					if got, want := w.findAllWith(s, ids), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
+						t.Errorf("%s (%q) on %d bytes: windows found %v, the whole text %v in %q", name, re.String(), len(s), got, want, s)
+					}
+					if got, want := w.findAll(s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
+						t.Errorf("%s (%q) alone on %d bytes: windows found %v, the whole text %v", name, re.String(), len(s), got, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A label of short windows repeated in a text is read about once (#873, third round): every expression read by
+// windows reads eight copies of the label of FuzzDiffBuild input 22905eb52eae1385, each on its own metric line,
+// with at most twice the bytes of one, also when the label was read alone first. An expression whose alphabet holds
+// every character of a line and the line break (one window over all the lines, which no reading can cut) is left
+// out.
+func TestWindowedReadsARepeatedLabelOfShortWindowsOnce(t *testing.T) {
+	label := shortWindowLabel(40 << 10)
+	var b strings.Builder
+	for i := range 8 {
+		fmt.Fprintf(&b, "template_%d{%s=\"\",pod=\"web-%d\"} 1\n", i, label, i)
+	}
+	answer := b.String()
+	read := 0
+	for name, re := range windowExprs(t) {
+		w := newWindowed(re)
+		if w.whole || slices.ContainsFunc(longRuns(answer, []*windowed{w})[0], func(r longRun) bool { return r.end-r.start > len(label) }) {
+			continue
+		}
+		read++
+		bytesRead := 0
+		w.onRead = func(n int) { bytesRead += n }
+		w.findAll(answer)
+		if bytesRead > 2*len(label)+windowMinText {
+			t.Errorf("%s: eight copies of a label of short windows read %d bytes with the expression, over twice the %d of one",
+				name, bytesRead, len(label))
+		}
+		bytesRead = 0
+		ids := &windowIDs{}
+		w.findAllWith(label, ids)
+		w.findAllWith(answer, ids)
+		if bytesRead > 2*len(label)+windowMinText {
+			t.Errorf("%s: the label alone and then eight copies read %d bytes with the expression, over twice the %d of one",
+				name, bytesRead, len(label))
+		}
+	}
+	if read < 10 {
+		t.Errorf("only %d expressions are read by windows", read)
 	}
 }

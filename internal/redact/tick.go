@@ -21,3 +21,7 @@ package redact
 // tick reports n steps of work. Without the build tag redactwork nothing counts them: the product build holds
 // no counter and no other shared state for it (#840).
 func tick(int) {}
+
+// tickExpression reports n bytes handed to a regular expression; without the build tag redactwork nothing counts
+// them.
+func tickExpression(int) {}

@@ -30,9 +30,9 @@ import "strings"
 // with the tag redactwork.
 func Tick(n int) { tick(n) }
 
-// counted returns t, counting its bytes as the work of the library call it is handed to.
+// counted returns t, counting its bytes as the work of the regular expression it is handed to.
 func counted(t string) string {
-	tick(len(t))
+	tickExpression(len(t))
 	return t
 }
 

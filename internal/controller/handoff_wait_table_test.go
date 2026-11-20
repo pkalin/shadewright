@@ -796,6 +796,23 @@ func checkPacedFailure(t *testing.T, res reconcile.Result, err error, got *api.R
 	}
 }
 
+// nothingToReadRow checks a row that left the watch with nothing to read and its write that says so stored
+// (noteNothingToRead), before the call failed or after a conflict on it was retried from a fresh read (patchGitWaits):
+// the refusal is gone, the wait stays, and a failure of the Kubernetes API that was not retried goes to the error
+// backoff. A request without the refusal in any other state no longer waits, and fails the row.
+func nothingToReadRow(t *testing.T, res reconcile.Result, err error, got *api.RemediationRequest, cluster bool,
+	kind failureKind) {
+	t.Helper()
+	if w := gitWait(got, waitHandoffRecovery); w == nil || w.Operation != recoveryNothingToRead || !abortedOnRefusal(got) {
+		t.Fatalf("the recovery no longer waits: conditions %+v (err %v)", got.Status.Conditions, err)
+	}
+	retried := cluster && (kind == kindConflict || kind == kindJoined) && err == nil && res.RequeueAfter > 0
+	if !retried && (err == nil || !cluster) {
+		t.Fatalf("recoverHandoff = %+v, %v after the record of nothing to read; want a retried conflict or the "+
+			"error backoff", res, err)
+	}
+}
+
 func recoveryWaitRow(t *testing.T, path recoveryPath, call string, kind failureKind) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -831,20 +848,10 @@ func recoveryWaitRow(t *testing.T, path recoveryPath, call string, kind failureK
 			got.Status.Phase, got.Status.Handoff.From.Phase, got.Status.Conditions, err)
 	}
 	c := watchedRecovery(got)
-	if w := gitWait(got, waitHandoffRecovery); c == nil && w != nil && w.Operation == recoveryNothingToRead &&
-		abortedOnRefusal(got) {
-		// The watch had nothing to read and its write that says so was stored (noteNothingToRead), before the call
-		// failed or after a conflict on it was retried from a fresh read (patchGitWaits): the refusal is gone, the
-		// wait stays, and a failure of the Kubernetes API that was not retried goes to the error backoff.
-		retried := cluster && (kind == kindConflict || kind == kindJoined) && err == nil && res.RequeueAfter > 0
-		if !retried && (err == nil || !cluster) {
-			t.Fatalf("recoverHandoff = %+v, %v after the record of nothing to read; want a retried conflict or the "+
-				"error backoff", res, err)
-		}
-		return
-	}
 	if c == nil {
-		t.Fatalf("the recovery no longer waits: conditions %+v (err %v)", got.Status.Conditions, err)
+		// Only a watch with nothing to read drops the refusal; any other state fails the row.
+		nothingToReadRow(t, res, err, got, cluster, kind)
+		return
 	}
 	wait, keep := waitOutcome(cluster, kind)
 	switch {

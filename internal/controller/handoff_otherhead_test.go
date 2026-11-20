@@ -299,3 +299,80 @@ func TestPredecessorHeadMergeKeptByThePresentPredecessor(t *testing.T) {
 func init() {
 	gitReadSites["recoverywait.go:recordOtherHeadMerge:1"] = gitReadSites["branchchange.go:checkRetargeted:1"]
 }
+
+// The predecessor records the merge of its own head while the replacement holds the lock before its takeover, and is
+// then deleted; the replacement looks only after that (decision of 2026-11-20 on #870 replacing the third row): the
+// predecessor ended the replacement in the pass that recorded the merge, so the replacement never records it a second
+// time as a foreign change, counts no failure, and lets go of the lock.
+func TestPredecessorRecordedItsHeadThenGoneRecordedOnce(t *testing.T) {
+	r, p, rr, _, move := predecessorHeadMerged(t)
+	ctx := t.Context()
+	gotP, err := reconcileOnce(t, r, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recordsMerge(gotP) {
+		t.Fatalf("predecessor %q: want it to record the merge of its own head", gotP.Status.Phase)
+	}
+	// The pass that stored the record ended the replacement: its handoff Aborted and its lock released.
+	if ended := storedRR(t, r, rr); ptr.Deref(ended.Status.HoldsTarget, false) ||
+		ended.Status.Handoff.From.Phase != api.HandoffAborted {
+		t.Fatalf("replacement %q, handoff %q, lock %v after the predecessor's record: want it ended in that pass",
+			ended.Status.Phase, ended.Status.Handoff.From.Phase, ptr.Deref(ended.Status.HoldsTarget, false))
+	}
+	if err := r.Delete(ctx, gotP); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(p)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(p), &api.RemediationRequest{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("predecessor still there (%v): want its finalizer done", err)
+	}
+	var got *api.RemediationRequest
+	for range 3 {
+		move(heldRecheckInterval)
+		got, _ = reconcileOnce(t, r, rr)
+	}
+	if recordsMerge(got) {
+		c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionApproved)
+		t.Fatalf("replacement %q, Approved %+v: it records a merge the predecessor recorded", got.Status.Phase, c)
+	}
+	if breakerOutcome(got) == outcomeFailure {
+		t.Fatalf("replacement %q: counted as a failure for a merge already recorded", got.Status.Phase)
+	}
+	if ptr.Deref(got.Status.HoldsTarget, false) {
+		t.Fatal("replacement keeps the target lock after the merge was recorded")
+	}
+}
+
+// The same record while the replacement still watches (its handoff aborted at a refusal, not ended): the pass that
+// stores the predecessor's record ends it Superseded with MergedForPredecessor, its handoff Aborted and its lock
+// released, no failure for the circuit breaker.
+func TestPredecessorRecordedItsHeadEndsTheWatchingReplacement(t *testing.T) {
+	r, g, p, rr, cr, _ := watchingAfterRefusal(t)
+	if err := g.ForcePush("shadewright/"+string(chainRootOf(p)), p.Status.PullRequest.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.MergeWithCommit(cr.Number); err != nil {
+		t.Fatal(err)
+	}
+	gotP, err := reconcileOnce(t, r, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recordsMerge(gotP) {
+		t.Fatalf("predecessor %q: want it to record the merge of its own head", gotP.Status.Phase)
+	}
+	got := storedRR(t, r, rr)
+	c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionPROpened)
+	if got.Status.Phase != api.PhaseSuperseded || c == nil || c.Reason != ReasonMergedForPredecessor ||
+		got.Status.Handoff.From.Phase != api.HandoffAborted || ptr.Deref(got.Status.HoldsTarget, false) ||
+		recordsMerge(got) || breakerOutcome(got) == outcomeFailure {
+		t.Fatalf("replacement %q, PullRequestOpened %+v, handoff %q, lock %v: want Superseded with "+
+			"MergedForPredecessor, its handoff Aborted, the lock released and no record", got.Status.Phase, c,
+			got.Status.Handoff.From.Phase, ptr.Deref(got.Status.HoldsTarget, false))
+	}
+}

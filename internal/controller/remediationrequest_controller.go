@@ -594,6 +594,9 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 
 	rr := &remediationv1alpha1.RemediationRequest{}
 	defer func() { res = r.lookAgainWhileHeld(rr, res, err) }()
+	// Runs before the one above: a predecessor that holds the record of its own merge ends its replacement in the
+	// same pass (endReplacementAfterRecord, decision of 2026-11-20 on #870).
+	defer r.endReplacementAfterRecord(ctx, rr, &res, &err)
 	// The request is read from the API server, not the cache (decision of 2026-11-19 on #786): every step decides on
 	// the request as stored, so no reconcile starts from a copy older than a write the executor already made. The
 	// cache still triggers the reconcile and serves the lists.

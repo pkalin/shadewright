@@ -33,6 +33,7 @@ stateDiagram-v2
     PRCreated --> Superseded: a replacement that took the pull request over, merged with its predecessor's commit put back, once the predecessor records the merge (MergedForPredecessor, #786)
     AwaitingApproval --> Superseded: the same (MergedForPredecessor, #786)
     NeedsIntervention --> Superseded: the same, after a stop (MergedForPredecessor, #786)
+    PolicyChecked --> Superseded: a replacement that holds the lock before its takeover, once the predecessor records the merge of its own head (MergedForPredecessor, #870)
     Pending --> Cancelled: spec.cancel (CancelRequested)
     PolicyChecked --> Cancelled: spec.cancel (CancelRequested)
     PRCreated --> Cancelled: spec.cancel, pull request closed (CancelRequested)

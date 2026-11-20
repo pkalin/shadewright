@@ -549,7 +549,7 @@ func (r *RemediationRequestReconciler) recordOtherHeadMerge(ctx context.Context,
 		if err != nil {
 			logf.FromContext(ctx).Info("Could not read what the merge of the pull request RemediationRequest was to "+
 				"take over brought; tried again", "remediationRequest", client.ObjectKeyFromObject(rr),
-				"error", err.Error())
+				"pullRequest", cr.Number, "mergeCommit", cr.MergeCommit, "error", err.Error())
 			return readOfContent(cr, err)
 		}
 		r.gitRetries().noteAnswered(client.ObjectKeyFromObject(rr))
@@ -865,7 +865,8 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 // only), and one merged whose head is rr's handoff commit (isOwnCommitAlone, the commit alone) is recorded on rr with
 // its receipt (recordFoundMerge); one merged with any other head, the predecessor's own included, is recorded on rr
 // as a foreign change (recordOtherHeadMerge, decisions of 2026-11-20 on #870), since rr holds the lock and nobody
-// else can. An open one keeps the lock, as in heldRecoveryRead, since it may still deliver rr's commit. Anything else
+// else can: a predecessor that recorded the merge of its own head ended rr in that pass (supersedeReplacementAfterMerge),
+// so rr still holds the lock here only when the predecessor went without a record. An open one keeps the lock, as in heldRecoveryRead, since it may still deliver rr's commit. Anything else
 // settles nothing here (done false), and the verdict of the look decides. A failure is returned;
 // a failure of the Kubernetes API is marked so (a *clusterError).
 func (r *RemediationRequestReconciler) heldRecoveryAlone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (

@@ -658,7 +658,9 @@ func (r *RemediationRequestReconciler) mergedHeadOwnerOf(ctx context.Context, gi
 // its outgoing handoff to (third case of the decision of 2026-11-20 on #870): pred is being deleted and holds no
 // record of that merge (holdsMergeRecord), so its finalizer records none, and repl holds the target lock before its
 // takeover (recordsEveryMerge), so it records the merge as a foreign change with the same reasons as any other head.
-// A present predecessor keeps its own head. It reads the status only.
+// A present predecessor keeps its own head. Only the replacement's side can find it true: the predecessor's own reading
+// (predecessorMergeOwner) passes no replacement for its own head, so it is false there, and the two sides agree because
+// a predecessor being deleted records nothing in its finalizer. It reads the status only.
 func predecessorLeftItsMerge(pred, repl *remediationv1alpha1.RemediationRequest,
 	to *remediationv1alpha1.OutgoingHandoff, head string) bool {
 	return !pred.DeletionTimestamp.IsZero() && pred.Status.PullRequest != nil &&
@@ -798,14 +800,18 @@ func (r *RemediationRequestReconciler) leavePredecessorMerge(ctx context.Context
 			"this request's plan was not merged", v.pr.Number, rr.Status.Handoff.From.Name))
 }
 
-// supersedeReplacementAfterMerge is the step a predecessor, rr, being deleted takes when it recorded the merge of its
-// own recorded head (holdsMergeRecord: with its receipt, or without one) after its replacement took the pull request
-// over (a person put that head back):
-// the replacement, which leaves that merge to rr while rr exists (replacementMergeOwner), ends Superseded with
-// ReasonMergedForPredecessor (leavePredecessorMerge), unless it ended or recorded a merge already, so that it never
-// records the same merge as a foreign change once rr is gone (second round of #786). A replacement gone, made again,
-// or not on rr's pull request needs nothing. A failed read or write is returned for a retry; a pause is
-// freshness.ErrPaused.
+// supersedeReplacementAfterMerge is the step a predecessor, rr, takes once it holds the record of the merge of its own
+// recorded head (holdsMergeRecord: with its receipt, or without one), so that its replacement never records the same
+// merge as a foreign change once rr is gone. It runs in the reconcile that stored that record and every one after it
+// (endReplacementAfterRecord), and in rr's finalizer before it lets go. Two cases end the replacement:
+//   - it took the pull request over (a person put rr's head back): it ends Superseded with ReasonMergedForPredecessor
+//     (leavePredecessorMerge), unless it ended or recorded a merge already (second round of #786);
+//   - it holds the target lock before its takeover (recordsEveryMerge), so it would record any merge of the pull
+//     request once rr is gone (heldRecoveryAlone): it ends on rr's record as it does when it reads the merge itself
+//     with rr present (endOnPredecessorRecord; decision of 2026-11-20 on #870 replacing the third row).
+//
+// A replacement gone, made again, being deleted or not on rr's pull request needs nothing. A failed read or write is
+// returned for a retry; a pause is freshness.ErrPaused.
 func (r *RemediationRequestReconciler) supersedeReplacementAfterMerge(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) error {
 	ho, pr := rr.Status.Handoff, rr.Status.PullRequest
@@ -819,8 +825,18 @@ func (r *RemediationRequestReconciler) supersedeReplacementAfterMerge(ctx contex
 	case err != nil:
 		return &clusterError{err: fmt.Errorf("get the replacement of RemediationRequest %s: %w", rr.Name, err)}
 	}
-	if repl.UID != types.UID(ho.To.UID) || !tookOver(repl) || repl.Status.PullRequest == nil ||
-		repl.Status.PullRequest.Number != rr.Status.PullRequest.Number || !repl.DeletionTimestamp.IsZero() ||
+	if repl.UID != types.UID(ho.To.UID) || !repl.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	v := changeVerdict{state: changeMerged, pr: providers.ChangeRequest{Number: pr.Number,
+		HeadSHA: pr.HeadSHA, State: providers.ChangeRequestMerged}}
+	if recordsEveryMerge(repl) {
+		if err := r.writeAllowed(ctx); err != nil {
+			return err
+		}
+		return r.endOnPredecessorRecord(ctx, repl, v)
+	}
+	if !tookOver(repl) || repl.Status.PullRequest == nil || repl.Status.PullRequest.Number != pr.Number ||
 		mergeRecorded(repl) ||
 		(ended(repl.Status.Phase) && repl.Status.Phase != remediationv1alpha1.PhaseNeedsIntervention) {
 		return nil
@@ -828,9 +844,39 @@ func (r *RemediationRequestReconciler) supersedeReplacementAfterMerge(ctx contex
 	if err := r.writeAllowed(ctx); err != nil {
 		return err
 	}
-	v := changeVerdict{state: changeMerged, pr: providers.ChangeRequest{Number: pr.Number,
-		HeadSHA: pr.HeadSHA, State: providers.ChangeRequestMerged}}
 	return r.ignoreStopped(r.leavePredecessorMerge(ctx, repl, v))
+}
+
+// endOnPredecessorRecord ends repl, a replacement that holds the target lock before its takeover (recordsEveryMerge),
+// once its predecessor holds the record of the merge of its own recorded head, v: repl records none, its handoff moves
+// to Aborted (nothing was taken over, and nothing can be through a merged pull request) and its lock is released, in
+// one status write. One that ended already settles as its own look settles that merge with the predecessor present
+// (endOnOtherMerge: its phase kept, an end the breaker counts as a failure becoming Cancelled with
+// ReasonHandoffAborted); one still running ends Superseded with ReasonMergedForPredecessor, as a replacement that took
+// the pull request over does (leavePredecessorMerge), no failure for the circuit breaker. A failed write is returned
+// for a retry.
+func (r *RemediationRequestReconciler) endOnPredecessorRecord(ctx context.Context,
+	repl *remediationv1alpha1.RemediationRequest, v changeVerdict) error {
+	if ended(repl.Status.Phase) {
+		return r.endOnOtherMerge(ctx, repl, v.pr)
+	}
+	repl.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
+	return r.ignoreStopped(r.leavePredecessorMerge(ctx, repl, v))
+}
+
+// endReplacementAfterRecord runs supersedeReplacementAfterMerge at the end of a reconcile of rr that went through
+// (err nil), so the reconcile that stored rr's record of the merge of its own head ends rr's replacement in the same
+// pass, and any later one tries again while that replacement still stands. A request being deleted takes the step in
+// its finalizer (beginFinalize). A pause leaves it to the next reconcile; any other failure replaces the answer of the
+// reconcile (res, err) with that error, for a retry.
+func (r *RemediationRequestReconciler) endReplacementAfterRecord(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest, res *reconcile.Result, err *error) {
+	if *err != nil || ctx.Err() != nil || rr.UID == "" || !rr.DeletionTimestamp.IsZero() {
+		return
+	}
+	if serr := r.supersedeReplacementAfterMerge(ctx, rr); serr != nil && !errors.Is(serr, freshness.ErrPaused) {
+		*res, *err = reconcile.Result{}, serr
+	}
 }
 
 // replacementHoldsRecord reports whether repl records the merge of pred's recorded pull request with head as its own

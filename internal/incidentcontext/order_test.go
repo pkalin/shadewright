@@ -33,7 +33,7 @@ import (
 //
 //   - O1: every container's first read comes before any second read, in the order of the containers, with
 //     the deadline a read of its own would have (one call timeout from its start): no log that one read per
-//     container would get is lost or read later.
+//     container, of the instance chosen first, would get is lost or read later.
 //   - O2: a second read (the other instance after an answer without lines, or the previous instance after
 //     the excerpt of a terminated current one) runs only in the time the section's budget has left, and none
 //     starts when no time is left.
@@ -112,8 +112,10 @@ func bothRestarted() []client.Object {
 // fixtureWindow is the window of the fixtures' Incident, which a read of a current instance asks for.
 const fixtureWindow = 40 * time.Minute
 
-// mainReads is the reference: the log section of origin/main, one read per container, written from its code
-// with the instance choice of #943. It models:
+// oneReadPerContainer is the reference: one read per container with the instance choice of #943. It is not
+// the log section before #943, which read the previous instance of a container whose current instance had
+// terminated; a log that only that instance gives can come later or not at all (the known limits in
+// limits_test.go). It models:
 //
 //   - the containers in the order of the pick, the first pod's container first (both have the same score
 //     and restarts);
@@ -125,7 +127,7 @@ const fixtureWindow = 40 * time.Minute
 //   - the log excerpt failed when a read failed (forbidden, hangs), not when it answered without lines.
 //
 // It returns the calls, the excerpts and whether the log excerpt is failed.
-func mainReads(plan map[string][2]outcome, previousFirst bool) ([]providers.LogQuery, []string, bool) {
+func oneReadPerContainer(plan map[string][2]outcome, previousFirst bool) ([]providers.LogQuery, []string, bool) {
 	calls := make([]providers.LogQuery, 0, 2)
 	var excerpts []string
 	failed := false
@@ -150,9 +152,9 @@ func mainReads(plan map[string][2]outcome, previousFirst bool) ([]providers.LogQ
 	return calls, excerpts, failed
 }
 
-// O1, O2, O3 and B1, B2 over the outcomes of the reads, against the reference [mainReads]: every container
-// plan (the current and the previous instance's outcome) for each of two containers, in each order, with
-// the current instance read first and with the previous one read first. The branch's first calls are the
+// O1, O2, O3 and B1, B2 over the outcomes of the reads, against the reference [oneReadPerContainer]: every
+// container plan (the current and the previous instance's outcome) for each of two containers, in each order,
+// with the current instance read first and with the previous one read first. The section's first calls are the
 // reference's calls in order, each with the reference's deadline; every excerpt the reference gets is in the
 // context; the log excerpt is failed exactly when the reference's is; the second reads follow only a first
 // read that did not fail, at most one per container, ending within two call timeouts of the first call.
@@ -194,7 +196,7 @@ func TestLogReadsMatchOneReadPerContainer(t *testing.T) {
 					c, metricReads, _, _ := timedBuildOf(t, f.objs(), l, call, 10*time.Second)
 					l.mu.Lock()
 					defer l.mu.Unlock()
-					want, excerpts, failed := mainReads(plan, f.previousFirst)
+					want, excerpts, failed := oneReadPerContainer(plan, f.previousFirst)
 					checkFirstReads(t, l, want, call)
 					checkSecondReads(t, l, plan, len(want))
 					checkDeadlines(t, l, call, len(want))

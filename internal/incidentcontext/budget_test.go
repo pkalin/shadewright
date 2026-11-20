@@ -78,9 +78,11 @@ type timedLogs struct {
 	mu      sync.Mutex
 	plan    map[string][2]outcome // pod -> outcome of the current, then the previous instance
 	slowFor time.Duration
-	calls   []providers.LogQuery
-	first   time.Time
-	cutAt   []time.Time
+	// previousText, when set, is the answer of a previous instance instead of the fixed excerpt.
+	previousText string
+	calls        []providers.LogQuery
+	first        time.Time
+	cutAt        []time.Time
 	// deadlines are the deadlines of the calls' contexts, and starts the times the calls reached the source,
 	// in the order of calls.
 	deadlines []time.Time
@@ -118,6 +120,9 @@ func (l *timedLogs) Logs(ctx context.Context, q providers.LogQuery) (providers.L
 		l.mu.Unlock()
 	}()
 	answer := providers.LogExcerpt{Text: q.Pod + " " + instanceName(q.Previous) + " failed\n", CollectedAt: testNow}
+	if q.Previous && l.previousText != "" {
+		answer.Text = l.previousText
+	}
 	switch o {
 	case slow:
 		select {

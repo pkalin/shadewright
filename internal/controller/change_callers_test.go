@@ -162,6 +162,10 @@ func other(git providers.GitProvider) {
 // request, including an Incident cancellation, has a separate release rule.
 const releaseFunc = "Release"
 
+// releaseWrapper is releaseLock, which calls lockverdict.Release and logs a failed review check left unwritten
+// (#925): a call of it counts as a release, so only releasers may call it.
+const releaseWrapper = "releaseLock"
+
 var (
 	lockWriters = map[string]bool{"acquire": true}
 	releasers   = map[string]bool{
@@ -265,7 +269,11 @@ func callWrites(owner string, n *ast.CallExpr) []string {
 	if !isSel || sel.Sel.Name != "Deref" {
 		found = append(found, pointerCopies(n.Args, "passes the pointer of status.holdsTarget")...)
 	}
-	if isSel && sel.Sel.Name == releaseFunc && isPackage(sel.X, "lockverdict") && !releasers[owner] {
+	if isSel && sel.Sel.Name == releaseFunc && isPackage(sel.X, "lockverdict") && !releasers[owner] &&
+		owner != releaseWrapper {
+		found = append(found, "releases the lock outside the lock rule")
+	}
+	if id, ok := n.Fun.(*ast.Ident); ok && id.Name == releaseWrapper && !releasers[owner] {
 		found = append(found, "releases the lock outside the lock rule")
 	}
 	if isSel && (sel.Sel.Name == "DeepCopyInto" || sel.Sel.Name == "Unmarshal") && len(n.Args) > 0 {
@@ -313,6 +321,9 @@ func copyInto(rr, o *R) { o.Status.DeepCopyInto(&rr.Status) }
 func decode(rr *R, b []byte) { _ = json.Unmarshal(b, &rr.Status) }
 func patch(rr *R) { _ = client.RawPatch(types.MergePatchType, []byte(` + "`" + `{"status":{"holdsTarget":false}}` + "`" + `)) }
 func early(rr *R) { _ = lockverdict.Release(&rr.Status, s) }
+func wrapped(rr *R) { _ = releaseLock(ctx, rr, s) }
+func releaseLock(ctx C, rr *R, v L) error { return lockverdict.Release(&rr.Status, v) }
+func cancelUndecided(rr *R) { _ = releaseLock(ctx, rr, s) }
 func release(rr *R, s L) { rr.Status.HoldsTarget = new(false) }
 func acquire(rr *R) { rr.Status.HoldsTarget = new(true) }
 func releaseRefused(rr *R) { _ = lockverdict.Release(&rr.Status, s) }
@@ -330,12 +341,12 @@ func restoreStatus(rr *R, before *S) { rr.Status = *before }
 		}
 	})
 	for _, owner := range []string{"star", "plain", "alias", "varAlias", "passed", "returned", "parenStar", "viaStatus",
-		"addr", "literal", "replace", "copyInto", "decode", "patch", "early", "release"} {
+		"addr", "literal", "replace", "copyInto", "decode", "patch", "early", "wrapped", "release"} {
 		if !caught[owner] {
 			t.Errorf("the guard misses the write in %s", owner)
 		}
 	}
-	for _, owner := range []string{"acquire", "releaseRefused", "restoreStatus", "reads"} {
+	for _, owner := range []string{"acquire", "releaseRefused", "restoreStatus", "reads", "releaseLock", "cancelUndecided"} {
 		if caught[owner] {
 			t.Errorf("the guard refuses %s", owner)
 		}

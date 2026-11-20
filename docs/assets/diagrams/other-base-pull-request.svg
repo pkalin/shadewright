@@ -57,5 +57,5 @@
 
   <rect class="box" x="36" y="470" width="1048" height="64" rx="12"/>
   <text class="no" x="54" y="498">Never on another base</text>
-  <text class="s" x="54" y="518">no push, comment or merge; no check run but a failed one (stale plan, cancel or stop, hints on); no close without the marker; no fork.</text>
+  <text class="s" x="54" y="518">no push, comment or merge; no check run but a failed one (stale plan, cancel or stop, hints on); no close without the marker; no fork or other repository.</text>
 </svg>

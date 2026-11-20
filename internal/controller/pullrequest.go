@@ -2299,7 +2299,10 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	// The waits for a read do not apply to a request being deleted (waitKind.applies, #878): removed in the same write,
 	// so the status does not say it waits for a merge while the cleanup is retried.
 	dropEnded(rr, r.now())
-	if marked := markDeleting(rr); marked || len(rr.Status.GitWaits) != waits {
+	// The deletion ends the looks of a stopped request, so nothing tries its failed review check again: the close
+	// below takes over, and says so with its own conditions when it fails (#925).
+	noted := endCheckNote(rr)
+	if marked := markDeleting(rr); marked || noted || len(rr.Status.GitWaits) != waits {
 		// Before the close below: the limits read this request, and count it against the cap, until the
 		// finalizer is gone (breakercounts.go).
 		if err := r.Status().Update(ctx, rr); err != nil {

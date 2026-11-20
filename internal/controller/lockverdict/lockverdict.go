@@ -211,7 +211,9 @@ func UndeliveredRepositoryGone(undelivered, repositoryGone bool) (*Verdict, bool
 }
 
 // Release clears the lock in status, about to be written, for the verdict v, with the condition TargetHeld that
-// said why it was kept. A nil or zero v releases nothing and returns ErrNoVerdict.
+// said why it was kept, and condition ReviewCheckNotFailed: the failed review check of a stopped request is tried
+// again only at the looks of a holder, which end with the lock (#925). A nil or zero v releases nothing and returns
+// ErrNoVerdict.
 func Release(status *api.RemediationRequestStatus, v *Verdict) error {
 	if v == nil || v.proof == none {
 		return ErrNoVerdict
@@ -219,5 +221,6 @@ func Release(status *api.RemediationRequestStatus, v *Verdict) error {
 	held := false
 	status.HoldsTarget = &held
 	meta.RemoveStatusCondition(&status.Conditions, api.ConditionTargetHeld)
+	meta.RemoveStatusCondition(&status.Conditions, api.ConditionReviewCheckNotFailed)
 	return nil
 }

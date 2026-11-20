@@ -374,7 +374,7 @@ The Git host refuses for good (`GitForbidden` or `GitRejected`) to close the pul
 
 #### ReviewCheckNotFailed
 
-With reviewer hints on, a request stopped while its own pull request is open, and the failed check run `shadewright/review` could not be written on its head, so a check written before the stop may still show on the pull request. Not a stop: the write is tried again at each look of the stopped request (every 10 minutes while it holds the lock), and the condition goes once the failed check is written. A Warning Event of the same name is recorded when it is set or its reason changes.
+With reviewer hints on, a request stopped while its own pull request is open, and the failed check run `shadewright/review` could not be written on its head, so a check written before the stop may still show on the pull request. Not a stop: the write is tried again at each look of the stopped request (every 10 minutes while it holds the lock), and the condition goes once the failed check is written, or when the looks end: a look finds the pull request closed, merged or gone, the lock is released, or the request is deleted. A Warning Event of the same name is recorded when it is set or its reason changes.
 
 | Reason | What it means | What to do |
 | --- | --- | --- |

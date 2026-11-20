@@ -118,8 +118,10 @@ import (
 // cancelled request whose pull request is closed or gone holds no lock (settled cancel). With reviewer hints on, a
 // request that stopped while its own pull request is open, with its repository in the settings, has its review check
 // failed (settled check) or, where the settings permit no write (another target branch named), says so with condition
-// ReviewCheckNotFailed (settled note, #925); a request whose failed check is recorded as Stale carries no such
-// condition (note cleared).
+// ReviewCheckNotFailed (settled note, #925); a request whose own pull request is not open (closed, merged or gone,
+// on any base) carries no such condition (note cleared). After every reconcile, no request whose failed check is
+// recorded as Stale carries it (note cleared), nor one whose lock is released or whose merge is recorded (note
+// ended).
 //
 // Each seed has a focus (seed modulo the number of focuses, modelFocuses): none, or one that makes an order of the
 // fourth or fifth decision of 2026-11-18 on #771 likely (a deadline that passes while the repository cannot be
@@ -338,6 +340,9 @@ type modelWorld struct {
 	lost bool
 	// lastingUntil keeps the fault as it is until then (an outage that lasts): fault events wait.
 	lastingUntil time.Time
+	// checkFails: the Git host fails every write of a check run (CreateCheckRun) with a 5xx (checkEvent): a write
+	// made to fail (writeFaulted), no failed read.
+	checkFails bool
 	// history is every copy of the request the API server held after a reconcile, for the stale cache.
 	history    []*api.RemediationRequest
 	violations []string
@@ -516,6 +521,10 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 	default:
 		orderStop(t, r, rr, start)
 	}
+	// In half of the runs with reviewer hints on, the Git host fails the write of check runs from the start until
+	// checkEvent or the heal: a stopped request says so with condition ReviewCheckNotFailed (GitFailed) until a later
+	// look writes the failed check (#925).
+	m.checkFails = r.ReviewerHints && rng.IntN(2) == 0
 	m.lost = start == startPolicyChecked && !m.handoff
 	r.VerifyOutcomes = st.verify
 	m.logf("start %+v", st)
@@ -795,7 +804,7 @@ func (m *modelWorld) run() {
 	}
 	m.mu.Lock()
 	m.fault, m.loseNext, m.conflictNext, m.applyNext, m.staleNext, m.noCommit = faultNone, false, false, false, false, false
-	m.lastingUntil, m.passWrites = time.Time{}, 0
+	m.lastingUntil, m.passWrites, m.checkFails = time.Time{}, 0, false
 	m.mu.Unlock()
 	if m.paused && (m.focus == focusPause || m.rng.IntN(2) == 0) {
 		// A pause stops everything (sixth decision of 2026-11-18 on #771): the healed world changes nothing while it
@@ -1055,13 +1064,22 @@ func (m *modelWorld) moveBackEvent(cr providers.ChangeRequest) {
 	m.logf("(moved back after the request stopped)")
 }
 
+// checkEvent switches the Git host's failure of check run writes on or off (checkFails, #925).
+func (m *modelWorld) checkEvent() {
+	m.mu.Lock()
+	m.checkFails = !m.checkFails
+	on := m.checkFails
+	m.mu.Unlock()
+	m.logf("the Git host fails check run writes: %t", on)
+}
+
 // event changes the world at random before a reconcile.
 func (m *modelWorld) event() {
 	cr, _ := m.pr()
 	if m.focusEvent(cr) {
 		return
 	}
-	switch m.rng.IntN(23) {
+	switch m.rng.IntN(24) {
 	case 0, 1, 8:
 		m.pullRequestEvent(cr)
 	case 19:
@@ -1072,6 +1090,8 @@ func (m *modelWorld) event() {
 		m.retargetEvent(cr)
 	case 22:
 		m.moveBackEvent(cr)
+	case 23:
+		m.checkEvent()
 	case 2, 3, 4, 9:
 		if m.clock.at.Before(m.lastingUntil) {
 			return
@@ -1799,6 +1819,7 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 		m.paceProperties(live, res, err, faulted)
 		m.lockProperties(live)
 		m.recordedProperty(live, faulted)
+		m.noteProperty(live)
 		return
 	}
 	for _, w := range live.Status.GitWaits {
@@ -1840,6 +1861,27 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	m.paceProperties(live, res, err, faulted)
 	m.lockProperties(live)
 	m.recordedProperty(live, faulted)
+	m.noteProperty(live)
+}
+
+// noteProperty: condition ReviewCheckNotFailed says the failed review check is tried again at the next look of a
+// stopped holder, so no request carries it after its lock is released or once its merge is recorded (note ended,
+// #925): the write that ends the looks removes it; nor once its failed check is recorded as Stale (note cleared):
+// the write that records it removes it.
+func (m *modelWorld) noteProperty(live *api.RemediationRequest) {
+	c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
+	switch {
+	case c == nil:
+	case !holdsLock(live):
+		m.fatalf("note ended: the lock is released (phase %s) and condition ReviewCheckNotFailed is still set: %s",
+			live.Status.Phase, conditionsOf(live))
+	case mergeRecorded(live):
+		m.fatalf("note ended: the merge is recorded (phase %s) and condition ReviewCheckNotFailed is still set: %s",
+			live.Status.Phase, conditionsOf(live))
+	case staleRecorded(live):
+		m.fatalf("note cleared: the failed review check is recorded, and condition ReviewCheckNotFailed is still "+
+			"set: %s", conditionsOf(live))
+	}
 }
 
 // recordedProperty: a request whose status records a merge that delivered the plan, in Merged, Succeeded,
@@ -2237,11 +2279,12 @@ func (m *modelWorld) settledNote(live *api.RemediationRequest, cr providers.Chan
 			"review check of its head is not failed (%+v), and condition ReviewCheckNotFailed does not say so: %s",
 			live.Status.Phase, cr.BaseBranch, m.g.CheckRuns(cr.HeadSHA), conditionsOf(live))
 		return true
-	case m.r.ReviewerHints && !m.paused && staleRecorded(live) && open && found && pr != nil &&
-		cr.Number == pr.Number && holdsLock(live) &&
-		meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil:
-		m.fatalf("note cleared: the failed review check is recorded, and condition ReviewCheckNotFailed is still "+
-			"set: %s", conditionsOf(live))
+	case meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) == nil:
+	case m.repo == nil && (!found || m.deleted || pr == nil || cr.Number != pr.Number ||
+		cr.State != providers.ChangeRequestOpen):
+		// With the repository in the settings the looks read the pull request: one that is not open ends them.
+		m.fatalf("note cleared: the request's pull request is not open (found %t, gone %t, #%d %s), and condition "+
+			"ReviewCheckNotFailed is still set: %s", found, m.deleted, cr.Number, cr.State, conditionsOf(live))
 		return true
 	}
 	return false
@@ -2428,6 +2471,21 @@ func (g *modelGit) FindChangeRequest(ctx context.Context, head string) (provider
 		return providers.ChangeRequest{}, fmt.Errorf("branch %s: %w", head, providers.ErrNotFound)
 	}
 	return g.shown(cr), err
+}
+
+// CreateCheckRun fails while the model says so (checkFails).
+func (g *modelGit) CreateCheckRun(ctx context.Context, sha string, run providers.CheckRun) error {
+	g.m.mu.Lock()
+	failing := g.m.checkFails
+	if failing {
+		// A write made to fail: a step that returns it for the backoff is no error of its own (property "errors").
+		g.m.writeFaulted = true
+	}
+	g.m.mu.Unlock()
+	if failing {
+		return errModelOutage
+	}
+	return g.GitProvider.CreateCheckRun(ctx, sha, run)
 }
 
 func (g *modelGit) ReadFile(ctx context.Context, sha, path string, limit int) (providers.File, error) {

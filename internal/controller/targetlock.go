@@ -562,8 +562,9 @@ func markedMerged(rr *remediationv1alpha1.RemediationRequest) bool {
 }
 
 // settleRecorded is what main's settleLock did in every write that ends a phase: in the status about to be written,
-// it releases the lock of a request whose status records a merge that delivered the plan (settleRecordedMerge), and
-// removes condition PullRequestUnreadable of a request that is settled (clearReleasedRead). It reads nothing, so the
+// it releases the lock of a request whose status records a merge that delivered the plan (settleRecordedMerge),
+// removes condition PullRequestUnreadable of a request that is settled (clearReleasedRead), and condition
+// ReviewCheckNotFailed of one whose merge is recorded (endCheckNote). It reads nothing, so the
 // write that records the merge or ends the verification releases the lock under a pause too. A request held for its verification keeps
 // the lock until that ends. Every other release needs its read (checkHeld), the end of a merge that did not deliver
 // the plan as shown (MergedWithForeignChange, MergeContentUnreadable, MergeNotCheckable) among them.
@@ -573,6 +574,11 @@ func (r *RemediationRequestReconciler) settleRecorded(rr *remediationv1alpha1.Re
 		_ = lockverdict.Release(&rr.Status, s)
 	}
 	clearReleasedRead(rr)
+	if mergeRecorded(rr) {
+		// The pull request is merged: no look tries its failed review check again, also while a verification keeps
+		// the lock (#925). A merge after a stop is recorded with its own facts (recordStoppedMerge).
+		endCheckNote(rr)
+	}
 }
 
 // mergeRecorded reports whether the status records the merge of the request's pull request: a merge receipt, a
@@ -1129,13 +1135,20 @@ func (r *RemediationRequestReconciler) lockWaiters(ctx context.Context, obj clie
 
 // failCheckAfterLook fails the review check of a stopped holder whose look v read its own pull request open, on the
 // target branch or on another base (stoppedCheck, #925): tried at every look while it is pending, and recorded by the
-// look's status write, with condition ReviewCheckNotFailed while it cannot be written (failStoppedCheck). Only a
-// failure of the Kubernetes API is returned, for the error backoff; any other failure is said in status and does not
-// hold the look, whose pace stays heldRecheckInterval.
+// look's status write, with condition ReviewCheckNotFailed while it cannot be written (failStoppedCheck); a look
+// that reads it not open removes that condition (endCheckNote). Only a failure of the Kubernetes API is returned, for
+// the error backoff; any other failure is said in status and does not hold the look, whose pace stays
+// heldRecheckInterval.
 func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, v changeVerdict) error {
 	pr := rr.Status.PullRequest
-	if !v.rule().stoppedCheck || pr == nil || v.pr.Number != pr.Number {
+	if !v.rule().stoppedCheck {
+		// The look read the request's own pull request not open (closed, merged or gone, on any base): no look writes
+		// its failed check any more, whether or not another pull request keeps the lock (#925).
+		endCheckNote(rr)
+		return nil
+	}
+	if pr == nil || v.pr.Number != pr.Number {
 		return nil
 	}
 	if err := r.failStoppedCheck(ctx, rr, string(rr.Status.Phase)); isClusterError(err) {

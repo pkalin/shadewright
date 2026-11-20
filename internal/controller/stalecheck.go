@@ -191,9 +191,10 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 //
 // The stop goes on whatever it returns, since a final phase waits for nothing, so a check that is not written is said
 // in status, in the same write: condition ReviewCheckNotFailed, with the reason of the failure (checkNotFailed), and a
-// Warning Event when it is set or its reason changes, not at each look. The write that records Stale removes it. A
-// repository entry that names another target branch writes nothing, since a branch change permits reads only (#771):
-// that is said the same way, until the entry names the branch again. A cancelled reconcile is only returned, and so
+// Warning Event when it is set or its reason changes, not at each look. The write that records Stale removes it, and
+// so does every write that ends the looks (endCheckNote). A repository entry that names another target branch writes
+// nothing, since a branch change permits reads only (#771): that is said the same way, until the entry names the
+// branch again. A cancelled reconcile is only returned, and so
 // is a failure of the Kubernetes API (reading the settings), for the error backoff.
 func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	reason string) error {
@@ -239,6 +240,15 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 		r.Recorder.Event(rr, corev1.EventTypeWarning, EventReviewCheckNotFailed, message)
 	}
 	return err
+}
+
+// endCheckNote removes condition ReviewCheckNotFailed from rr's status in memory, for the write that ends the looks
+// of a stopped request: the condition says the failed check is tried again at the next look, so it is True only
+// while the request's own pull request is open and its failed check is not written (#925). Its callers: a look that
+// reads the pull request not open (failCheckAfterLook), a write that records the merge (settleRecorded), every
+// release of the lock (lockverdict.Release, which removes it itself) and the first write of a deletion (finalize).
+func endCheckNote(rr *remediationv1alpha1.RemediationRequest) bool {
+	return meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 }
 
 // checkNotFailed is the reason of condition ReviewCheckNotFailed for err, the failure to write a stopped request's

@@ -763,14 +763,9 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return reconcile.Result{}, errors.Join(err, v.err)
 	}
 	if err != nil || v.failed() {
-		if err == nil && c == nil && answeredUnknown(v.err) {
-			// The reads worked and the Git host answered, but only a later look may settle the answer (a first look
-			// at a missing number, contradicting reads): the look leaves the lock held, so the one rule applies to it
-			// as to a settled look (failCheckAfterLook), and the failed check does not wait one more look (seed 1456
-			// of the Git waits model, #925). Which pull request keeps the lock is not read in such a look.
-			if err := r.failCheckAfterUnsettledLook(ctx, rr); err != nil {
-				return reconcile.Result{}, err
-			}
+		// A look whose reads worked but settled nothing yet still leaves the lock held: the one rule applies.
+		if err := r.failCheckAfterUnsettledLook(ctx, rr, v, err, c != nil); err != nil {
+			return reconcile.Result{}, err
 		}
 		return r.heldUnsettled(ctx, rr, v, err, c != nil)
 	}
@@ -1281,14 +1276,21 @@ func (r *RemediationRequestReconciler) lockWaiters(ctx context.Context, obj clie
 	return out
 }
 
-// failCheckAfterUnsettledLook is failCheckAfterLook for a look whose reads worked but settled nothing yet
-// (answeredUnknown): the lock stays held, so the failed check is owed on the recorded head as after any look that
-// leaves it held. The change to the status (Stale on the head, or condition ReviewCheckNotFailed) is written here,
+// failCheckAfterUnsettledLook is failCheckAfterLook for checkHeld's look v that settled nothing, with err the error of
+// the look and said whether the repository could not be opened. Only a look whose reads worked and whose Git host
+// answered, but whose answer only a later look may settle (answeredUnknown: a first look at a missing number,
+// contradicting reads), counts: it leaves the lock held, so the failed check is owed on the recorded head as after any
+// look that leaves it held, and does not wait one more look (seed 1456 of the Git waits model, #925). Which pull
+// request keeps the lock is not read in such a look. A look whose reads failed writes nothing; the next look tries.
+// The change to the status (Stale on the head, or condition ReviewCheckNotFailed) is written here,
 // since heldUnsettled writes none for such a look. A conflict or any other failed status write is returned for the
 // error backoff: the check run is then written already, and the next look reads it last (stoppedCheckShown) or writes
 // it once more. Only a failure of the Kubernetes API is returned besides.
 func (r *RemediationRequestReconciler) failCheckAfterUnsettledLook(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest) error {
+	rr *remediationv1alpha1.RemediationRequest, v changeVerdict, err error, said bool) error {
+	if err != nil || said || !v.failed() || !answeredUnknown(v.err) {
+		return nil
+	}
 	before := rr.Status.DeepCopy()
 	if err := r.failCheckAfterLook(ctx, rr, nil); err != nil {
 		return err

@@ -117,6 +117,7 @@ var troubleshootingSections = map[string][]string{
 	"DesiredValueMissing":               {secRender},
 	"DirectionReversed":                 {secNotRequest},
 	"EvidenceMissing":                   {secAfterMerge},
+	"ExecutorRestarted":                 {secAfterMerge},
 	"FieldNotFound":                     {secRequest, secRender},
 	"FileMissing":                       {secRender},
 	"FileNotInBuild":                    {secRender},

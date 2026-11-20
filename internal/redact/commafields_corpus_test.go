@@ -42,7 +42,7 @@ const (
 )
 
 var (
-	commaFirstKeys   = []string{"password", "TOKEN", "API_TOKEN", "DB_PASSWORD", clientSecretKey, "user", "--password ", "export TOKEN"}
+	commaFirstKeys   = []string{"password", "TOKEN", "API_TOKEN", "DB_PASSWORD", clientSecretKey, "user", spacedPasswordFlag, "export TOKEN"}
 	commaSeps        = []string{"=", ": ", "= ", ":"}
 	commaFirstValues = []string{`"abc"`, `'abc'`, `"a b"`, `'a b'`, `"a"x`, plainABC, `"abc"def`, `""`}
 	commaSecondKeys  = []string{

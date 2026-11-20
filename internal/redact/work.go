@@ -24,6 +24,12 @@ import "strings"
 // counter; built with the tag redactwork, as make test runs the linearity tests, tick adds to the count of
 // Work (work_counted.go).
 
+// Tick reports n steps of work done for a decision of this package outside it: the read tools count the bytes
+// of an answer they walk to make its pieces, so that the linearity tests see that work with the redactor's. Like
+// the counting inside the package it does nothing in the product build and adds to the count of Work in a build
+// with the tag redactwork.
+func Tick(n int) { tick(n) }
+
 // counted returns t, counting its bytes as the work of the library call it is handed to.
 func counted(t string) string {
 	tick(len(t))
@@ -39,6 +45,7 @@ func indexByte(t string, c byte) int {
 	return i
 }
 
+//nolint:unparam // the counted strings.LastIndexByte, with its signature like the other counted functions here
 func lastIndexByte(t string, c byte) int {
 	i := strings.LastIndexByte(t, c)
 	tick(len(t) - i)

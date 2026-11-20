@@ -279,20 +279,25 @@ func abandoned(ctx context.Context) error {
 }
 
 // redact makes s valid UTF-8 and redacts it ([Redact]).
-func (b *Builder) redact(s string) string { return Redact(b.redactor.String, s) }
+func (b *Builder) redact(s string) string { return Redact(Twice(b.redactor), s) }
 
-// value redacts one value from the cluster for a line of a section ([Value]).
-func (b *Builder) value(s string) string { return Value(b.redactor.String, s) }
+// value returns s, a value from the cluster, as a fragment of a section: it is decided with the section
+// ([decide]).
+func (b *Builder) value(s string) frag { return val(s) }
 
-// finish redacts the assembled text of a section block as a whole, then cuts it to n bytes in whole lines,
+// shown redacts one value from the cluster for a text that is not written as pieces ([Value]).
+func (b *Builder) shown(s string) string { return Value(Twice(b.redactor), s) }
+
+// finish decides the pieces of a section block once ([decide]), then cuts the text to n bytes in whole lines,
 // keeping the head: the sections it finishes are written most relevant first. The values the lines recorded
 // become the block's quotable values; [Block.Data] keeps those the redaction and the cuts left in the text.
 func (b *Builder) finish(blk *Block, l *lines, n int) {
-	text, cut := keepHead(b.redact(l.String()), n)
+	decided, values := decide(b.redactor, l.ps, l.quotes)
+	text, cut := keepHead(decided, n)
 	if cut {
 		blk.addLabel(LabelSectionCut)
 	}
-	blk.Text, blk.Values = text, l.values
+	blk.Text, blk.Values = text, values
 }
 
 // cutOrder is the order in which the total bound cuts sections: the attacker-controlled bulk first, the

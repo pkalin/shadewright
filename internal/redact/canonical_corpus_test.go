@@ -409,7 +409,7 @@ func TestCanonCorpusIsByConstruction(t *testing.T) {
 		for _, r := range c.secrets {
 			s := c.in[r[0]:r[1]]
 			switch {
-			case strings.HasPrefix(s, "Qz") && len(s) == 11:
+			case len(s) == 11 && (strings.HasPrefix(s, "Qz") || strings.HasPrefix(s, "Q!") || strings.Trim(s, "0123456789") == ""):
 				// A generated secret is unique in the corpus, and its prefix and suffix tell it from the other
 				// pieces of its input.
 				if other, ok := seen[s]; ok {

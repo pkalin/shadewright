@@ -32,23 +32,46 @@ import (
 	"github.com/pkalin/shadewright/internal/redact"
 )
 
-// lines collects the lines of a section; every value from the cluster goes through Builder.value first, and
-// every value from a source that may be quoted as evidence through lines.data.
+// lines collects the lines of a section as pieces; every value from the cluster goes in as a fragment
+// ([Builder.value]), and every value from a source that may be quoted as evidence goes through lines.data.
 type lines struct {
-	strings.Builder
+	ps frag
+	// quotes is the number of quotable values recorded through data.
+	quotes int
+	// values are quotable values recorded through dataText: text already decided, in a section of decided text
+	// only (the summary).
 	values []string
 }
 
-// data records v, a value from a source as rendered, as quotable ([Block.Data]) and returns it.
-func (l *lines) data(v string) string {
+// data marks f, a value from a source or a line made of such values, as one quotable value ([Block.Data]) and
+// returns it.
+func (l *lines) data(f frag) frag {
+	l.quotes++
+	out := make(frag, len(f))
+	for i, p := range f {
+		p.quote = l.quotes
+		out[i] = p
+	}
+	return out
+}
+
+// dataText records v, a value already decided and rendered, as quotable ([Block.Data]) and returns it.
+func (l *lines) dataText(v string) string {
 	l.values = append(l.values, v)
 	return v
 }
 
+// add writes a line ([fragf]).
 func (l *lines) add(format string, args ...any) {
-	fmt.Fprintf(&l.Builder, format, args...)
-	_ = l.WriteByte('\n') // a strings.Builder never fails
+	l.ps = append(l.ps, fragf(format, args...)...)
+	l.ps = append(l.ps, piece{Piece: redact.Piece{Text: "\n"}})
 }
+
+// String returns the lines as written, with nothing redacted.
+func (l *lines) String() string { return l.ps.text() }
+
+// Len returns the length of the lines as written.
+func (l *lines) Len() int { return len(l.String()) }
 
 func stamp(t metav1.Time) string {
 	if t.IsZero() {
@@ -77,15 +100,7 @@ const (
 // the whole bound, and a summary that fits is what it always was.
 func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 	s, st := inc.Spec, inc.Status
-	var vals [cutValues]string
-	if s.Symptom != "" {
-		vals[cutSymptom] = b.value(s.Symptom)
-	}
-	if s.ReportingController != "" {
-		vals[cutController] = b.value(s.ReportingController)
-	}
-	vals[cutReason], vals[cutName] = b.value(s.Reason), b.value(s.Subject.Name)
-	kind, namespace, typ := b.value(s.Subject.Kind), b.value(s.Subject.Namespace), b.value(s.Type)
+	vals, kind, namespace, typ, phase, red := b.summaryValues(inc)
 	render := func(keep [cutValues]int) (*lines, [cutValues]summaryTail) {
 		var l lines
 		var tails [cutValues]summaryTail
@@ -94,7 +109,7 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 		// records its own quotable values after the head, in the order of the line.
 		add := func(i int, label string, rest func() string) {
 			head, note := cutOf(vals[i], keep[i])
-			head = l.data(head)
+			head = l.dataText(head)
 			tail := head + note + rest()
 			if note != "" {
 				tails[i] = summaryTail{line: n, text: tail}
@@ -103,8 +118,8 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 			n++
 		}
 		none := func() string { return "" }
-		add(cutName, "subject: "+l.data(kind)+" "+l.data(namespace)+"/", none)
-		add(cutReason, "reason: ", func() string { return " (" + l.data(typ) + ")" })
+		add(cutName, "subject: "+l.dataText(kind)+" "+l.dataText(namespace)+"/", none)
+		add(cutReason, "reason: ", func() string { return " (" + l.dataText(typ) + ")" })
 		if s.ReportingController != "" {
 			add(cutController, "reported by: ", none)
 		}
@@ -120,7 +135,7 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 		}
 		if st.Phase != "" {
 			// The phase is written by the analyzer itself, never evidence.
-			l.add("phase: %s", b.value(string(st.Phase)))
+			l.add("phase: %s", phase)
 		}
 		return &l, tails
 	}
@@ -128,14 +143,76 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 	var t lines
 	absorbedLines(&t, st.Absorbed)
 	if t.Len() == 0 {
-		b.fitSummary(&blk, vals, render, b.limits.Summary)
+		b.fitSummary(&blk, vals, render, b.limits.Summary, red)
 		return blk
 	}
 	tally := b.redact(t.String())
-	b.fitSummary(&blk, vals, render, b.limits.Summary-max(len(tally), longestTally))
+	b.fitSummary(&blk, vals, render, b.limits.Summary-max(len(tally), longestTally), red)
 	blk.unitAt = len(blk.Text)
 	blk.Text += tally
 	return blk
+}
+
+// summaryValues returns the values of the summary as it shows them, and how the fit redacts the summary's lines
+// (fitSummary). With a redactor that decides on pieces, the summary's lines are decided once with every value
+// whole, as they were read ([decide]), and the values come back decided: the fit only shortens them, and the
+// lines are not redacted again (the identity). With any other redactor each value is redacted alone ([Value])
+// and the lines are redacted again after the fit ([Redact]), as the release before #845 did.
+func (b *Builder) summaryValues(inc *remediationv1alpha1.Incident) (vals [cutValues]string, kind, namespace, typ, phase string,
+	red func(string) string) {
+	s, st := inc.Spec, inc.Status
+	pr, ok := b.redactor.(pieceRedactor)
+	if !ok {
+		if s.Symptom != "" {
+			vals[cutSymptom] = b.shown(s.Symptom)
+		}
+		if s.ReportingController != "" {
+			vals[cutController] = b.shown(s.ReportingController)
+		}
+		vals[cutReason], vals[cutName] = b.shown(s.Reason), b.shown(s.Subject.Name)
+		kind, namespace, typ = b.shown(s.Subject.Kind), b.shown(s.Subject.Namespace), b.shown(s.Type)
+		if st.Phase != "" {
+			phase = b.shown(string(st.Phase))
+		}
+		return vals, kind, namespace, typ, phase, b.redact
+	}
+	// The lines as the fit writes them with nothing cut, each value a piece of its own.
+	var l lines
+	l.add("subject: %s %s/%s", val(s.Subject.Kind), val(s.Subject.Namespace), val(s.Subject.Name))
+	l.add("reason: %s (%s)", val(s.Reason), val(s.Type))
+	if s.ReportingController != "" {
+		l.add("reported by: %s", val(s.ReportingController))
+	}
+	if s.Symptom != "" {
+		l.add("symptom: %s", val(s.Symptom))
+	}
+	l.add("occurrences: %d", st.Count)
+	if st.FirstSeen != nil {
+		l.add("first seen: %s", stamp(*st.FirstSeen))
+	}
+	if st.LastSeen != nil {
+		l.add("last seen: %s", stamp(*st.LastSeen))
+	}
+	if st.Phase != "" {
+		l.add("phase: %s", val(string(st.Phase)))
+	}
+	var data []string
+	for _, v := range decidedPieces(pr, l.ps) {
+		if v.data {
+			data = append(data, v.text)
+		}
+	}
+	kind, namespace, vals[cutName], vals[cutReason], typ, data = data[0], data[1], data[2], data[3], data[4], data[5:]
+	if s.ReportingController != "" {
+		vals[cutController], data = data[0], data[1:]
+	}
+	if s.Symptom != "" {
+		vals[cutSymptom], data = data[0], data[1:]
+	}
+	if st.Phase != "" {
+		phase = data[0]
+	}
+	return vals, kind, namespace, typ, phase, func(t string) string { return t }
 }
 
 // summaryTail is where a shortened value stands in the rendered summary: its line, and the text from the start
@@ -160,7 +237,8 @@ type summaryTail struct {
 // in practice a handful. Only values beyond the schema's limits (Kind, namespace and type are not shortened)
 // can leave the lines longer than n once nothing more can be shortened: the section's own cut then removes
 // lines from the end, as for any other section.
-func (b *Builder) fitSummary(blk *Block, vals [cutValues]string, render func([cutValues]int) (*lines, [cutValues]summaryTail), n int) {
+func (b *Builder) fitSummary(blk *Block, vals [cutValues]string, render func([cutValues]int) (*lines, [cutValues]summaryTail), n int,
+	red func(string) string) {
 	var keep [cutValues]int
 	for i, v := range vals {
 		keep[i] = len(v)
@@ -168,7 +246,7 @@ func (b *Builder) fitSummary(blk *Block, vals [cutValues]string, render func([cu
 	var settled [cutValues]bool
 	for {
 		l, tails := render(keep)
-		text := b.redact(l.String())
+		text := red(l.String())
 		if d := damagedCut(l.String(), text, keep, vals, tails, settled); d >= 0 {
 			if keep[d] == 0 {
 				settled[d] = true
@@ -408,10 +486,10 @@ func (b *Builder) templateLines(l *lines, containers []corev1.Container) {
 }
 
 // memoryLimit renders the memory limit of resources as a quotable value, or "not set".
-func (b *Builder) memoryLimit(l *lines, r corev1.ResourceRequirements) string {
+func (b *Builder) memoryLimit(l *lines, r corev1.ResourceRequirements) frag {
 	q, ok := r.Limits[corev1.ResourceMemory]
 	if !ok {
-		return "not set"
+		return cat("not set")
 	}
 	return l.data(b.value(q.String()))
 }
@@ -474,9 +552,9 @@ func (b *Builder) podLines(l *lines, t *target) {
 	}
 	for i := range t.pods {
 		p := &t.pods[i]
-		owner := ""
+		var owner frag
 		if ref := metav1.GetControllerOfNoCopy(p); ref != nil {
-			owner = ", controlled by " + l.data(b.value(ref.Kind)) + " " + l.data(b.value(ref.Name))
+			owner = cat(", controlled by ", l.data(b.value(ref.Kind)), " ", l.data(b.value(ref.Name)))
 		}
 		l.add("pod %s%s, phase %s, created %s", l.data(b.value(p.Name)), owner, l.data(b.value(string(p.Status.Phase))),
 			stamp(p.CreationTimestamp))
@@ -501,29 +579,29 @@ func (b *Builder) containerLine(l *lines, p *corev1.Pod, cs containerStatus) {
 	if cs.init {
 		kind = "init container"
 	}
-	parts := []string{fmt.Sprintf("ready %t, restarts %d", cs.Ready, cs.RestartCount)}
-	parts = append(parts, "now "+b.state(l, cs.State))
+	parts := []frag{cat(fmt.Sprintf("ready %t, restarts %d", cs.Ready, cs.RestartCount))}
+	parts = append(parts, cat("now ", b.state(l, cs.State)))
 	if cs.LastTerminationState.Terminated != nil {
-		parts = append(parts, "last "+b.state(l, cs.LastTerminationState))
+		parts = append(parts, cat("last ", b.state(l, cs.LastTerminationState)))
 	}
 	if r, ok := podResources(p, cs.Name, cs.init); ok {
-		parts = append(parts, "this pod's memory limit "+b.memoryLimit(l, r))
+		parts = append(parts, cat("this pod's memory limit ", b.memoryLimit(l, r)))
 	}
-	l.add("  %s %s: %s", kind, l.data(b.value(cs.Name)), strings.Join(parts, "; "))
+	l.add("  %s %s: %s", kind, l.data(b.value(cs.Name)), joinFrags(parts, "; "))
 }
 
-func (b *Builder) state(l *lines, s corev1.ContainerState) string {
+func (b *Builder) state(l *lines, s corev1.ContainerState) frag {
 	switch {
 	case s.Waiting != nil:
-		return fmt.Sprintf("waiting, reason %s: %s", l.data(b.value(s.Waiting.Reason)), l.data(b.value(s.Waiting.Message)))
+		return fragf("waiting, reason %s: %s", l.data(b.value(s.Waiting.Reason)), l.data(b.value(s.Waiting.Message)))
 	case s.Terminated != nil:
 		x := s.Terminated
-		return fmt.Sprintf("terminated, reason %s, exit code %d, signal %d, started %s, finished %s: %s",
+		return fragf("terminated, reason %s, exit code %d, signal %d, started %s, finished %s: %s",
 			l.data(b.value(x.Reason)), x.ExitCode, x.Signal, stamp(x.StartedAt), stamp(x.FinishedAt), l.data(b.value(x.Message)))
 	case s.Running != nil:
-		return "running since " + stamp(s.Running.StartedAt)
+		return cat("running since " + stamp(s.Running.StartedAt))
 	}
-	return "unknown"
+	return cat("unknown")
 }
 
 // absorbedReasons are the consequence reasons the summary shows from status.absorbed, in the order it shows

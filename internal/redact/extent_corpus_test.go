@@ -420,7 +420,7 @@ func TestExtentTakesTheKnownValue(t *testing.T) {
 func TestExtentKeepsTheArgumentsAfterAQuotedSecret(t *testing.T) {
 	rng := rand.New(rand.NewPCG(708, 4)) //nolint:gosec // a fixed seed keeps the corpus the same on every run
 	openers := []string{"$(", "`", "${", "[", "{", "(", " ", ")", "]", "}", "$("}
-	tails := []string{"EVIDENCE)", "EV`", "EV}", "EV]", "--region", "west", "a b)", "$(x)", "x'y"}
+	tails := []string{"EVIDENCE)", "EV`", "EV}", "EV]", regionFlag, "west", "a b)", "$(x)", "x'y"}
 	failed := 0
 	for i := range 3000 {
 		k := &knownValue{rng: rng}

@@ -34,9 +34,21 @@ limitations under the License.
 // logfmt string, with no blank or a Unicode space at the colon, after "---" lines or less indented than the
 // key's line), and the rest of the line after such an indicator when a block was flattened onto it, inside a
 // flow collection up to its closing bracket (#840),
+// and, read on one canonical view of the text (view.go, #845): the block under each secret key and indicator
+// of a line that holds several, with every Unicode space, control and format character and invalid byte as
+// indentation and LF, CRLF and a lone CR as line ends, a flow value up to the bracket that closes it after any
+// brackets inside the secret, a block that a comment line at column 0 interrupts, a value in a string of a
+// sequence after the string that holds its key ("password:", "--password=", also with blank strings between,
+// the colon in a string of its own, or a flag after other words; decided once for a list, for a sequence
+// written in a text and for a tool result laid out as one text, seqValues and Pieces in layout.go), an
+// environment entry whose value comes before its name, in flow and in block form, and a "- key:" naming a
+// secret with its "values" (a selector); and, read on the folded view of the text (fold.go), a key name with an invisible character
+// inside it or before its colon, a key followed by a colon look-alike of Unicode's confusables list, an explicit
+// YAML key ("? password" over ": x", also "password" alone below "?" or "? |"), and a key followed by a
+// separator of other characters ("userPassword:: x", "password => x", "token\x00: x"),
 // the value after a secret-named command-line flag ("--client-secret x", "-password x", "--sas x", also across line ends, in
-// argument lists and after a flag that took the flag as its value), however it reads or starts with
-// ("--use-token --verbose" loses "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
+// argument lists), however it reads or starts with, another flag included ("--use-token --verbose" loses
+// "--verbose", "--secret db-creds" loses "db-creds"), and the value after a key
 // name of two or more words, joined by "_", "-" or in camelCase, and a blank ("aws_secret_access_key x",
 // "ClientSecret x"), only when the whole value is an opaque token: 16 or more characters, every one of them
 // from "A-Z a-z 0-9 / + = _ -", and at least one digit or one of "/+=" ("client_secret is missing" keeps "is",
@@ -64,22 +76,37 @@ limitations under the License.
 // "basic internationalization": over-redaction kept by decision (#194), because these cannot be told apart
 // from a password or token.
 //
-// Known gaps: JSON escaped more than three times, a Kubernetes environment entry whose "value" comes before
-// its "name" or more than 16 lines after it, a base64 secret cut short by slashes with no secret key name
+// Known gaps: JSON escaped more than three times, a Kubernetes environment entry whose "value" comes more
+// than 16 lines after its "name", a base64 secret cut short by slashes with no secret key name
 // before it whose parts read as words or acronyms (whole or in part, see base64Windows), a secret after a
 // one-word key name and a blank without a dash ("set secret x", which only the long-token rule judges,
 // because "kubectl get secret foo" has the same shape), after a single-letter flag ("-p x"), after a key or
 // flag name written with Unicode escapes, or in a here-document or here-string, the part of a value after a
 // key name past the bound of the extent rule (maxValueExtent, extent.go), a quoted piece glued to an unquoted
 // value that does not close on its line, a backslash and a letter or digit glued to a quoted piece after a
-// flag, a field after a comma glued to a quoted piece after a key name that is no flag, a value after a flag in
-// pretty-printed escaped JSON ("\",\n  \""), the part of an
+// flag, a field after a comma glued to a quoted piece after a key name that is no flag, the part of an
 // unquoted value after a quote inside it, the words after the first of a block sequence item after a quoted
 // flag item or of an item after a flag item that opens with a backslash or "$(", a quoted scalar after a
 // verbatim tag in an array, a value after a compound name and a blank that is no opaque token, a value on
 // the lines below a secret key after other text on its line with nothing after its colon, the lines after the
-// first of a scalar over several lines under a bare short key, and a secret in a format no rule knows
-// (TestKeyNameKnownLeaks). Callers redact text while it still has its lines, before they join or cut them.
+// first of a scalar over several lines under a bare short key, a value after a secret key and blanks alone
+// with no colon, "=" or arrow ("userPassword x", read as prose like "password reset failed"), a value after a
+// separator with more than maxSepRun marks, controls or invisible characters (blanks do not count), after a
+// key and a separator of "|", "~", ">", "-" or a dash, or after a key, a line break and then the separator
+// (#859 looks for such values by their shape), and a secret in a format no rule knows (TestKeyNameKnownLeaks).
+// It removes too much in a few known places: the line after a value that a lone CR ends, the text after "->",
+// "=>" or "==" behind a key word, the name of a secret key that stands as another secret key's value, and a
+// URL in angle brackets with a port before a link with an "@".
+//
+// Every rule reads the text as it was given and reports spans of it; the spans of all rules are merged and
+// replaced once ([Redactor.String]), so no rule reads another's output and no pass comes before another. The
+// rules of #840 and before are kept as they were, and the view rules only add spans to theirs, so nothing
+// they removed comes back. Callers redact text once, as it was read, before they replace a character, join a
+// line, escape or cut it, and never redact what they made of it (#845). A caller that holds a sequence of
+// strings (a container's arguments, the name and value of a metric label) redacts it with [Redactor.Strings],
+// which takes the decision String takes on the strings joined by line breaks and so also sees a key in one
+// string and its value in a later one. The folded view is a second reading of the same text, not of a rule's
+// output: its matches count on the bytes they were folded from.
 package redact
 
 import (
@@ -94,6 +121,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/redact/released"
 )
 
 // Kinds of redacted data, used in markers such as "[REDACTED:jwt]".
@@ -117,6 +146,12 @@ type Pattern struct {
 	Expr string
 }
 
+// spanFunc is the span function of a rule (rule.span).
+type spanFunc func(s string, m []int, prevEnd int) (start, end int, ok bool)
+
+// spansFunc is the spans function of a rule (rule.spans).
+type spansFunc func(s string, m []int, prevEnd int, add func(start, end int)) int
+
 // rule is one compiled pattern. Spans of the listed groups are redacted, or the whole match when groups is
 // empty. span, when set, replaces groups: it receives the submatches and the end of the previous span it returned for this rule, and
 // returns the byte range to redact, or ok false to leave the match alone.
@@ -124,15 +159,25 @@ type rule struct {
 	kind   string
 	re     *regexp.Regexp
 	groups []int
-	span   func(s string, m []int, prevEnd int) (start, end int, ok bool)
+	span   spanFunc
 	// spans, when set, replaces span for a rule that redacts several ranges per match: it calls add for
 	// each and returns the end of what it read, which later matches of the rule before it skip.
-	spans func(s string, m []int, prevEnd int, add func(start, end int)) int
+	spans spansFunc
+	// spansFor, when set, replaces spans with the function it returns, made anew for each pass over a text.
+	spansFor func() spansFunc
+	// spanFor, when set, replaces span in the same way.
+	spanFor func() spanFunc
+	// scan, when set, replaces re and the functions above: a rule that reads the whole text on the canonical
+	// view (view.go) and calls add for each range to redact.
+	scan func(s string, add func(start, end int))
 }
 
 // Redactor replaces sensitive data in text. It is safe for concurrent use.
 type Redactor struct {
 	rules []rule
+	// before is the redactor of the release before, with the same extra patterns: the reading kept in package
+	// released (before.go). nil only for a redactor made of some rules alone, in a test.
+	before *released.Redactor
 }
 
 var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -157,10 +202,25 @@ func New(extra ...Pattern) (*Redactor, error) {
 		}
 		rules = append(rules, r)
 	}
-	return &Redactor{rules: rules}, nil
+	ps := make([]released.Pattern, len(extra))
+	for i, p := range extra {
+		tick(1)
+		ps[i] = released.Pattern{Kind: p.Kind, Expr: p.Expr}
+	}
+	before, err := released.New(ps...)
+	if err != nil {
+		return nil, fmt.Errorf("the reading of the release before: %w", err)
+	}
+	return &Redactor{rules: rules, before: before}, nil
 }
 
-var defaultRedactor = &Redactor{rules: builtinRules()}
+var defaultRedactor = func() *Redactor {
+	r, err := New()
+	if err != nil {
+		panic(err) // the built-in rules compile, as the tests show
+	}
+	return r
+}()
 
 // String redacts s with the built-in rules.
 func String(s string) string {
@@ -361,6 +421,7 @@ type span struct {
 	start, end int
 	kind       string
 	rule       int
+	folded     bool // a match in the folded view, not mapped to the bytes of the text yet
 }
 
 // String returns s with every match of every rule replaced by a marker. Overlapping matches are merged
@@ -370,44 +431,63 @@ func (r *Redactor) String(s string) string {
 }
 
 // spans returns the matches of every rule in s, sorted, with overlapping matches merged into one named after
-// the match that starts first (the first rule, on a tie).
+// the match that starts first (the first rule, on a tie), and what String of the release before hid in s
+// (releasedString), as one more reading. The rules read s, and
+// also its folded view when it has one (foldView: a key with an invisible character inside it, a colon
+// look-alike, an explicit key, a separator of other characters), whose matches count on the bytes of s they were
+// folded from. A merged range takes the invisible characters right after it.
 func (r *Redactor) spans(s string) []span {
-	var spans []span
-	for i, ru := range r.rules {
+	return settle(s, append(r.ruleMatches(s), r.releasedString(s, false, nil)...))
+}
+
+// ownSpans is spans without the reading of the release before: the rules of this package alone, as Pieces reads
+// each piece (it applies the reading of the release before as that release's tools did, releasedPieces).
+func (r *Redactor) ownSpans(s string) []span {
+	return settle(s, r.ruleMatches(s))
+}
+
+// settle merges matches found on s (mergeSpans) and gives each merged range the invisible characters right
+// after it.
+func settle(s string, matches []span) []span {
+	merged := mergeSpans(matches)
+	for i := range merged {
 		tick(1)
-		prevEnd := 0
-		add := func(start, end int) {
-			if end > start {
-				spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i})
-			}
+		// Invisible characters right after a match belong to it (#845, fourth round): the folded view drops
+		// them, and kept apart from the replacement they would be the one visible trace of where it ended. The
+		// merged ranges are disjoint, so each byte is read at most once here.
+		limit := len(s)
+		if i+1 < len(merged) {
+			limit = merged[i+1].start
 		}
-		for _, m := range ru.re.FindAllStringSubmatchIndex(counted(s), -1) {
+		for merged[i].end < limit {
 			tick(1)
-			if ru.spans != nil {
-				prevEnd = ru.spans(s, m, prevEnd, add)
-				continue
+			n := invisibleLen(s, merged[i].end)
+			if n == 0 {
+				break
 			}
-			if ru.span != nil {
-				if start, end, ok := ru.span(s, m, prevEnd); ok && end > start {
-					spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i})
-					prevEnd = end
-				}
-				continue
-			}
-			if len(ru.groups) == 0 {
-				if m[1] > m[0] {
-					spans = append(spans, span{start: m[0], end: m[1], kind: ru.kind, rule: i})
-				}
-				continue
-			}
-			for _, g := range ru.groups {
-				tick(1)
-				if 2*g+1 < len(m) && m[2*g] >= 0 && m[2*g+1] > m[2*g] {
-					spans = append(spans, span{start: m[2*g], end: m[2*g+1], kind: ru.kind, rule: i})
-				}
-			}
+			merged[i].end += n
 		}
 	}
+	return merged
+}
+
+// ruleMatches returns the matches of every rule in s and in its folded view (mapped to the bytes of s), unsorted
+// and not merged, each with the kind of the rule that found it.
+func (r *Redactor) ruleMatches(s string) []span {
+	spans := r.ruleSpans(s, nil, false)
+	if f, ok := foldView(s); ok {
+		spans = r.ruleSpans(f.text, spans, true)
+		for i := len(spans) - 1; i >= 0 && spans[i].folded; i-- {
+			tick(1)
+			spans[i].start, spans[i].end, spans[i].folded = f.from[spans[i].start], f.to[spans[i].end-1], false
+		}
+	}
+	return spans
+}
+
+// mergeSpans sorts spans and merges the overlapping ones into one named after the span that starts first (the
+// first rule, on a tie).
+func mergeSpans(spans []span) []span {
 	if len(spans) == 0 {
 		return nil
 	}
@@ -434,6 +514,61 @@ func (r *Redactor) spans(s string) []span {
 	return merged
 }
 
+// ruleSpans appends the matches of every rule in s to spans, unsorted, marked folded when s is a folded view.
+func (r *Redactor) ruleSpans(s string, spans []span, folded bool) []span {
+	for i, ru := range r.rules {
+		tick(1)
+		if folded && ru.kind == KindIP {
+			// The folded view reads keys and separators; an address is read as written ("：：" is no "::").
+			continue
+		}
+		prevEnd := 0
+		add := func(start, end int) {
+			if end > start {
+				spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i, folded: folded})
+			}
+		}
+		if ru.scan != nil {
+			ru.scan(s, add)
+			continue
+		}
+		spanFn, oneSpan := ru.spans, ru.span
+		if ru.spansFor != nil {
+			spanFn = ru.spansFor()
+		}
+		if ru.spanFor != nil {
+			oneSpan = ru.spanFor()
+		}
+		for _, m := range ru.re.FindAllStringSubmatchIndex(counted(s), -1) {
+			tick(1)
+			if spanFn != nil {
+				prevEnd = spanFn(s, m, prevEnd, add)
+				continue
+			}
+			if oneSpan != nil {
+				if start, end, ok := oneSpan(s, m, prevEnd); ok && end > start {
+					spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i, folded: folded})
+					prevEnd = end
+				}
+				continue
+			}
+			if len(ru.groups) == 0 {
+				if m[1] > m[0] {
+					spans = append(spans, span{start: m[0], end: m[1], kind: ru.kind, rule: i, folded: folded})
+				}
+				continue
+			}
+			for _, g := range ru.groups {
+				tick(1)
+				if 2*g+1 < len(m) && m[2*g] >= 0 && m[2*g+1] > m[2*g] {
+					spans = append(spans, span{start: m[2*g], end: m[2*g+1], kind: ru.kind, rule: i, folded: folded})
+				}
+			}
+		}
+	}
+	return spans
+}
+
 // Replace redacts s with the built-in rules as [String] does, but writes repl(kind, text) for each match in
 // place of its marker and between(text) for the text between matches. A caller that rewrites text before it
 // shows it (replaces characters, joins lines, cuts) uses it to redact the text as it was read first, and to
@@ -444,10 +579,15 @@ func Replace(s string, repl func(kind, text string) string, between func(string)
 
 // Replace is the package's Replace with r's rules.
 func (r *Redactor) Replace(s string, repl func(kind, text string) string, between func(string) string) string {
+	return r.replaceSpans(s, r.spans(s), repl, between)
+}
+
+// replaceSpans is Replace with the sorted, disjoint spans given.
+func (r *Redactor) replaceSpans(s string, spans []span, repl func(kind, text string) string, between func(string) string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	pos := 0
-	for _, cur := range r.spans(s) {
+	for _, cur := range spans {
 		tick(1)
 		b.WriteString(between(s[pos:cur.start]))
 		b.WriteString(repl(cur.kind, s[cur.start:cur.end]))
@@ -481,8 +621,16 @@ func render(s string, spans []span) string {
 
 // marker returns the replacement for n bytes of the given kind. It is never longer than n, so redaction
 // never grows its input.
-func marker(kind string, n int) string {
-	for _, m := range []string{"[REDACTED:" + kind + "]", "[" + kind + "]", "[REDACTED]", "***"} {
+func marker(kind string, n int) string { return markerAt(kind, n, 0) }
+
+// markerLevels is the number of levels of markerAt.
+const markerLevels = 4
+
+// markerAt is marker starting at a shorter form: level 0 is marker, level 1 starts at "[kind]", level 2 at
+// "[REDACTED]" and level 3 at "***". An answer bounded in size takes the first level that fits it
+// (PiecesWithin).
+func markerAt(kind string, n, level int) string {
+	for _, m := range []string{"[REDACTED:" + kind + "]", "[" + kind + "]", "[REDACTED]", "***"}[level:] {
 		tick(1)
 		if len(m) <= n {
 			return m
@@ -853,21 +1001,47 @@ func indentedLines(s string, pos, keyCol int) (int, int) {
 	return start, end
 }
 
-// blockScalarSpan returns the content of a YAML literal or folded block scalar whose header line the rule
-// matched: the following lines that are blank or indented deeper than the key, up to the last non-blank
-// one. With no content, the indicator itself (group 2) is redacted. Headers inside a block already
+// blockScalarHeader matches the header line of a YAML literal or folded block scalar under a secret key, with
+// chomping and indentation indicators: group 1 is the key, group 2 the indicator.
+var blockScalarHeader = regexp.MustCompile(
+	`(?im)^[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:[ \t]*([|>][1-9+-]{0,2})[ \t]*(?:#[^\r\n]*)?\r?$`)
+
+// blockScalarScan redacts the content of each YAML literal or folded block scalar whose header line
+// blockScalarHeader matches: the following lines that are blank or indented deeper than the key, up to the last
+// non-blank one. With no content, the indicator itself (group 2) is redacted. Headers inside a block already
 // redacted are skipped, so each byte is scanned once. Under a bare short key (bareShortColon) the content
 // counts only when one of its lines looks like a secret, and an empty block is kept.
-func blockScalarSpan(s string, m []int, prevEnd int) (int, int, bool) {
-	if m[0] < prevEnd || keepReference(s, m) || sasRefused(s, m, true) {
-		return 0, 0, false
+//
+// A block is read once, however many headers stand inside it (#845): the block of a header inside a block is
+// part of that block, so when a bare short key refused the outer one, no line of the inner one looks like a
+// secret either, and a bare short header up to the end of the refused block is skipped unread. Blocks nest by
+// indentation, so the end of the outermost refused block is all the bookkeeping needs: lines each indented
+// one more than the last, all "pass: |", are read once, not once per header.
+func blockScalarScan(s string, add func(start, end int)) {
+	prevEnd, refused := 0, -1
+	for _, m := range blockScalarHeader.FindAllStringSubmatchIndex(counted(s), -1) {
+		tick(1)
+		if m[0] < prevEnd || keepReference(s, m) || sasRefused(s, m, true) {
+			continue
+		}
+		bare := bareShortColon(s, m)
+		if bare && m[1] < refused {
+			continue
+		}
+		start, end := indentedLines(s, m[1], m[2]-m[0])
+		switch {
+		case start < 0:
+			if !bare {
+				add(m[4], m[5])
+				prevEnd = m[5]
+			}
+		case !bare || blockLooksLikeSecret(s, start, end):
+			add(start, end)
+			prevEnd = end
+		default:
+			refused = max(refused, end)
+		}
 	}
-	bare := bareShortColon(s, m)
-	start, end := indentedLines(s, m[1], m[2]-m[0])
-	if start < 0 {
-		return m[4], m[5], !bare
-	}
-	return start, end, !bare || blockLooksLikeSecret(s, start, end)
 }
 
 // childKey matches a mapping key at the start of a line's text, after any sequence entry indicators. Group
@@ -943,6 +1117,7 @@ func nestedHeader(s string, l blockLine) []int {
 // for nextLineSpans, and returns the end of the last line of the block, or pos when it has none. With bare,
 // each value counts only when it looks like a secret.
 func nextLineBlock(s string, pos, keyCol int, bare bool, add func(start, end int)) int {
+	tick(1) // a call, which may be a turn of its recursion
 	const (
 		undecided = iota
 		scalar
@@ -2083,13 +2258,14 @@ func valueSpan(s string, pos, boundary, keyCol int) (int, int) {
 // A quoted string crosses a line end only to a line indented deeper than the key that starts at keyPos
 // (groupEnd). Where the extent rule gives no extent, the value is valueSpan's. With wide false the extents
 // #769 widens are read as on main before it (keyValueSpans).
-func extendedValueSpan(s string, pos, boundary, keyCol, ctx, keyPos int, wide bool) (int, int) {
+func extendedValueSpan(s string, pos, boundary, keyCol, ctx, keyPos int, wide bool, w *wordMemo) (int, int) {
+	tick(1) // a call, which may be a turn of its recursion
 	if pos >= len(s) {
 		return pos, pos
 	}
 	if boundary == boundaryFlow {
 		if v := commentEnd(s, pos); v > pos {
-			_, end := extendedValueSpan(s, v, boundary, keyCol, ctx, keyPos, wide)
+			_, end := extendedValueSpan(s, v, boundary, keyCol, ctx, keyPos, wide, w)
 			return pos, max(end, v)
 		}
 	}
@@ -2103,7 +2279,7 @@ func extendedValueSpan(s string, pos, boundary, keyCol, ctx, keyPos int, wide bo
 	}
 	if escapeLevel(s, pos) == 0 && opensGroup(s, pos) {
 		if boundary == boundaryWhitespace {
-			if start, end, ok := quotedWordSpan(s, pos, keyPos, s[keyPos] == '-', wide); ok {
+			if start, end, ok := quotedWordSpan(s, pos, keyPos, s[keyPos] == '-', wide, w); ok {
 				return start, end
 			}
 		} else if c := s[pos]; c == '"' || c == '\'' {
@@ -2249,6 +2425,32 @@ func plainValueSpan(s string, pos, boundary, keyCol int) (int, int) {
 	return pos, end
 }
 
+// plainLineRefused reports, for a bare short key, whether the plain value at pos that a line ends
+// (boundaryLine) holds a blank and so does not look like a secret (looksLikeSecret): a blank on its line, or a
+// continuation line below it. It reads the value's line and the first line below it, never the whole
+// continuation, so a key on each of lines that are each indented one more than the last ("pass: | x") costs
+// constant time per line instead of a read to the end of the text (#845). A quoted value that closes is not
+// plain (false); one that does not close is, as valueSpan reads it.
+func plainLineRefused(s string, pos, keyCol int) bool {
+	if pos >= len(s) || escapeLevel(s, pos) > 0 || (s[pos] == '"' || s[pos] == '\'') && quotedEnd(s, pos) > 0 {
+		return false
+	}
+	le := lineEnd(s, pos)
+	end := le
+	for end > pos && isSpace(s[end-1]) {
+		tick(1)
+		end--
+	}
+	for i := pos; i < end; i++ {
+		tick(1)
+		if s[i] <= ' ' {
+			return true
+		}
+	}
+	_, _, cont := nextBlockLine(s, le, keyCol, blockScalar)
+	return end > pos && cont
+}
+
 // isBlockHeader reports whether a YAML block scalar indicator ("|", ">-", "|2+") starts at pos and is
 // followed only by blanks or a comment up to the line end. It reads only the indicator and the blanks after
 // it, so it costs constant time per key on any input.
@@ -2289,43 +2491,55 @@ func isSpace(c byte) bool {
 // The extents #769 widens never hide a key (TestMonotonicAgainstMain): the end returned, before which later
 // keys of the rule are skipped, is the end of the value read without them (wide false), as on main. A key in
 // the part they add is matched as on main, and its own value redacted.
-func keyValueSpans(boundary int, envName bool) func(s string, m []int, prevEnd int, add func(start, end int)) int {
-	return func(s string, m []int, prevEnd int, add func(start, end int)) int {
-		if m[2] < prevEnd || keepReference(s, m) || sasRefused(s, m, !envName) {
-			return prevEnd
+func keyValueSpans(boundary int, envName bool) func() spansFunc {
+	return func() spansFunc {
+		w := &wordMemo{}
+		return func(s string, m []int, prevEnd int, add func(start, end int)) int {
+			return keyValueSpan(s, m, prevEnd, add, boundary, envName, w)
 		}
-		if isBlockHeader(s, m[1]) || commentOverBlock(s, m) {
-			return prevEnd
-		}
-		bare := bareShortColon(s, m)
-		b := boundary
-		if bare && b == boundaryFlow {
-			b = boundaryFlowWord
-		}
-		start, end := valueSpan(s, m[1], b, m[2]-m[0])
-		if bare {
-			if v := s[start:end]; start > m[1] && !looksLikeQuotedSecret(v) || start == m[1] && !looksLikeSecret(v) {
-				return prevEnd
-			}
-			add(start, end)
-			return skipEnd(prevEnd, start, end)
-		}
-		if i := index(s[m[3]:m[1]], ":="); i >= 0 {
-			// Main read Go's ":=" as ":" and a value that opens with "=": that value stays redacted.
-			ms, me := valueSpan(s, m[3]+i+1, b, m[2]-m[0])
-			start, end = min(start, ms), max(end, me)
-		}
-		ws, we := keyValueExtent(s, m, b, start, end, true)
-		add(ws, we)
-		ms, me := keyValueExtent(s, m, b, start, end, false)
-		return skipEnd(prevEnd, ms, me)
 	}
+}
+
+// keyValueSpan is keyValueSpans for one match, with the memory of the shell words read in this pass of the
+// rule over s.
+func keyValueSpan(s string, m []int, prevEnd int, add func(start, end int), boundary int, envName bool, w *wordMemo) int {
+	if m[2] < prevEnd || keepReference(s, m) || sasRefused(s, m, !envName) {
+		return prevEnd
+	}
+	if isBlockHeader(s, m[1]) || commentOverBlock(s, m) {
+		return prevEnd
+	}
+	bare := bareShortColon(s, m)
+	b := boundary
+	if bare && b == boundaryFlow {
+		b = boundaryFlowWord
+	}
+	if bare && b == boundaryLine && plainLineRefused(s, m[1], m[2]-m[0]) {
+		return prevEnd
+	}
+	start, end := valueSpan(s, m[1], b, m[2]-m[0])
+	if bare {
+		if v := s[start:end]; start > m[1] && !looksLikeQuotedSecret(v) || start == m[1] && !looksLikeSecret(v) {
+			return prevEnd
+		}
+		add(start, end)
+		return skipEnd(prevEnd, start, end)
+	}
+	if i := index(s[m[3]:m[1]], ":="); i >= 0 {
+		// Main read Go's ":=" as ":" and a value that opens with "=": that value stays redacted.
+		ms, me := valueSpan(s, m[3]+i+1, b, m[2]-m[0])
+		start, end = min(start, ms), max(end, me)
+	}
+	ws, we := keyValueExtent(s, m, b, start, end, true, w)
+	add(ws, we)
+	ms, me := keyValueExtent(s, m, b, start, end, false, w)
+	return skipEnd(prevEnd, ms, me)
 }
 
 // keyValueExtent returns the union of the value start, end and the extent rule's value after the key of m,
 // with the extents #769 widens when wide is true.
-func keyValueExtent(s string, m []int, boundary, start, end int, wide bool) (int, int) {
-	xs, xe := extendedValueSpan(s, m[1], boundary, m[2]-m[0], keyQuoteLevel(s, m[2]), m[2], wide)
+func keyValueExtent(s string, m []int, boundary, start, end int, wide bool, w *wordMemo) (int, int) {
+	xs, xe := extendedValueSpan(s, m[1], boundary, m[2]-m[0], keyQuoteLevel(s, m[2]), m[2], wide, w)
 	xs, xe = clampToString(xs, xe, enclosingStringEnd(s, m[2], m[1]))
 	return min(start, xs), max(end, xe, argumentEnd(s, m, wide))
 }
@@ -2352,7 +2566,7 @@ func skipEnd(prevEnd, start, end int) int {
 // "--password-file", "--password-stdin") keeps its value. A value that ends inside the previous value is
 // skipped, as it is redacted already; one that starts inside it and runs past its end (a quote opened inside
 // the previous value) is redacted to its own end.
-func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
+func flagValueSpan(s string, m []int, prevEnd int, tm *tokenMemo) (int, int, bool) {
 	switch {
 	case m[0] > 0 && isAlnum(s[m[0]-1]), referenceKey(s[m[2]:m[3]], true):
 		return 0, 0, false
@@ -2363,7 +2577,7 @@ func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 	sep := s[m[3]:m[1]]
 	q := strings.TrimLeft(sep, `\`)
 	closed := q != "" && (q[0] == '"' || q[0] == '\'')
-	start, end := flagExtent(s, m, closed)
+	start, end := flagExtent(s, m, closed, tm)
 	// A value that lies inside the previous value is redacted already; one that runs past it is not.
 	return start, end, end > prevEnd
 }
@@ -2379,9 +2593,9 @@ func flagValueSpan(s string, m []int, prevEnd int) (int, int, bool) {
 //
 // The value is the union of keyNameValue's without the extent rule (the value main gave) and the extent
 // rule's, so it is never shorter than main's (TestExtentStillRedactsWhatMainRedacted).
-func flagExtent(s string, m []int, closed bool) (int, int) {
-	start, end := keyNameValue(s, m[1], m[0], closed, extNone)
-	xs, xe := flagExtendedValue(s, m, closed)
+func flagExtent(s string, m []int, closed bool, tm *tokenMemo) (int, int) {
+	start, end := keyNameValue(s, m[1], m[0], closed, extNone, tm)
+	xs, xe := flagExtendedValue(s, m, closed, tm)
 	xs, xe = clampToString(xs, xe, enclosingStringEnd(s, m[0], m[1]))
 	if xe > xs {
 		start, end = min(start, xs), max(end, xe)
@@ -2390,7 +2604,7 @@ func flagExtent(s string, m []int, closed bool) (int, int) {
 }
 
 // flagExtendedValue is the extent rule's part of flagExtent.
-func flagExtendedValue(s string, m []int, closed bool) (int, int) {
+func flagExtendedValue(s string, m []int, closed bool, tm *tokenMemo) (int, int) {
 	sep := s[m[3]:m[1]]
 	pos := m[1]
 	list := strings.IndexByte(sep, '-') >= 0
@@ -2402,7 +2616,7 @@ func flagExtendedValue(s string, m []int, closed bool) (int, int) {
 	if list {
 		if v := nodeProperties(s, pos); isBlockHeader(s, v) {
 			nl := m[3] + strings.LastIndexAny(sep, "\r\n") + 1
-			start, end := listBlockScalarSpan(s, v, indexByte(s[nl:pos], '-'))
+			start, end := listBlockScalarSpan(s, v, indexByte(s[nl:pos], '-'), tm)
 			if v > pos {
 				start = pos
 			}
@@ -2411,7 +2625,7 @@ func flagExtendedValue(s string, m []int, closed bool) (int, int) {
 	}
 	if list || flow {
 		if v := nodeProperties(s, pos); v > pos {
-			_, end := keyNameValue(s, v, m[0], true, ext)
+			_, end := keyNameValue(s, v, m[0], true, ext, tm)
 			switch {
 			case opensGroup(s, v):
 			case flow:
@@ -2422,7 +2636,7 @@ func flagExtendedValue(s string, m []int, closed bool) (int, int) {
 			return pos, end
 		}
 	}
-	start, end := keyNameValue(s, pos, m[0], closed, ext)
+	start, end := keyNameValue(s, pos, m[0], closed, ext, tm)
 	if start == pos && pos < len(s) && !opensGroup(s, pos) && s[pos] != '\\' {
 		switch {
 		case flow:
@@ -2491,7 +2705,7 @@ func blockSequenceItem(s string, m []int) bool {
 // secret-named flag ("--password x", which the flag rule redacts): a match that starts inside a value already
 // taken is skipped ("client_secret db_password --region west" does not read "db_password" as a name), except
 // a secret-named flag, which is judged on its own. Each value is read once, so the cost stays linear.
-func compoundValueSpans(s string, m []int, prevEnd int, add func(start, end int)) int {
+func compoundValueSpans(s string, m []int, prevEnd int, add func(start, end int), tm *tokenMemo) int {
 	name := s[m[2]:m[3]]
 	key := strings.TrimLeft(name, "-")
 	dashes := len(name) - len(key)
@@ -2508,7 +2722,7 @@ func compoundValueSpans(s string, m []int, prevEnd int, add func(start, end int)
 	if !named && !flag {
 		return prevEnd
 	}
-	start, end := keyNameValue(s, m[1], m[2], false, extNone)
+	start, end := keyNameValue(s, m[1], m[2], false, extNone, tm)
 	if v := s[start:end]; named && opaqueToken(v) && (!spelled || !flagWord(v)) {
 		add(start, end)
 	}
@@ -2610,7 +2824,7 @@ func flagWord(v string) bool {
 // opens a quote takes the rest of its line (unclosedQuoteEnd), and any other the rules above. The compound
 // rule passes extNone: an opaque token holds no quote or blank, so a longer extent could not change what it
 // redacts.
-func keyNameValue(s string, pos, keyStart int, closed bool, ext extentMode) (int, int) {
+func keyNameValue(s string, pos, keyStart int, closed bool, ext extentMode, tm *tokenMemo) (int, int) {
 	if pos >= len(s) {
 		return pos, pos
 	}
@@ -2636,15 +2850,15 @@ func keyNameValue(s string, pos, keyStart int, closed bool, ext extentMode) (int
 			return start, end
 		}
 		// The escaped quote does not close on its line: the quote and the token after it, as for a plain one.
-		return pos, tokenEnd(s, start)
+		return pos, tm.tokenEnd(s, start)
 	}
 	if c := s[pos]; c == '"' || c == '\'' {
 		if end := quotedEnd(s, pos); end > 0 {
 			return pos + 1, end - 1
 		}
-		return pos, tokenEnd(s, pos+1)
+		return pos, tm.tokenEnd(s, pos+1)
 	}
-	if end := tokenEnd(s, pos); end > pos || s[pos] != '\\' {
+	if end := tm.tokenEnd(s, pos); end > pos || s[pos] != '\\' {
 		return pos, end
 	}
 	// A quote escaped in a way no JSON level gives ("\'"): the quote and the token after it, as for a
@@ -2654,7 +2868,7 @@ func keyNameValue(s string, pos, keyStart int, closed bool, ext extentMode) (int
 		tick(1)
 		q++
 	}
-	return pos, tokenEnd(s, q+1)
+	return pos, tm.tokenEnd(s, q+1)
 }
 
 // flagWordSpan is the extent rule's part of keyNameValue for a value at pos that opens with no escaped quote:
@@ -2673,7 +2887,7 @@ func flagWordSpan(s string, pos int, ext extentMode) (int, int, bool) {
 	c := s[pos]
 	switch {
 	case ext == extShell:
-		if start, end, ok := quotedWordSpan(s, pos, noKey, true, true); ok {
+		if start, end, ok := quotedWordSpan(s, pos, noKey, true, true, nil); ok {
 			return start, end, true
 		}
 	case c == '"' || c == '\'':
@@ -2700,6 +2914,45 @@ const (
 	// extLiteral reads a value that is an item of a JSON array or YAML sequence: a quoted item is literal.
 	extLiteral
 )
+
+// flagValueSpanFor returns the span function of the flag rule for one pass over a text (flagValueSpan), with
+// its own memory of the last value end read.
+func flagValueSpanFor() spanFunc {
+	tm := &tokenMemo{}
+	return func(s string, m []int, prevEnd int) (int, int, bool) { return flagValueSpan(s, m, prevEnd, tm) }
+}
+
+// compoundValueSpansFor returns the spans function of the compound key name rule for one pass over a text
+// (compoundValueSpans), with its own memory of the last value end read.
+func compoundValueSpansFor() spansFunc {
+	tm := &tokenMemo{}
+	return func(s string, m []int, prevEnd int, add func(start, end int)) int {
+		return compoundValueSpans(s, m, prevEnd, add, tm)
+	}
+}
+
+// tokenMemo is the last value end tokenEnd read in one pass of a rule over one text, so that the values of a
+// run of keys glued with no blank ("-password,-password,...") are read once and not each to the end of the run
+// (#845, fifteenth decision, P3); nil keeps nothing. tokenEnd(s, p) is the first stop at or after p, so it is the
+// same end for every p from the start of the last read to its end: no stop lies between them.
+type tokenMemo struct {
+	from, end int
+	ok        bool
+}
+
+// tokenEnd is tokenEnd(s, pos), with the memory of the last read.
+func (tm *tokenMemo) tokenEnd(s string, pos int) int {
+	if tm == nil {
+		return tokenEnd(s, pos)
+	}
+	if tm.ok && tm.from <= pos && pos <= tm.end {
+		tick(1)
+		return tm.end
+	}
+	end := tokenEnd(s, pos)
+	tm.from, tm.end, tm.ok = pos, end, true
+	return end
+}
 
 // tokenEnd returns the end of the unquoted value that starts at pos, after a flag or a compound key name: the value ends at whitespace, the line end, or a quote character ("\"", "'", or one escaped
 // by backslashes), and at nothing else. So a key inside a JSON or logfmt string cannot take the fields after
@@ -2868,6 +3121,8 @@ func builtinRules() []rule {
 		// password such as "Hunter<2"), which a JSON or HTML encoder would have escaped and text read raw
 		// does not (#840); it still ends at "/", so it never reaches into the next URL. The host part ends at
 		// "<" and ">", so a bracket of the markup around the URL ("<postgres://u:p@h/x>") stays.
+		// A list of URLs in angle brackets ("<https://example.com>,<mailto:ops@example.com>") is one match up to
+		// the "@", as on main: property 1 of #845 has no exceptions, and showing more is #860.
 		{kind: KindConnectionString, re: regexp.MustCompile(
 			`(?i)\b[a-z][a-z0-9+.-]{1,30}://[^\s/?#@'"]+@[^\s'"<>]+`)},
 		// Secret fields of semicolon-separated connection strings (Azure Storage, Service Bus, SQL Server):
@@ -2888,34 +3143,37 @@ func builtinRules() []rule {
 		// Key-value pairs whose key names a secret, one rule per format so each value ends at its own
 		// format's boundary. Env files, logfmt and free text: the value runs to the next whitespace.
 		// Go's ":=" is one separator.
-		{kind: KindCredential, spans: keyValueSpans(boundaryWhitespace, false), re: regexp.MustCompile(
+		{kind: KindCredential, spansFor: keyValueSpans(boundaryWhitespace, false), re: regexp.MustCompile(
 			`(?i)(` + bareKeyExpr + `)[ \t]*(?::=|[:=])[ \t]*`)},
 		// Command-line flags whose name holds a secret, with the value after blanks or line ends, in an
 		// argument list (JSON, escaped JSON or a YAML list) or after a shell line continuation:
 		// "--client-secret <value>", "\"--password\", \"<value>\"", "- --password\n- <value>"
 		// (flagValueSpan). "--name=value" is the rule above.
-		{kind: KindCredential, span: flagValueSpan, re: regexp.MustCompile(
+		{kind: KindCredential, spanFor: flagValueSpanFor, re: regexp.MustCompile(
 			`(?i)--?(` + bareKeyExpr + `)` + flagSeparatorExpr)},
+		// Kubernetes environment variables in flow form with the value before the name (#845, view.go).
+		{kind: KindCredential, span: envValueFirstSpan, re: envValueFirst},
+		// A key in one string of a sequence and its value in a later one (#845, view.go).
+		{kind: KindCredential, scan: seqScan},
 		// A key name of two or more words joined by "_", blanks and one token: "aws_secret_access_key <value>"
 		// (compoundValueSpans).
-		{kind: KindCredential, spans: compoundValueSpans, re: regexp.MustCompile(
+		{kind: KindCredential, spansFor: compoundValueSpansFor, re: regexp.MustCompile(
 			`(?i)(` + bareKeyExpr + `)[ \t]+`)},
 		// JSON and YAML flow mappings: a field after "{" or ",", ending at its closing quote or at , } ].
 		// JSON whitespace, newlines included and also escaped, may surround the key and the colon.
-		{kind: KindCredential, spans: keyValueSpans(boundaryFlow, false), re: regexp.MustCompile(
+		{kind: KindCredential, spansFor: keyValueSpans(boundaryFlow, false), re: regexp.MustCompile(
 			`(?i)[{,]` + jsonSpaceExpr + `(` + flowKeyExpr + `)` + jsonSpaceExpr + `:` + jsonSpaceExpr)},
 		// Kubernetes environment variables in JSON and YAML flow form: the value after a name that holds a
 		// secret, {"name":"DB_PASSWORD","value":"..."}.
-		{kind: KindCredential, spans: keyValueSpans(boundaryFlow, true), re: regexp.MustCompile(
+		{kind: KindCredential, spansFor: keyValueSpans(boundaryFlow, true), re: regexp.MustCompile(
 			`(?i)\\*["']?\bname\\*["']?` + jsonSpaceExpr + `:` + jsonSpaceExpr + `\\*["']?(` + bareKeyExpr + `)\\*["']?` +
 				jsonSpaceExpr + `,` + jsonSpaceExpr + `\\*["']?value\\*["']?` + jsonSpaceExpr + `:` + jsonSpaceExpr)},
 		// YAML block mappings: a key at the start of a line, its value to the line end plus continuation
 		// lines indented deeper than the key.
-		{kind: KindCredential, spans: keyValueSpans(boundaryLine, false), re: regexp.MustCompile(
+		{kind: KindCredential, spansFor: keyValueSpans(boundaryLine, false), re: regexp.MustCompile(
 			`(?im)^[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:[ \t]+`)},
 		// YAML literal and folded block scalars under a secret key, with chomping and indentation indicators.
-		{kind: KindCredential, span: blockScalarSpan, re: regexp.MustCompile(
-			`(?im)^[ \t]*(?:-[ \t]+)?(` + secretKeyExpr + `)[ \t]*:[ \t]*([|>][1-9+-]{0,2})[ \t]*(?:#[^\r\n]*)?\r?$`)},
+		{kind: KindCredential, scan: blockScalarScan},
 		// YAML block mappings: a key with nothing after its colon but blanks or a comment, its value on the
 		// following lines indented deeper than the key.
 		{kind: KindCredential, spans: nextLineSpans, re: regexp.MustCompile(`(?im)^` + nextLineHeaderExpr)},
@@ -2925,6 +3183,10 @@ func builtinRules() []rule {
 		// A secret key and a YAML block scalar indicator wherever the key stands on a line (#840): the block
 		// below, and the rest of the line when a block was flattened onto it (anyKeySpans).
 		{kind: KindCredential, spans: anyKeySpans, re: anyKey},
+		// The block-value rule on the canonical view (#845, view.go): a secret key with a block indicator
+		// wherever it stands, indented with any Unicode space or control character, after any line end, with
+		// several keys on one line, and a value in a flow collection followed to the end of its brackets.
+		{kind: KindCredential, scan: viewBlockSpans},
 		// Long random tokens without a known prefix: a run of base64, base64url or hex characters (see
 		// longTokenSpans).
 		{kind: KindToken, spans: longTokenSpans, re: regexp.MustCompile(`[A-Za-z0-9+/_-]{24,}=*`)},

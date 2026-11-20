@@ -54,23 +54,37 @@ const (
 	canonFormExcerpt = "block cut from its key"
 	// canonFormMixed is the forms above combined, and next to a second secret key.
 	canonFormMixed = "forms combined"
+	// canonFormGlyph is a secret key written with a format character inside it (a zero-width space or joiner, a
+	// soft hyphen, a byte order mark) or with a character that looks like a colon after it.
+	canonFormGlyph = "key with format characters or a colon look-alike"
+	// canonFormExplicit is a secret key written as an explicit YAML key: "? password" and its value on the
+	// next line after ":".
+	canonFormExplicit = "explicit key"
+	// canonFormComment is a comment line at column 0 between the lines of a block value.
+	canonFormComment = "comment inside the block"
+	// canonFormLabels is a metric series whose labels are secret keys and values, as query_metrics shows them.
+	canonFormLabels = "metric labels"
 )
 
 // canonForms lists the forms in the order the corpus writes them.
 var canonForms = []string{
 	canonFormIndent, canonFormKeys, canonFormBrackets, canonFormSequence, canonFormEnv, canonFormExcerpt,
-	canonFormMixed,
+	canonFormMixed, canonFormGlyph, canonFormExplicit, canonFormComment, canonFormLabels, canonFormSeparator,
+	canonFormAutolink, canonFormSepBlanks, canonFormKeyValue, canonFormEqualsArrow,
 }
 
 // canonCase is one input of the corpus. in is the text as a caller reads it. args, for a sequence, holds its
-// strings as a container's arguments hold them; in is then one rendering of that sequence. secrets and keep
-// are byte ranges of in: each secret range is a piece of a secret that must not appear in any output, each
-// keep range a piece of text (a key, a flag, a word around the secret) that must survive.
+// strings as a container's arguments hold them; in is then one rendering of that sequence. labels, for a
+// metric series, holds its labels in the order query_metrics shows them (sorted by name); in is then the
+// series as it shows them. secrets and keep are byte ranges of in: each secret range is a piece of a secret
+// that must not appear in any output, each keep range a piece of text (a key, a flag, a word around the
+// secret) that must survive.
 type canonCase struct {
 	form    string
 	name    string
 	in      string
 	args    []string
+	labels  [][2]string
 	secrets [][2]int
 	keep    [][2]int
 }
@@ -233,6 +247,19 @@ func canonCorpus() []canonCase {
 	g.envCases()
 	g.excerptCases()
 	g.mixedCases()
+	// The forms of the second round of #845 come last, so the inputs above keep their text and their hashes.
+	g.splitSequenceCases()
+	g.glyphCases()
+	g.explicitKeyCases()
+	g.commentCases()
+	g.envValueFirstBlockCases()
+	g.labelCases()
+	// The forms of the third round come after those of the second, for the same reason.
+	g.foldRoundThreeCases()
+	// The forms of the fourth round come after those of the third.
+	g.foldRoundFourCases()
+	// The forms of the fifth round come after those of the fourth.
+	g.foldRoundFiveCases()
 	return g.out
 }
 
@@ -746,6 +773,12 @@ func canonHash(c canonCase) string {
 	for _, a := range c.args {
 		h.Write([]byte{0})
 		h.Write([]byte(a))
+	}
+	for _, l := range c.labels {
+		h.Write([]byte{1})
+		h.Write([]byte(l[0]))
+		h.Write([]byte{2})
+		h.Write([]byte(l[1]))
 	}
 	return hex.EncodeToString(h.Sum(nil)[:8])
 }

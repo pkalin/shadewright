@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -39,6 +40,9 @@ const (
 	toolKind      = "Pod"
 	toolReason    = "BackOff"
 	argNamespace  = "namespace"
+	argPod        = "pod"
+	argContainer  = "container"
+	argTemplate   = "template"
 	argKind       = "kind"
 	argName       = "name"
 )
@@ -75,25 +79,41 @@ func (r *textReader) List(_ context.Context, list client.ObjectList, _ ...client
 	return nil
 }
 
-// readTools is one tool set over a textReader and a fake log source; calls are serialized, since each
-// sets the text first.
+// readTools is one tool set over a textReader and fake log, metrics and delivery sources; calls are
+// serialized, since each sets the text first.
 type readTools struct {
 	sync.Mutex
-	set    *tools.Set
-	reader *textReader
-	logs   *fake.Logs
+	set      *tools.Set
+	reader   *textReader
+	logs     *fake.Logs
+	metrics  *fake.Metrics
+	delivery *fake.Delivery
 }
 
+// Arguments of the read tools in the entry points.
+const (
+	toolTemplate   = "container_restarts_total"
+	toolDelivery   = "apps"
+	toolMetricText = "message"
+)
+
 func newReadTools() *readTools {
-	reader, logs := &textReader{}, &fake.Logs{}
+	reader, logs, metrics, delivery := &textReader{}, &fake.Logs{}, &fake.Metrics{}, &fake.Delivery{}
 	set, err := tools.New(tools.Config{
-		Pods: reader, Events: reader, Objects: reader, Logs: logs,
-		Redactor: defaultRedactor(), Namespaces: []string{toolNS},
+		Pods: reader, Events: reader, Objects: reader, Logs: logs, Metrics: metrics, Delivery: delivery,
+		Redactor: defaultRedactor(), Namespaces: []string{toolNS}, DeliveryNamespaces: []string{toolNS},
 	})
 	if err != nil {
 		panic(err)
 	}
-	return &readTools{set: set, reader: reader, logs: logs}
+	return &readTools{set: set, reader: reader, logs: logs, metrics: metrics, delivery: delivery}
+}
+
+// toolSeries is the series query_metrics answers with: a label of the pod and the given labels.
+func toolSeries(labels map[string]string) []providers.Series {
+	l := map[string]string{argContainer: toolContainer}
+	maps.Copy(l, labels)
+	return []providers.Series{{Labels: l, Samples: []providers.Sample{{Value: 1}}}}
 }
 
 // toolText calls one read tool of the model with in as the text the cluster holds, and returns its answer.
@@ -106,14 +126,43 @@ func toolText(name string, args map[string]any) func(in string) []string {
 		defer rt.Unlock()
 		rt.reader.text = in
 		rt.logs.Set(fake.LogKey{Namespace: toolNS, Pod: toolPod, Container: toolContainer}, in)
-		raw, err := json.Marshal(args)
-		if err != nil {
-			panic(err)
-		}
-		r, err := rt.set.Call(context.Background(), providers.ToolCall{ID: "c1", Name: name, Arguments: raw})
-		if err != nil {
-			panic(err)
-		}
-		return []string{r.Text}
+		rt.metrics.Set(toolTemplate, toolSeries(map[string]string{toolMetricText: in}))
+		rt.delivery.Set(providers.DeliveryUnit{Kind: "Kustomization", Namespace: toolNS, Name: toolDelivery},
+			providers.DeliveryStatus{AppliedRevision: "main@sha1:0123456789abcdef0123456789abcdef01234567", Message: in})
+		return []string{callTool(rt.set, name, args)}
 	}
+}
+
+// callTool calls one read tool and returns its answer, which must not be a refusal or a missing source: an
+// entry point that reads nothing checks nothing.
+func callTool(set *tools.Set, name string, args map[string]any) string {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		panic(err)
+	}
+	r, err := set.Call(context.Background(), providers.ToolCall{ID: "c1", Name: name, Arguments: raw})
+	if err != nil {
+		panic(err)
+	}
+	if r.Status != tools.StatusOK {
+		panic(fmt.Sprintf("%s answered %s: %s", name, r.Status, r.Text))
+	}
+	return r.Text
+}
+
+// labelsTools is one tool set whose query_metrics answers with the labels of a metric series input; calls are
+// serialized, since each sets the labels first.
+var labelsTools = sync.OnceValue(newReadTools)
+
+// queryMetricsOfLabels returns the answer of query_metrics for a series with the given labels.
+func queryMetricsOfLabels(labels [][2]string) string {
+	rt := labelsTools()
+	rt.Lock()
+	defer rt.Unlock()
+	m := map[string]string{}
+	for _, l := range labels {
+		m[l[0]] = l[1]
+	}
+	rt.metrics.Set(toolTemplate, toolSeries(m))
+	return callTool(rt.set, tools.NameQueryMetrics, map[string]any{argNamespace: toolNS, argPod: toolPod, argTemplate: toolTemplate})
 }

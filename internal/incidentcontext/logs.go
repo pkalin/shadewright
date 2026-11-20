@@ -136,8 +136,8 @@ func (b *Builder) logBlock(pick logPick, ex providers.LogExcerpt, err error, bud
 	if pick.previous {
 		instance = "previous instance"
 	}
-	title := "pod " + b.value(pick.pod) + " " + kind + " " + b.value(pick.container) + ", " + instance
-	v := RenderLog(b.redactor.String, title, ex, err, budget, budget)
+	title := "pod " + b.shown(pick.pod) + " " + kind + " " + b.shown(pick.container) + ", " + instance
+	v := RenderLog(b.redactor, false, title, ex, err, budget, budget)
 	failed := v.Read == LogReadFailed || v.Read == LogReadOversized
 	if failed {
 		blk.Availability = CouldNotFetch

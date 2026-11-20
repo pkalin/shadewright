@@ -41,6 +41,10 @@ import (
 // get_resource for every input, take the text of the input, as entryPoints gives them.
 const canonSequenceEntry = tools.NameGetResource + " of the strings"
 
+// canonLabelsEntry is the read tool query_metrics on a series whose labels are those of a metric labels input
+// (#845): a secret key as a label's name and a secret as its value.
+const canonLabelsEntry = tools.NameQueryMetrics + " of the labels"
+
 // argsReader answers get_resource with a pod whose container arguments are args.
 type argsReader struct {
 	client.Reader
@@ -189,7 +193,7 @@ func canonKeptLost(out string, masked []string, keep []string) []int {
 // drops the lines before the cut, so its kept pieces are checked on the excerpt of the whole read only.
 var canonKeptEntries = map[string]bool{
 	canonEntryValue: true, tools.NameGetResource: true, tools.NameListEvents: true,
-	tools.NameGetPodLogs: true, canonEntryExcerpt: true, canonSequenceEntry: true,
+	tools.NameGetPodLogs: true, canonEntryExcerpt: true, canonSequenceEntry: true, canonLabelsEntry: true,
 }
 
 // canonEntryValue and canonEntryExcerpt are the names of two entry points in entryPoints.
@@ -244,6 +248,13 @@ func canonEntryLeaks(cases []redact.CanonCase) (leaks []redact.CanonLeak, firstO
 		}
 		out := getResourceOfArgs(c.Args)
 		return pieces(canonSequenceEntry, c, []string{out}, c.MaskedArgs), out
+	}
+	checks[canonLabelsEntry] = func(c redact.CanonCase) ([]string, string) {
+		if c.Labels == nil {
+			return nil, ""
+		}
+		out := queryMetricsOfLabels(c.Labels)
+		return pieces(canonLabelsEntry, c, []string{out}, c.MaskedLabels), out
 	}
 	run := func(name string, f func(c redact.CanonCase) ([]string, string)) result {
 		var r result
@@ -366,6 +377,45 @@ func TestCanonEntryPointsLeakNothingMainHid(t *testing.T) {
 	}
 }
 
+// canonOverRedaction is the stored over-redaction table of the entry points (#845, sixth decision of
+// 2026-11-18, point 6): the kept pieces of the corpus that main keeps and the rule loses, per entry point.
+const canonOverRedaction = "testdata/canonical-overredaction-entry.tsv"
+
+// The kept pieces main keeps and the rule loses are a stored table, so that a later change that hides more
+// shows up as a diff of it, and one that hides less as a row that no longer holds. The counts per entry point are
+// logged.
+func TestCanonOverRedactionAgainstMain(t *testing.T) {
+	corpus, found := canonCorpusLeaks()
+	main, _ := redact.ReadCanonTable(t, redact.CanonMainEntryLeaks)
+	key := func(r redact.CanonLeak) string { return r.Check + "\t" + r.Hash + "\t" + r.Item }
+	mainLost := map[string]bool{}
+	for _, r := range main {
+		mainLost[key(r)] = true
+	}
+	var over []redact.CanonLeak
+	per := map[string]int{}
+	for _, r := range found.leaks {
+		if !strings.HasPrefix(r.Item, "k") || mainLost[key(r)] {
+			continue
+		}
+		over = append(over, r)
+		per[r.Check]++
+	}
+	t.Logf("kept pieces main keeps and the rule loses: %d, by entry point %v", len(over), per)
+	if redact.CanonWriteTables(t, corpus.sampled) {
+		redact.WriteCanonTable(t, canonOverRedaction, []string{
+			"# Kept pieces of the canonical view corpus that main keeps and the rule loses, by entry point (#845), written by CANON_LEAKS_WRITE=1.",
+		}, over)
+		return
+	}
+	checked := map[string]string{}
+	for _, c := range corpus.cases {
+		checked[c.Hash] = c.Name
+	}
+	want, _ := redact.ReadCanonTable(t, canonOverRedaction)
+	redact.CheckCanonLeaks(t, canonOverRedaction, redact.CanonIndex(), checked, want, over)
+}
+
 // TestWriteCanonMainEntryTable writes redact.CanonMainEntryLeaks from the entry points it runs with, when
 // CANON_MAIN_ENTRY_TABLE names the output path (and CANON_MAIN_COMMIT the commit, for its first line); it is
 // run once in a checkout of the commit of the main table, with entryPoints reduced to the entry points that
@@ -384,10 +434,41 @@ func TestWriteCanonMainEntryTable(t *testing.T) {
 	for n := range entryPoints {
 		names = append(names, n)
 	}
-	names = append(names, canonSequenceEntry)
+	names = append(names, canonSequenceEntry, canonLabelsEntry)
 	slices.Sort(names)
 	redact.WriteCanonTable(t, path, []string{
 		"# Leaks of the entry points on the canonical view corpus (#845), piece by piece, at main " + os.Getenv("CANON_MAIN_COMMIT") + ".",
 		"# entry points: " + strings.Join(names, ","),
 	}, got)
+}
+
+// canonNoSourceTools are the tools that show no text from a source: they are never available (no Git reader is
+// wired), and TestEveryToolIsAnEntryPoint checks that they still answer so.
+var canonNoSourceTools = []string{tools.NameReadGitFile, tools.NameGetRecentChanges}
+
+// Every tool of the registry that shows text from a source is an entry point of the corpus (#845): query_metrics
+// was not, and lost its second pass unseen. A new tool fails here until it is added to entryPoints, or to
+// canonNoSourceTools while it answers "not available".
+func TestEveryToolIsAnEntryPoint(t *testing.T) {
+	rt := newReadTools()
+	for _, name := range tools.Names() {
+		if _, ok := entryPoints[name]; ok {
+			continue
+		}
+		if !slices.Contains(canonNoSourceTools, name) {
+			t.Errorf("tool %s is no entry point of the canonical corpus: add it to entryPoints", name)
+			continue
+		}
+		raw, err := json.Marshal(map[string]any{"path": "apps/web.yaml"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := rt.set.Call(context.Background(), providers.ToolCall{ID: "c1", Name: name, Arguments: raw})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Status != tools.StatusNotAvailable {
+			t.Errorf("tool %s answers %s: it shows text from a source now, add it to entryPoints", name, r.Status)
+		}
+	}
 }

@@ -49,6 +49,7 @@ kubeconfig*
 
 # Go test output and OS files
 cover.out
+cover-controller.out
 .DS_Store
 
 # Output of make build-installer

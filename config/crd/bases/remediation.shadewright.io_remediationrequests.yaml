@@ -1826,13 +1826,17 @@ spec:
                           desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the
                           KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter
                           stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision
-                          or container) or PartialRollout (the report does not cover every desired replica, or a revert is checked
-                          before RolledOut is True). Every one is a reset of the no-evidence class.
+                          or container), PartialRollout (the report does not cover every desired replica, or a revert is checked
+                          before RolledOut is True) or ExecutorRestarted (a new executor process, after a restart or a leader change,
+                          found the window open and opened by no check of its own; its time is the second before it began
+                          reconciling, or windowStart when that is later).
+                          Every one is a reset of the no-evidence class.
                         enum:
                         - NotAvailable
                         - StaleReport
                         - ReportMismatch
                         - PartialRollout
+                        - ExecutorRestarted
                         type: string
                       time:
                         description: |-

@@ -734,6 +734,7 @@ func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *
 		return err
 	}
 	r.reportCounters.forget(client.ObjectKeyFromObject(rr))
+	r.ownWindows.forget(client.ObjectKeyFromObject(rr))
 	r.unwrittenResets.forget(client.ObjectKeyFromObject(rr))
 	r.mergeReadings.forget(client.ObjectKeyFromObject(rr))
 	if r.Recorder != nil {

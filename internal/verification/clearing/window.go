@@ -84,8 +84,10 @@ func ClassOf(r v1alpha1.ResetReason) Class {
 //
 // The report's window is stored in its status ([ReportWindow]). The checks here also take the executor's own
 // window as a Window, held in memory, but its resets carry the executor's reasons (NotAvailable, StaleReport,
-// ReportMismatch), which the enum of the report's WindowReset.reason refuses: the executor keeps its window in
-// request status with its own type (status.verification, a VerificationReset), not in this API type.
+// ReportMismatch, PartialRollout, which the verifier sets too, and ExecutorRestarted), and the enum of the
+// report's WindowReset.reason refuses NotAvailable, StaleReport, ReportMismatch and ExecutorRestarted: the
+// executor keeps its window in request status with its own type (status.verification, a VerificationReset), not
+// in this API type.
 type Window struct {
 	Start     *metav1.Time
 	LastReset *v1alpha1.WindowReset

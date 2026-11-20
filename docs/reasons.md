@@ -335,6 +335,7 @@ Whether the symptom cleared after the change, judged from the verifier's report.
 | <span id="vf-notavailable"></span>`NotAvailable` | `Inconclusive`: the target reported other available replicas than `spec.replicas`. | Check why pods are not available. [More](troubleshooting.md#after-the-merge) |
 | <span id="vf-podnotready"></span>`PodNotReady` | `Inconclusive`: a pod of the rollout was not Ready without a restart. | Check the readiness probe and the node. [More](troubleshooting.md#after-the-merge) |
 | <span id="vf-evidencemissing"></span>`EvidenceMissing` | `Inconclusive`: the report could not cover the pods (a pod without a status, or more than 200 pods). | Check the target's pods. [More](troubleshooting.md#after-the-merge) |
+| <span id="vf-executorrestarted"></span>`ExecutorRestarted` | `Inconclusive` at the timeout: the executor restarted, or another replica became leader, while the window was open, and no full window fitted after it. | Check the executor's restarts, then the symptom by hand. [More](troubleshooting.md#after-the-merge) |
 | <span id="vf-scaledtozero"></span>`ScaledToZero` | `Inconclusive`: the target's `spec.replicas` was 0. | Scale it up and check by hand. [More](troubleshooting.md#after-the-merge) |
 | <span id="vf-observationgap"></span>`ObservationGap` | `Inconclusive`: a gap of more than a minute between samples, with a pod the verifier had not seen. | Check that the verifier runs steadily. [More](troubleshooting.md#after-the-merge) |
 

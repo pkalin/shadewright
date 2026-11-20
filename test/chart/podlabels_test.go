@@ -47,8 +47,10 @@ func TestEgressSelectorPodLabelsReplaceTheDefault(t *testing.T) {
 			"one label":     {[]string{s.valuesPath + "app=mine"}, `{"app":"mine"}`},
 			"two labels":    {[]string{s.valuesPath + "app=mine", s.valuesPath + "team=a"}, `{"app":"mine","team":"a"}`},
 			// A null key is ignored: the workaround of an install that nulled the default key (#985).
-			"null key and a label": {[]string{s.valuesPath + `app\.kubernetes\.io/name=null`, s.valuesPath + "app=otel"}, `{"app":"otel"}`},
-			"all keys null":        {[]string{s.valuesPath + `app\.kubernetes\.io/name=null`}, s.def},
+			"null key and a label": {
+				[]string{s.valuesPath + `app\.kubernetes\.io/name=null`, s.valuesPath + "app=otel"}, `{"app":"otel"}`,
+			},
+			"all keys null": {[]string{s.valuesPath + `app\.kubernetes\.io/name=null`}, s.def},
 		}
 		for cn, c := range cases {
 			t.Run(name+"/"+cn, func(t *testing.T) {

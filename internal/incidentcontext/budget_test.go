@@ -191,20 +191,18 @@ func timedBuildOf(t *testing.T, objs []client.Object, l *timedLogs, call, whole 
 // that follows stops at the section's budget without marking the log excerpt failed, both excerpts stay, and
 // the metrics are still read within the build deadline.
 func TestLogSectionKeepsItsTimeBudget(t *testing.T) {
+	// A slow answer comes 150 ms before the call timeout, and the build deadline is 1.2 s after the section's
+	// end: margins for a runner under heavy load. The section's time is checked by the calls' deadlines,
+	// which load does not move, not by the clock. Reading the first container's previous instance before the
+	// second container's current one would cut that read at 800 ms and lose its excerpt.
 	const call = 400 * time.Millisecond
 	l := &timedLogs{
 		plan:    map[string][2]outcome{crashPod: {slow, hangs}, secondPod: {slow, hangs}},
-		slowFor: 350 * time.Millisecond,
+		slowFor: 250 * time.Millisecond,
 	}
-	c, metricReads, took, lead := timedBuild(t, l, call, time.Second)
-	// The section ends 800 ms after it starts, so the metrics are read when the build reached it with time to
-	// spare; on a loaded machine under -race the cluster reads before it can take longer.
+	c, metricReads, _, _ := timedBuild(t, l, call, 2*time.Second)
 	if metricReads == 0 {
-		if lead < 100*time.Millisecond {
-			t.Errorf("no metric reads: the log section used up the build deadline")
-		} else {
-			t.Logf("no metric reads, the build took %s to reach the log section", lead)
-		}
+		t.Errorf("no metric reads: the log section used up the build deadline")
 	}
 	if slices.Contains(c.FailedSources, SectionLogs) {
 		t.Errorf("failed sources %v: only a second read was cut short", c.FailedSources)
@@ -218,15 +216,11 @@ func TestLogSectionKeepsItsTimeBudget(t *testing.T) {
 			t.Errorf("the excerpt of %s read before the budget ran out is gone: %q", p, data)
 		}
 	}
-	// The budget is 800 ms; checkDeadlines below checks it exactly, this coarse check by the clock leaves a
-	// margin for scheduling under -race that stays below the 1.1 s the section took without a budget.
-	if took > 2*call+250*time.Millisecond {
-		t.Errorf("log section took %s, budget %s", took, 2*call)
-	}
 	if len(l.calls) > 2*MaxLogExcerpts {
 		t.Errorf("%d log calls, want at most %d", len(l.calls), 2*MaxLogExcerpts)
 	}
 	checkDeadlines(t, l, call, MaxLogExcerpts)
+	checkOwnTimeout(t, l, MaxLogExcerpts, call)
 }
 
 // checkDeadlines checks B1 by the deadlines of the log calls: each of the first reads may run for one call

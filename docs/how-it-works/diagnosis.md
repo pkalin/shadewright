@@ -54,6 +54,7 @@ An analysis takes one unit of a daily budget, has a deadline of 8 minutes, and a
 
 ## In depth
 
+- [Working with models](models.md): the concept and the parts.
 - [Design 3.3: analysis](../design/3-observation-and-deduplication.md#33-analysis)
 - [Design 4: tools](../design/4-tools.md#4-tools)
 - [Data handling](../data-handling.md#what-is-sent-to-the-model): what leaves the cluster.

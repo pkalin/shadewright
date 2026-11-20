@@ -1177,7 +1177,8 @@ func TestStopOnMovedBaseSaysTheCheckWasNotFailed(t *testing.T) {
 // When the repository is no longer in the settings nothing can be closed, and the deletion says so with a Warning
 // Event PullRequestLeftOpen. On main both pull requests stayed open and no Event was recorded.
 func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
-	for _, mode := range []string{"settings reach it", "repository gone", "settings gone"} {
+	const entryGone, settingsGone = "entry gone", "settings object gone"
+	for _, mode := range []string{"settings reach it", entryGone, settingsGone} {
 		t.Run(mode, func(t *testing.T) {
 			gone := mode != "settings reach it"
 			// settlementWorld leaves the settings naming freshOtherBranch, not the recorded main.
@@ -1202,9 +1203,9 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch mode {
-			case "repository gone":
+			case entryGone:
 				dropRepository(t, r)
-			case "settings gone":
+			case settingsGone:
 				if err := r.Delete(ctx, &api.RemediationSettings{ObjectMeta: metav1.ObjectMeta{Name: api.SettingsName}}); err != nil {
 					t.Fatal(err)
 				}
@@ -1244,8 +1245,8 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 					t.Fatalf("events %q: want one Warning Event %s naming #%d", events, EventPullRequestLeftOpen, n)
 				}
 				// The Event says what is missing: the entry of the repository, or the settings object itself.
-				says := map[string]string{"repository gone": "no usable entry for the repository",
-					"settings gone": "RemediationSettings " + api.SettingsName + " does not exist"}[mode]
+				says := map[string]string{entryGone: "no usable entry for the repository",
+					settingsGone: "RemediationSettings " + api.SettingsName + " does not exist"}[mode]
 				if !strings.Contains(events[0], says) {
 					t.Fatalf("event %q: want it saying %q", events[0], says)
 				}

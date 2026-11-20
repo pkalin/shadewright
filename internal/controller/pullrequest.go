@@ -2357,9 +2357,7 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 			// Closed, nothing reachable to close (said by leftUnreachable below, #925), the open ones closed and a
 			// merged one read as merged, or not ours to close. A close refused as a conflict is not a merge until a
 			// read says so: it is retried.
-			if errors.Is(err, errRepositoryGone) || errors.Is(err, freshness.ErrRepositoryUnusable) {
-				unreachable = err
-			}
+			unreachable = unreachableCleanup(err)
 			if err := r.clearCleanupConditions(ctx, rr); err != nil {
 				return reconcile.Result{}, err
 			}
@@ -2407,6 +2405,15 @@ func (r *RemediationRequestReconciler) reportLetGo(ctx context.Context, rr *reme
 	case unreachable != nil:
 		r.leftUnreachable(ctx, rr, unreachable)
 	}
+}
+
+// unreachableCleanup returns err, from the finalizer's close (closeOnDeleteOf), when it says the settings reach no
+// repository of the plan (the settings object is missing, or holds no usable entry for it), nil otherwise.
+func unreachableCleanup(err error) error {
+	if errors.Is(err, errRepositoryGone) || errors.Is(err, freshness.ErrRepositoryUnusable) {
+		return err
+	}
+	return nil
 }
 
 // cleanupDone reports whether err, from the finalizer's close (closeOnDeleteOf), lets the finalizer go: nil, or an

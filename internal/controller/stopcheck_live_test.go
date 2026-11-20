@@ -187,12 +187,12 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 	}{
 		{name: "pending last", over: true, writes: true},
 		{name: "failed last"},
-		{name: "read fails", over: true, fail: "ReviewCheckRun", unread: true},
-		{name: "read fails on the failed check", fail: "ReviewCheckRun", unread: true},
+		{name: "read fails", over: true, fail: opReviewCheckRun, unread: true},
+		{name: "read fails on the failed check", fail: opReviewCheckRun, unread: true},
 		{name: "settings name another branch", branchChanged: true, unread: true},
 		{name: "write fails", over: true, fail: "CreateCheckRun", note: true},
 		{name: "failed last ends the note", noted: true},
-		{name: "read fails keeps the note", over: true, fail: "ReviewCheckRun", noted: true, note: true, unread: true},
+		{name: "read fails keeps the note", over: true, fail: opReviewCheckRun, noted: true, note: true, unread: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -221,7 +221,7 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 				if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
 					t.Fatal(err)
 				}
-				settings.Spec.Repositories[0].TargetBranch = "release"
+				settings.Spec.Repositories[0].TargetBranch = freshOtherBranch
 				if err := r.Update(ctx, settings); err != nil {
 					t.Fatal(err)
 				}
@@ -275,7 +275,7 @@ func TestLiveReadThatKeepsFailingShowsInStatus(t *testing.T) {
 	live := r.Client
 	r.APIReader = failingRequestReader{Reader: live, name: p.Name}
 	key := client.ObjectKeyFromObject(p)
-	var versions []string
+	versions := make([]string, 0, 2)
 	for range 2 {
 		before := p.DeepCopy()
 		if err := r.watchReviewCheck(ctx, p, commentsCaughtUp); err != nil {

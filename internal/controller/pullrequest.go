@@ -2779,10 +2779,17 @@ func (r *RemediationRequestReconciler) ownsMarker(ctx context.Context, body stri
 
 // change describes the action in words: the field, the previous and the planned value.
 func change(rr *remediationv1alpha1.RemediationRequest) (what, previous, desired string) {
+	return changeWith(rr, func(s string) string { return s })
+}
+
+// changeWith is change with value applied to the untrusted part of the description (the container name) before
+// it is joined to the fixed words, so a value withheld by the body's redaction leaves "the memory limit of
+// container" in place.
+func changeWith(rr *remediationv1alpha1.RemediationRequest, value func(string) string) (what, previous, desired string) {
 	a := rr.Spec.Action
 	switch {
 	case a.SetContainerMemoryLimit != nil:
-		return "the memory limit of container " + a.SetContainerMemoryLimit.Container,
+		return "the memory limit of container " + value(a.SetContainerMemoryLimit.Container),
 			a.SetContainerMemoryLimit.Previous.String(), a.SetContainerMemoryLimit.Desired.String()
 	case a.AdjustKedaMaxReplicas != nil:
 		return "the maximum replica count", fmt.Sprint(a.AdjustKedaMaxReplicas.PreviousValue),
@@ -2923,7 +2930,6 @@ func (t *bodyText) v(s string) string {
 // request it reverts or the cluster goes through t.v, and only the operator's own text is written as it is.
 func composeBody(rr *remediationv1alpha1.RemediationRequest, incident string,
 	failed *remediationv1alpha1.RemediationRequest, redactValue func(s string, keep ...string) (string, bool)) string {
-	what, previous, desired := change(rr)
 	t, src := rr.Spec.TargetRef, rr.Status.Source
 	revert := remediationv1alpha1.IsRevert(rr)
 	approval := "yes"
@@ -2932,6 +2938,7 @@ func composeBody(rr *remediationv1alpha1.RemediationRequest, incident string,
 	}
 	keep := []string{incident, keptRequestName(rr), keptName(failed)}
 	x := &bodyText{redact: redactValue, keep: keep}
+	what, previous, desired := changeWith(rr, x.v)
 	var b strings.Builder
 	if revert {
 		fmt.Fprintf(&b, "Shadewright proposes to revert a failed change for incident `%s`.\n\n",
@@ -2940,7 +2947,7 @@ func composeBody(rr *remediationv1alpha1.RemediationRequest, incident string,
 	} else {
 		fmt.Fprintf(&b, "Shadewright proposes one typed change for incident `%s`.\n\n", x.v(rr.Spec.IncidentRef.Name))
 	}
-	fmt.Fprintf(&b, "**Change:** %s (`%s`) of %s `%s`, from `%s` to `%s`.\n\n", x.v(what), x.v(string(rr.Spec.Action.Type)),
+	fmt.Fprintf(&b, "**Change:** %s (`%s`) of %s `%s`, from `%s` to `%s`.\n\n", what, x.v(string(rr.Spec.Action.Type)),
 		x.v(t.Kind), x.v(t.Namespace+"/"+t.Name), x.v(previous), x.v(desired))
 	fmt.Fprintf(&b, "**Scope:** one value in `%s` on `%s`. Nothing else in this pull request is part of the plan.\n\n",
 		x.v(string(src.Path)), x.v(string(src.TargetBranch)))
@@ -2959,7 +2966,7 @@ func composeBody(rr *remediationv1alpha1.RemediationRequest, incident string,
 			"and the analyzer's log for this request's name, not in this pull request (ADR-0026): check it before "+
 			"approving.\n\n", x.v(size), x.v(string(rr.Spec.PolicyRef)))
 	}
-	fmt.Fprintf(&b, "**Expected effect:** once merged and delivered, %s is `%s`.\n\n", x.v(what), x.v(desired))
+	fmt.Fprintf(&b, "**Expected effect:** once merged and delivered, %s is `%s`.\n\n", what, x.v(desired))
 	b.WriteString("**Risk:** the change is bounded by the policy's limits and touches one field. " +
 		"Any other push to this branch stops the automation.\n\n")
 	if revert {

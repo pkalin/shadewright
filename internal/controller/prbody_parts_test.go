@@ -364,3 +364,26 @@ func TestPullRequestBodyPartsCorpus(t *testing.T) {
 		t.Fatalf("the corpus did not reach both kinds: %d equal to main, %d with an open key", equal, contextual)
 	}
 }
+
+// TestPullRequestBodyWithheldContainerKeepsTheFieldWords: the container name is the only untrusted part of "the
+// memory limit of container <name>". Withheld, it stands as the marker after the fixed words, in the Change and
+// the Expected effect lines alike, instead of taking the words with it.
+func TestPullRequestBodyWithheldContainerKeepsTheFieldWords(t *testing.T) {
+	rr := bodyRequest()
+	name := rr.Spec.Action.SetContainerMemoryLimit.Container
+	body := composeBody(rr, "", nil, func(s string, keep ...string) (string, bool) {
+		if s == name {
+			return withheldValue, false
+		}
+		return redactBodyValue(s, keep...)
+	})
+	if got := strings.Count(body, "the memory limit of container "+withheldValue); got != 2 {
+		t.Errorf("the field words with the marker appear %d times, want 2 (Change, Expected effect):\n%s", got, body)
+	}
+	if !strings.Contains(body, bodyWithheld) {
+		t.Errorf("the body does not say a value was withheld:\n%s", body)
+	}
+	if !skeleton(rr, "").MatchString(strings.Replace(body, bodyWithheld, "", 1)) {
+		t.Errorf("the operator's text changed:\n%s", body)
+	}
+}

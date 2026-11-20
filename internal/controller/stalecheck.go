@@ -291,8 +291,11 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 			"writing it again")
 	}
 	if err == nil {
-		err = git.CreateCheckRun(stepCtx, pr.HeadSHA, stoppedCheckRun(reason))
-		err = boundErr(ctx, stepCtx, "write the check run", err)
+		// A write the Git host accepted is written, also when the step's time ran out as it returned: only a failed
+		// write is named for the deadline or the cancel.
+		if err = git.CreateCheckRun(stepCtx, pr.HeadSHA, stoppedCheckRun(reason)); err != nil {
+			err = boundErr(ctx, stepCtx, "write the check run", err)
+		}
 	}
 	switch {
 	case err == nil:

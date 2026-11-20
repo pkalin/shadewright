@@ -635,20 +635,20 @@ func markedMerged(rr *remediationv1alpha1.RemediationRequest) bool {
 // settleRecorded is what main's settleLock did in every write that ends a phase: in the status about to be written,
 // it releases the lock of a request whose status records a merge that delivered the plan (settleRecordedMerge),
 // removes condition PullRequestUnreadable of a request that is settled (clearReleasedRead), and condition
-// ReviewCheckNotFailed of one whose merge is recorded (endCheckNote). It reads nothing, so the
+// ReviewCheckNotFailed of one whose merge is recorded, logged at Info when it was set (endCheckNoteLogged). It reads nothing, so the
 // write that records the merge or ends the verification releases the lock under a pause too. A request held for its verification keeps
 // the lock until that ends. Every other release needs its read (checkHeld), the end of a merge that did not deliver
 // the plan as shown (MergedWithForeignChange, MergeContentUnreadable, MergeNotCheckable) among them.
-func (r *RemediationRequestReconciler) settleRecorded(rr *remediationv1alpha1.RemediationRequest) {
+func (r *RemediationRequestReconciler) settleRecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) {
 	if s, ok := r.settleRecordedMerge(rr); ok && ptr.Deref(rr.Status.HoldsTarget, false) {
-		// Release refuses only a nil verdict, which ok rules out.
-		_ = lockverdict.Release(&rr.Status, s)
+		// Release refuses only a nil verdict, which ok rules out. releaseLock logs the end of ReviewCheckNotFailed.
+		_ = releaseLock(ctx, rr, s)
 	}
 	clearReleasedRead(rr)
 	if mergeRecorded(rr) {
 		// The pull request is merged: no look tries its failed review check again, also while a verification keeps
 		// the lock (#925). A merge after a stop is recorded with its own facts (recordStoppedMerge).
-		endCheckNote(rr)
+		endCheckNoteLogged(ctx, rr, "its merge is recorded")
 	}
 }
 
@@ -1314,13 +1314,33 @@ func releaseLock(ctx context.Context, rr *remediationv1alpha1.RemediationRequest
 	if err := lockverdict.Release(&rr.Status, v); err != nil {
 		return err
 	}
-	if c != nil && rr.Status.PullRequest != nil {
-		logf.FromContext(ctx).Info("Released the target lock of a RemediationRequest whose failed review check was not "+
-			"written; a check written before the stop may stay the latest on its head", "remediationRequest",
-			client.ObjectKeyFromObject(rr), "pullRequest", rr.Status.PullRequest.Number, "head",
-			rr.Status.PullRequest.HeadSHA, "reason", c.Reason)
-	}
+	logCheckNoteEnd(ctx, rr, c, "the target lock is released")
 	return nil
+}
+
+// endCheckNoteLogged ends condition ReviewCheckNotFailed (endCheckNote) and, when it was set, says so in the log at
+// Info as a release does (logCheckNoteEnd), with why the looks end.
+func endCheckNoteLogged(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, why string) {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
+	if c == nil {
+		return
+	}
+	note := *c
+	endCheckNote(rr)
+	logCheckNoteEnd(ctx, rr, &note, why)
+}
+
+// logCheckNoteEnd logs at Info that condition ReviewCheckNotFailed, c as it was before it ended (nil when it was not
+// set), ends for why with the failed review check not written: a check written before the stop may stay the latest on
+// the recorded head, and no look of the request tries it again (#925).
+func logCheckNoteEnd(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, c *metav1.Condition, why string) {
+	if c == nil || rr.Status.PullRequest == nil {
+		return
+	}
+	logf.FromContext(ctx).Info("Ended the looks of a RemediationRequest whose failed review check was not written ("+
+		why+"); a check written before the stop may stay the latest on its head", "remediationRequest",
+		client.ObjectKeyFromObject(rr), "pullRequest", rr.Status.PullRequest.Number, "head",
+		rr.Status.PullRequest.HeadSHA, "reason", c.Reason)
 }
 
 // failCheckAfterLook is the one rule for the failed review check of a stopped holder after its look (decision of
@@ -1341,7 +1361,7 @@ func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,
 	pr := rr.Status.PullRequest
 	if mergeRecorded(rr) || pr == nil || !ptr.Deref(rr.Status.HoldsTarget, false) {
 		// Merged, nothing recorded to fail, or the look released the lock: the looks end, and so does the condition.
-		endCheckNote(rr)
+		endCheckNoteLogged(ctx, rr, "the pull request is merged or the target lock is released")
 		return nil
 	}
 	other := holding != nil && holding.Number != pr.Number

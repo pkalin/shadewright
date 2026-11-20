@@ -226,7 +226,15 @@ var (
 // SHADEWRIGHT_MODEL_SEED_RANGE=91-240 and the count it logs per run.
 var modelGoneSeeds = []uint64{165, 202, 210}
 
-// modelSeeds is the fixed seed set: 1 to n, and modelGoneSeeds under the race detector or -short.
+// modelUnsettledSeeds are the seeds above 240 whose sequence has a stopped holder kept by another pull request from
+// its branch at a look that settles nothing yet (the first look at a missing number): property "stopped holder" fails
+// on each of them when that look does not write the failed check (failCheckAfterUnsettledLook, #925). They are the
+// only seeds of 1 to 4000 that do, so the fixed set adds them in every run. A change of the model's draws can move
+// them; the new ones are found with the call removed and SHADEWRIGHT_MODEL_SEED_RANGE.
+var modelUnsettledSeeds = []uint64{1456, 3796, 3895}
+
+// modelSeeds is the fixed seed set: 1 to n, modelGoneSeeds under the race detector or -short, and
+// modelUnsettledSeeds.
 func modelSeeds(t *testing.T) []uint64 {
 	if s := os.Getenv("SHADEWRIGHT_MODEL_SEED"); s != "" {
 		seed, err := strconv.ParseUint(s, 10, 64)
@@ -240,7 +248,7 @@ func modelSeeds(t *testing.T) []uint64 {
 		// Each order of the fourth decision of 2026-11-18 on #771 is found in this range on the build before its fix.
 		n = 90
 	}
-	seeds := make([]uint64, 0, n+len(modelGoneSeeds))
+	seeds := make([]uint64, 0, n+len(modelGoneSeeds)+len(modelUnsettledSeeds))
 	for i := range n {
 		seeds = append(seeds, uint64(i+1))
 	}
@@ -249,6 +257,7 @@ func modelSeeds(t *testing.T) []uint64 {
 		// checks it on more than the two seeds of 1 to 90 that do.
 		seeds = append(seeds, modelGoneSeeds...)
 	}
+	seeds = append(seeds, modelUnsettledSeeds...)
 	if s := os.Getenv("SHADEWRIGHT_MODEL_SEED_RANGE"); s != "" {
 		from, to, _ := strings.Cut(s, "-")
 		a, errA := strconv.ParseUint(from, 10, 64)

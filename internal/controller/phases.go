@@ -729,7 +729,7 @@ func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *
 		Status: status, Reason: reason, Message: message, ObservedGeneration: rr.Generation})
 	r.setPhase(rr, phase)
 	rr.Status.Deadline = nil
-	r.settleRecorded(rr)
+	r.settleRecorded(ctx, rr)
 	if err := r.writeIf(ctx, rr, true); err != nil {
 		return err
 	}

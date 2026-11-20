@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -596,5 +597,32 @@ func reinstallLive(t *testing.T, r *RemediationRequestReconciler, p *api.Remedia
 	}
 	if _, reinstalled, ok := cleanupRepository(s, p, true); !ok || !reinstalled {
 		t.Fatal("the request needs its repository through a new installation")
+	}
+}
+
+// A failed review check whose write the Git host accepts as the step's time runs out is written: the look records
+// Stale on the head and sets no ReviewCheckNotFailed, instead of a timeout that says the check could not be failed
+// and a write once more at the next look with no read first (#925).
+func TestStoppedCheckWrittenAsItsTimeRunsOutIsRecorded(t *testing.T) {
+	r, g, p, _, _, head := gateWorld(t)
+	ctx := context.Background()
+	plainWaiting(t, r, p, head)
+	stopLive(t, r, g, p)
+	p.Status.PullRequest.ReviewCheck = nil
+	r.WriteTimeout = 50 * time.Millisecond
+	g.SetAfter(func(op string) error {
+		if op == opCreateCheckRun {
+			time.Sleep(2 * r.WriteTimeout)
+		}
+		return nil
+	})
+	if err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention), false); err != nil {
+		t.Fatalf("failStoppedCheck: %v", err)
+	}
+	if rc := p.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale {
+		t.Fatalf("review check %+v: want Stale recorded for the write that went through", rc)
+	}
+	if c := meta.FindStatusCondition(p.Status.Conditions, api.ConditionReviewCheckNotFailed); c != nil {
+		t.Fatalf("condition ReviewCheckNotFailed %+v: want none for a check that was written", c)
 	}
 }

@@ -2061,7 +2061,7 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 		Message:            message,
 		ObservedGeneration: rr.Generation,
 	})
-	r.settleRecorded(rr)
+	r.settleRecorded(ctx, rr)
 	// A wait the stop ends (the deadline's, a merge wait once the merge is recorded) goes in the same write.
 	dropEnded(rr, r.now())
 	if err := r.Status().Update(ctx, rr); err != nil {

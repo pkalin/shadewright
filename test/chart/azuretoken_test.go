@@ -28,15 +28,17 @@ import (
 const (
 	anID      = "11111111-1111-1111-1111-111111111111"
 	tenantID  = "33333333-3333-3333-3333-333333333333"
-	tokenPath = "/var/run/secrets/azure/tokens/azure-identity-token"
+	tokenPath = "/var/run/secrets/azure/tokens/azure-identity-token" //nolint:gosec // a file path, not a credential
+	anToken   = "analyzer.identity.azure.projectToken=true"
+	exToken   = "executor.identity.azure.projectToken=true"
 	tokenVol  = "azure-identity-token"
 )
 
 // tokenModeSet turns the mode on for both components, with placeholder IDs.
 func tokenModeSet(extra ...string) []string {
 	return append([]string{
-		"executor.identity.azure.projectToken=true", "executor.identity.azure.tenantId=" + tenantID,
-		"analyzer.identity.azure.clientId=" + anID, "analyzer.identity.azure.projectToken=true",
+		exToken, "executor.identity.azure.tenantId=" + tenantID,
+		"analyzer.identity.azure.clientId=" + anID, anToken,
 		"analyzer.identity.azure.tenantId=" + tenantID,
 	}, extra...)
 }
@@ -119,7 +121,7 @@ func TestAzureProjectTokenKeepsOtherVolumes(t *testing.T) {
 // TestAzureProjectTokenOneComponentOnly: switching the executor leaves the analyzer's Pod as the webhook mode
 // has it (label, no volume).
 func TestAzureProjectTokenOneComponentOnly(t *testing.T) {
-	r := render(t, false, "executor.identity.azure.projectToken=true", "executor.identity.azure.tenantId="+tenantID,
+	r := render(t, false, exToken, "executor.identity.azure.tenantId="+tenantID,
 		"analyzer.identity.azure.clientId="+anID)
 	tpl, c := podOf(t, r, analyzerDeployment)
 	if tpl.Labels[identityLabel] != "true" || len(tpl.Spec.Volumes) != 0 || len(c.Env) > 4 {
@@ -139,17 +141,17 @@ func TestAzureProjectTokenRefusals(t *testing.T) {
 		set  []string
 		want string
 	}{
-		{[]string{"analyzer.identity.azure.projectToken=true", "analyzer.identity.azure.tenantId=" + tenantID},
+		{[]string{anToken, "analyzer.identity.azure.tenantId=" + tenantID},
 			"analyzer.identity.azure.clientId"},
-		{[]string{"analyzer.identity.azure.projectToken=true", "analyzer.identity.azure.clientId=" + anID},
+		{[]string{anToken, "analyzer.identity.azure.clientId=" + anID},
 			"analyzer.identity.azure.tenantId"},
-		{[]string{"executor.identity.azure.projectToken=true"}, "executor.identity.azure.tenantId"},
-		{[]string{"executor.identity.azure.projectToken=true", "executor.identity.azure.clientId="},
+		{[]string{exToken}, "executor.identity.azure.tenantId"},
+		{[]string{exToken, "executor.identity.azure.clientId="},
 			"executor.identity.azure.clientId"},
 		{[]string{"analyzer.identity.azure.tenantId=" + tenantID}, "analyzer.identity.azure.projectToken"},
-		{[]string{"analyzer.identity.azure.projectToken=true", "analyzer.identity.azure.clientId=" + anID,
+		{[]string{anToken, "analyzer.identity.azure.clientId=" + anID,
 			"analyzer.identity.azure.tenantId=not a tenant"}, "tenantId"},
-		{[]string{executorOff, "executor.identity.azure.projectToken=true"}, "executor.identity.azure.projectToken"},
+		{[]string{executorOff, exToken}, "executor.identity.azure.projectToken"},
 	}
 	for _, c := range cases {
 		out := helmFails(t, c.set...)
@@ -165,7 +167,7 @@ func TestAzureProjectTokenOffRendersAsBefore(t *testing.T) {
 	helm := tool(t, "HELM", "helm")
 	out := func(set ...string) []byte {
 		return run(t, repoRoot(t), helm, helmArgsWith(t, ciValues(t),
-			append([]string{"clusterId=chart-test", "analyzer.identity.azure.clientId=" + anID,
+			append([]string{testCluster, "analyzer.identity.azure.clientId=" + anID,
 				"executor.identity.azure.clientId=" + id0, withVerifier}, set...)...)...)
 	}
 	def := out()

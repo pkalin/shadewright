@@ -68,12 +68,19 @@ func TestTokenShapesWorkIsLinear(t *testing.T) {
 	for _, open := range complexityOpenings {
 		for _, unit := range complexityUnits() {
 			shapes++
-			var work [3]int64
+			var work, size [4]int
 			for i := range work {
 				in := open + strings.Repeat(unit, complexityN<<i)
-				work[i] = countWork(t, func() { String(in) })
+				work[i], size[i] = int(countWork(t, func() { String(in) })), len(in)
 			}
 			for i := 1; i < len(work); i++ {
+				// Texts shorter than windowMinText are read whole and longer ones by windows (windows.go), whose
+				// fixed cost per byte is higher: a doubling across that length is a one-time step ("pass: |" cost
+				// 2.25 times as much from 512 to 1,024 units, then 1.94 and 1.95), and the doublings on either
+				// side of it are held to the bound.
+				if (size[i-1] < windowMinText) != (size[i] < windowMinText) {
+					continue
+				}
 				if float64(work[i]) > 2*complexitySlack*float64(work[i-1]) {
 					if failed++; failed <= 10 {
 						t.Errorf("%q + %q x %d: work %d, at twice as many units %d", open, unit, complexityN<<(i-1), work[i-1], work[i])
@@ -86,7 +93,7 @@ func TestTokenShapesWorkIsLinear(t *testing.T) {
 	if failed > 0 {
 		t.Errorf("%d of %d shapes cost more than twice as much at twice the size", failed, shapes)
 	}
-	t.Logf("%d shapes at %d, %d and %d units", shapes, complexityN, 2*complexityN, 4*complexityN)
+	t.Logf("%d shapes at %d, %d, %d and %d units", shapes, complexityN, 2*complexityN, 4*complexityN, 8*complexityN)
 	for _, n := range []int{512, 1024, 2048} {
 		open := "{" + passwordKey + ": marigold"
 		in := open + strings.Repeat("}", n)

@@ -69,8 +69,9 @@ const ReasonAnotherRequestMerged = "AnotherRequestMerged"
 // ReasonAnotherRequestClosed is the PlanFresh reason of a request that ended Superseded because it waited behind
 // the target lock of another request for the same target and field (of any Incident, recorded in
 // status.queuedBehind) whose pull request was then closed without a merge, before this one took the lock or
-// opened a pull request (#643). A reviewer who closed that pull request said no to the change; the Incident's
-// next analysis is the way to a new proposal.
+// opened a pull request (#643). A reviewer who closed that pull request said no to the change. The Incident is
+// not analyzed again: unless a newer request names it, it moves to Escalated, and a person applies a new request
+// if the change is still wanted (#930).
 const ReasonAnotherRequestClosed = "AnotherRequestClosed"
 
 // ReasonAnotherRequestSucceeded is the PlanFresh reason of a request that ended Superseded because it waited

@@ -156,7 +156,7 @@ import (
 // to 500, 1 to 100 under the race detector or -short; the code was checked against the seeds 1 to 9,000 and then
 // 9,001 to 13,000, in the fifth round of #786 against 1 to 24,000, for #880 against 1 to 60,000, and for its second decision (a wait is a claim) against 1 to 260,000 with the
 // deletion of the claim holder drawn, and for the live copies of the requests (decision of 2026-11-19 on #786) against 1 to
-// 260,000 with the cache lagging behind a change of the other request drawn. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
+// 260,000 with the cache lagging behind a change of the other request drawn. For #870 (P12) it was checked against 1 to 120,000. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
 // to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1 prints the trace of every seed
 // (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile). The log of every run (go test -v)
 // holds the count of failures per property, of the exclusions, and of what the sequences reached.
@@ -2849,7 +2849,7 @@ func TestHandoffModelRecoveryWaitEndsOnAMergeOnAnotherBase(t *testing.T) {
 // its next read of what the merge brought works, and the status write of its record meets a conflict. The claim stays
 // until a write stores the record: the content read removes no wait of its own, so the lost write leaves the claim.
 func TestHandoffModelOtherHeadClaimSurvivesALostRecordWrite(t *testing.T) {
-	m := hmDirected(t, hmStartIntent, []hmStep{{Kind: hFault, Code: 404, Op: "CheckCommit"}, {Kind: hPush},
+	m := hmDirected(t, hmStartIntent, []hmStep{{Kind: hFault, Code: 404, Op: opCheckCommit}, {Kind: hPush},
 		{Kind: hMerge}, stRecRepl, stRecRepl, {Kind: hConflict, Obj: hmRepl}, stRecRepl})
 	if m.merge == nil || m.merge.firstRead != hmRepl || !m.merge.recorded[hmRepl] {
 		t.Fatalf("the merge is not read first and recorded by the replacement: %+v", m.merge)

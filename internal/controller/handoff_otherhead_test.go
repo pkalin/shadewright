@@ -152,7 +152,7 @@ func TestOtherHeadContentReadFailsWaitsThenRecords(t *testing.T) {
 	}
 	// CheckBetween is read only by the content read (retargetedContent), not by the owner check before it.
 	g.SetFail(func(op string) error {
-		if op == "CheckBetween" {
+		if op == opCheckBetween {
 			return unavailable()
 		}
 		return nil

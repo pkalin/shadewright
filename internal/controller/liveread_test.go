@@ -186,7 +186,7 @@ func TestStoppedCheckRefusalIsNotGitFailed(t *testing.T) {
 			p.Status.Phase = api.PhaseNeedsIntervention
 			p.Status.HoldsTarget = new(true)
 			g.SetFail(func(op string) error {
-				if op == "CreateCheckRun" {
+				if op == opCreateCheckRun {
 					return c.fail
 				}
 				return nil

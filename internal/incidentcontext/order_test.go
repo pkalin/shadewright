@@ -78,10 +78,9 @@ func TestFirstReadsComeBeforeSecondReads(t *testing.T) {
 		l.calls[1].Pod != secondPod || l.calls[1].Previous {
 		t.Fatalf("calls %+v, want the current instance of each container first", l.calls)
 	}
-	for i := range 2 {
-		if d := l.deadlines[i].Sub(l.starts[i]); d < call-50*time.Millisecond || d > call {
-			t.Errorf("first read %d may run for %s, want the call timeout %s", i, d, call)
-		}
+	checkOwnTimeout(t, l, 2, call)
+	if len(l.calls) != 3 {
+		t.Errorf("calls %+v: want the first container's previous instance read, and no read started after the budget", l.calls)
 	}
 	var data []string
 	for _, blk := range blocks(c, SectionLogs) {
@@ -158,10 +157,9 @@ func mainReads(plan map[string][2]outcome, previousFirst bool) ([]providers.LogQ
 // context; the log excerpt is failed exactly when the reference's is; the second reads follow only a first
 // read that did not fail, at most one per container, ending within two call timeouts of the first call.
 func TestLogReadsMatchOneReadPerContainer(t *testing.T) {
-	const call = 100 * time.Millisecond
-	// The time from the builder setting a call's deadline to the fake source seeing the call. A first read
-	// that a second read before it had cut short would lose 20 ms or more.
-	const slack = 15 * time.Millisecond
+	// A slow answer comes 90 ms before the call timeout, a margin for the time from the builder setting a
+	// call's deadline to the fake source starting its timer, under -race on a loaded machine.
+	const call, slowFor = 150 * time.Millisecond, 60 * time.Millisecond
 	// The table of the budget tests (each outcome for both instances, and after a current instance that
 	// answers), with slow answers before a second read. A plan is the current, then the previous instance's
 	// outcome.
@@ -192,13 +190,13 @@ func TestLogReadsMatchOneReadPerContainer(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/%v-%v_%v-%v", f.name, a[0], a[1], b[0], b[1]), func(t *testing.T) {
 					t.Parallel()
 					plan := map[string][2]outcome{crashPod: a, secondPod: b}
-					l := &timedLogs{plan: plan, slowFor: 80 * time.Millisecond}
+					l := &timedLogs{plan: plan, slowFor: slowFor}
 					c, metricReads, _, _ := timedBuildOf(t, f.objs(), l, call, 10*time.Second)
 					l.mu.Lock()
 					defer l.mu.Unlock()
 					want, excerpts, failed := mainReads(plan, f.previousFirst)
-					checkFirstReads(t, l, want, call, slack)
-					checkSecondReads(t, l, plan, len(want), call)
+					checkFirstReads(t, l, want, call)
+					checkSecondReads(t, l, plan, len(want))
 					checkDeadlines(t, l, call, len(want))
 					if metricReads == 0 {
 						t.Error("no metric reads")
@@ -227,22 +225,36 @@ func TestLogReadsMatchOneReadPerContainer(t *testing.T) {
 
 // checkFirstReads checks O1: the first calls are want, in order, each with a deadline of one call timeout
 // from its start.
-func checkFirstReads(t *testing.T, l *timedLogs, want []providers.LogQuery, call, slack time.Duration) {
+func checkFirstReads(t *testing.T, l *timedLogs, want []providers.LogQuery, call time.Duration) {
 	t.Helper()
 	if len(l.calls) < len(want) || !slices.Equal(l.calls[:len(want)], want) {
 		t.Fatalf("calls %+v, want first %+v", l.calls, want)
 	}
-	for i := range want {
-		if d := l.deadlines[i].Sub(l.starts[i]); d < call-slack || d > call {
-			t.Errorf("first read %d may run for %s, want the call timeout %s", i, d, call)
+	checkOwnTimeout(t, l, len(want), call)
+}
+
+// checkOwnTimeout checks that each of the first n calls had the deadline of a read of its own: one call
+// timeout from its start. The builder sets a deadline after the call before returned and before the source
+// sees the call, so it lies between the end of the call before plus the timeout and the start plus the
+// timeout, whatever the load; a deadline cut to a budget shared with an earlier read falls below.
+func checkOwnTimeout(t *testing.T, l *timedLogs, n int, call time.Duration) {
+	t.Helper()
+	for i := range n {
+		d := l.deadlines[i]
+		if d.After(l.starts[i].Add(call)) {
+			t.Errorf("first read %d may run until %s after its start, want the call timeout %s", i, d.Sub(l.starts[i]), call)
+		}
+		if i > 0 && d.Before(l.ends[i-1].Add(call)) {
+			t.Errorf("first read %d may run until %s after the read before ended, want the call timeout %s",
+				i, d.Sub(l.ends[i-1]), call)
 		}
 	}
 }
 
 // checkSecondReads checks O2 and B2: the calls after the first reads are at most one per container, of the
-// instance not read first, after a first read that did not fail, each started within two call timeouts of
-// the first call.
-func checkSecondReads(t *testing.T, l *timedLogs, plan map[string][2]outcome, firstReads int, call time.Duration) {
+// instance not read first, after a first read that did not fail. That they end within the budget is
+// checkDeadlines'.
+func checkSecondReads(t *testing.T, l *timedLogs, plan map[string][2]outcome, firstReads int) {
 	t.Helper()
 	seen := map[string]bool{}
 	for i := firstReads; i < len(l.calls); i++ {
@@ -262,8 +274,6 @@ func checkSecondReads(t *testing.T, l *timedLogs, plan map[string][2]outcome, fi
 			t.Errorf("call %d %+v is not the one second read of a container", i, q)
 		case o.fails():
 			t.Errorf("call %d %+v follows a failed read (%v)", i, q, o)
-		case !l.starts[i].Before(l.first.Add(2 * call)):
-			t.Errorf("call %d started %s after the first, budget %s", i, l.starts[i].Sub(l.first), 2*call)
 		}
 		seen[q.Pod] = true
 	}

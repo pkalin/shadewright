@@ -85,6 +85,8 @@ type timedLogs struct {
 	// in the order of calls.
 	deadlines []time.Time
 	starts    []time.Time
+	// ends are the times the calls returned, in the order they returned (the reads are sequential).
+	ends []time.Time
 }
 
 // cut records a read that its context ended.
@@ -110,6 +112,11 @@ func (l *timedLogs) Logs(ctx context.Context, q providers.LogQuery) (providers.L
 		o = l.plan[q.Pod][1]
 	}
 	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		l.ends = append(l.ends, time.Now())
+		l.mu.Unlock()
+	}()
 	answer := providers.LogExcerpt{Text: q.Pod + " " + instanceName(q.Previous) + " failed\n", CollectedAt: testNow}
 	switch o {
 	case slow:

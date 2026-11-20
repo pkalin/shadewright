@@ -321,20 +321,7 @@ func longRuns(s string, ws []*windowed) [][]longRun {
 	starts := make([]int, len(ws))
 	prevs := make([]int, len(ws))
 	cuts := make([]bool, len(ws))
-	// chunks are the chunks being gathered (start, prev and cut of their first window; end, next and last of their
-	// last), open where chunked has the expression's bit; first is the start of the first window of each
-	// expression after the last long run it got, -1 when none stands there yet.
-	chunks := make([]longRun, len(ws))
-	var chunked uint64
-	first := make([]int, len(ws))
-	for k := range first {
-		first[k] = -1
-	}
-	emit := func(k int, r longRun) {
-		r.follows = first[k] == r.start
-		first[k] = -1
-		out[k] = append(out[k], r)
-	}
+	ch := newChunker(s, out)
 	var cur uint64
 	prev := 0 // the start of the character before i
 	for i := 0; i <= len(s); {
@@ -363,49 +350,15 @@ func longRuns(s string, ws []*windowed) [][]longRun {
 		}
 		if closing := (cur &^ m.alpha) | (cur & m.start); closing != 0 || m.alpha&^cur != 0 {
 			tick(1)
-			cutHere := 0 // whether a chunk may end at i (chunkCut): 0 not read yet, 1 yes, 2 no
+			ch.cutHere = 0
 			for ; closing != 0; closing &= closing - 1 {
 				k := bits.TrailingZeros64(closing)
-				win := longRun{prev: prevs[k], start: starts[k], end: i, next: i + size, last: prev, cut: cuts[k]}
-				if i-starts[k] >= windowMinRun {
-					// A long window is read on its own, as before chunks: the chunk before it ends at the window before.
-					if chunked&(1<<k) != 0 && chunks[k].end-chunks[k].start >= windowMinRun {
-						emit(k, chunks[k])
-					}
-					chunked &^= 1 << k
-					emit(k, win)
-					continue
-				}
-				if chunked&(1<<k) == 0 {
-					chunks[k], chunked = win, chunked|1<<k
-				} else {
-					chunks[k].end, chunks[k].next, chunks[k].last = win.end, win.next, win.last
-				}
-				if i-chunks[k].start < windowMinRun {
-					continue
-				}
-				if cutHere == 0 {
-					tick(chunkHashBytes)
-					cutHere = 2
-					if chunkCut(s, i) {
-						cutHere = 1
-					}
-				}
-				if cutHere == 1 || i-chunks[k].start >= chunkMaxRun {
-					emit(k, chunks[k])
-					chunked &^= 1 << k
-				}
+				ch.closeWindow(k, longRun{prev: prevs[k], start: starts[k], end: i, next: i + size, last: prev, cut: cuts[k]})
 			}
 			for opening := m.alpha &^ (cur &^ m.start); opening != 0; opening &= opening - 1 {
 				k := bits.TrailingZeros64(opening)
 				starts[k], prevs[k], cuts[k] = i, prev, cur&(1<<k) != 0
-				if chunked&(1<<k) != 0 && i-chunks[k].end >= windowMinRun {
-					emit(k, chunks[k])
-					chunked &^= 1 << k
-				}
-				if first[k] < 0 {
-					first[k] = i
-				}
+				ch.openWindow(k, i)
 			}
 			cur = m.alpha
 		}
@@ -415,17 +368,103 @@ func longRuns(s string, ws []*windowed) [][]longRun {
 		prev = i
 		i += size
 	}
-	for ; chunked != 0; chunked &= chunked - 1 {
-		if k := bits.TrailingZeros64(chunked); chunks[k].end-chunks[k].start >= windowMinRun || len(s)-chunks[k].end >= windowMinRun {
-			emit(k, chunks[k])
-		}
-	}
-	for k := range out {
-		if n := len(out[k]); n > 0 && first[k] < 0 {
-			out[k][n-1].final = true
-		}
-	}
+	ch.finish()
 	return out
+}
+
+// chunker gathers the long windows and the chunks of short windows of a text for each expression of one pass of
+// longRuns (a bit each).
+type chunker struct {
+	s   string
+	out [][]longRun
+	// chunks are the chunks being gathered (start, prev and cut of their first window; end, next and last of their
+	// last), open where chunked has the expression's bit.
+	chunks  []longRun
+	chunked uint64
+	// first is the start of the first window of each expression after the last long run it got, -1 when none
+	// stands there yet.
+	first []int
+	// cutHere is whether a chunk may end where windows end now (chunkCut): 0 not read yet, 1 yes, 2 no.
+	cutHere int
+}
+
+// newChunker returns a chunker of s that appends to out.
+func newChunker(s string, out [][]longRun) *chunker {
+	c := &chunker{s: s, out: out, chunks: make([]longRun, len(out)), first: make([]int, len(out))}
+	for k := range c.first {
+		tick(1)
+		c.first[k] = -1
+	}
+	return c
+}
+
+// emit gives expression k the long run r.
+func (c *chunker) emit(k int, r longRun) {
+	r.follows = c.first[k] == r.start
+	c.first[k] = -1
+	c.out[k] = append(c.out[k], r)
+}
+
+// closeWindow takes the window win of expression k, which ends here: a long window on its own (the chunk before it
+// ends at the window before), a short one into the chunk being gathered, which ends here when the text decides so.
+func (c *chunker) closeWindow(k int, win longRun) {
+	bit := uint64(1) << k
+	if win.end-win.start >= windowMinRun {
+		if c.chunked&bit != 0 && c.chunks[k].end-c.chunks[k].start >= windowMinRun {
+			c.emit(k, c.chunks[k])
+		}
+		c.chunked &^= bit
+		c.emit(k, win)
+		return
+	}
+	if c.chunked&bit == 0 {
+		c.chunks[k], c.chunked = win, c.chunked|bit
+	} else {
+		c.chunks[k].end, c.chunks[k].next, c.chunks[k].last = win.end, win.next, win.last
+	}
+	if win.end-c.chunks[k].start < windowMinRun {
+		return
+	}
+	if c.cutHere == 0 {
+		tick(chunkHashBytes)
+		c.cutHere = 2
+		if chunkCut(c.s, win.end) {
+			c.cutHere = 1
+		}
+	}
+	if c.cutHere == 1 || win.end-c.chunks[k].start >= chunkMaxRun {
+		c.emit(k, c.chunks[k])
+		c.chunked &^= bit
+	}
+}
+
+// openWindow notes a window of expression k that begins at i: the chunk being gathered ends before it when
+// windowMinRun bytes or more without a window stand between them.
+func (c *chunker) openWindow(k, i int) {
+	if c.chunked&(1<<k) != 0 && i-c.chunks[k].end >= windowMinRun {
+		c.emit(k, c.chunks[k])
+		c.chunked &^= 1 << k
+	}
+	if c.first[k] < 0 {
+		c.first[k] = i
+	}
+}
+
+// finish gives each expression the chunk it was gathering at the end of the text, when it is long enough or
+// windowMinRun bytes without a window follow it, and marks its last long run final when no window follows that.
+func (c *chunker) finish() {
+	for ; c.chunked != 0; c.chunked &= c.chunked - 1 {
+		k := bits.TrailingZeros64(c.chunked)
+		if c.chunks[k].end-c.chunks[k].start >= windowMinRun || len(c.s)-c.chunks[k].end >= windowMinRun {
+			c.emit(k, c.chunks[k])
+		}
+	}
+	for k := range c.out {
+		tick(1)
+		if n := len(c.out[k]); n > 0 && c.first[k] < 0 {
+			c.out[k][n-1].final = true
+		}
+	}
 }
 
 // windowKey is what a long window was read as: the character before it, as read, and the window with the

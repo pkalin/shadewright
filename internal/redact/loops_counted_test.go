@@ -55,16 +55,14 @@ var boundedLoops = map[string]string{
 	"newRuneSet#1":    exprSyntax,
 	"newRuneSet#2":    exprSyntax,
 	// The expressions read by windows, at most 64 (a bit each), and the ASCII characters.
-	"longRuns#0": windowExprCount,
-	"longRuns#1": "utf8.RuneSelf ASCII characters per expression",
-	"longRuns#2": windowExprCount,
-	"longRuns#4": windowExprCount + ", once per distinct character of the text",
-	"longRuns#5": windowExprCount + " per character, in the counted loop over the text",
-	"longRuns#6": windowExprCount + " per character, in the counted loop over the text",
-	"longRuns#7": windowExprCount,
-	"longRuns#8": windowExprCount,
-	"chunkCut#0": "chunkHashBytes bytes, counted by its caller",
-	"shifted#0":  matchPairs,
+	"longRuns#0":          windowExprCount,
+	"longRuns#1":          "utf8.RuneSelf ASCII characters per expression",
+	"longRuns#3":          windowExprCount + ", once per distinct character of the text",
+	"longRuns#4":          windowExprCount + " per character, in the counted loop over the text",
+	"longRuns#5":          windowExprCount + " per character, in the counted loop over the text",
+	"(*chunker).finish#0": windowExprCount,
+	"chunkCut#0":          "chunkHashBytes bytes, counted by its caller",
+	"shifted#0":           matchPairs,
 }
 
 // exprSyntax is the bound of a loop over the syntax tree of one expression of the package or of an extra pattern.

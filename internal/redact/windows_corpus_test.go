@@ -51,12 +51,15 @@ func windowExprs(t *testing.T) map[string]*regexp.Regexp {
 	return out
 }
 
+// windowKeys are the key words of the generated texts of the windowed reading.
+var windowKeys = []string{passwordKey, "aws_secret_access_key", "x_token", "apiKey", authKey, "Bearer ", "name", "value",
+	"secretName", passKey, "sig", sasKeyName, "DB_PASS", "AccountKey", "blobSas", clientSecretKey, "Authorization"}
+
 // windowText generates a text of at least windowMinText bytes: fragments of keys, separators, values, look-alike,
 // invisible, invalid and multi-byte characters, with long runs of key words (each at least windowMinRun bytes),
 // some repeated in other places with other characters around them.
 func windowText(rng *rand.Rand) string {
-	keys := []string{passwordKey, "aws_secret_access_key", "x_token", "apiKey", authKey, "Bearer ", "name", "value",
-		"secretName", passKey, "sig", sasKeyName, "DB_PASS", "AccountKey", "blobSas", clientSecretKey, "Authorization"}
+	keys := windowKeys
 	seps := []string{":", "=", ": ", "=\"", "\"", "'", ",", "{", "}", "[", "]", " ", "\t", "\n", "\r\n", "  ", "- ",
 		"|", ">", "#", "?", "&", "//", "@", ";", `\"`, `\n`, ":=", "--", "x://u:", "\\"}
 	odd := []string{"\ufe55", "\uff1a", "\ufeff", "\u200b", "\u212a", "\u017f", "\xbf", "\xe2\x82", "\u00e9", "\u00a0",
@@ -258,10 +261,9 @@ func shortWindowLabel(n int) string {
 // and invalid characters, repeated as a unit or not) and an answer that writes it, or a copy with one fragment
 // changed, on several lines with other characters around it, as the metric lines of a context do.
 func chunkText(rng *rand.Rand) (label, answer string) {
-	frags := []string{passwordKey, "aws_secret_access_key", "x_token", "apiKey", authKey, "Bearer ", "name", "value",
-		"DB_PASS", "AccountKey", clientSecretKey, ":", "=", ": ", "=\"", "\"", "'", ",", "{", "}", "[", "]", " ", "\t",
+	frags := append(slices.Clone(windowKeys), ":", "=", ": ", "=\"", "\"", "'", ",", "{", "}", "[", "]", " ", "\t",
 		"\n", "\r\n", "  ", "- ", "|+\n  ", ">", "#", "?", "&", "@", `\"`, `\n`, "x://u:", "\ufe55", "\uff1a", "\ufeff",
-		"\u200b", "\xbf", "\u00e9", "\u2028", "a", "b", "0001", "10.1.2.3", "fe80::1", "eyJhbGciOi"}
+		"\u200b", "\xbf", "\u00e9", "\u2028", "a", "b", "0001", "10.1.2.3", "fe80::1", "eyJhbGciOi")
 	pick := func() string { return frags[rng.IntN(len(frags))] }
 	var unit strings.Builder
 	for range 3 + rng.IntN(12) {

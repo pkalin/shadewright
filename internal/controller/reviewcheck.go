@@ -25,6 +25,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -401,12 +402,17 @@ func (r *RemediationRequestReconciler) noteLiveRead(ctx context.Context, rr *rem
 // syncReviewCheck (decisions of 2026-11-20 on #925), and reports whether that request may still get it: the same
 // request (UID), reviewCheckWritable, and the pull request and head rr records. A reconcile that works from an older
 // cached copy may otherwise write a pending check over the failed one a stop wrote (model seed 35217): the stopped,
-// released or deleted request in the API server gets nothing. A failed read is returned, wrapped in
-// errReviewCheckLiveRead; syncReviewCheck then writes no passing check.
+// released or deleted request in the API server gets nothing. A request the API server no longer has (NotFound) is
+// gone, not a failed read: it is not writable, for every state, and no request is left to write a stop's failed
+// check again over a pending one (decision of 2026-11-20 on #925, after the fourth pass). Any other failed read is
+// returned, wrapped in errReviewCheckLiveRead; syncReviewCheck then writes no passing check.
 func (r *RemediationRequestReconciler) liveReviewCheckWritable(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (bool, error) {
 	live := &remediationv1alpha1.RemediationRequest{}
-	if err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+	switch err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); {
+	case apierrors.IsNotFound(err):
+		return false, nil
+	case err != nil:
 		return false, fmt.Errorf("%w: %w", errReviewCheckLiveRead, err)
 	}
 	pr, lpr := rr.Status.PullRequest, live.Status.PullRequest
@@ -559,8 +565,8 @@ const (
 // state, so a status write lost after an earlier host write is made good without another one. Otherwise it writes
 // the host and then records the state: the order on a restart between the two does not matter, as the next look
 // compares again. Right before the host write the request is read live (liveReviewCheckWritable): a request that
-// the live read shows stopped, released or being deleted gets no check from a reconcile that read an older copy
-// (#925). When the live read fails, a passing check is not written (errReviewCheckLiveRead is returned), while a
+// the live read shows stopped, released, being deleted or gone (NotFound) gets no check from a reconcile that read an
+// older copy (#925). When the live read fails, a passing check is not written (errReviewCheckLiveRead is returned), while a
 // pending or failed one still is, as neither lets a merge through and a pass that no longer rests on an approval
 // must not stay on the head (decision of 2026-11-20 on #925); a stop's failed check that such a write covers is
 // written again by the stopped request's next look (failStoppedCheck). A Refused check whose backoff has not run
@@ -596,8 +602,8 @@ func (r *RemediationRequestReconciler) syncReviewCheck(ctx context.Context, git 
 		log.Info("Could not read RemediationRequest live before its review check; writing the check that "+
 			"does not pass all the same", "error", err.Error())
 	case !ok:
-		log.Info("RemediationRequest no longer waits for review in the API server; its review check is not " +
-			"written from an older copy")
+		log.Info("RemediationRequest no longer waits for review in the API server, or is gone; its review check " +
+			"is not written from an older copy")
 		return checkUntouched, nil
 	}
 	err = git.CreateCheckRun(ctx, pr.HeadSHA, checkRunFor(want))

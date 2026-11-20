@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
@@ -50,6 +51,17 @@ func stopLive(t *testing.T, r *RemediationRequestReconciler, g *fakegit.Git, p *
 		t.Fatal(err)
 	}
 	return older
+}
+
+// deleteLive removes p from the API server: a stopped request deleted with no finalizer left.
+func deleteLive(t *testing.T, r *RemediationRequestReconciler, p *api.RemediationRequest) {
+	t.Helper()
+	if err := r.Delete(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(p), &api.RemediationRequest{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the deleted request can still be read: %v", err)
+	}
 }
 
 // cachedCopy is a client whose cache still serves copy for its key: every other read and every write goes to Client.
@@ -111,6 +123,11 @@ func TestReviewCheckFromAStaleCopyLeavesTheStopsCheck(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		// Stopped and then deleted: the live read answers NotFound, which is no failed read but a request that is gone,
+		// so nothing is written for it, a pending check no more than a pass, and no request is left to write the
+		// failed check again (decision of 2026-11-20 on #925, after the fourth pass).
+		{name: "pending over a stop, then deleted", phase: api.PhaseAwaitingApproval, live: deleteLive},
+		{name: "passing over a stop, then deleted", phase: api.PhaseAwaitingApproval, approved: true, live: deleteLive},
 		{name: "live read fails before a pass", phase: api.PhaseAwaitingApproval, approved: true, readFails: true},
 		{name: "live read fails before a pending check", phase: api.PhaseAwaitingApproval, readFails: true,
 			writes: true},

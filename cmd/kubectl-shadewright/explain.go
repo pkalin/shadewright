@@ -131,6 +131,7 @@ var troubleshootingSections = map[string][]string{
 	"GitReadFailedBeforeHandoffGrace":   {secPullRequest},
 	"GitReadFailedBeforeMergeWait":      {secPullRequest},
 	"GitRejected":                       {secPullRequest},
+	"GitUnauthorized":                   {secPullRequest},
 	"HandedOff":                         {secPhases},
 	"HandoffAborted":                    {secPhases},
 	"HandoffInFlight":                   {secPullRequest},

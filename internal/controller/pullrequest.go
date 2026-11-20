@@ -157,6 +157,10 @@ const (
 	// to a step of a stale plan's cleanup through a new installation of the GitHub App (#290), such as an
 	// installation ID with a typing mistake or one not granted the repository. It is tried again.
 	ReasonGitNotFound = "GitNotFound"
+	// ReasonGitUnauthorized (condition ReviewCheckNotFailed, #925): the Git host rejected the GitHub App's credentials
+	// (401): its private key is wrong or was replaced without the cluster's copy, or the App was deleted. Each look
+	// tries again and fails the same way until a person fixes the App or its key.
+	ReasonGitUnauthorized = "GitUnauthorized"
 	// ReasonGitFailed (conditions PullRequestNotClosed and PullRequestUnreadable, #797): a step of a stale plan's
 	// cleanup through a new installation of the GitHub App (#290) failed without a refusal or a 404: a server error,
 	// a timeout, a rate limit, an answer that settles nothing or an unclassified failure. It is tried again.

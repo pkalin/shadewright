@@ -163,8 +163,9 @@ func liveReadNoted(t *testing.T, c client.Client, p *api.RemediationRequest) boo
 
 // A write of a stopped request's failed review check that the Git host refuses for good, or answers with a 404, is
 // not shown as the passing failure GitFailed: condition ReviewCheckNotFailed names the refusal (GitForbidden,
-// GitRejected, a token the installation refuses included) or GitNotFound, so a person knows the next look will not
-// help until it is fixed. A server error stays GitFailed.
+// GitRejected, a token the installation refuses included), GitUnauthorized (a 401: the App's key is wrong or the
+// App was deleted) or GitNotFound, so a person knows the next look will not help until it is fixed. A server error
+// stays GitFailed.
 func TestStoppedCheckRefusalIsNotGitFailed(t *testing.T) {
 	cases := []struct {
 		name string
@@ -174,6 +175,8 @@ func TestStoppedCheckRefusalIsNotGitFailed(t *testing.T) {
 		{name: "forbidden", fail: fmt.Errorf("status 403: %w", providers.ErrForbidden), want: ReasonGitForbidden},
 		{name: "token refused", fail: fmt.Errorf("installation token unavailable: %w", providers.ErrForbidden),
 			want: ReasonGitForbidden},
+		{name: "token rejected (401)", fail: fmt.Errorf("installation token unavailable: %w",
+			providers.ErrUnauthorized), want: ReasonGitUnauthorized},
 		{name: "rejected", fail: fmt.Errorf("status 422: %w", providers.ErrRejected), want: ReasonGitRejected},
 		{name: "not found", fail: fmt.Errorf("status 404: %w", providers.ErrNotFound), want: ReasonGitNotFound},
 		{name: "server error", fail: fmt.Errorf("status 502: %w", providers.ErrRetryable), want: ReasonGitFailed},

@@ -347,9 +347,10 @@ func endCheckNote(rr *remediationv1alpha1.RemediationRequest) bool {
 // checkNotFailed is the reason of condition ReviewCheckNotFailed for err, the failure to write a stopped request's
 // failed review check, and what it says: the settings that permit no write to the repository of the plan, a pause of
 // the kill switch, a refusal of the Git host that holds until a person fixes it (GitForbidden, GitRejected, as
-// refusal classes them; a token the installation refuses is forbidden), a 404 (GitNotFound: the installation or the
-// repository is not reachable through it), or any other failure of the Git host (GitFailed, which passes by
-// itself), never with the host's answer.
+// refusal classes them; a token the installation refuses is forbidden), credentials the Git host rejects (a 401,
+// GitUnauthorized: a wrong private key or a deleted App, which holds until the App or its key is fixed), a 404
+// (GitNotFound: the installation or the repository is not reachable through it), or any other failure of the Git
+// host (GitFailed, which passes by itself), never with the host's answer.
 func checkNotFailed(err error) (reason, text string) {
 	switch {
 	case errors.Is(err, freshness.ErrPaused):
@@ -371,6 +372,9 @@ func checkNotFailed(err error) (reason, text string) {
 			"repository), which holds until that is fixed"
 	case final:
 		return reason, "the Git host refused the request as invalid, which holds until its cause is fixed"
+	case providers.IsUnauthorized(err):
+		return ReasonGitUnauthorized, "the Git host rejected the App's credentials (401): its private key is wrong " +
+			"or the App was deleted, which holds until the App or its key is fixed"
 	case providers.IsNotFound(err):
 		return ReasonGitNotFound, "the Git host answered 404: the App's installation or the repository is not " +
 			"reachable through it"

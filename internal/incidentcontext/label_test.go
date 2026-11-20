@@ -10,7 +10,7 @@ import (
 // The label of a log excerpt the source cannot tie to one restart names the container and the restart, and
 // never the pod: the pod and the container are certain, only which restart is not (#951).
 func TestLogInstanceUncertainLabelNamesContainerAndRestart(t *testing.T) {
-	const want = "log excerpt from this container; which restart it comes from is uncertain"
+	const want = "log excerpt from this container (which restart it comes from is uncertain)"
 	l := string(LabelLogInstanceUncertain)
 	if l != want {
 		t.Fatalf("label %q, want %q", l, want)

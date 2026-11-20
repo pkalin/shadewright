@@ -13,7 +13,7 @@ func TestLogInstanceUncertainLabelMatchesContext(t *testing.T) {
 		t.Fatalf("tool label %q, context label %q", LabelLogInstanceUncertain, incidentcontext.LabelLogInstanceUncertain)
 	}
 	r := Result{Tool: "get_logs", Status: StatusOK, Labels: []Label{LabelLogInstanceUncertain}, Text: "line\n"}
-	want := `labels="log excerpt from this container; which restart it comes from is uncertain">`
+	want := `labels="log excerpt from this container (which restart it comes from is uncertain)">`
 	if c := r.Content(); !strings.Contains(c, want) {
 		t.Fatalf("content lacks %s:\n%s", want, c)
 	}

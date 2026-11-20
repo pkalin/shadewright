@@ -151,12 +151,14 @@ import (
 // pause or the lift). Under the commit and pause focuses the executor is also down, now and then, for longer than a
 // wait. A focus only weights the start and the events; every event can still happen.
 //
-// Seeds: modelSeeds in CI (a fixed set, fewer under the race detector or -short); SHADEWRIGHT_MODEL_SEEDS=n runs n
+// Seeds: modelSeeds in CI (a fixed set, fewer under the race detector or -short, with modelGoneSeeds added); SHADEWRIGHT_MODEL_SEEDS=n runs n
 // more seeds from the time, SHADEWRIGHT_MODEL_SEED=s one seed and SHADEWRIGHT_MODEL_SEED_RANGE=a-b the seeds a to b
 // instead of the fixed set. A failure prints its seed and the trace; SHADEWRIGHT_MODEL_TRACE=1 prints it always.
 
 const (
 	modelSteps = 24
+	// modelGoneOdds: goneEvent deletes the pull request in one pass of this many where it can.
+	modelGoneOdds = 2
 
 	// CleanupTimeout of the model: long, but for a step that meets a read that times out (cleanupTimeout). The long
 	// one stays above the 2 s that modelGit.fail takes for a short deadline.
@@ -218,7 +220,13 @@ var (
 		focusPause, focusLastRead}
 )
 
-// modelSeeds is the fixed seed set: 1 to n.
+// modelGoneSeeds are the seeds above 90 whose sequence stops for a pull request read gone with reviewer hints on
+// (goneEvent): the fixed set under the race detector or -short adds them. A change of the model's draws can move
+// them; TestGitWaitModel then fails when no seed of the set reaches the property, and the new seeds are found with
+// SHADEWRIGHT_MODEL_SEED_RANGE=91-240 and the count it logs per run.
+var modelGoneSeeds = []uint64{165, 202, 210}
+
+// modelSeeds is the fixed seed set: 1 to n, and modelGoneSeeds under the race detector or -short.
 func modelSeeds(t *testing.T) []uint64 {
 	if s := os.Getenv("SHADEWRIGHT_MODEL_SEED"); s != "" {
 		seed, err := strconv.ParseUint(s, 10, 64)
@@ -232,9 +240,14 @@ func modelSeeds(t *testing.T) []uint64 {
 		// Each order of the fourth decision of 2026-11-18 on #771 is found in this range on the build before its fix.
 		n = 90
 	}
-	seeds := make([]uint64, 0, n)
+	seeds := make([]uint64, 0, n+len(modelGoneSeeds))
 	for i := range n {
 		seeds = append(seeds, uint64(i+1))
+	}
+	if n < 240 {
+		// The seeds of 91 to 240 that reach property "gone check" (goneEvent), so a run under the race detector
+		// checks it on more than the two seeds of 1 to 90 that do.
+		seeds = append(seeds, modelGoneSeeds...)
 	}
 	if s := os.Getenv("SHADEWRIGHT_MODEL_SEED_RANGE"); s != "" {
 		from, to, _ := strings.Cut(s, "-")
@@ -274,6 +287,10 @@ func TestGitWaitModel(t *testing.T) {
 		modelGoneStops.mu.Lock()
 		defer modelGoneStops.mu.Unlock()
 		t.Logf("stops for a pull request read gone with reviewer hints on, checked: %d", modelGoneStops.count)
+		if fixedSeeds && modelGoneStops.count == 0 && !t.Failed() {
+			t.Errorf("property \"gone check\" was never reached on the fixed seeds: a change of the model's events " +
+				"no longer draws a stop for a pull request read gone with reviewer hints on (goneEvent, #925)")
+		}
 		modelHeldChecks.mu.Lock()
 		defer modelHeldChecks.mu.Unlock()
 		t.Logf("looks of a stopped holder kept by another pull request from its branch, checked: %d",
@@ -341,6 +358,10 @@ type modelWorld struct {
 	liveRng   *rand.Rand
 	// heldRng draws heldEvent, apart from rng, so the orders the seeds drew before it are kept.
 	heldRng *rand.Rand
+	// goneRng draws goneEvent, apart from rng and heldRng, so the orders the seeds drew before it are kept.
+	goneRng *rand.Rand
+	// goneQuiet counts the passes after goneEvent's delete in which event draws nothing.
+	goneQuiet int
 	// writeFaulted reports that this reconcile met an injected write fault or a stale read.
 	writeFaulted bool
 	// deleted hides the pull request from every read (gone from the host); gone are earlier pull requests of the
@@ -519,6 +540,8 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 	m.liveRng = rand.New(rand.NewPCG(seed, seed^0x6a09e667f3bcc909))
 	// #nosec G404 -- seeded as above.
 	m.heldRng = rand.New(rand.NewPCG(seed, seed^0xbb67ae8584caa73b))
+	// #nosec G404 -- seeded as above.
+	m.goneRng = rand.New(rand.NewPCG(seed, seed^0x3c6ef372fe94f82b))
 	start := st.start
 	phase := api.PhaseNeedsIntervention
 	switch start {
@@ -1009,15 +1032,7 @@ func (m *modelWorld) pullRequestEvent(cr providers.ChangeRequest) {
 			m.logf("move the pull request to the configured branch")
 		}
 	case 2:
-		m.mu.Lock()
-		m.deleted = true
-		m.mu.Unlock()
-		if cr.BaseBranch == movedBranch {
-			modelMoves.mu.Lock()
-			modelMoves.movedBeforeDelete++
-			modelMoves.mu.Unlock()
-		}
-		m.logf("delete the pull request")
+		m.deleteEvent(cr)
 	default:
 		sha, err := m.g.Merge(m.number)
 		if err == nil {
@@ -1110,6 +1125,51 @@ func (m *modelWorld) heldEvent() {
 	m.unmarkedEvent()
 }
 
+// deleteEvent deletes the request's open pull request cr: every read finds it gone from the host.
+func (m *modelWorld) deleteEvent(cr providers.ChangeRequest) {
+	m.mu.Lock()
+	m.deleted = true
+	m.mu.Unlock()
+	if cr.BaseBranch == movedBranch {
+		modelMoves.mu.Lock()
+		modelMoves.movedBeforeDelete++
+		modelMoves.mu.Unlock()
+	}
+	m.logf("delete the pull request")
+}
+
+// goneEvent is a person who deletes the open pull request of a request that waits for review with reviewer hints on,
+// in one pass of modelGoneOdds where that holds, with writes not paused, reads and check run writes working, and the
+// settings naming the plan's branch (main) for its repository: the case of property "gone
+// check" (decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop, ADR-0045), which the
+// draws of event reached on none of the fixed seeds (seeds 1 to 240, and 1 to 90 under the race detector). The watch
+// confirms gone over two looks, so the world stays quiet for the pass of the delete and the next one (goneQuiet):
+// any other event there (a pause, a cancel, a fault) mostly ends the sequence elsewhere. It reports whether the
+// pass is quiet, so event draws nothing else. It draws from goneRng, so the seeds where it deletes nothing keep the
+// orders they drew before it.
+func (m *modelWorld) goneEvent() bool {
+	if m.goneQuiet > 0 {
+		m.goneQuiet--
+		return true
+	}
+	if !m.r.ReviewerHints || m.deleted || m.goneStopSeen || m.paused || m.fault != faultNone || m.checkFails ||
+		m.repo != nil || m.configured != mainBranch || m.goneRng.IntN(modelGoneOdds) != 0 {
+		return false
+	}
+	live := m.live()
+	pr := live.Status.PullRequest
+	if !progresses(live) || pr == nil || handedOff(live) || intent(live) != nil {
+		return false
+	}
+	cr, found := m.pr()
+	if !found || cr.Number != pr.Number || cr.State != providers.ChangeRequestOpen {
+		return false
+	}
+	m.deleteEvent(cr)
+	m.goneQuiet = 1
+	return true
+}
+
 // unmarkedOpen reports whether the pull request of unmarkedEvent is open.
 func (m *modelWorld) unmarkedOpen() bool {
 	if m.unmarked == 0 {
@@ -1191,6 +1251,9 @@ func (m *modelWorld) checkEvent() {
 // event changes the world at random before a reconcile.
 func (m *modelWorld) event() {
 	m.heldEvent()
+	if m.goneEvent() {
+		return
+	}
 	cr, _ := m.pr()
 	if m.focusEvent(cr) {
 		return
@@ -2096,7 +2159,8 @@ func (m *modelWorld) stoppedHolderProperty(live *api.RemediationRequest, err err
 }
 
 // modelGoneStops counts, over every seed of a run, the stops for a pull request read gone with reviewer hints on that
-// goneCheckProperty checked, so a run shows the property was reached.
+// goneCheckProperty checked, so a run shows the property was reached; TestGitWaitModel fails on the fixed seed set
+// when it is 0.
 var modelGoneStops struct {
 	mu    sync.Mutex
 	count int

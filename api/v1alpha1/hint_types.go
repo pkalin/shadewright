@@ -224,11 +224,12 @@ type Hint struct {
 // request (ADR-0028 section 7). The reply is built from a fixed template and typed fields, plus the quoted
 // first line of the stored hint, its one free text. It is posted only when the redactor would change nothing
 // in it, so it fails closed. Posted: the reply is in the pull request (posted, or found there by its marker
-// in a comment of the executor's own). NotRedactable: the redactor would still change the reply, so nothing
-// was posted. TooManyComments: the pull request has more comments than the executor reads to find an
-// earlier reply, so nothing was posted rather than risk a second reply. Refused: the Git host refused the
-// comment for good (a permission the App lacks, a rule, an invalid request). GaveUp: posting failed on every
-// try within the executor's bound. Only Posted means the author was told.
+// in a comment of the executor's own). NotRedactable: the redactor would still change the reply, or its
+// check of the reply ran out of the redactor's work budget and was withheld, so nothing was posted.
+// TooManyComments: the pull request has more comments than the executor reads to find an earlier reply, so
+// nothing was posted rather than risk a second reply. Refused: the Git host refused the comment for good (a
+// permission the App lacks, a rule, an invalid request). GaveUp: posting failed on every try within the
+// executor's bound. Only Posted means the author was told.
 // +kubebuilder:validation:Enum=Posted;NotRedactable;TooManyComments;Refused;GaveUp
 type HintReply string
 
@@ -449,9 +450,10 @@ const MaxRefusedHints = 10
 // section 2); a command of an author without write access is never recorded, so it cannot push a record out.
 // CapReached: MaxHints hints of the request are Consumed or Reserved already, which count for its whole
 // supersede chain. TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the
-// end of its first line. NotRedactable: the redacted text still holds something the redactor would change.
-// Empty: the command has no text. EditedAfterSeen: a comment the executor had read already was edited to carry
-// the command. An edit of a stored hint's comment is recorded on the hint (editedAfterAccept), not here.
+// end of its first line. NotRedactable: the redacted text still holds something the redactor would change,
+// or redaction withheld the text whole because it ran out of its work budget. Empty: the command has no
+// text. EditedAfterSeen: a comment the executor had read already was edited to carry the command. An edit of a
+// stored hint's comment is recorded on the hint (editedAfterAccept), not here.
 // +kubebuilder:validation:Enum=CapReached;TooLong;NotRedactable;Empty;EditedAfterSeen
 type HintRefusal string
 

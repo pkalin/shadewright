@@ -245,7 +245,8 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // (ChangeRequestGone), and every look of a stopped holder that leaves the lock held (failCheckAfterLook, the one rule
 // of the decision of 2026-11-20 on #925), so a stop for any other reason gets it at its first look, and a failed
 // write is tried again at the next. With skipReinstalled, a repository reached through a new installation of the App
-// (#290) gets nothing and condition ReviewCheckNotFailed is removed: the pull request read gone, or another one that
+// (#290) gets nothing and condition ReviewCheckNotFailed is removed, with a line at Info when it was set
+// (endCheckNoteLogged): the pull request read gone, or another one that
 // keeps the lock, is not tied to the request there. Once Stale is recorded on the head, such a look
 // reads the latest review check of the head (stoppedCheckShown) and writes the failed check again only when the Git
 // host shows another state last or none (decision of 2026-11-20 on #925): one read and at most one write per look,
@@ -277,8 +278,9 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 	git, _, reinstalled, err := r.openPlanRepositoryFor(stepCtx, rr)
 	if err == nil && reinstalled && skipReinstalled {
 		// Through a new installation of the plan's repository (#290) the pull request read gone, or the one that
-		// keeps the lock, is not tied to the request there, so nothing is written and nothing is owed.
-		endCheckNote(rr)
+		// keeps the lock, is not tied to the request there, so nothing is written and nothing is owed. The looks no
+		// longer try the check, so an end of condition ReviewCheckNotFailed is said in the log at Info.
+		endCheckNoteLogged(ctx, rr, "the repository is reached through a new installation")
 		r.stoppedCheckLooks.Delete(client.ObjectKeyFromObject(rr))
 		return nil
 	}
@@ -402,8 +404,10 @@ func (r *RemediationRequestReconciler) stoppedCheckUnread(ctx, stepCtx context.C
 // of a stopped request: the condition says the failed check is tried again at the next look, so it is True only
 // while the request's own pull request, or another open pull request from its branch that keeps the lock, is open
 // and its failed check is not written (#925). Its callers: a look that reads the pull request not open while no other
-// open pull request keeps the lock (failCheckAfterLook), a write that records the merge (settleRecorded), every
-// release of the lock (lockverdict.Release, which removes it itself) and the first write of a deletion (finalize).
+// open pull request keeps the lock (failCheckAfterLook), a look through a new installation while a pull request other
+// than the recorded one keeps it (failStoppedCheck), a write that records the merge (settleRecorded), every release of
+// the lock (lockverdict.Release, which removes it itself) and the first write of a deletion (beginFinalize). Each of
+// them says the end in the log at Info when the condition was set (logCheckNoteEnd).
 func endCheckNote(rr *remediationv1alpha1.RemediationRequest) bool {
 	return meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 }

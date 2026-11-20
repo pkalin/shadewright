@@ -2487,7 +2487,14 @@ func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *re
 		marked = true
 	}
 	// The deletion ends the looks of a stopped request, so nothing tries its failed review check again: the close
-	// below takes over, and says so with its own conditions when it fails (#925).
+	// below takes over, and says so with its own conditions when it fails (#925). A check written before the stop may
+	// stay the latest on the head, also for an open pull request from the branch the close does not take (#984), so an
+	// end of condition ReviewCheckNotFailed is said in the log at Info once the write that removes it went through.
+	var ended *metav1.Condition
+	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed); c != nil {
+		note := *c
+		ended = &note
+	}
 	if endCheckNote(rr) {
 		marked = true
 	}
@@ -2497,6 +2504,7 @@ func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *re
 				rr.Name, err)
 		}
 	}
+	logCheckNoteEnd(ctx, rr, ended, "the request is being deleted")
 	if err := r.supersedeReplacementAfterMerge(ctx, rr); err != nil {
 		if errors.Is(err, freshness.ErrPaused) {
 			res, err := r.waitWhilePaused(ctx, rr)

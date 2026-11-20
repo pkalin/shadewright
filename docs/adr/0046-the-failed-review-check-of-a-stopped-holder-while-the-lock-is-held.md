@@ -1,0 +1,69 @@
+# ADR-0046: The failed review check of a stopped holder while the lock is held
+
+- Status: Proposed
+- Date: 2026-11-20
+
+## Context
+
+Issue [#925](https://github.com/pkalin/shadewright/issues/925), built in pull request [#939](https://github.com/pkalin/shadewright/pull/939). [ADR-0045](0045-the-failed-review-check-on-a-pull-request-on-another-base.md) lists the exact cases where the executor writes the failed check run `shadewright/review` on a pull request on another base. Its case 4 covers a stopped request that holds the target lock: it writes at a look only while its own pull request is not open, another open pull request from its branch keeps the lock, and condition `ReviewCheckNotFailed` says the check is still owed. A stale plan, a cancel or a stop that reads the pull request merged on another base writes nothing, and nothing is written through a new installation of the repository for a pull request read gone.
+
+Four review passes on #925 each found another verdict of the request's own pull request that left a passing check, written before the stop, as the last check on the recorded head while a pull request from the request's branch could still merge that head: read gone, the stop on gone, the gone write without a gate, and the request's own pull request closed while another one holds the lock. A fifth pass found that a look that settles nothing yet left the check for the next look, ten minutes later (seed 1456 of the Git waits model, which the fixed seed set now holds). A rule that reads the verdict can miss the next verdict. The decision of 2026-11-20 on #925 replaced the per-verdict rows with one rule that reads the lock and the check on the head instead.
+
+Three writes of that rule are not in ADR-0045 as accepted, so the rule widens a Git write. [ADR-0021](0021-amending-accepted-adrs.md) says an amendment does not widen on its own authority: another accepted ADR has to decide it. The decision of 2026-11-20 by the maintainer records them in this ADR, not in an amendment of ADR-0045, which keeps its accepted text and links here. #939 does not merge before this ADR is accepted.
+
+## Decision
+
+[![A stopped request that holds the target lock, with reviewer hints on: after each look that leaves the lock held, by its own pull request on any base or by another open pull request from its branch, the executor writes the stop's failed check run shadewright/review on the recorded head commit, unless the Git host already shows it last. Three writes are new against ADR-0045: the look writes without waiting for condition ReviewCheckNotFailed, it writes when its own pull request was merged on another base, and a look that settles nothing yet writes through a new installation of the repository too. The check can only block a merge of that commit. Not covered: a deleted request (issue 984), reads that keep failing (issue 979), a look a stop exception takes over, a settled look through a new installation while another pull request holds the lock, and a request whose lock nothing holds. No new read and no new grant.](../assets/diagrams/stopped-holder-check.svg)](../assets/diagrams/stopped-holder-check.svg "Open full size")
+
+**The rule.** With reviewer hints on, a stopped request that holds the target lock writes the stop's failed check run on its recorded head commit after each look that leaves the lock held, by its own pull request on any base or by another open pull request from its branch, marked or not. The look reads which pull request keeps the lock and the latest `shadewright/review` check of the head (once state `Stale` is recorded for that head; before that it writes without a read). It writes when the Git host does not show the failed check last. It never reads the verdict of its own pull request for this: open on another base, closed on any base, merged on another base or gone, the rule is the same, so a new verdict cannot reopen the gap. On the target branch the same write is the check run of [ADR-0028](0028-reviewer-hints-through-the-pull-request.md) section 5; this ADR decides it where the pull request is on another base, merged there, or gone.
+
+**What it widens.** Three writes, each the same failed check run on the same recorded head:
+
+1. The look no longer waits for condition `ReviewCheckNotFailed`. ADR-0045 case 4 wrote at a look only while that condition said the check was still owed, so a request that stopped for another reason, whose own pull request was already closed or gone at its first look, wrote nothing. Now every look that leaves the lock held writes unless the failed check shows last.
+2. It writes when the request's own pull request was merged on another base. ADR-0045 refused that write (case 5, its conditions, limit (d) and a rejected alternative). Now a look writes it while the lock is still held, which means another open pull request from the branch keeps it.
+3. A look through a new installation writes when it settles nothing yet. A look whose reads were answered, but whose answer only a later look may settle (the first look that finds the recorded number missing, reads that disagree, a 404 the branch does not confirm, or an answer about another pull request than the one asked for), leaves the lock held. It writes the check as any look that leaves the lock held, and it does not read which pull request keeps the lock, so it writes through a new installation of the repository as well. ADR-0045 wrote nothing through a new installation for a pull request read gone.
+
+**Why each fails closed.** Every one is the same failed check run `shadewright/review` on the request's recorded head commit, which the executor pushed or adopted, with the stop's fixed summary. A failed check can only keep that commit from merging: it approves nothing, pushes nothing and closes nothing (invariant 3).
+
+- Without the gate on `ReviewCheckNotFailed`, the worst case is one more failed check on a head that already has one, which changes nothing, or a failed check over a pending or passing one written after the stop, which is the defect ADR-0045 exists for.
+- After a merge on another base, the merged pull request cannot be stopped, but the pull request that holds the lock has the same head and can still merge it on a pass written before the stop. The check blocks that one; on the merged one it shows and decides nothing.
+- Through a new installation, the write names the commit by its full object ID from the request's status, never a value from the Git host's answer. A repository without that commit refuses the write, and `ReviewCheckNotFailed` says so; a repository with it can only have that commit blocked. An answer about another pull request changes no part of the write.
+
+**What it carries.** The stop's fixed title "The request stopped" and one fixed summary: Shadewright stopped the request of this pull request, with the phase it stopped in as the only constant, no longer checks its plan, so it must not be merged on an earlier check, and the check stays failed. It promises no close on any base, so it is the same on every base, and it holds no base name, branch name, hint, comment or other text from the code host (invariant 4).
+
+**When the write fails.** A refused or failed write sets `ReviewCheckNotFailed` with its cause and a Warning Event when it is set or its cause changes, and the next look tries again while the lock is held. The write that records `Stale` removes the condition, and so does a look that finds the failed check last. A release of the lock ends the condition, and so does the write that records a merge of the request's pull request (also while a verification keeps the lock); each logs at Info that a check written before the stop may stay the latest on the head.
+
+**What is read and granted.** Nothing new. The read of the pull request by its number, the listing of the branch on every base and the read of the latest check of the head are those of ADR-0043 and ADR-0045. The write uses the App permission `checks: write` that every token request already names. The looks run at `heldRecheckInterval` (10 minutes) while the request holds the lock: one read of the check and at most one write per look, with no polling of its own.
+
+**Further points of the same decision, which widen nothing.**
+
+- With no pull request from the branch holding the lock, no look follows: only the stop's own write remains where ADR-0045 has one (case 2, the stop for a pull request open on another base, and case 5, the stop for one read gone).
+- A settled look through a new installation while a pull request other than the recorded one holds the lock writes nothing, as ADR-0045 says: the new installation does not tie that pull request to the request. It ends `ReviewCheckNotFailed` and logs at Info that a check written before the stop may stay on the head.
+- A failed check written by a stale plan or a cancel for a pull request read gone has its own fixed summary, which says the pull request cannot be found and that nothing is closed, instead of the summary for another base.
+
+**How the invariants hold.** Invariant 3: a failed check only blocks. Invariant 4: no host text goes into the check run, and the head is a full object ID from status. Invariant 5: the recorded `Stale` state and the head find the work again; a lost status write makes the next look write the same failed run once more. Invariant 6: the executor alone writes it, with the permission it has. Invariants 1 and 2 are not touched.
+
+## Consequences
+
+A pass written before the stop no longer decides the merge of a pull request from the request's branch while the request holds the lock, whatever happened to the request's own pull request. The cost is a failed check written on a few more looks, and possibly on a commit that a pull request merged on another base already carries, where it decides nothing.
+
+Not covered, known limits:
+
+- (a) Deletion ([#984](https://github.com/pkalin/shadewright/issues/984)). Deleting a stopped request ends `ReviewCheckNotFailed` in the first write of the deletion and writes no check; the finalizer closes only the pull requests with the request's marker and releases the lock. An unmarked open pull request from the same branch keeps a pass written before the stop, which can decide its merge. The first write of the deletion logs at Info that a check written before the stop may stay on the head. Writing the check at a deletion would widen a write again and needs its own decision.
+- (b) Reads that keep failing ([#979](https://github.com/pkalin/shadewright/issues/979)). A look whose reads failed writes nothing; the next look tries. While the reads keep failing (condition `GitReadRetry` says so) no look writes the check, and `ReviewCheckNotFailed` does not say it is owed. On a head already recorded `Stale`, a look that cannot read the check records only the Warning Event `StoppedCheckUnread` once, which goes when the Event expires.
+- (c) A look a stop exception takes over: a look that settles the lock but goes to a step of its own before the rule runs writes nothing in that look: the cleanup of an expired request whose own pull request is open, the retried close after a stale cleanup stopped on a refusal, a cancel settled for its Incident, the record of a merge, and a failed read of who records a merge after a handoff. The next look that reaches the rule writes.
+- (d) A new installation: a settled look through a new installation while a pull request other than the recorded one holds the lock writes nothing (above), and the pass stays there as ADR-0045 accepts.
+- (e) ADR-0045 limits (a), (b), (e) and (f) hold for these writes too: the check blocks only where the base's ruleset requires it from the App, a new commit on the pull request has no run, a move between read and write can only block, and the failed check is final for the request.
+
+## Alternatives considered
+
+- Amend ADR-0045. It would widen a write on the authority of an amendment, which ADR-0021 refuses.
+- Keep the rows per verdict of the request's own pull request. Four review passes each found a verdict the rows missed; a rule that reads the lock and the head does not depend on the list of verdicts.
+- Keep the gate on `ReviewCheckNotFailed`. A request that stopped for another reason with its own pull request already closed never sets the condition, so it never writes, and the open pull request that holds the lock merges on the old pass.
+- Write nothing at a look that settles nothing yet. The pass stays last for one more look (`heldRecheckInterval`), during which the pull request that holds the lock can merge on it (seed 1456 of the Git waits model).
+- Skip the write at such a look through a new installation. It would need that look to read which pull request holds the lock, which a look that settles nothing does not do. The write names the recorded commit by its full object ID and can only block it.
+- Write when the lock is not held. No pull request from the branch keeps it, so no look runs; a look of its own for this would be a new poll of the Git host for a released request.
+
+## Amendments
+
+None.

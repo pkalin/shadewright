@@ -352,7 +352,8 @@ func expiring(ctx context.Context) bool {
 // gitWaitSummary sets condition GitReadRetry in conditions from waits: removed when there is none; otherwise True
 // with the reason of the entry that ends first (a Paced entry ends never), the reads named in the message, and that
 // entry's start as lastTransitionTime. A replacement whose handoff was aborted at a refusal shows its HandoffRecovery
-// entry, with a message that says it watches for a merge until the entry's end.
+// entry, with a message that says it watches for a merge until the entry's end, or, once the watch found nothing to
+// read (recoveryNothingToRead), that it waits with nothing to read until that end.
 func gitWaitSummary(rr *api.RemediationRequest, now time.Time) {
 	if len(rr.Status.GitWaits) == 0 {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionGitReadRetry)
@@ -377,6 +378,13 @@ func gitWaitSummary(rr *api.RemediationRequest, now time.Time) {
 			" (see condition PullRequestUnreadable); this request writes nothing to Git, keeps the target lock and reads the pull request it was to take over until " +
 			w.Ends.UTC().Format(time.RFC3339) + ", recording a merge of its commit. Last failed reads: " +
 			strings.Join(ops, "; ")
+		if w.Operation == recoveryNothingToRead {
+			// The watch found no predecessor that hands over to this request (noteNothingToRead): no read is made.
+			message = "The handoff was aborted at a refused read of its recovery on " +
+				w.Since.UTC().Format(time.RFC3339) + "; the request it replaces is gone, was made again or no longer " +
+				"hands over to this request, so this request has nothing to read. It writes nothing to Git and " +
+				"keeps the target lock until " + w.Ends.UTC().Format(time.RFC3339) + ", the end of its wait"
+		}
 	}
 	want := metav1.Condition{Type: api.ConditionGitReadRetry, Status: metav1.ConditionTrue,
 		Reason: kindOfEntry(first).reason(), Message: message,

@@ -121,6 +121,11 @@ import (
 //	   another base ends at the first reconcile that reads it with every read answering (decision of 2026-11-19 on
 //	   #786): NeedsIntervention with ChangeRequestOnOtherBase naming that base, its handoff Aborted, no lock; like
 //	   P8, only directed sequences reach it;
+//	P11 a replacement in its recovery wait whose predecessor is gone, made again or no longer hands over to it has
+//	   nothing to read: after a reconcile with every read answering that leaves it in that wait, it shows no
+//	   refusal of its recovery (condition PullRequestUnreadable with a reason of recoveryWaitReasons), its
+//	   HandoffRecovery entry says it has nothing to read (recoveryNothingToRead), and the entry keeps its start and
+//	   end (review pass 14 of #786, 2026-11-20);
 //	P9 the predecessor never stores the abort of an intent whose takeover the replacement, as stored at that write,
 //	   recorded (from Done), whatever ends it, unless a person put the predecessor's own head back on the pull
 //	   request (fourth round of #786).
@@ -1541,6 +1546,7 @@ func (m *hmWorld) reconcile(who string) {
 	m.actor, m.faulted = who, false
 	m.mu.Unlock()
 	p10 := m.p10Applies(who, before)
+	p11 := m.p11Applies(who, before)
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.keys[who]})
 	m.mu.Lock()
 	m.actor = ""
@@ -1571,6 +1577,10 @@ func (m *hmWorld) reconcile(who string) {
 	// P10: a recovery wait whose pull request was merged into another base ends at the first reconcile that reads it.
 	if p10 && err == nil && !faulted {
 		m.checkEndedOnOtherBase(after)
+	}
+	// P11: a recovery wait with nothing to read shows no refusal and says what it waits for.
+	if p11 && err == nil && !faulted {
+		m.checkNothingToRead(before, after)
 	}
 	// P7: no reconcile asks to run again within a second.
 	if err == nil && res.RequeueAfter > 0 && res.RequeueAfter < time.Second {
@@ -2005,6 +2015,37 @@ func (m *hmWorld) checkEndedOnOtherBase(after *api.RemediationRequest) {
 		m.fail("P10", "the replacement's end does not say where its pull request was merged: %+v", c)
 	case ptr.Deref(after.Status.HoldsTarget, false) || after.Status.Handoff.From.Phase != api.HandoffAborted:
 		m.fail("P10", "the replacement keeps the lock or its handoff after its end on another base (%s)", describe(after))
+	}
+}
+
+// p11Applies reports whether P11 checks the reconcile of who about to start from before: the replacement in its
+// recovery wait, its predecessor gone or not naming it (namesReplacement false), and nothing armed against the
+// reconcile, as for P10.
+func (m *hmWorld) p11Applies(who string, before *api.RemediationRequest) bool {
+	m.mu.Lock()
+	quiet := m.sticky == nil && len(m.once) == 0 && len(m.lose) == 0 && len(m.conflict) == 0 && m.interleave == "" &&
+		m.crashAt < 0 && !m.paused && m.settings == ""
+	m.mu.Unlock()
+	return who == hmRepl && quiet && before != nil && abortedOnRefusal(before) && !m.namesReplacement()
+}
+
+// checkNothingToRead checks P11 on the replacement as stored after a reconcile that began in its recovery wait with
+// nothing to read (p11Applies) and left it there.
+func (m *hmWorld) checkNothingToRead(before, after *api.RemediationRequest) {
+	if after == nil || !abortedOnRefusal(after) {
+		return
+	}
+	m.reach["recovery-wait-nothing-to-read"] = true
+	was, w := gitWait(before, waitHandoffRecovery), gitWait(after, waitHandoffRecovery)
+	switch {
+	case watchedRecovery(after) != nil:
+		m.fail("P11", "the replacement's recovery wait has nothing to read but shows the refusal %s (%s)",
+			watchedRecovery(after).Reason, describe(after))
+	case w.Operation != recoveryNothingToRead:
+		m.fail("P11", "the replacement's recovery wait has nothing to read but names the read %q", w.Operation)
+	case !w.Since.Equal(&was.Since) || !w.Ends.Equal(was.Ends):
+		m.fail("P11", "the replacement's recovery wait moved from %v-%v to %v-%v", was.Since.Time, was.Ends.Time,
+			w.Since.Time, w.Ends.Time)
 	}
 }
 

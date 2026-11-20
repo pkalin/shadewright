@@ -263,6 +263,11 @@ func (r *RemediationRequestReconciler) abortOnRefusal(ctx context.Context, rr *r
 			"RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, werr)))
 	}
 	if !abortedOnRefusal(rr) {
+		// The request moved on meanwhile (it no longer recovers its handoff, read live): nothing is aborted, and the
+		// refusal is logged so it is not lost; the next reconcile decides from the request as it is now.
+		logf.FromContext(ctx).Info("Met a refused read of the recovery of RemediationRequest after it moved on; "+
+			"nothing was aborted", "remediationRequest", client.ObjectKeyFromObject(rr), "phase", rr.Status.Phase,
+			"reason", want.Reason, "error", err.Error())
 		return reconcile.Result{RequeueAfter: stepDelay}, nil
 	}
 	r.unreadableEvent(rr, was, watchedRecovery(rr))
@@ -378,9 +383,16 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 		}
 		return res, !cancelRequested(rr), nil
 	}
+	// Nothing to read: the wait says so and drops the refusal it no longer reads past (noteNothingToRead).
+	idle := func() (reconcile.Result, bool, error) {
+		if err := r.noteNothingToRead(ctx, rr); err != nil {
+			return reconcile.Result{}, true, err
+		}
+		return wait()
+	}
 	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred); {
 	case apierrors.IsNotFound(err):
-		return wait()
+		return idle()
 	case err != nil:
 		return reconcile.Result{}, true, &clusterError{err: fmt.Errorf("get the RemediationRequest %s replaces: %w",
 			rr.Name, err)}
@@ -391,7 +403,7 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 	}
 	if pred.UID != types.UID(from.UID) || to == nil || to.UID != remediationv1alpha1.UID(rr.UID) ||
 		pred.Status.PullRequest == nil {
-		return wait()
+		return idle()
 	}
 	git, err := r.openRecovery(ctx, rr)
 	if err != nil {
@@ -419,6 +431,61 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 		return reconcile.Result{}, true, err
 	}
 	return wait()
+}
+
+// recoveryNothingToRead is the operation of a HandoffRecovery entry whose watch has nothing to read
+// (noteNothingToRead): the predecessor is gone, was made again, or no longer hands over to this request, so no pull
+// request of the handoff can be named. gitWaitSummary and endRecoveryWait read it to say so. Fixed text only. Nothing
+// names the request again once it was noted: a predecessor hands over only from the reservation of its successor.
+const recoveryNothingToRead = "none: the request it replaces is gone, was made again or no longer hands over to " +
+	"this request"
+
+// noteNothingToRead records, on rr, that its recovery wait has nothing to read (observeStep found no predecessor
+// that hands over to it): condition PullRequestUnreadable of the recovery (watchedRecovery) is removed, since no
+// read is made that it could name, and the HandoffRecovery entry takes recoveryNothingToRead as its operation, so
+// condition GitReadRetry says in fixed wording that the request waits with nothing to read until the entry's end.
+// The entry keeps its start and end, and the lock is kept. One status write, only when something changes, on a fresh
+// read and retried on a conflict; a request that no longer watches after an abort writes nothing. A failure is the
+// Kubernetes API's (a *clusterError).
+func (r *RemediationRequestReconciler) noteNothingToRead(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	if w := gitWait(rr, waitHandoffRecovery); watchedRecovery(rr) == nil && (w == nil ||
+		w.Operation == recoveryNothingToRead) {
+		return nil
+	}
+	var unreadable *metav1.Condition
+	noted := false
+	err := r.patchGitWaits(ctx, rr, func(live *remediationv1alpha1.RemediationRequest) error {
+		unreadable = meta.FindStatusCondition(live.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+		noted = abortedOnRefusal(live)
+		if !noted {
+			return nil
+		}
+		if watchedRecovery(live) != nil {
+			meta.RemoveStatusCondition(&live.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+			unreadable = nil
+		}
+		gitWait(live, waitHandoffRecovery).Operation = recoveryNothingToRead
+		return nil
+	})
+	if err != nil {
+		return clusterSideErr(fmt.Errorf("record that the recovery wait of RemediationRequest %s/%s has nothing to "+
+			"read: %w", rr.Namespace, rr.Name, err))
+	}
+	if unreadable != nil {
+		putUnreadable(&rr.Status.Conditions, unreadable)
+	} else {
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+	}
+	if !noted {
+		return nil
+	}
+	// No Event for the removal: EventPullRequestReadable says the pull requests can be read again, which is not
+	// what happened; condition GitReadRetry says it.
+	logf.FromContext(ctx).Info("Recorded that the recovery wait of RemediationRequest has nothing to read: the request "+
+		"it replaces is gone, was made again or no longer hands over to it", "remediationRequest",
+		client.ObjectKeyFromObject(rr), "replaces", rr.Status.Handoff.From.Name)
+	return nil
 }
 
 // recordWatchedMerge records, on rr, a merge of the pull request of pred, v as read through git, whose merged head is
@@ -545,9 +612,14 @@ func (r *RemediationRequestReconciler) endRecoveryWait(ctx context.Context, rr *
 	if c := watchedRecovery(rr); c != nil {
 		why = fmt.Sprintf(" (%s, see condition %s)", c.Reason, remediationv1alpha1.ConditionPullRequestUnreadable)
 	}
-	msg := fmt.Sprintf("The handoff was aborted at a refused read of its recovery on %s%s; this request watched the "+
-		"pull request it was to take over for %s, until %s, and saw no merge of its commit. It keeps the target lock "+
-		"while that pull request may still be merged, and a later merge of its commit is recorded on this request",
+	saw := "watched the pull request it was to take over for %s, until %s, and saw no merge of its commit"
+	if entry.Operation == recoveryNothingToRead {
+		saw = "waited for %s, until %s, with nothing to read: the request it replaces is gone, was made again or no " +
+			"longer hands over to this request"
+	}
+	msg := fmt.Sprintf("The handoff was aborted at a refused read of its recovery on %s%s; this request "+saw+
+		". It keeps the target lock while that pull request may still be merged, and a later merge of its commit is "+
+		"recorded on this request",
 		entry.Since.UTC().Format(time.RFC3339), why, end.Sub(entry.Since.Time), end.UTC().Format(time.RFC3339))
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type: remediationv1alpha1.ConditionPROpened, Status: metav1.ConditionFalse, Reason: ReasonRecoveryWaitExpired,
@@ -686,7 +758,8 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 	// 2026-11-19 on #786: a release there lost the record of a merge of its commit made meanwhile).
 	if want := recoveryUnreadable(rr, err); want != nil {
 		if werr := r.setUnreadable(ctx, rr, want); werr != nil {
-			return reconcile.Result{}, true, werr
+			// The refusal goes with the failed write, so the error log of this attempt names it (as observeFailed).
+			return reconcile.Result{}, true, errors.Join(err, werr)
 		}
 	}
 	read := recoveryRead(err)
@@ -806,7 +879,8 @@ func (r *RemediationRequestReconciler) endOnOtherMerge(ctx context.Context, rr *
 func (r *RemediationRequestReconciler) endMergedElsewhere(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest) error {
 	rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
-	if s, ok := settleHandoffAborted(rr); ok {
+	s, released := settleHandoffAborted(rr)
+	if released {
 		if err := lockverdict.Release(&rr.Status, s); err != nil {
 			return err
 		}
@@ -817,6 +891,13 @@ func (r *RemediationRequestReconciler) endMergedElsewhere(ctx context.Context, r
 			"Shadewright writes nothing to it", cr.Number, otherBaseText(cr))))
 	if err != nil {
 		return err
+	}
+	if !released {
+		// No verdict releases it (its status records a pull request): the look at stopped holders decides the lock.
+		logf.FromContext(ctx).Info("Stopped RemediationRequest with its target lock kept: the pull request it was to "+
+			"take over was merged into another base", "remediationRequest", client.ObjectKeyFromObject(rr),
+			"pullRequest", cr.Number, "base", cr.BaseBranch)
+		return nil
 	}
 	logf.FromContext(ctx).Info("Released the target lock of RemediationRequest: the pull request it was to take over "+
 		"was merged into another base", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cr.Number,

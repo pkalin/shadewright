@@ -44,7 +44,7 @@ It has no shell, no `exec`, no `kubectl apply`. The analyzer holds no Git creden
 
 ## Two tiers
 
-The small model goes first with one call. Escalation to the stronger model happens only on a fixed signal: the context was cut, a source failed, or the small model's reply was invalid twice. A feeling of low confidence never triggers it. If there is no escalation model, the signal ends in a hand-off to a person. The stronger model's invalid reply is also a hand-off, not a retry.
+The small model goes first, without tools, and is asked once more after an invalid reply. If the context was cut or a source failed, the stronger model goes first and the small model is not called. Otherwise escalation happens only when the small model's reply is invalid twice. A feeling of low confidence never triggers it. If there is no escalation model, the signal ends in a hand-off to a person. The stronger model's invalid reply is also a hand-off, not a retry.
 
 An analysis is bounded by one unit of the daily budget, a deadline of 8 minutes by default (9 at most), 500,000 tokens by default, and at most 3 plus the tool-call limit model calls. When one runs out, the Incident is handed to a person.
 

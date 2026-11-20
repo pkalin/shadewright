@@ -122,7 +122,12 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -timeout 20m -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart -e '/internal/controller$$') -race -timeout 20m -coverprofile cover.out
+	@# internal/controller (the plain tests, then the envtest suite TestControllers) took 14 to 15 minutes under -race
+	@# on a hosted runner before #838 and ran past 20 after it (#961): it gets 30 in a run of its own, so that the
+	@# other packages keep 20; its coverage is appended to cover.out.
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test ./internal/controller -race -timeout 30m -coverprofile cover-controller.out
+	tail -n +2 cover-controller.out >> cover.out && rm cover-controller.out
 	@# The redact timing tests and the 100,000 seeded keys skip under -race, and the generated corpora check a seeded
 	@# sample there (internal/redact/race_test.go, racesample_test.go): run the whole package again without it, so
 	@# that no test is selected by name and a renamed one cannot drop out. The

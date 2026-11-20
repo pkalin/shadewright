@@ -657,9 +657,9 @@ func (r *RemediationRequestReconciler) mergedHeadOwnerOf(ctx context.Context, gi
 // predecessorLeftItsMerge reports whether a merge of pred's own recorded head is left to repl, its replacement named by
 // its outgoing handoff to (third case of the decision of 2026-11-20 on #870): pred holds no record of that merge
 // (holdsMergeRecord) and no claim on it (holdsMergeClaim), and it can no longer record it: it is being deleted, so its
-// finalizer records none, or it released its lock on a verdict and holds no intent (mayStillRecord false: a request
-// that released its lock records nothing of that pull request any more, also when a person reopens and merges it,
-// design 6.5). repl holds the target lock before its takeover (recordsEveryMerge), so it records the merge as a
+// finalizer records none, or it ended and released its lock on a verdict and holds no intent (mayStillRecord false: a
+// stopped request that released its lock is not looked at again and records nothing of that pull request any more,
+// also when a person reopens and merges it, design 6.5). A predecessor that still runs records its own merge. repl holds the target lock before its takeover (recordsEveryMerge), so it records the merge as a
 // foreign change with the same reasons as any other head; it never lets go of the lock without a record
 // (mayReleaseOnMerge). A predecessor that may still record keeps its own head, and repl waits for its record. Only the
 // replacement's side can find it true: the predecessor's own reading (predecessorMergeOwner) passes no replacement for
@@ -668,7 +668,7 @@ func (r *RemediationRequestReconciler) mergedHeadOwnerOf(ctx context.Context, gi
 func predecessorLeftItsMerge(pred, repl *remediationv1alpha1.RemediationRequest,
 	to *remediationv1alpha1.OutgoingHandoff, head string) bool {
 	pr := pred.Status.PullRequest
-	return pr != nil && (!pred.DeletionTimestamp.IsZero() || !mayStillRecord(pred)) &&
+	return pr != nil && (!pred.DeletionTimestamp.IsZero() || (ended(pred.Status.Phase) && !mayStillRecord(pred))) &&
 		!holdsMergeRecord(pred, pr.Number, head) && !holdsMergeClaim(pred, pr.Number, head) &&
 		to != nil && repl != nil && repl.UID == types.UID(to.UID) && recordsEveryMerge(repl)
 }

@@ -43,6 +43,9 @@ const (
 )
 
 // chartVersions reads version and appVersion from Chart.yaml.
+// testCluster is the clusterId every test render sets.
+const testCluster = "clusterId=chart-test"
+
 func chartVersions(t *testing.T) (version, appVersion string) {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(repoRoot(t), "dist", "chart", "Chart.yaml"))
@@ -71,7 +74,7 @@ const withVerifier = "verifier.watchNamespaces={demo}"
 
 func defaultRender(t *testing.T, set ...string) rendered {
 	t.Helper()
-	return renderArgs(t, helmArgsWith(t, ciValues(t), append([]string{"clusterId=chart-test"}, set...)...))
+	return renderArgs(t, helmArgsWith(t, ciValues(t), append([]string{testCluster}, set...)...))
 }
 
 func container(t *testing.T, r rendered, k string) corev1.Container {
@@ -242,14 +245,14 @@ func execCombined(name, dir string, args ...string) ([]byte, error) {
 // TestImageWithoutDigestFailsClosed checks that a source checkout without digests does not render unless
 // image.allowTag opts in to the appVersion tag, and that ci/default-values.yaml holds that one key only.
 func TestImageWithoutDigestFailsClosed(t *testing.T) {
-	out, err := runErr(t, helmArgsWith(t, nil, "clusterId=chart-test"))
+	out, err := runErr(t, helmArgsWith(t, nil, testCluster))
 	if err == nil {
 		t.Fatalf("helm template without digests or image.allowTag succeeded:\n%s", out)
 	}
 	if !strings.Contains(out, "image.digest is empty") || !strings.Contains(out, "image.allowTag=true") {
 		t.Errorf("error does not say how to fix it:\n%s", out)
 	}
-	out, err = runErr(t, helmArgsWith(t, nil, "clusterId=chart-test", "image.allowTag=false",
+	out, err = runErr(t, helmArgsWith(t, nil, testCluster, "image.allowTag=false",
 		"executor.image.digest=sha256:"+strings.Repeat("1", 64),
 		"verifier.image.digest=sha256:"+strings.Repeat("3", 64)))
 	if err == nil || !strings.Contains(out, "analyzer.image.digest is empty") {

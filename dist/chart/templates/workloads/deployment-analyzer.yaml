@@ -26,7 +26,7 @@ spec:
       labels:
         {{- include "shadewright.labels" (dict "component" "analyzer" "context" $) | nindent 8 }}
         control-plane: analyzer
-        {{- if $c.identity.azure.clientId }}
+        {{- if and $c.identity.azure.clientId (not (include "shadewright.azureProjectToken" $c)) }}
         # Asks the AKS workload identity webhook to inject the federated token (design section 9).
         azure.workload.identity/use: "true"
         {{- end }}
@@ -130,6 +130,9 @@ spec:
               fieldPath: metadata.name
         - name: GOMEMLIMIT
           value: {{ include "shadewright.goMemLimit" (dict "component" "analyzer" "context" $) | quote }}
+        {{- if include "shadewright.azureProjectToken" $c }}
+        {{- include "shadewright.azureTokenEnv" $c | nindent 8 }}
+        {{- end }}
         {{- with ($c.tracing | default dict).endpoint }}
         # The analysis traces (#90): OTLP over gRPC, off without an endpoint.
         - name: OTEL_TRACES_EXPORTER
@@ -180,8 +183,12 @@ spec:
         resources:
           {{- toYaml $c.resources | nindent 10 }}
         {{- $keyVolume := include "shadewright.anthropicKeyVolume" $ }}
-        {{- if or $c.metricsTLS.secretName $keyVolume $compatibleKeys }}
+        {{- $azTok := include "shadewright.azureProjectToken" $c }}
+        {{- if or $c.metricsTLS.secretName $keyVolume $compatibleKeys $azTok }}
         volumeMounts:
+        {{- if $azTok }}
+        - {{- include "shadewright.azureTokenMount" . | nindent 10 }}
+        {{- end }}
         {{- with $c.metricsTLS.secretName }}
         - name: metrics-tls
           mountPath: /etc/shadewright/metrics-tls
@@ -200,8 +207,11 @@ spec:
           readOnly: true
         {{- end }}
         {{- end }}
-      {{- if or $c.metricsTLS.secretName $keyVolume $compatibleKeys }}
+      {{- if or $c.metricsTLS.secretName $keyVolume $compatibleKeys $azTok }}
       volumes:
+      {{- if $azTok }}
+      - {{- include "shadewright.azureTokenVolume" . | nindent 8 }}
+      {{- end }}
       {{- with $c.metricsTLS.secretName }}
       - name: metrics-tls
         secret:

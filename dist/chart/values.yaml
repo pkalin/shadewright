@@ -121,6 +121,9 @@ rbac:
 ## The executor reconciles RemediationRequests and is the only component that talks to Git. Its identity may
 ## only sign with the GitHub App key in Key Vault.
 executor:
+  # -- Deploy the executor. `false` renders none of its objects (Deployment, ServiceAccount, Roles and bindings, PodDisruptionBudget, metrics Service, NetworkPolicy, leader election Lease, ServiceMonitor, and its subject in the metrics authentication binding), so nothing in the release can write to Git. The analyzer is unchanged: it still records Incidents and diagnoses, and a RemediationRequest it proposes gets no phase because nothing checks it, so leave `analyzer.analysis.actionPolicies` empty in this mode. Also set `verifier.watchNamespaces: []`: the verifier works only on requests in `Verifying`, a phase only the executor sets. With `false` the chart refuses the values that only configure an executor: `executor.replicas` other than 1, `identity.azure.clientId`, `identity.azure.tenantId`, `identity.azure.projectToken`, `serviceAccount.annotations`, `goMemLimit`, `reviewerHints.enabled`, `verification.enabled`, `verification.nodeGrace` other than `1m`, `extraArgs` and `metricsTLS.secretName`. Image, resources and Pod placement values are not refused and have no effect.
+  # @section -- Executor
+  enabled: true
   # -- Number of Pods. 1 (the default) runs the one Pod. Above 1 the extra Pods are warm standbys: leader election keeps one of them active and the others idle, and when the leader's Pod fails a standby takes over after about one Lease duration (15 seconds by default). A standby costs an idle Pod and adds no throughput. Above 1 the chart also renders a PodDisruptionBudget (`minAvailable: 1`) and a preferred Pod anti-affinity by node, unless `affinity` sets `podAntiAffinity` itself.
   # @section -- Executor
   replicas: 1
@@ -141,6 +144,13 @@ executor:
       # @default -- empty (no identity)
       # @section -- Identity
       clientId: ""
+      # -- Tenant ID (a UUID or a tenant domain, not a secret) of the Entra ID tenant that holds the executor's managed identity. Used only with `projectToken`, where it becomes `AZURE_TENANT_ID`; the chart refuses it without `projectToken`, and `projectToken` without it.
+      # @default -- empty
+      # @section -- Identity
+      tenantId: ""
+      # -- Renders what the Azure workload identity webhook would inject, for a cluster without it: a projected ServiceAccount token volume (audience `api://AzureADTokenExchange`, `expirationSeconds` 3600, readable by any user), its read-only mount at `/var/run/secrets/azure/tokens`, and the variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE` and `AZURE_AUTHORITY_HOST` (`https://login.microsoftonline.com/`, the public cloud). Sets no `azure.workload.identity/use` Pod label, so a cluster that has the webhook does not get both. Needs `clientId` and `tenantId`, or the chart refuses to render. The federated credential is the same as with the webhook: subject `system:serviceaccount:<namespace>:<ServiceAccount>`, audience `api://AzureADTokenExchange`.
+      # @section -- Identity
+      projectToken: false
   serviceAccount:
     # -- Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `executor.identity.azure.clientId`.
     # @section -- Executor
@@ -325,6 +335,13 @@ analyzer:
       # @default -- empty (no identity)
       # @section -- Identity
       clientId: ""
+      # -- Tenant ID (a UUID or a tenant domain, not a secret) of the Entra ID tenant that holds the analyzer's managed identity. Used only with `projectToken`, where it becomes `AZURE_TENANT_ID`; the chart refuses it without `projectToken`, and `projectToken` without it.
+      # @default -- empty
+      # @section -- Identity
+      tenantId: ""
+      # -- Renders what the Azure workload identity webhook would inject, for a cluster without it: a projected ServiceAccount token volume (audience `api://AzureADTokenExchange`, `expirationSeconds` 3600, readable by any user), its read-only mount at `/var/run/secrets/azure/tokens`, and the variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE` and `AZURE_AUTHORITY_HOST` (`https://login.microsoftonline.com/`, the public cloud). Sets no `azure.workload.identity/use` Pod label, so a cluster that has the webhook does not get both. Needs `clientId` and `tenantId`, or the chart refuses to render. The federated credential is the same as with the webhook: subject `system:serviceaccount:<namespace>:<ServiceAccount>`, audience `api://AzureADTokenExchange`.
+      # @section -- Identity
+      projectToken: false
   serviceAccount:
     # -- Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `analyzer.identity.azure.clientId`.
     # @section -- Analyzer

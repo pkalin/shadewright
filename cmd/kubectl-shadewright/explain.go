@@ -211,6 +211,7 @@ var troubleshootingSections = map[string][]string{
 	"Restarted":                         {secAfterMerge},
 	"ReviewCheckConflict":               {secPullRequest},
 	"ReviewCheckRefused":                {secPullRequest},
+	"ReviewCheckLiveReadFailed":         {secPullRequest},
 	"ReviewCheckStuck":                  {secPullRequest},
 	"ReviewCommentsUnread":              {secPullRequest},
 	"ReviewListTooLong":                 {secPullRequest},

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Working with models</title>
-  <desc id="d">The model sits in the middle of a harness of code. Code tells it the rules: the prompt, the output schema and the bounds of the policy. Code shows it a redacted, bounded context. On escalation it may call read-only tools. Code checks its answer: a quote found in the evidence, the closed action catalog and the policy. Its only output is a proposal, a RemediationRequest. Below, records and traces describe what ran, without the text. Dashed boxes are planned: a step log with replay by step, and one bounded extra round when the answer names missing data a tool can fetch.</desc>
+  <desc id="d">The model sits in the middle of a harness of code. Code tells it the rules: the prompt, the output schema and the bounds of the policy. Code shows it a redacted, bounded context. On escalation it may call read-only tools. Code checks its answer: a quote found in the evidence, the closed action catalog and the policy. Its only output is a proposal, a RemediationRequest. Below, records keep the redacted answer and its counts, and traces keep counts and durations only. Dashed boxes are planned: a step log with replay by step, and one bounded extra round when the answer names missing data a tool can fetch.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -59,7 +59,7 @@
 
   <rect class="box" x="50" y="456" width="250" height="68" rx="10"/>
   <text class="h" x="66" y="482">Records and traces</text>
-  <text class="s" x="66" y="503">what ran, never the text</text>
+  <text class="s" x="66" y="503">the answer; traces: counts only</text>
 
   <rect class="pl" x="700" y="456" width="250" height="68" rx="10"/>
   <text class="h" x="716" y="482">Step log and replay</text>

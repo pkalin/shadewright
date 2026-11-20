@@ -57,7 +57,7 @@ A deployment names one of three providers: Microsoft Foundry (workload identity,
 ## How a model is judged
 
 - **Evaluation harness.** Scenarios and an injection corpus in `test/eval` run against a model. <span class="sw-status sw-planned">planned</span> The analyzer checking those results before it starts.
-- **Records.** With an analysis store, each analysis leaves a redacted record: counts, the reason and the prompt version. It holds no context, prompt or model reply.
+- **Records.** With an analysis store, each analysis leaves a redacted record: the model's summary and what it found missing, counts, the reason and the prompt version. It holds neither the context nor the prompt.
 - **Traces.** Off by default. A span carries IDs, counts, durations and fixed labels, never text.
 - <span class="sw-status sw-planned">planned</span> A step log, so an analysis can be replayed step by step.
 

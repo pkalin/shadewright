@@ -524,7 +524,7 @@ Reading the sections side by side, so that a slow source costs only its own sect
 **What marks the context for escalation.** Only "could not fetch" and the total cut. Evidence markers are labels on a block and never escalate:
 
 - a section cut to its own bound;
-- a log excerpt the source marked truncated, with its end missing or uncertain about its instance;
+- a log excerpt the source marked truncated, with its end missing, or uncertain about which instance of the container it comes from (a restart or a re-created pod);
 - a partial metrics answer;
 - a pod set capped or uncertain about which pods the target had during the window.
 

@@ -83,11 +83,9 @@ networkPolicy:
       # -- Namespace of the Prometheus (matched by `kubernetes.io/metadata.name`). Required when `enabled`.
       # @section -- Network policy
       namespace: ""
-      # -- Labels of the Prometheus server Pods in that namespace. The default matches the prometheus-community chart.
+      # -- Labels of the Prometheus server Pods in that namespace. A value you set replaces the default whole (Helm would merge a map, so the chart applies the default only when this is empty): list every label the Pods need. Empty uses `app.kubernetes.io/name: prometheus` and `app.kubernetes.io/component: server`, which match the prometheus-community chart.
       # @section -- Network policy
-      podLabels:
-        app.kubernetes.io/name: prometheus
-        app.kubernetes.io/component: server
+      podLabels: {}
       # -- TCP port of the Prometheus HTTP API on the Pod (the container port, not the Service port), 1 to 65535.
       # @section -- Network policy
       port: 9090
@@ -98,10 +96,9 @@ networkPolicy:
       # -- Namespace of the collector (matched by `kubernetes.io/metadata.name`). Required when `enabled`.
       # @section -- Network policy
       namespace: ""
-      # -- Labels of the collector Pods in that namespace. The default matches the opentelemetry-collector chart.
+      # -- Labels of the collector Pods in that namespace. A value you set replaces the default whole (Helm would merge a map, so the chart applies the default only when this is empty): list every label the Pods need. Empty uses `app.kubernetes.io/name: opentelemetry-collector`, which matches the opentelemetry-collector chart.
       # @section -- Network policy
-      podLabels:
-        app.kubernetes.io/name: opentelemetry-collector
+      podLabels: {}
       # -- TCP port of the collector's OTLP gRPC receiver on the Pod, 1 to 65535.
       # @section -- Network policy
       port: 4317

@@ -1004,7 +1004,6 @@
                 },
                 "podLabels": {
                   "type": "object",
-                  "minProperties": 1,
                   "maxProperties": 8,
                   "additionalProperties": {
                     "type": "string",
@@ -1033,7 +1032,6 @@
                 },
                 "podLabels": {
                   "type": "object",
-                  "minProperties": 1,
                   "maxProperties": 8,
                   "additionalProperties": {
                     "type": "string",

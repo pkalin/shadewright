@@ -1658,7 +1658,7 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 // stopOpenElsewhere is the watch's answer to the request's own pull request, cr, read by its number open on another
 // base than the target branch, where a person moved it (#892). A cancelled request ends Cancelled saying so
 // (errOpenElsewhere, prOpenElsewhere, cancelOpen), whether or not its target branch changed. Any other request stops
-// in NeedsIntervention with ChangeRequestOnOtherBase. Nothing is written to the pull request, and the lock stays
+// in NeedsIntervention with ChangeRequestOnOtherBase. Nothing but the failed review check is written to the pull request, and the lock stays
 // while it is open (lookHeld, TargetHeld). In the same step the review check of its head is failed (failStoppedCheck,
 // #925): moved back to the target branch, the pull request cannot merge on a check written before the stop. A failed
 // write of the check does not hold the stop: the stop's status write carries condition ReviewCheckNotFailed, which

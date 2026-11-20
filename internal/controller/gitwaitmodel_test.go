@@ -1902,8 +1902,11 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 // own pull request is open with the last review check of its head failed, no later reconcile leaves another state
 // last on that head while the request stays stopped and that pull request open with that head: a reconcile working
 // from an older copy of the request (the stale cache) must not write a pending or passing check over the failed one,
-// whether its live read works or fails (liveFails): without it only a pass is taken down (decision of 2026-11-20 on
-// #925, after the fifth pass). Paused or not, with any fault: nothing the model injects writes a check run.
+// whether its live read works or fails: without it only a pass is taken down (decision of 2026-11-20 on #925, after
+// the fifth pass). The model fails that live read in half of the stale-copy reconciles (liveFails), but it does not
+// catch a wrong rule for a failed read: with the condition reverted, seeds 1 to 20,000 pass. The directed tests
+// TestFailedLiveReadWritesOnlyOverAPass, TestReviewCheckFromAStaleCopyLeavesTheStopsCheck and
+// TestFailedLiveReadLeavesTheStopsCheckWhileAnotherPullRequestHolds are what prove it. Paused or not, with any fault: nothing the model injects writes a check run.
 func (m *modelWorld) stopCheckProperty(live *api.RemediationRequest) {
 	pr := live.Status.PullRequest
 	cr, found := m.pr()

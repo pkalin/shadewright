@@ -275,7 +275,7 @@ func deliveryPending(rr *remediationv1alpha1.RemediationRequest) bool {
 	return c == nil || (c.Status == metav1.ConditionUnknown && c.Reason == ReasonDeliveryPending)
 }
 
-// liveReadNote reports whether condition Approved changes from o to n only by the note of a failed live read before a
+// liveReadNote reports whether condition Approved changes from o to n only by the note of a failed live read before a passing
 // review check write (noteLiveRead): one of them carries reason ReviewCheckLiveReadFailed (False) and the other the
 // same, WaitingForReview (False), or no Approved yet (a pull request just opened). The look that writes it keeps its
 // pace, so its write must not wake the request.

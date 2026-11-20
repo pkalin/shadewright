@@ -146,7 +146,9 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 	case prClosed:
 		return r.endCancelFound(ctx, rr, r.failCancelCheck(ctx, rr), false)
 	case prOpenElsewhere:
-		// Open on a base a person moved it to (#892): nothing is written to it there, the failed check included.
+		// Open on a base a person moved it to (#892): it is not closed there. The failed review check is not written
+		// in this reconcile; the Cancelled request keeps its lock while that pull request is open, and its looks write
+		// the failed check on the head (failStoppedCheck, #925, decision of 2026-11-19).
 		return r.endCancelFound(ctx, rr, nil, true)
 	case prOpen, prUnchecked, prStopped, prConflicted, prMergeCommitPending, prMergeUnchecked, prBranchUnread:
 	}
@@ -155,7 +157,9 @@ func (r *RemediationRequestReconciler) cancelOpen(ctx context.Context, rr *remed
 	}
 	// The check fails first, whatever becomes of the close; its failure does not stop the close, and it is tried
 	// again with the next try. Its read of the pull request by number comes before the write: one found open on a
-	// base a person moved it to gets no check, and the cancel ends saying so.
+	// base a person moved it to gets the failed check on its head too (failCheckStep, changeElsewhere writes it,
+	// #925), as moved back it must not merge on a check written before the cancel; the close then finds it open
+	// there and the cancel ends saying so.
 	checkErr := r.failCancelCheck(ctx, rr)
 	if errors.Is(checkErr, errOpenElsewhere) {
 		return r.endCancelFound(ctx, rr, nil, true)

@@ -111,8 +111,11 @@ import (
 //     on #771, point 5 as the sixth kept it);
 //   - stop check kept: once a reconcile leaves a stopped request whose own pull request is open with the last review
 //     check of its head failed, that check stays the last one on the head while the request stays stopped and the
-//     pull request open, also when a reconcile works from an older copy of the request (decision of 2026-11-20 on
-//     #925);
+//     pull request open, also when a reconcile works from an older copy of the request whose live read works
+//     (decisions of 2026-11-20 on #925). With the live read failed, such a reconcile still writes a pending check,
+//     which covers the failed one only until the stopped request's next look; the model draws no failed live read of
+//     the request (and no approval, so no passing check), and directed tests hold that case
+//     (TestReviewCheckFromAStaleCopyLeavesTheStopsCheck, TestFailedLiveReadStillTakesThePassDown);
 //   - schema: no status write is one the API server refuses.
 //
 // At the end the world heals (reads work, no write fails; the repository comes back in half of the runs; a pause is
@@ -1878,8 +1881,10 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 // is no longer open (stop check kept, decision of 2026-11-20 on #925). Once a reconcile leaves a stopped request whose
 // own pull request is open with the last review check of its head failed, no later reconcile leaves another state
 // last on that head while the request stays stopped and that pull request open with that head: a reconcile working
-// from an older copy of the request (the stale cache) must not write a pending or passing check over the failed one.
-// Paused or not, with any fault: nothing the model injects writes a check run.
+// from an older copy of the request (the stale cache) whose live read works must not write a pending or passing check
+// over the failed one. Paused or not, with any fault: nothing the model injects writes a check run. The model fails
+// no live read of the request: with one, a pending check may cover the failed one until the stopped request's next
+// look (decision of 2026-11-20 on #925, point 2), which directed tests check.
 func (m *modelWorld) stopCheckProperty(live *api.RemediationRequest) {
 	pr := live.Status.PullRequest
 	cr, found := m.pr()

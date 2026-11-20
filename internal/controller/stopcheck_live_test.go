@@ -69,7 +69,9 @@ func (c cachedCopy) Get(ctx context.Context, key client.ObjectKey, obj client.Ob
 // A reconcile that works from an older cached copy of a request (waiting for review, or with its pull request just
 // opened) never writes a pending or passing review check over the failed one a stop wrote: the live request is read
 // before the write, and a stopped, released or deleted one gets nothing (model seed 35217). A failed live read writes
-// nothing and is returned. A live request that still waits gets the write.
+// no passing check and is returned; a pending check is still written then (decision of 2026-11-20 on #925), and the
+// stopped request's next look writes its failed check again (TestStoppedHolderWritesItsFailedCheckAgain). A live
+// request that still waits gets the write.
 func TestReviewCheckFromAStaleCopyLeavesTheStopsCheck(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -109,7 +111,9 @@ func TestReviewCheckFromAStaleCopyLeavesTheStopsCheck(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		{name: "live read fails", phase: api.PhaseAwaitingApproval, readFails: true},
+		{name: "live read fails before a pass", phase: api.PhaseAwaitingApproval, approved: true, readFails: true},
+		{name: "live read fails before a pending check", phase: api.PhaseAwaitingApproval, readFails: true,
+			writes: true},
 		{name: "still waiting", phase: api.PhaseAwaitingApproval, writes: true, live: func(t *testing.T,
 			r *RemediationRequestReconciler, p *api.RemediationRequest) {
 			p.Status.Phase, p.Status.PullRequest.ReviewCheck = api.PhaseAwaitingApproval, nil
@@ -143,7 +147,7 @@ func TestReviewCheckFromAStaleCopyLeavesTheStopsCheck(t *testing.T) {
 			runs := len(g.CheckRuns(head))
 			err := r.reviewCheck(ctx, older)
 			switch {
-			case c.readFails && !errors.Is(err, errReviewCheckLiveRead):
+			case c.readFails && !c.writes && !errors.Is(err, errReviewCheckLiveRead):
 				t.Fatalf("a failed live read returned %v: want errReviewCheckLiveRead for a retry", err)
 			case !c.readFails && !c.writes && err != nil:
 				// A write that went through records its state from the older copy, which meets a conflict; the next
@@ -152,8 +156,23 @@ func TestReviewCheckFromAStaleCopyLeavesTheStopsCheck(t *testing.T) {
 			}
 			got := g.CheckRuns(head)
 			if c.writes {
-				if len(got) != runs+1 {
-					t.Fatalf("a request that still waits for review got no check: %+v", got)
+				if len(got) != runs+1 || got[len(got)-1].Status != providers.CheckRunInProgress {
+					t.Fatalf("no pending check was written: %+v", got)
+				}
+				if !c.readFails {
+					return
+				}
+				// The pending check covers the stop's failed one only until the stopped request's next look.
+				r.Client, r.APIReader = live, live
+				stopped := &api.RemediationRequest{}
+				if err := live.Get(ctx, client.ObjectKeyFromObject(p), stopped); err != nil {
+					t.Fatal(err)
+				}
+				if err := r.failStoppedCheck(ctx, stopped, string(api.PhaseNeedsIntervention)); err != nil {
+					t.Fatal(err)
+				}
+				if got := g.CheckRuns(head); got[len(got)-1].Status != providers.CheckRunFailure {
+					t.Fatalf("the stopped request's next look left the pending check last: %+v", got)
 				}
 				return
 			}
@@ -264,14 +283,15 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 	}
 }
 
-// A live read before the review check write that keeps failing shows in status while it lasts, not only in the one
+// A live read before a passing review check write that keeps failing shows in status while it lasts, not only in the one
 // ReviewCheckStuck Event after ten looks: condition Approved False with reason ReviewCheckLiveReadFailed, written once
 // over two looks, and set back to WaitingForReview by the look whose live read works. The look returns no error, so
 // its pace is kept, and the write of the note does not wake the request (onlyOwnMarksChanged).
 func TestLiveReadThatKeepsFailingShowsInStatus(t *testing.T) {
-	r, g, p, _, _, head := gateWorld(t)
+	r, g, p, _, cr, head := gateWorld(t)
 	ctx := context.Background()
 	plainWaiting(t, r, p, head)
+	approve(g, cr.Number, 90, 3003, head)
 	live := r.Client
 	r.APIReader = failingRequestReader{Reader: live, name: p.Name}
 	key := client.ObjectKeyFromObject(p)

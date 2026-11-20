@@ -346,7 +346,10 @@ func endCheckNote(rr *remediationv1alpha1.RemediationRequest) bool {
 
 // checkNotFailed is the reason of condition ReviewCheckNotFailed for err, the failure to write a stopped request's
 // failed review check, and what it says: the settings that permit no write to the repository of the plan, a pause of
-// the kill switch, or any other failure of the Git host (GitFailed), never with the host's answer.
+// the kill switch, a refusal of the Git host that holds until a person fixes it (GitForbidden, GitRejected, as
+// refusal classes them; a token the installation refuses is forbidden), a 404 (GitNotFound: the installation or the
+// repository is not reachable through it), or any other failure of the Git host (GitFailed, which passes by
+// itself), never with the host's answer.
 func checkNotFailed(err error) (reason, text string) {
 	switch {
 	case errors.Is(err, freshness.ErrPaused):
@@ -361,6 +364,16 @@ func checkNotFailed(err error) (reason, text string) {
 	case errors.Is(err, freshness.ErrRepositoryUnusable):
 		return string(sourcemap.ReasonRepositoryUnusable), "the entry of the repository of the plan in " +
 			"RemediationSettings cannot be used"
+	}
+	switch reason, _, final := refusal(err); {
+	case final && reason == ReasonGitForbidden:
+		return reason, "the Git host refused the App (a permission it lacks, its installation or a rule of the " +
+			"repository), which holds until that is fixed"
+	case final:
+		return reason, "the Git host refused the request as invalid, which holds until its cause is fixed"
+	case providers.IsNotFound(err):
+		return ReasonGitNotFound, "the Git host answered 404: the App's installation or the repository is not " +
+			"reachable through it"
 	}
 	return ReasonGitFailed, "the Git host did not take the write"
 }

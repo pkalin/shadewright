@@ -109,8 +109,11 @@ func serve(text []byte, o *corev1.PodLogOptions) []byte {
 	return text
 }
 
-func newLogServer(current string) *logServer {
-	l := &logServer{cs: fake.NewClientset(testPodObject()), current: []byte(current)}
+func newLogServer(current string) *logServer { return newLogServerFor(testPodObject(), current) }
+
+// newLogServerFor is newLogServer for another pod object.
+func newLogServerFor(pod *corev1.Pod, current string) *logServer {
+	l := &logServer{cs: fake.NewClientset(pod), current: []byte(current)}
 	l.cs.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		if a.GetSubresource() != "log" {
 			return false, nil, nil
@@ -272,6 +275,23 @@ func TestPreviousContainer(t *testing.T) {
 	}
 	if got.Text != string(l.previous) || got.Truncated {
 		t.Errorf("Logs(previous) = %+v", got)
+	}
+}
+
+// A kubelet that no longer holds the previous instance answers the logs request with HTTP 200 and its
+// sentence naming that instance: the adapter returns ErrLogGone, never the sentence as log text, after one
+// logs request.
+func TestCollectedPreviousContainerIsGone(t *testing.T) {
+	l := newLogServer("current instance\n")
+	l.previous = []byte(goneSentence + prevCID)
+	q := query()
+	q.Previous = true
+	got, err := l.source(t).Logs(context.Background(), q)
+	if !errors.Is(err, providers.ErrLogGone) || !errors.Is(err, providers.ErrNotFound) || got.Text != "" {
+		t.Fatalf("Logs(previous) = %+v, %v; want ErrLogGone", got, err)
+	}
+	if strings.Contains(err.Error(), prevCID) || len(l.opts) != 1 {
+		t.Errorf("error %q, %d logs requests", err, len(l.opts))
 	}
 }
 

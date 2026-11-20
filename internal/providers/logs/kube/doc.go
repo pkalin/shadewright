@@ -87,4 +87,11 @@ limitations under the License.
 // which request failed ("pod read" or "logs request"). A failed second pod read is not an error: it marks the
 // excerpt uncertain. When the caller's context is done, its error is returned, so that errors.Is matches
 // [context.Canceled] or [context.DeadlineExceeded].
+//
+// A log the node no longer holds: the kubelet answers a logs request for a container it has removed with HTTP
+// 200 and the body "unable to retrieve container logs for <runtime>://<id>". When the whole body of the first
+// read is that sentence, with at most one newline after it, and names the container ID the status gave for the
+// instance asked for (or, when the status named none, an ID of that form), the adapter returns
+// [providers.ErrLogGone], which wraps [providers.ErrNotFound], instead of an excerpt. Any other body is a log,
+// one that holds the sentence among other lines or with other text on its line included.
 package kube

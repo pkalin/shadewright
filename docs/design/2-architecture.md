@@ -237,6 +237,8 @@ HTTP status handling is in 2.6.
 - It marks the excerpt uncertain when the two reads differ or the second fails (section 4).
 - A failed first check is an error, not an excerpt.
 
+**A log the node no longer holds.** The kubelet keeps one terminated instance per container, and not for long. Asked for the log of an instance it has removed, it answers with HTTP 200 and the body `unable to retrieve container logs for <runtime>://<id>`. The adapter returns that answer as `ErrLogGone` (a "not found"), never as log text, when the whole body is that sentence followed by at most one newline, and the sentence names the container ID the pod's status gives for the instance asked for (or, when the status names none, an ID of that form). A log that holds the sentence among other lines, after a timestamp, with other text on its line or for another container stays log text ([#943](https://github.com/pkalin/shadewright/issues/943)).
+
 **What can go wrong.**
 
 - It retries no request. client-go's own retries are off for the log requests and the pod reads alike: neither a status with Retry-After nor a reset connection is sent again.

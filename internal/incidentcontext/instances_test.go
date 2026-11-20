@@ -327,8 +327,10 @@ func TestFailedLogReadIsNotReadAgain(t *testing.T) {
 	var mu sync.Mutex
 	var logReads, metricReads int
 	b := newBuilder(t, reader(t, webObjects()...), src, func(c *Config) {
+		// The build deadline leaves room for a second read of the hanging source, which must not come, and for
+		// the metrics after the one read, also on a loaded runner.
 		c.SourceTimeout = 400 * time.Millisecond
-		c.BuildTimeout = 700 * time.Millisecond
+		c.BuildTimeout = 2 * time.Second
 		c.Logs = logFunc(func(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
 			mu.Lock()
 			logReads++

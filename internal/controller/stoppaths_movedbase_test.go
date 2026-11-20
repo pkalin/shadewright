@@ -1180,7 +1180,8 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 	const entryGone, settingsGone = "entry gone", "settings object gone"
 	for _, mode := range []string{"settings reach it", entryGone, settingsGone} {
 		t.Run(mode, func(t *testing.T) {
-			gone := mode != "settings reach it"
+			gone := mode == entryGone
+			var kept *api.RemediationSettings
 			// settlementWorld leaves the settings naming freshOtherBranch, not the recorded main.
 			r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
 			ctx := context.Background()
@@ -1206,6 +1207,10 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 			case entryGone:
 				dropRepository(t, r)
 			case settingsGone:
+				kept = &api.RemediationSettings{}
+				if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, kept); err != nil {
+					t.Fatal(err)
+				}
 				if err := r.Delete(ctx, &api.RemediationSettings{ObjectMeta: metav1.ObjectMeta{Name: api.SettingsName}}); err != nil {
 					t.Fatal(err)
 				}
@@ -1228,6 +1233,34 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 					t.Logf("Reconcile %d: %v", i, err)
 				}
 			}
+			if kept != nil {
+				// A missing settings object is a failure of the cleanup, not a repository that left the settings: the
+				// request stays with CleanupFailing (SettingsNotFound) and its pull request open, and nothing says it was
+				// left open (#925). Once the object is back, the deletion closes its pull requests and goes.
+				got := &api.RemediationRequest{}
+				if err := r.Get(ctx, key, got); err != nil {
+					t.Fatalf("the request was let go with RemediationSettings missing: %v", err)
+				}
+				c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionCleanupFailing)
+				if c == nil || c.Reason != ReasonSettingsNotFound {
+					t.Fatalf("condition CleanupFailing %+v: want reason %s", c, ReasonSettingsNotFound)
+				}
+				if st := g.ChangeRequests()[n-1].State; st != providers.ChangeRequestOpen {
+					t.Fatalf("pull request #%d is %s while the settings are missing: want it open", n, st)
+				}
+				if left := warningsOf(recorder, EventPullRequestLeftOpen); left != 0 {
+					t.Fatalf("%d Warning Events %s while the cleanup is retried", left, EventPullRequestLeftOpen)
+				}
+				kept.ResourceVersion = ""
+				if err := r.Create(ctx, kept); err != nil {
+					t.Fatal(err)
+				}
+				for i := range 3 {
+					if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+						t.Logf("Reconcile %d after the settings came back: %v", i, err)
+					}
+				}
+			}
 			if err := r.Get(ctx, key, &api.RemediationRequest{}); !apierrors.IsNotFound(err) {
 				t.Fatalf("the request is still there (%v)", err)
 			}
@@ -1244,10 +1277,8 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 					!strings.Contains(events[0], fmt.Sprintf("#%d", n)) {
 					t.Fatalf("events %q: want one Warning Event %s naming #%d", events, EventPullRequestLeftOpen, n)
 				}
-				// The Event says what is missing: the entry of the repository, or the settings object itself.
-				says := map[string]string{entryGone: "no usable entry for the repository",
-					settingsGone: "RemediationSettings " + api.SettingsName + " does not exist"}[mode]
-				if !strings.Contains(events[0], says) {
+				// The Event says what is missing: the entry of the repository.
+				if says := "no entry for the repository"; !strings.Contains(events[0], says) {
 					t.Fatalf("event %q: want it saying %q", events[0], says)
 				}
 				return

@@ -668,15 +668,20 @@ var recoveryPaths = []recoveryPath{
 				t.Fatal(err)
 			}
 		},
-		// Nothing is read from the Git host: the watch goes on with the condition of the refusal, paced within the
-		// ends of its waits as the API server holds them (withinWaits, #885).
+		// Nothing is read from the Git host: the watch has nothing to read, so one status write on a fresh read
+		// removes the refusal and records that on its entry (noteNothingToRead), and the watch goes on, paced within
+		// the ends of its waits as the API server holds them (withinWaits, #885).
 		calls: []string{
 			"k8s get RemediationRequest/" + oldName + "#1",
 			"k8s get RemediationRequest/" + oldName + "#2",
 			"k8s get RemediationRequest/" + newName + "#1",
+			"k8s patch status RemediationRequest/" + newName + "#1",
+			"k8s get RemediationRequest/" + newName + "#2",
 		},
 		ended: func(rr *api.RemediationRequest) bool {
-			return rr.Status.Phase == api.PhasePolicyChecked && abortedOnRefusal(rr) && watchedRecovery(rr) != nil
+			w := gitWait(rr, waitHandoffRecovery)
+			return rr.Status.Phase == api.PhasePolicyChecked && abortedOnRefusal(rr) && watchedRecovery(rr) == nil &&
+				w != nil && w.Operation == recoveryNothingToRead
 		},
 	},
 }
@@ -826,6 +831,18 @@ func recoveryWaitRow(t *testing.T, path recoveryPath, call string, kind failureK
 			got.Status.Phase, got.Status.Handoff.From.Phase, got.Status.Conditions, err)
 	}
 	c := watchedRecovery(got)
+	if w := gitWait(got, waitHandoffRecovery); c == nil && w != nil && w.Operation == recoveryNothingToRead &&
+		abortedOnRefusal(got) {
+		// The watch had nothing to read and its write that says so was stored (noteNothingToRead), before the call
+		// failed or after a conflict on it was retried from a fresh read (patchGitWaits): the refusal is gone, the
+		// wait stays, and a failure of the Kubernetes API that was not retried goes to the error backoff.
+		retried := cluster && (kind == kindConflict || kind == kindJoined) && err == nil && res.RequeueAfter > 0
+		if !retried && (err == nil || !cluster) {
+			t.Fatalf("recoverHandoff = %+v, %v after the record of nothing to read; want a retried conflict or the "+
+				"error backoff", res, err)
+		}
+		return
+	}
 	if c == nil {
 		t.Fatalf("the recovery no longer waits: conditions %+v (err %v)", got.Status.Conditions, err)
 	}

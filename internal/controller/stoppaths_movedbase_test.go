@@ -1234,32 +1234,7 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 				}
 			}
 			if kept != nil {
-				// A missing settings object is a failure of the cleanup, not a repository that left the settings: the
-				// request stays with CleanupFailing (SettingsNotFound) and its pull request open, and nothing says it was
-				// left open (#925). Once the object is back, the deletion closes its pull requests and goes.
-				got := &api.RemediationRequest{}
-				if err := r.Get(ctx, key, got); err != nil {
-					t.Fatalf("the request was let go with RemediationSettings missing: %v", err)
-				}
-				c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionCleanupFailing)
-				if c == nil || c.Reason != ReasonSettingsNotFound {
-					t.Fatalf("condition CleanupFailing %+v: want reason %s", c, ReasonSettingsNotFound)
-				}
-				if st := g.ChangeRequests()[n-1].State; st != providers.ChangeRequestOpen {
-					t.Fatalf("pull request #%d is %s while the settings are missing: want it open", n, st)
-				}
-				if left := warningsOf(recorder, EventPullRequestLeftOpen); left != 0 {
-					t.Fatalf("%d Warning Events %s while the cleanup is retried", left, EventPullRequestLeftOpen)
-				}
-				kept.ResourceVersion = ""
-				if err := r.Create(ctx, kept); err != nil {
-					t.Fatal(err)
-				}
-				for i := range 3 {
-					if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
-						t.Logf("Reconcile %d after the settings came back: %v", i, err)
-					}
-				}
+				settingsBackCloses(t, r, g, recorder, key, n, kept)
 			}
 			if err := r.Get(ctx, key, &api.RemediationRequest{}); !apierrors.IsNotFound(err) {
 				t.Fatalf("the request is still there (%v)", err)
@@ -1290,5 +1265,38 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// settingsBackCloses checks a deleted request whose RemediationSettings object is missing: a failure of the cleanup,
+// not a repository that left the settings, so the request stays with CleanupFailing (SettingsNotFound), its pull
+// request #n open and nothing says it was left open (#925). It then creates kept again and reconciles, so the
+// deletion closes the pull requests and goes.
+func settingsBackCloses(t *testing.T, r *RemediationRequestReconciler, g *fakegit.Git,
+	recorder *record.FakeRecorder, key client.ObjectKey, n int64, kept *api.RemediationSettings) {
+	t.Helper()
+	ctx := context.Background()
+	got := &api.RemediationRequest{}
+	if err := r.Get(ctx, key, got); err != nil {
+		t.Fatalf("the request was let go with RemediationSettings missing: %v", err)
+	}
+	c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionCleanupFailing)
+	if c == nil || c.Reason != ReasonSettingsNotFound {
+		t.Fatalf("condition CleanupFailing %+v: want reason %s", c, ReasonSettingsNotFound)
+	}
+	if st := g.ChangeRequests()[n-1].State; st != providers.ChangeRequestOpen {
+		t.Fatalf("pull request #%d is %s while the settings are missing: want it open", n, st)
+	}
+	if left := warningsOf(recorder, EventPullRequestLeftOpen); left != 0 {
+		t.Fatalf("%d Warning Events %s while the cleanup is retried", left, EventPullRequestLeftOpen)
+	}
+	kept.ResourceVersion = ""
+	if err := r.Create(ctx, kept); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+			t.Logf("Reconcile %d after the settings came back: %v", i, err)
+		}
 	}
 }

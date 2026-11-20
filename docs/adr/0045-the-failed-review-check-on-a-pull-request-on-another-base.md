@@ -1,6 +1,6 @@
 # ADR-0045: The failed review check on a pull request on another base
 
-- Status: Accepted
+- Status: Accepted, amended
 - Date: 2026-11-20
 
 ## Context
@@ -13,7 +13,7 @@ A check run belongs to a commit, not to a base. A passing check written while th
 
 ## Decision
 
-[![With reviewer hints on, the failed check run shadewright/review is written on the recorded head and recorded Stale in five cases: a stale plan, a cancel or a stop reads the request's own pull request open on another base, a stale plan or a cancel reads it closed on another base, a stopped holder whose own pull request is not open looks while another open pull request from its branch holds the lock and the check is still owed, and a stale plan, a cancel or a stop reads the pull request gone. Whenever the pull request is not read open on the target branch the summary is a fixed variant that promises no close. A pull request merged on another base, or read gone after a new installation of the repository, gets no check, and nothing is written with hints off or when the read fails. Pause, a target branch change, a gone repository or a failing Git host delay the write and are said in the condition ReviewCheckNotFailed. Never on another base: push, comment, merge, update of title or body. No new read and no new grant.](../assets/diagrams/review-check-other-base.svg)](../assets/diagrams/review-check-other-base.svg "Open full size")
+[![With reviewer hints on, the failed check run shadewright/review is written on the recorded head and recorded Stale in five cases: a stale plan, a cancel or a stop reads the request's own pull request open on another base, a stale plan or a cancel reads it closed on another base, a stopped holder whose own pull request is not open looks while another open pull request from its branch holds the lock and no failed check is last on the recorded head, whatever its own pull request is, and a stale plan, a cancel or a stop reads the pull request gone. Whenever the pull request is not read open on the target branch the summary is a fixed variant that promises no close. A pull request merged on another base, or read gone after a new installation of the repository, gets no check, and nothing is written with hints off or when the read fails. Pause, a target branch change, a gone repository or a failing Git host delay the write and are said in the condition ReviewCheckNotFailed. Never on another base: push, comment, merge, update of title or body. No new read and no new grant.](../assets/diagrams/review-check-other-base.svg)](../assets/diagrams/review-check-other-base.svg "Open full size")
 
 **What is written.** One check run: name `shadewright/review`, conclusion `failure`, on the recorded head commit of the request's own pull request, with reviewer hints on. This is the exact list of cases that write it on another base, and there is no other:
 
@@ -83,4 +83,13 @@ Known limits:
 
 ## Amendments
 
-None.
+2026-11-20 ([#925](https://github.com/pkalin/shadewright/issues/925), the decision of that date that replaces the per-verdict rows for a stopped request's check with one rule; it records the decision and widens nothing). Cases 4 and 5 are now one rule for the looks of a stopped holder, and the code decides from the lock and the check on the head, not from the verdict of the request's own pull request:
+
+- **The rule.** While another open pull request from the request's branch holds the lock and the latest `shadewright/review` on the recorded head is not failed, the holder's look writes the failed check there, whatever its own pull request is: open on another base, closed on any base, merged on another base, or gone. The look writes it whether or not an earlier write failed: case 4 no longer waits for condition `ReviewCheckNotFailed`. The check carries the stop's summary, which promises no close.
+- **After a new installation** of the repository nothing is written while a pull request other than the recorded one holds the lock, as case 5 says for gone.
+- **No pull request from the branch holds the lock.** Only the stop's own write remains where the list above has one (the stop for a pull request open on another base, case 2, and the stop for one read gone, case 5). No look follows, and the case stays open only as limit (c).
+- **A refused write** sets `ReviewCheckNotFailed` and is tried again at each look while the lock is held. A release of the lock ends the condition, and the executor logs at Info that a check written before the stop may stay on the head.
+
+Why: four review passes on #925 each found a new verdict that left a pass on a shared head after a stop (gone, the stop on gone, the gone write without a gate, and the request's own pull request closed while another holds the lock). A rule that reads the verdict can miss the next one; a rule that reads the lock and the head cannot. The writes stay within cases 4 and 5 as accepted: the same check, on the same recorded head, for a stopped holder whose own pull request is not open on the target branch.
+
+A failed check written for a pull request read gone by a stale plan or a cancel now has its own fixed summary, which says the pull request cannot be found and that nothing is closed, instead of the summary for another base.

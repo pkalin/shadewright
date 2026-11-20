@@ -319,7 +319,7 @@ var hmReads = []string{"open", opGet, "FindChangeRequest", opList, opBranchHead,
 
 // hmWrites are the calls that write the branch or the pull request.
 var hmWrites = map[string]bool{opCommit: true, "AppendCommit": true, opCreateBranch: true, opOpen: true,
-	"UpdateChangeRequest": true, opClose: true, opComment: true, hmOpAutoMerge: true, "CreateCheckRun": true}
+	"UpdateChangeRequest": true, opClose: true, opComment: true, hmOpAutoMerge: true, opCreateCheckRun: true}
 
 const (
 	hmOpListComments = "ListComments"
@@ -1096,7 +1096,7 @@ func (m *hmWorld) gitAfter(op string) error {
 			m.mu.Lock()
 		}
 	}
-	if m.movedBase && (op != "CreateCheckRun" || !m.lastCheckFailed()) {
+	if m.movedBase && (op != opCreateCheckRun || !m.lastCheckFailed()) {
 		// P8 (ADR-0043): nothing writes to a pull request a person moved to another base, nor to its branch; only the
 		// finalizer closes it there (CloseChangeRequestAnyBase, not a write of hmWrites). The one write allowed there
 		// is a failed review check on the head (ADR-0045, #925): moved back, the pull request cannot merge on a check

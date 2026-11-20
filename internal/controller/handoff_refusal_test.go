@@ -1193,17 +1193,22 @@ func TestRecoveryWaitKeepsTheLockForTheNeighboursOfAMergeOnAnotherBase(t *testin
 			}
 			// The one write allowed after the wait is the predecessor's failed review check on its own head, when its
 			// stop reads its pull request open on another base (stopOpenElsewhere, ADR-0045, #925).
-			if other := slices.DeleteFunc(slices.Clone(*writes), func(w string) bool { return w == "CreateCheckRun" }); len(other) != 0 {
-				t.Fatalf("writes to Git after the wait: %q, want none but a failed review check", *writes)
-			}
-			if slices.Contains(*writes, "CreateCheckRun") {
-				last := lastReviewCheck(g.CheckRuns(p.Status.PullRequest.HeadSHA))
-				if last == nil || last.Status != providers.CheckRunFailure {
-					t.Fatalf("check runs %+v on the predecessor's head: want the failed one last",
-						g.CheckRuns(p.Status.PullRequest.HeadSHA))
-				}
-			}
+			onlyFailedCheck(t, g, *writes, p.Status.PullRequest.HeadSHA)
 		})
+	}
+}
+
+// onlyFailedCheck fails t unless writes holds no write to Git but the failed review check, and that check, when
+// written, is the last one on head.
+func onlyFailedCheck(t *testing.T, g *fakegit.Git, writes []string, head string) {
+	t.Helper()
+	if other := slices.DeleteFunc(slices.Clone(writes), func(w string) bool { return w == opCreateCheckRun }); len(other) != 0 {
+		t.Fatalf("writes to Git after the wait: %q, want none but a failed review check", writes)
+	}
+	if slices.Contains(writes, opCreateCheckRun) {
+		if last := lastReviewCheck(g.CheckRuns(head)); last == nil || last.Status != providers.CheckRunFailure {
+			t.Fatalf("check runs %+v on the predecessor's head: want the failed one last", g.CheckRuns(head))
+		}
 	}
 }
 

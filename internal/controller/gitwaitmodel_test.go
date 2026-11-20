@@ -517,6 +517,7 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 		focus: st.focus, afterLift: -1, flap: st.flap}
 	// #nosec G404 -- a seeded generator, so a failing order can be run again from its seed.
 	m.liveRng = rand.New(rand.NewPCG(seed, seed^0x6a09e667f3bcc909))
+	// #nosec G404 -- seeded as above.
 	m.heldRng = rand.New(rand.NewPCG(seed, seed^0xbb67ae8584caa73b))
 	start := st.start
 	phase := api.PhaseNeedsIntervention

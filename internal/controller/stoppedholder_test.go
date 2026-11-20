@@ -35,6 +35,9 @@ import (
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 )
 
+// ownClosed is the state of stoppedHolderWorld's own pull request closed on the target branch.
+const ownClosed = "closed"
+
 // stoppedHolderWorld is a stopped holder (NeedsIntervention, lock held) with reviewer hints on whose recorded head has
 // a passing review check written before the stop. own puts its own pull request in that state; another pull request
 // from its branch, without the marker, is open on the target branch and keeps the lock.
@@ -52,7 +55,7 @@ func stoppedHolderWorld(t *testing.T, own string) (*RemediationRequestReconciler
 		Status: providers.CheckRunSuccess, Title: "passed before the stop"}); err != nil {
 		t.Fatal(err)
 	}
-	if own != "closed" {
+	if own != ownClosed {
 		if err := g.CreateBranch(ctx, movedBranch, head); err != nil {
 			t.Fatal(err)
 		}
@@ -61,7 +64,7 @@ func stoppedHolderWorld(t *testing.T, own string) (*RemediationRequestReconciler
 		}
 	}
 	switch own {
-	case "closed", "closed on another base":
+	case ownClosed, "closed on another base":
 		if err := g.Close(pr.Number); err != nil {
 			t.Fatal(err)
 		}
@@ -94,7 +97,7 @@ func stoppedHolderWorld(t *testing.T, own string) (*RemediationRequestReconciler
 // since that pull request can merge the head on it. On the branch before this rule, the look wrote nothing for its own
 // pull request closed or merged, and the pass stayed (pipeline findings 1 and 8).
 func TestStoppedHolderFailsItsCheckWhateverItsOwnPullRequest(t *testing.T) {
-	for _, own := range []string{"closed", "closed on another base", "merged on another base", "open on another base"} {
+	for _, own := range []string{ownClosed, "closed on another base", "merged on another base", "open on another base"} {
 		t.Run(own, func(t *testing.T) {
 			r, g, get, head := stoppedHolderWorld(t, own)
 			if _, err := r.checkHeld(context.Background(), get()); err != nil {
@@ -129,7 +132,7 @@ func TestStoppedHolderFailsItsCheckWhateverItsOwnPullRequest(t *testing.T) {
 // A refused write of the stopped holder's failed check sets ReviewCheckNotFailed, and the next look while the lock is
 // held tries it again and removes the condition once it is written (decision of 2026-11-20 on #925, "one rule").
 func TestStoppedHolderRetriesARefusedCheckWhileTheLockIsHeld(t *testing.T) {
-	r, g, get, head := stoppedHolderWorld(t, "closed")
+	r, g, get, head := stoppedHolderWorld(t, ownClosed)
 	refuse := true
 	g.SetFail(func(op string) error {
 		if refuse && op == opCreateCheckRun {
@@ -161,7 +164,7 @@ func TestStoppedHolderRetriesARefusedCheckWhileTheLockIsHeld(t *testing.T) {
 // and a check written before the stop may stay the latest on the head; the release says so in the log at Info
 // (releaseLock). Before, the condition went with no log line and no Event.
 func TestLockReleaseLogsAFailedCheckLeftUnwritten(t *testing.T) {
-	r, g, get, _ := stoppedHolderWorld(t, "closed")
+	r, g, get, _ := stoppedHolderWorld(t, ownClosed)
 	g.SetFail(func(op string) error {
 		if op == opCreateCheckRun {
 			return &providers.RetryableError{Err: errors.New("status 502: bad gateway")}

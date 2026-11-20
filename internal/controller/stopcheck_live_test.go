@@ -215,7 +215,7 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 		{name: "read fails", over: true, fail: opReviewCheckRun, unread: true},
 		{name: "read fails on the failed check", fail: opReviewCheckRun, unread: true},
 		{name: "settings name another branch", branchChanged: true, unread: true},
-		{name: "write fails", over: true, fail: "CreateCheckRun", note: true},
+		{name: "write fails", over: true, fail: opCreateCheckRun, note: true},
 		{name: "failed last ends the note", noted: true},
 		{name: "read fails keeps the note", over: true, fail: opReviewCheckRun, noted: true, note: true, unread: true},
 	}

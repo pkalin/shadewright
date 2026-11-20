@@ -690,8 +690,6 @@ func acquire(rr *remediationv1alpha1.RemediationRequest) {
 // the lock; a merge without its commit, or an open pull request with the predecessor's own head, releases it with its
 // handoff Aborted; any other open pull request keeps it; a failed read keeps it and is retried visibly. Only when that
 // read settles nothing (closed, gone) does the verdict of the look decide. The end itself never releases the lock.
-//
-//nolint:gocyclo // main's branch-change and moved-base cases meet the recovery's read here; #925 moves the verdicts into one decision.
 func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	reading := openReadWait(rr)

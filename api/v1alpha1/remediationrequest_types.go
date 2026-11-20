@@ -473,20 +473,20 @@ const (
 	// entry; an entry past its end is ended at the start of the next reconcile. A failure of the Kubernetes API
 	// never sets it. It is removed with the last entry.
 	ConditionGitReadRetry = "GitReadRetry"
-	// ConditionReviewCheckNotFailed is True, with reviewer hints on, while a request that stopped with its own pull
-	// request open (on the target branch or on a base a person moved it to) could not fail the check run
-	// shadewright/review on its head (#925), so a check written before the stop may still show on the pull request.
-	// The reason says why: TargetBranchChanged, RepositoryUnavailable, RepositoryUnusable or SettingsNotFound while
-	// the settings do not let the executor write to the repository of the plan, WritesPaused while RemediationSettings
-	// spec.paused holds Git writes, GitForbidden or GitRejected when the Git host refused the write for good,
-	// GitUnauthorized when it rejected the App's credentials (a 401), GitNotFound when it answered 404, and
-	// GitFailed for any other failure of the Git host. The message names the pull request, never the Git host's
-	// answer. The write is tried again at each look of the stopped request, every 10
-	// minutes while it holds the lock; the condition is removed when the failed check is written and recorded as
-	// Stale, by a look that reads the failed check as the latest on the head, and by the write that ends the looks: a look that finds the pull request closed, merged or gone while
-	// no other open pull request from the request's branch keeps the lock (one that does has the same head, and the
-	// write is tried on), the release of the lock, a recorded merge, or the first write of a deletion. One Warning
-	// Event, ReviewCheckNotFailed, is recorded when it is set or its reason changes.
+	// ConditionReviewCheckNotFailed is True, with reviewer hints on, while a stopped request that holds the target lock
+	// could not fail the check run shadewright/review on its recorded head (#925), so a check written before the stop
+	// may still show on a pull request from its branch. The look writes it whatever the request's own pull request is
+	// (open on any base, closed, merged elsewhere or gone) while the lock is held, by that pull request or by another
+	// open one from the branch. The reason says why: TargetBranchChanged, RepositoryUnavailable, RepositoryUnusable or
+	// SettingsNotFound while the settings do not let the executor write to the repository of the plan, WritesPaused
+	// while RemediationSettings spec.paused holds Git writes, GitForbidden or GitRejected when the Git host refused the
+	// write for good, GitUnauthorized when it rejected the App's credentials (a 401), GitNotFound when it answered 404,
+	// and GitFailed for any other failure of the Git host. The message names the pull request, never the Git host's
+	// answer. The write is tried again at each look of the stopped request, every 10 minutes while it holds the lock;
+	// the condition is removed when the failed check is written and recorded as Stale, by a look that reads the failed
+	// check as the latest on the head, by the release of the lock (which logs that an earlier check may stay), a
+	// recorded merge, or the first write of a deletion. One Warning Event, ReviewCheckNotFailed, is recorded when it is
+	// set or its reason changes.
 	ConditionReviewCheckNotFailed = "ReviewCheckNotFailed"
 )
 

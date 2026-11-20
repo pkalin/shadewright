@@ -261,7 +261,9 @@ func TestSettlementMovedBaseMessageBoundsTheBase(t *testing.T) {
 	for name, base := range map[string]string{
 		"secret":  "hotfix/credential=review-secret",
 		"control": "x\nReleased the lock\x1b[31m",
-		"long":    strings.Repeat("b", 40000),
+		// Sixteen times maxHostBranchBytes and four times the bound below: a base kept whole fails the check as a
+		// longer one would, and the redaction of the whole name (before the cut) stays short under -race (#961).
+		"long": strings.Repeat("b", 4096),
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, g, rr, clock, n := movedBaseWorld(t, "branch")

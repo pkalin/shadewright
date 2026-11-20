@@ -1516,7 +1516,7 @@ Used by: [VerificationReset](#verificationreset), [WindowReset](#windowreset).
 | `NotAvailable` | ResetNotAvailable: the target reports other available replicas than desired, fewer or more (executor). No evidence. |
 | `StaleReport` | ResetStaleReport: the report is missing or its sample counter stopped rising (executor). No evidence. |
 | `ReportMismatch` | ResetReportMismatch: the report's spec names another request, merge commit, target or template revision (executor). No evidence. |
-| `ExecutorRestarted` | ResetExecutorRestarted: a new executor process (a restart or a leader change) found the window open and opened by no check of its own, a span no check of its own covers (executor, #895). No evidence. |
+| `ExecutorRestarted` | ResetExecutorRestarted: a new executor process (a restart or a leader change) found the window open and opened by no check of its own, a span no check of its own covers (the executor). No evidence. |
 
 ### ResolvedSource
 

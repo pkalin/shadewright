@@ -60,7 +60,7 @@ const (
 	// (executor). No evidence.
 	ResetReportMismatch ResetReason = "ReportMismatch"
 	// ResetExecutorRestarted: a new executor process (a restart or a leader change) found the window open and
-	// opened by no check of its own, a span no check of its own covers (executor, #895). No evidence.
+	// opened by no check of its own, a span no check of its own covers (the executor). No evidence.
 	ResetExecutorRestarted ResetReason = "ExecutorRestarted"
 )
 

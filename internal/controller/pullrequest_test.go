@@ -7527,7 +7527,8 @@ var _ = Describe("RemediationRequest pull request step", func() {
 		// on the target branch: it is the request's own
 		// recorded commit, and without the check an earlier pass there stays while another pull request from the
 		// branch is open (decision of 2026-11-20 on #925 replacing point 2). Through a new installation of the App
-		// (#290) gone writes nothing (failCheckNotOursReinstalled): goneReinstalled is that cell. "stop" is the stop's
+		// (#290) gone writes nothing for a stale plan or a cancel (failCheckNotOursReinstalled), while the stop's check
+		// is written there too (ADR-0046): goneReinstalled is that cell. "stop" is the stop's
 		// check (failStoppedCheck, stoppedCheckTitle), whose summary promises no close on any base: the watch writes it
 		// when it stops the request for its pull request read gone, as stale and cancel do (decision of 2026-11-20 on
 		// #925 extending the replacement of point 2 to the stop), and when it reads the pull request open on another base.
@@ -7557,20 +7558,21 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				// that reconcile: the stopped holder's later looks write the stop's check (failStoppedCheck), whose
 				// summary promises no close. Gone never reaches the cancel's check: the look at the pull request
 				// before the cancel reads it gone and stops the request with ChangeRequestGone, which writes the
-				// stop's check; through a new installation nothing. "the check step of a cancel" proves the row for
-				// the cancel's own check.
+				// stop's check, through a new installation too (decision of 2026-11-21 on #925, ADR-0046). "the
+				// check step of a cancel" proves the row for the cancel's own check.
 				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
 					isElsewhere: none, isGone: stop, mergedThere: none, failedRead: none},
-				goneReinstalled: none,
+				goneReinstalled: stop,
 			},
 			pathWatch: {
 				// The watch of an open request: it stops the request for its pull request read gone
 				// (ChangeRequestGone) or open on another base (ChangeRequestOnOtherBase), each with the stop's check;
-				// closed, merged there or a failed read write nothing in that reconcile.
+				// closed, merged there or a failed read write nothing in that reconcile. The stop on gone writes its
+				// check through a new installation too (decision of 2026-11-21 on #925, ADR-0046).
 				act: func(own, other int64) { _, _ = reconcileResult() },
 				want: map[verdictCase]string{isOpen: none, isClosed: none, closedThere: none,
 					isElsewhere: stop, isGone: stop, mergedThere: none, failedRead: none},
-				goneReinstalled: none,
+				goneReinstalled: stop,
 			},
 			"the check step of a cancel": {
 				// failCancelCheck on its own, as cancelOpen calls it before the close: a pull request that goes

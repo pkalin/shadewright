@@ -193,7 +193,7 @@ func TestStoppedCheckRefusalIsNotGitFailed(t *testing.T) {
 				return nil
 			})
 			r.Recorder = record.NewFakeRecorder(10)
-			if err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention), false); err == nil {
+			if err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention)); err == nil {
 				t.Fatal("a failed write of the stopped check returned no error")
 			}
 			cond := meta.FindStatusCondition(p.Status.Conditions, api.ConditionReviewCheckNotFailed)

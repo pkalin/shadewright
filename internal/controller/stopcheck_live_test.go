@@ -260,7 +260,7 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 				looks = 2
 			}
 			for range looks {
-				err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention), false)
+				err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention))
 				if err != nil && (!c.note || c.unread) {
 					t.Fatalf("failStoppedCheck: %v", err)
 				}
@@ -390,7 +390,7 @@ func TestFailedLiveReadLeavesTheStopsCheckWhileAnotherPullRequestHolds(t *testin
 	if err := live.Get(ctx, client.ObjectKeyFromObject(p), stopped); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.failCheckAfterLook(ctx, stopped, &holding); err != nil {
+	if err := r.failCheckAfterLook(ctx, stopped); err != nil {
 		t.Fatal(err)
 	}
 	if got := g.CheckRuns(head); got[len(got)-1].Status != providers.CheckRunFailure {
@@ -432,17 +432,10 @@ func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosed
 			if err != nil {
 				t.Fatal(err)
 			}
-			var holding *providers.ChangeRequest
 			if tc.holding {
-				n, err := g.AddOpenChangeRequest(cr.HeadBranch, mainBranch, "opened by a person")
-				if err != nil {
+				if _, err := g.AddOpenChangeRequest(cr.HeadBranch, mainBranch, "opened by a person"); err != nil {
 					t.Fatal(err)
 				}
-				other, err := g.GetChangeRequest(ctx, n)
-				if err != nil {
-					t.Fatal(err)
-				}
-				holding = &other
 			}
 			p.Status.Phase = api.PhaseNeedsIntervention
 			p.Status.HoldsTarget = new(tc.holding)
@@ -452,7 +445,7 @@ func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosed
 					Message: notWrittenYet})
 			}
 			runs := len(g.CheckRuns(head))
-			if err := r.failCheckAfterLook(ctx, p, holding); err != nil {
+			if err := r.failCheckAfterLook(ctx, p); err != nil {
 				t.Fatal(err)
 			}
 			got := g.CheckRuns(head)[runs:]
@@ -478,11 +471,11 @@ func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosed
 
 // A stopped holder whose look reads its own pull request gone (decision of 2026-11-20 on #925 extending the
 // replacement of point 2 to the stop, ADR-0045): while the lock is kept, here by another open pull request from the
-// branch, the look writes the stop's failed check on the recorded head (stoppedCheckUnlessReinstalled), and a failed
+// branch, the look writes the stop's failed check on the recorded head (failCheckAfterLook), and a failed
 // write sets condition ReviewCheckNotFailed and is tried again at the next look. Once written and still last, a look
 // writes nothing; when the Git host shows another state last, it writes the failed check once more. A look that
-// released the lock writes nothing and ends the note (lockverdict.Release), and so does one through a new
-// installation of the plan's repository (#290).
+// released the lock writes nothing and ends the note (lockverdict.Release). Through a new installation of the plan's
+// repository (#290) the look writes the same check (decision of 2026-11-21 on #925, ADR-0046).
 func TestStoppedHolderLookOnGoneFailsItsCheck(t *testing.T) {
 	type look struct {
 		failWrite bool
@@ -504,7 +497,7 @@ func TestStoppedHolderLookOnGoneFailsItsCheck(t *testing.T) {
 		{name: "written and still last", written: true, looks: []look{{wantRuns: 0}, {wantRuns: 0}}},
 		{name: "written and another state last", written: true, passAfter: true, looks: []look{{wantRuns: 1}, {wantRuns: 0}}},
 		{name: "the look released the lock", released: true, looks: []look{{wantRuns: 0}}},
-		{name: "through a new installation", reinstalled: true, looks: []look{{wantRuns: 0}}},
+		{name: "through a new installation", reinstalled: true, looks: []look{{wantRuns: 1}, {wantRuns: 0}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -523,17 +516,10 @@ func TestStoppedHolderLookOnGoneFailsItsCheck(t *testing.T) {
 			if err := g.Close(cr.Number); err != nil {
 				t.Fatal(err)
 			}
-			var holding *providers.ChangeRequest
 			if !tc.released {
-				n, err := g.AddOpenChangeRequest(cr.HeadBranch, mainBranch, "opened by a person")
-				if err != nil {
+				if _, err := g.AddOpenChangeRequest(cr.HeadBranch, mainBranch, "opened by a person"); err != nil {
 					t.Fatal(err)
 				}
-				other, err := g.GetChangeRequest(ctx, n)
-				if err != nil {
-					t.Fatal(err)
-				}
-				holding = &other
 			}
 			p.Status.Phase = api.PhaseNeedsIntervention
 			p.Status.HoldsTarget = new(!tc.released)
@@ -553,7 +539,7 @@ func TestStoppedHolderLookOnGoneFailsItsCheck(t *testing.T) {
 					return nil
 				})
 				runs := len(g.CheckRuns(head))
-				if err := r.failCheckAfterLook(ctx, p, holding); err != nil {
+				if err := r.failCheckAfterLook(ctx, p); err != nil {
 					t.Fatalf("look %d: %v", i, err)
 				}
 				got := g.CheckRuns(head)[runs:]
@@ -616,7 +602,7 @@ func TestStoppedCheckWrittenAsItsTimeRunsOutIsRecorded(t *testing.T) {
 		}
 		return nil
 	})
-	if err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention), false); err != nil {
+	if err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention)); err != nil {
 		t.Fatalf("failStoppedCheck: %v", err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale {

@@ -53,3 +53,42 @@ func TestSettleRecordedLogsTheEndOfReviewCheckNotFailed(t *testing.T) {
 		}
 	}
 }
+
+// Finding R5 of the ADR-0046 run on #925 (decision of 2026-11-21): a look of a stopped holder whose review check is no
+// longer its own, a handoff intent standing or reviewer hints off, ends condition ReviewCheckNotFailed and writes
+// nothing, so a check written before the stop may stay the latest on the head; the end is said in the log at Info,
+// as every other end of the looks says it. Before, the condition went silently.
+func TestStoppedHolderLogsTheEndOfItsNoteWhenItOwnsNoCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		hints bool
+	}{{name: "a handoff intent", hints: true}, {name: "hints off"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &api.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "rr"}}
+			rr.Status.Phase = api.PhaseNeedsIntervention
+			rr.Status.HoldsTarget = new(true)
+			rr.Status.PullRequest = &api.PullRequestStatus{Number: 7, HeadSHA: strings.Repeat("a", 40)}
+			if tc.hints {
+				rr.Status.Handoff = &api.Handoff{To: &api.OutgoingHandoff{Phase: api.HandoffIntent}}
+			}
+			meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionReviewCheckNotFailed,
+				Status: metav1.ConditionTrue, Reason: ReasonGitFailed, Message: "m"})
+			ctx, lines := loggedCtx()
+			if err := (&RemediationRequestReconciler{ReviewerHints: tc.hints}).failCheckAfterLook(ctx, rr); err != nil {
+				t.Fatalf("failCheckAfterLook: %v", err)
+			}
+			if meta.FindStatusCondition(rr.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil {
+				t.Fatal("ReviewCheckNotFailed stays on a request that owns no review check")
+			}
+			var found int
+			for _, l := range *lines {
+				if strings.Contains(l, "may stay the latest on its head") && strings.Contains(l, ReasonGitFailed) {
+					found++
+				}
+			}
+			if found != 1 {
+				t.Fatalf("%d Info lines say the condition ended, want 1: %q", found, *lines)
+			}
+		})
+	}
+}

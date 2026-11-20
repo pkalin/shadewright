@@ -325,8 +325,8 @@ func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 // request can still be closed there; but every caller reads the pull request through that entry with this request's
 // marker (request UID and plan digest, invariant 5) before it fails the review check or closes it, and the provider
 // opened for it writes nothing else (openPlanEntry). One write is the exception: the failed check of a stopped
-// holder's look that settles nothing yet (failCheckAfterUnsettledLook, ADR-0046) follows no read that confirmed the
-// pull request, and names only the recorded head. The entry applies only while stale holds (the stale mark, or
+// holder after any look that leaves the lock held, and of its stop for a pull request read gone (failStoppedCheck,
+// ADR-0046), follows no read that confirmed a pull request as the request's, and names only the recorded head. The entry applies only while stale holds (the stale mark, or
 // staleCleanupStopped, as planEntry passes it). Another URL is never accepted: closing a number elsewhere could
 // close someone else's pull request.
 func cleanupRepository(settings *remediationv1alpha1.RemediationSettings, rr *remediationv1alpha1.RemediationRequest,
@@ -1842,7 +1842,7 @@ func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr
 	if cancelRequested(rr) {
 		return errOpenElsewhere
 	}
-	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestOnOtherBase, false); ctx.Err() != nil ||
+	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestOnOtherBase); ctx.Err() != nil ||
 		isClusterError(err) {
 		return err
 	}
@@ -1854,12 +1854,13 @@ func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr
 // NeedsIntervention with ChangeRequestGone, cancelled or not. In the same step the review check of the recorded head
 // is failed (failStoppedCheck, decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop,
 // ADR-0045): the head is the request's own commit, and another pull request from its branch could merge it on a pass
-// written before the stop. Through a new installation of the plan's repository nothing is written. A failed write does not hold the stop: its status write carries condition
+// written before the stop. Through a new installation of the plan's repository the same check is written on the same
+// recorded head (decision of 2026-11-21 on #925, ADR-0046). A failed write does not hold the stop: its status write carries condition
 // ReviewCheckNotFailed, and a look of the stopped holder that keeps the lock tries it again. A cancelled reconcile and
 // a failure of the Kubernetes API are returned, for the error backoff, before anything is written.
 func (r *RemediationRequestReconciler) stopGone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	v changeVerdict) error {
-	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestGone, true); ctx.Err() != nil ||
+	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestGone); ctx.Err() != nil ||
 		isClusterError(err) {
 		return err
 	}
@@ -2491,12 +2492,15 @@ func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *re
 	}
 	// The deletion ends the looks of a stopped request, so nothing tries its failed review check again: the close
 	// below takes over, and says so with its own conditions when it fails (#925). A check written before the stop may
-	// stay the latest on the head, also for an open pull request from the branch the close does not take (#984), so an
-	// end of condition ReviewCheckNotFailed is said in the log at Info once the write that removes it went through.
+	// stay the latest on the head, also for an open pull request from the branch the close does not take (#984, ADR-0046
+	// limit (a)): whenever condition ReviewCheckNotFailed was set or the recorded head is not known to show the failed
+	// check (checkMayStay), that is said in the log at Info once the first write of the deletion went through.
 	var ended *metav1.Condition
 	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed); c != nil {
 		note := *c
 		ended = &note
+	} else if r.checkMayStay(rr) {
+		ended = &metav1.Condition{Reason: "NotRecordedStale"}
 	}
 	if endCheckNote(rr) {
 		marked = true

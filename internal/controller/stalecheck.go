@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -243,11 +244,12 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // can then merge that commit on a check written before the stop (#925, ADR-0045). Its callers: the step that stops
 // the request for its pull request open on another base (stopOpenElsewhere), the watch's stop for one read gone
 // (ChangeRequestGone), and every look of a stopped holder that leaves the lock held (failCheckAfterLook, the one rule
-// of the decision of 2026-11-20 on #925), so a stop for any other reason gets it at its first look, and a failed
-// write is tried again at the next. With skipReinstalled, a repository reached through a new installation of the App
-// (#290) gets nothing and condition ReviewCheckNotFailed is removed, with a line at Info when it was set
-// (endCheckNoteLogged): the pull request read gone, or another one that
-// keeps the lock, is not tied to the request there. Once Stale is recorded on the head, such a look
+// of the decision of 2026-11-21 on #925), so a stop for any other reason gets it at its first look, and a failed
+// write is tried again at the next. A repository reached through a new installation of the App (#290) gets the same
+// write, whichever pull request keeps the lock (ADR-0046): it names only the recorded head, by its full object ID from
+// status, and can only block that commit. A request that owns no review check (reviewer hints off, a handoff intent,
+// the pull request handed over) writes nothing, and condition ReviewCheckNotFailed is removed with a line at Info when
+// it was set (endCheckNoteLogged), since no look tries the check again. Once Stale is recorded on the head, such a look
 // reads the latest review check of the head (stoppedCheckShown) and writes the failed check again only when the Git
 // host shows another state last or none (decision of 2026-11-20 on #925): one read and at most one write per look,
 // bounded by those looks (heldRecheckInterval while the lock is held), with no polling of its own. Only a failed
@@ -266,9 +268,9 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // since a branch change permits reads only (#771): that is said the same way, until the entry names the branch again. A cancelled reconcile is only returned, and so is a
 // failure of the Kubernetes API (reading the settings), for the error backoff.
 func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	reason string, skipReinstalled bool) error {
+	reason string) error {
 	if !r.ownsReviewCheck(rr) {
-		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
+		endCheckNoteLogged(ctx, rr, "the request owns no review check: reviewer hints off or a handoff")
 		return nil
 	}
 	recorded := staleOnHead(rr)
@@ -277,15 +279,7 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 		pr.Number, "head", pr.HeadSHA)
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	defer cancel()
-	git, _, reinstalled, err := r.openPlanRepositoryFor(stepCtx, rr)
-	if err == nil && reinstalled && skipReinstalled {
-		// Through a new installation of the plan's repository (#290) the pull request read gone, or the one that
-		// keeps the lock, is not tied to the request there, so nothing is written and nothing is owed. The looks no
-		// longer try the check, so an end of condition ReviewCheckNotFailed is said in the log at Info.
-		endCheckNoteLogged(ctx, rr, "the repository is reached through a new installation")
-		r.stoppedCheckLooks.Delete(client.ObjectKeyFromObject(rr))
-		return nil
-	}
+	git, _, _, err := r.openPlanRepositoryFor(stepCtx, rr)
 	if recorded {
 		var again bool
 		if again, err = stoppedCheckShown(stepCtx, git, pr.HeadSHA, err); !again {
@@ -402,14 +396,24 @@ func (r *RemediationRequestReconciler) stoppedCheckUnread(ctx, stepCtx context.C
 	return nil
 }
 
+// checkMayStay reports whether a stopped holder's recorded head is not known to show the stop's failed review check:
+// rr owns its review check (ownsReviewCheck), no longer progresses, holds the target lock, has no merge recorded, and
+// records no state Stale on that head. A deletion of such a request writes no check (ADR-0046 limit (a), #984), so a
+// check written before the stop may stay the latest there.
+func (r *RemediationRequestReconciler) checkMayStay(rr *remediationv1alpha1.RemediationRequest) bool {
+	return r.ownsReviewCheck(rr) && !progresses(rr) && ptr.Deref(rr.Status.HoldsTarget, false) &&
+		!mergeRecorded(rr) && !staleOnHead(rr)
+}
+
 // endCheckNote removes condition ReviewCheckNotFailed from rr's status in memory, for the write that ends the looks
 // of a stopped request: the condition says the failed check is tried again at the next look, so it is True only
 // while the request's own pull request, or another open pull request from its branch that keeps the lock, is open
 // and its failed check is not written (#925). Its callers: a look that reads the pull request not open while no other
-// open pull request keeps the lock (failCheckAfterLook), a look through a new installation while a pull request other
-// than the recorded one keeps it (failStoppedCheck), a write that records the merge (settleRecorded), every release of
-// the lock (lockverdict.Release, which removes it itself) and the first write of a deletion (beginFinalize). Each of
-// them says the end in the log at Info when the condition was set (logCheckNoteEnd).
+// open pull request keeps the lock (failCheckAfterLook), a look of a request that owns no review check any more
+// (failStoppedCheck), a write that records the merge (settleRecorded), every release of the lock
+// (lockverdict.Release, which removes it itself) and the first write of a deletion (beginFinalize). Each of them says
+// the end in the log at Info when the condition was set (logCheckNoteEnd); the deletion says it also when the
+// condition was not set but the recorded head is not known to show the failed check (checkMayStay).
 func endCheckNote(rr *remediationv1alpha1.RemediationRequest) bool {
 	return meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 }

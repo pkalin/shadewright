@@ -42,6 +42,9 @@ import (
 // ownClosed is the state of stoppedHolderWorld's own pull request closed on the target branch.
 const ownClosed = "closed"
 
+// ownOpenElsewhere is the state of stoppedHolderWorld's own pull request open on another base.
+const ownOpenElsewhere = "open on another base"
+
 // stoppedHolderWorld is a stopped holder (NeedsIntervention, lock held) with reviewer hints on whose recorded head has
 // a passing review check written before the stop. own puts its own pull request in that state; another pull request
 // from its branch, without the marker, is open on the target branch and keeps the lock.
@@ -101,7 +104,7 @@ func stoppedHolderWorld(t *testing.T, own string) (*RemediationRequestReconciler
 // since that pull request can merge the head on it. On the branch before this rule, the look wrote nothing for its own
 // pull request closed or merged, and the pass stayed (pipeline findings 1 and 8).
 func TestStoppedHolderFailsItsCheckWhateverItsOwnPullRequest(t *testing.T) {
-	for _, own := range []string{ownClosed, "closed on another base", "merged on another base", "open on another base"} {
+	for _, own := range []string{ownClosed, "closed on another base", "merged on another base", ownOpenElsewhere} {
 		t.Run(own, func(t *testing.T) {
 			r, g, get, head := stoppedHolderWorld(t, own)
 			if _, err := r.checkHeld(context.Background(), get()); err != nil {
@@ -279,6 +282,22 @@ func TestLockReleaseLogsAFailedCheckLeftUnwritten(t *testing.T) {
 // shows its own pull request deleted from the host, so the next look is a first look at a missing number.
 func reinstalledStoppedHolder(t *testing.T, r *RemediationRequestReconciler, get func() *api.RemediationRequest) {
 	t.Helper()
+	reinstallStoppedHolder(t, r, get)
+	n := get().Status.PullRequest.Number
+	open := r.OpenRepository
+	r.OpenRepository = func(ctx context.Context, repo api.GitRepository) (providers.GitProvider, error) {
+		git, err := open(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		return &deletedChangeRequest{GitProvider: git, n: n}, nil
+	}
+}
+
+// reinstallStoppedHolder makes stoppedHolderWorld's request a stale cleanup stopped on a refusal of the Git host
+// (staleCleanupStopped), whose plan's repository the settings now name under a new installation of the App (#290).
+func reinstallStoppedHolder(t *testing.T, r *RemediationRequestReconciler, get func() *api.RemediationRequest) {
+	t.Helper()
 	ctx := context.Background()
 	live := get()
 	meta.SetStatusCondition(&live.Status.Conditions, metav1.Condition{Type: api.ConditionPlanFresh,
@@ -297,14 +316,82 @@ func reinstalledStoppedHolder(t *testing.T, r *RemediationRequestReconciler, get
 	if _, reinstalled, ok := cleanupRepository(s, get(), true); !ok || !reinstalled || !staleCleanupStopped(get()) {
 		t.Fatal("setup: the request does not reach its repository through a new installation")
 	}
-	n := live.Status.PullRequest.Number
-	open := r.OpenRepository
-	r.OpenRepository = func(ctx context.Context, repo api.GitRepository) (providers.GitProvider, error) {
-		git, err := open(ctx, repo)
-		if err != nil {
-			return nil, err
-		}
-		return &deletedChangeRequest{GitProvider: git, n: n}, nil
+}
+
+// reversedListing is the repository seen through gitView with every listing of change requests in reverse order, so
+// the open pull request opened last comes first.
+type reversedListing struct{ providers.GitProvider }
+
+func (l *reversedListing) ListChangeRequests(ctx context.Context, head string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	all, err := l.GitProvider.ListChangeRequests(ctx, head, openOnly)
+	slices.Reverse(all)
+	return all, err
+}
+
+func (l *reversedListing) ListChangeRequestsAnyBase(ctx context.Context, head string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	all, err := l.GitProvider.ListChangeRequestsAnyBase(ctx, head, openOnly)
+	slices.Reverse(all)
+	return all, err
+}
+
+// The decision of 2026-11-21 on #925 (one rule, no installation exception, ADR-0046): a stopped holder that reaches
+// its repository through a new installation and whose look settles the lock held writes the stop's failed check on
+// the recorded head, whichever pull request from its branch keeps the lock and in whatever order the Git host lists
+// them. Before, a settled look wrote nothing when the pull request chosen as holding the lock was not the recorded one:
+// an unmarked open pull request kept the pass on the head, also when listed before the recorded one, open as well.
+func TestStoppedHolderFailsItsCheckThroughANewInstallationAtASettledLook(t *testing.T) {
+	cases := []struct {
+		name, own string
+		// reversed lists the unmarked pull request before the recorded one; alone closes the unmarked one.
+		reversed, alone bool
+	}{
+		{name: "own closed, an unmarked one keeps the lock", own: ownClosed},
+		{name: "own open on another base, an unmarked one listed first", own: ownOpenElsewhere, reversed: true},
+		{name: "own open on another base, an unmarked one listed after", own: ownOpenElsewhere},
+		{name: "own open on another base, no unmarked one", own: ownOpenElsewhere, alone: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, get, head := stoppedHolderWorld(t, tc.own)
+			if tc.alone {
+				for _, cr := range g.ChangeRequests() {
+					if cr.State == providers.ChangeRequestOpen && cr.Number != get().Status.PullRequest.Number {
+						if err := g.Close(cr.Number); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
+			reinstallStoppedHolder(t, r, get)
+			if tc.reversed {
+				open := r.OpenRepository
+				r.OpenRepository = func(ctx context.Context, repo api.GitRepository) (providers.GitProvider, error) {
+					git, err := open(ctx, repo)
+					if err != nil {
+						return nil, err
+					}
+					return &reversedListing{GitProvider: git}, nil
+				}
+			}
+			if _, err := r.checkHeld(context.Background(), get()); err != nil {
+				t.Fatalf("checkHeld: %v", err)
+			}
+			live := get()
+			if !holdsLock(live) {
+				t.Fatalf("the look released the lock an open pull request keeps: %s", conditionsOf(live))
+			}
+			if last := lastReviewCheck(g.CheckRuns(head)); last == nil || last.Status != providers.CheckRunFailure ||
+				last.Title != stoppedCheckTitle {
+				t.Fatalf("check runs on the recorded head %+v: want the stop's failed check last", g.CheckRuns(head))
+			}
+			if !staleOnHead(live) || meta.FindStatusCondition(live.Status.Conditions,
+				api.ConditionReviewCheckNotFailed) != nil {
+				t.Fatalf("Stale on head %v, conditions %s: want Stale recorded and no ReviewCheckNotFailed",
+					staleOnHead(live), conditionsOf(live))
+			}
+		})
 	}
 }
 
@@ -332,11 +419,13 @@ func TestStoppedHolderFailsItsCheckThroughANewInstallationAtAnUnsettledLook(t *t
 	}
 }
 
-// Finding DR-2 of the second ADR run on #925: the same stopped holder whose write at the unsettled look was refused
+// Finding DR-2 of the second ADR run on #925, under the decision of 2026-11-21 (ADR-0046, one rule with no
+// installation exception): the same stopped holder whose write at the unsettled look was refused
 // (ReviewCheckNotFailed set) looks again; that look settles the lock, held by the other open pull request from the
-// branch, which the new installation does not tie to the request. It writes nothing, ends the condition, and says so
-// in the log at Info, since no look tries the check again (ADR-0045 as accepted). Before, the condition went silently.
-func TestStoppedHolderLogsTheEndOfItsNoteThroughANewInstallation(t *testing.T) {
+// branch. It writes the stop's failed check on the recorded head again, records Stale and removes the condition.
+// Before, it wrote nothing, since the new installation does not tie that pull request to the request, and the pass
+// written before the stop stayed last.
+func TestStoppedHolderRetriesItsCheckThroughANewInstallationAtASettledLook(t *testing.T) {
 	r, g, get, head := stoppedHolderWorld(t, ownClosed)
 	reinstalledStoppedHolder(t, r, get)
 	refuse := true
@@ -360,29 +449,21 @@ func TestStoppedHolderLogsTheEndOfItsNoteThroughANewInstallation(t *testing.T) {
 		t.Fatal("setup: the first look at the missing number is not kept")
 	}
 	r.looks().note(get(), n, first.Add(-confirmWait-time.Second))
-	runs := len(g.CheckRuns(head))
-	ctx, lines := loggedCtx()
-	if _, err := r.checkHeld(ctx, get()); err != nil {
+	if _, err := r.checkHeld(context.Background(), get()); err != nil {
 		t.Fatalf("checkHeld: %v", err)
 	}
 	live := get()
 	if !holdsLock(live) {
 		t.Fatalf("the settled look released the lock another open pull request keeps: %s", conditionsOf(live))
 	}
-	if got := g.CheckRuns(head); len(got) != runs {
-		t.Fatalf("the settled look through a new installation wrote %+v: want nothing", got[runs:])
+	if last := lastReviewCheck(g.CheckRuns(head)); last == nil || last.Status != providers.CheckRunFailure ||
+		last.Title != stoppedCheckTitle {
+		t.Fatalf("check runs on the recorded head %+v: want the stop's failed check last", g.CheckRuns(head))
 	}
-	if c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed); c != nil {
-		t.Fatalf("ReviewCheckNotFailed %+v after the settled look: want it ended", c)
-	}
-	var found int
-	for _, l := range *lines {
-		if strings.Contains(l, "whose failed review check was not written") && strings.Contains(l, "new installation") {
-			found++
-		}
-	}
-	if found != 1 {
-		t.Fatalf("%d Info lines say the condition ended through a new installation, want 1: %q", found, *lines)
+	if !staleOnHead(live) || meta.FindStatusCondition(live.Status.Conditions,
+		api.ConditionReviewCheckNotFailed) != nil {
+		t.Fatalf("Stale on head %v, conditions %s: want Stale recorded and no ReviewCheckNotFailed",
+			staleOnHead(live), conditionsOf(live))
 	}
 }
 
@@ -412,5 +493,36 @@ func TestDeletionLogsTheEndOfReviewCheckNotFailed(t *testing.T) {
 	}
 	if found != 1 {
 		t.Fatalf("%d Info lines say the condition ended at the deletion, want 1: %q", found, *lines)
+	}
+}
+
+// Finding D3 of the ADR-0046 run on #925 (limit (a), #984): the deletion of a stopped holder writes no check, so
+// whenever its recorded head is not known to show the stop's failed check (no state Stale recorded on it) a check
+// written before the stop may stay there, and the first write of the deletion says so in the log at Info, with or
+// without condition ReviewCheckNotFailed. A head recorded Stale is not logged. Before, only a set condition was.
+func TestDeletionLogsAHeadNotKnownToShowTheFailedCheck(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		r, _, get, head := stoppedHolderWorld(t, ownClosed)
+		if stale {
+			live := get()
+			live.Status.PullRequest.ReviewCheck = &api.ReviewCheck{Head: head, State: api.ReviewCheckStale}
+			if err := r.Status().Update(context.Background(), live); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ctx, lines := loggedCtx()
+		if _, _, err := r.beginFinalize(ctx, get()); err != nil {
+			t.Fatalf("stale %v: beginFinalize: %v", stale, err)
+		}
+		var found int
+		for _, l := range *lines {
+			if strings.Contains(l, "may stay the latest on its head") && strings.Contains(l, "being deleted") {
+				found++
+			}
+		}
+		if want := map[bool]int{false: 1, true: 0}[stale]; found != want {
+			t.Fatalf("stale %v: %d Info lines say a check before the stop may stay, want %d: %q", stale, found, want,
+				*lines)
+		}
 	}
 }

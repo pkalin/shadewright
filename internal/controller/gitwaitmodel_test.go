@@ -2129,7 +2129,8 @@ var modelHeldChecks struct {
 // the failed review check last on its recorded head, or says why not with condition ReviewCheckNotFailed (stopped
 // holder, decision of 2026-11-20 on #925, "one rule"): that pull request has the branch head and could merge it on a
 // pass written before the stop. The look decides from the lock and the check on the head, never from the verdict of
-// its own pull request. The model reaches no new installation of the App, so that exception is the directed tests'.
+// its own pull request. The model reaches no new installation of the App; the rule has no exception for one
+// (decision of 2026-11-21 on #925, ADR-0046), and the directed tests cover that path.
 func (m *modelWorld) stoppedHolderProperty(live *api.RemediationRequest, err error, faulted bool) {
 	if !m.r.ReviewerHints || err != nil || faulted || m.lastFailedCalls > 0 || len(m.history) < 2 {
 		return
@@ -2179,7 +2180,8 @@ var modelGoneStops struct {
 // hints on fails the review check on its recorded head in the same reconcile, or says why not with condition
 // ReviewCheckNotFailed (gone check, decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop,
 // ADR-0045): otherwise another pull request from its branch could merge that commit on a pass written before the
-// stop. The model reaches no new installation of the App, so the exception for it is the directed tests'.
+// stop. The model reaches no new installation of the App; the stop writes the same check through one (decision of
+// 2026-11-21 on #925, ADR-0046), which the directed tests cover.
 func (m *modelWorld) goneCheckProperty(live *api.RemediationRequest) {
 	if m.goneStopSeen || live.Status.Phase != api.PhaseNeedsIntervention || !slices.ContainsFunc(live.Status.Conditions,
 		func(c metav1.Condition) bool { return c.Reason == ReasonChangeRequestGone }) {

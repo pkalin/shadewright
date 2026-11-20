@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 560" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">The failed review check of a stopped holder while the lock is held</title>
-  <desc id="d">Overview of ADR-0046. A stopped request that holds the target lock, with reviewer hints on, looks at its lock every 10 minutes. After each look that leaves the lock held, by its own pull request on any base or by another open pull request from its branch, it writes the stop's failed check run shadewright/review on the recorded head commit, unless the Git host already shows it last. Three writes are new against ADR-0045: the look no longer waits for condition ReviewCheckNotFailed, it writes when its own pull request was merged on another base, and a look that settles nothing yet writes through a new installation of the repository too. The check can only keep that commit from merging. A refused write sets ReviewCheckNotFailed and is tried again at the next look. Not covered: a deleted request (issue 984), reads that keep failing (issue 979), a look that a stop exception takes over, a settled look through a new installation while another open pull request is listed first, a request with hints off or a handoff, a pause, a target branch change or a repository gone, which leave a pass in place while the lock is held, and a request whose lock nothing holds. No new read and no new grant.</desc>
+  <desc id="d">Overview of ADR-0046. A stopped request that holds the target lock, with reviewer hints on, looks at its lock every 10 minutes. After each look that leaves the lock held, by its own pull request on any base or by another open pull request from its branch, it writes the stop's failed check run shadewright/review on the recorded head commit, unless the Git host already shows it last. Three writes are new against ADR-0045: the look no longer waits for condition ReviewCheckNotFailed, it writes when its own pull request was merged on another base, and it writes through a new installation of the repository too, settled or not, whichever pull request keeps the lock. The check can only keep that commit from merging. A refused write sets ReviewCheckNotFailed and is tried again at the next look. Not covered: a deleted request (issue 984), reads that keep failing (issue 979), a look that a stop exception takes over, a request with hints off or a handoff (logged at Info), a pause, a target branch change or a repository gone, which leave a pass in place while the lock is held, and a request whose lock nothing holds. No new read and no new grant.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
@@ -53,17 +53,16 @@
   <text class="s" x="54" y="326">1. No wait for condition ReviewCheckNotFailed.</text>
   <text class="s" x="54" y="350">2. Own pull request merged on another base while</text>
   <text class="s" x="54" y="368">    another open one keeps the lock.</text>
-  <text class="s" x="54" y="392">3. A look that settles nothing yet writes through</text>
-  <text class="s" x="54" y="410">    a new installation too.</text>
+  <text class="s" x="54" y="392">3. Through a new installation too, settled or not,</text>
+  <text class="s" x="54" y="410">    whichever pull request keeps the lock.</text>
 
   <rect class="ext" x="574" y="274" width="510" height="152" rx="12"/>
   <text class="tag" x="592" y="300">NOT COVERED</text>
   <text class="s" x="592" y="322">Deleted request (#984). Reads that keep failing (#979).</text>
   <text class="s" x="592" y="340">A look a stop exception takes over writes nothing then.</text>
-  <text class="s" x="592" y="358">Settled look through a new installation when another</text>
-  <text class="s" x="592" y="374">open pull request is listed first: nothing, logged at Info.</text>
-  <text class="s" x="592" y="392">Hints off or a handoff: nothing, no log. Pause, another</text>
-  <text class="s" x="592" y="408">target branch, repository gone: late. Lock released: no look.</text>
+  <text class="s" x="592" y="362">Hints off or a handoff: nothing, logged at Info.</text>
+  <text class="s" x="592" y="384">Pause, another target branch, repository gone: late.</text>
+  <text class="s" x="592" y="406">Lock released: no look.</text>
 
   <rect class="box" x="36" y="450" width="1048" height="72" rx="12"/>
   <text class="no" x="54" y="478">No new read, no new grant</text>

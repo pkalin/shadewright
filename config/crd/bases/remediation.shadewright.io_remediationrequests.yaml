@@ -912,7 +912,7 @@ spec:
                   replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all,
                   and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the
                   executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed,
-                  so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.
+                  so a Declined hint stays as the record of what was asked. A replacement carries over those of its chain.
                 items:
                   description: |-
                     Hint is one reviewer hint the executor accepted from a comment on the request's pull request (ADR-0028

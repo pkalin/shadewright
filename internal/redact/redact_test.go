@@ -986,6 +986,24 @@ func TestRedactorStringKeeping(t *testing.T) {
 	}
 }
 
+// New refuses an extra pattern that compiles alone but whose search from a later start (meter.Expr, which
+// wraps it in three more levels) nests too deeply to compile: an error when the redactor is made, never a panic
+// at its first read (#873).
+func TestNewRefusesAPatternWhoseSearchCannotBeWrapped(t *testing.T) {
+	const depth = 998
+	expr := strings.Repeat("(?:", depth) + "a" + strings.Repeat(")*", depth)
+	if _, err := regexp.Compile(expr); err != nil {
+		t.Fatalf("the pattern itself does not compile, so the test proves nothing: %v", err)
+	}
+	r, err := New(Pattern{Kind: "nested", Expr: expr})
+	if err == nil {
+		t.Fatalf("New accepted a pattern whose search cannot be wrapped (redactor %p)", r)
+	}
+	if !strings.Contains(err.Error(), "extra pattern 0 (nested)") || !strings.Contains(err.Error(), "nests too deeply") {
+		t.Errorf("New's error = %v, want it to name the pattern and the nesting", err)
+	}
+}
+
 // StringKeeping keeps only whole occurrences of the verified strings; everything else is redacted as String
 // redacts it (#264).
 func TestStringKeeping(t *testing.T) {

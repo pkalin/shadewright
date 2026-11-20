@@ -78,10 +78,11 @@ var knownDiffFailures = map[string]map[string]redacttest.KnownFailure{
 var knownTokenRepeat = redacttest.KnownFailure{Property: "P6", Reason: "#962, the release's reading of a flag repeated"}
 
 // knownPairsBeforeABlankLine is TOKEN="a" repeated before a long blank line, as Strings reads it: the release's
-// reading takes 53, 237 and 868 steps per byte at 3, 6 and 13 KB (measured 2026-11-20 with -tags redactwork),
-// four times the work for twice the text.
+// reading takes 53, 237 and 868 steps per byte at 3, 6 and 13 KB (measured 2026-11-20 with -tags redactwork, #962).
+// The steps per byte grow about four times for twice the text, so the total work about eight times (9 times from
+// 3 to 6 KB, 7.9 times from 6 to 13 KB): faster than the square of the text over these sizes.
 var knownPairsBeforeABlankLine = redacttest.KnownFailure{
-	Property: "P6", Reason: "the release's reading of key pairs before a long blank line grows with the square of the text",
+	Property: "P6", Reason: "#962, the release's reading of key pairs before a long blank line",
 }
 
 // seedTokenRepeat is "--token,}" repeated to 36 KiB, a seed of diffSeeds.

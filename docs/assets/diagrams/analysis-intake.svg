@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 600" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Scoring analysis records outside the cluster</title>
+  <desc id="d">Overview of ADR-0047. The analyzer of the www cluster, which we do not run, creates a record in its records container. Blob created goes through an Event Grid system topic to a storage queue. A Container Apps job that scales to zero takes one message per execution. It checks the size and the schema, runs the redactor again and quarantines the record on any hit before any model call, ends without a model call when the record is already scored or the month's cap is reached, then makes one judge call from the other model family than the analysis, with allowlisted fields, a fixed prompt, a fixed answer schema and one tool, a cross-check by a second model asked at most once. It creates the score and deletes the message. Two separate model keys, each capped at 40 to 50 USD a month in its provider's console and in code. Scores and quarantined records are in their own containers with a retention period. One managed identity reads records, reads and writes scores, writes quarantine, processes one queue and reads two Key Vault secrets. It has no storage key and no cluster credential.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .no{fill:#ff8fa3;font-size:12.5px;font-weight:600}
+      .tag{fill:#c6a8ff;font-size:12.5px;font-weight:600}
+    </style>
+  </defs>
+  <rect width="1120" height="600" rx="18" fill="#0e0e16"/>
+
+  <rect class="ext" x="36" y="30" width="200" height="86" rx="12"/>
+  <text class="h" x="52" y="58">Analyzer, www cluster</text>
+  <text class="s" x="52" y="80">not run by us; creates a record</text>
+  <text class="s" x="52" y="98">(create-only), redacted</text>
+
+  <rect class="ext" x="286" y="30" width="200" height="86" rx="12"/>
+  <text class="h" x="302" y="58">Records container</text>
+  <text class="s" x="302" y="80">one container, named in the</text>
+  <text class="s" x="302" y="98">intake's configuration</text>
+
+  <rect class="ext" x="536" y="30" width="230" height="86" rx="12"/>
+  <text class="h" x="552" y="58">Event Grid system topic</text>
+  <text class="s" x="552" y="80">blob created, that container only;</text>
+  <text class="s" x="552" y="98">sends the event to the queue</text>
+
+  <rect class="box" x="816" y="30" width="268" height="86" rx="12"/>
+  <text class="h" x="832" y="58">Storage queue</text>
+  <text class="s" x="832" y="80">at least once; a message is deleted</text>
+  <text class="s" x="832" y="98">only after the score is written</text>
+
+  <path class="f" d="M236 73H286" marker-end="url(#a)"/>
+  <path class="f" d="M486 73H536" marker-end="url(#a)"/>
+  <path class="f" d="M766 73H816" marker-end="url(#a)"/>
+  <path class="f" d="M950 116V150H500V160" marker-end="url(#a)"/>
+
+  <rect class="key" x="36" y="160" width="728" height="236" rx="12"/>
+  <text class="tag" x="54" y="184">CONTAINER APPS JOB, SCALES TO ZERO, ONE MESSAGE PER EXECUTION, NO INGRESS</text>
+  <text class="h" x="54" y="208">Before any model call</text>
+  <text class="s" x="54" y="228">1  Blob properties: over 1 MiB, quarantine note, content not downloaded</text>
+  <text class="s" x="54" y="246">2  Schema: known fields and version only; otherwise quarantine</text>
+  <text class="s" x="54" y="264">3  Redactor Clean on every string and key; any hit quarantines the record</text>
+  <text class="s" x="54" y="282">4  Already scored (record ID and hash) or the month's cap reached: no model call</text>
+  <text class="h" x="54" y="312">Then</text>
+  <text class="s" x="54" y="332">5  One judge call: allowlisted fields, fixed prompt and answer schema, one tool</text>
+  <text class="s" x="54" y="350">   (cross_check, at most once, counted in code). Token limits per call and per run.</text>
+  <text class="s" x="54" y="372">6  Create the score (create-only), then delete the message. A failed read is retried.</text>
+  <text class="s" x="54" y="388">   After the dequeue bound: a score with status error.</text>
+
+  <path class="f" d="M764 230H800" marker-end="url(#a)"/>
+  <path class="f" d="M764 340H800" marker-end="url(#a)"/>
+
+  <rect class="ext" x="800" y="160" width="284" height="130" rx="12"/>
+  <text class="h" x="816" y="186">Judge: the other family</text>
+  <text class="s" x="816" y="208">Anthropic key, own workspace</text>
+  <text class="s" x="816" y="226">OpenAI key, own project</text>
+  <text class="s" x="816" y="244">each capped 40 to 50 USD a month</text>
+  <text class="s" x="816" y="262">in the console and in code</text>
+  <text class="s" x="816" y="280">cross-check: a second model, once</text>
+
+  <rect class="box" x="800" y="304" width="284" height="92" rx="12"/>
+  <text class="h" x="816" y="330">Scores and quarantine</text>
+  <text class="s" x="816" y="352">own containers, own retention:</text>
+  <text class="s" x="816" y="370">quarantine 30 days, scores 365</text>
+  <text class="s" x="816" y="386">(proposed)</text>
+
+  <rect class="box" x="36" y="416" width="1048" height="80" rx="12"/>
+  <text class="tag" x="54" y="440">ONE MANAGED IDENTITY</text>
+  <text class="s" x="54" y="460">read the records container; read and write scores; write quarantine; process messages of the one queue;</text>
+  <text class="s" x="54" y="478">read the value of two Key Vault secrets (the two intake keys), each at its own scope.</text>
+
+  <rect class="box" x="36" y="510" width="1048" height="64" rx="12"/>
+  <text class="no" x="54" y="536">Never</text>
+  <text class="s" x="54" y="556">a storage key, a write or delete on records, a cluster or Git credential, a role assignment right, any use of a score to decide an action.</text>
+</svg>

@@ -527,7 +527,7 @@ func (r *RemediationRequestReconciler) recordWatchedMerge(ctx context.Context, g
 // predecessor's own head: a person pushed on top of rr's commit after the predecessor handed the pull request to a
 // person, or replaced it (decision of 2026-11-20 on #870). One writer of the merge record per pull request, the one
 // that holds the lock, so the predecessor records none. First what the merge brought to the target branch is read,
-// as for a merge into a retargeted branch (checkRetargeted, #771); a read that fails is an error of the content wait
+// as for a merge into a retargeted branch (retargetedContent, #771); a read that fails is an error of the content wait
 // about cr (MergeContent in status.gitWaits, a claim on the merge the predecessor waits for), retried by the caller
 // and ended after mergeContentWait with MergeContentUnreadable (endContentUnreadable), with nothing recorded before.
 // Then one status write (endOtherHeadMerge) records the pull request on rr and ends it NeedsIntervention with
@@ -539,13 +539,23 @@ func (r *RemediationRequestReconciler) recordOtherHeadMerge(ctx context.Context,
 	if err := r.writeAllowed(ctx); err != nil {
 		return clusterSideErr(err)
 	}
-	ref, err := r.checkRetargeted(ctx, git, rr, cr, remediationv1alpha1.GitBranch(cr.BaseBranch))
-	if err != nil {
-		return err
-	}
-	brought := "it brought only the planned change of the target file"
-	if ref != nil {
-		brought = ref.message
+	// The content read alone, as checkRetargeted makes it but without its removal of the content wait: that wait is
+	// this request's claim on the merge, so it goes only in the status write that stores the record (stop removes a
+	// wait that no longer applies), never in a write of its own that a lost record write would leave without either.
+	brought := "the Git host reported no full merge commit ID, so what it brought cannot be checked"
+	if shaPattern.MatchString(cr.MergeCommit) {
+		ref, err := retargetedContent(ctx, git, rr, cr, remediationv1alpha1.GitBranch(cr.BaseBranch))
+		if err != nil {
+			logf.FromContext(ctx).Info("Could not read what the merge of the pull request RemediationRequest was to "+
+				"take over brought; tried again", "remediationRequest", client.ObjectKeyFromObject(rr),
+				"error", err.Error())
+			return readOfContent(cr, err)
+		}
+		r.gitRetries().noteAnswered(client.ObjectKeyFromObject(rr))
+		brought = "it brought only the planned change of the target file"
+		if ref != nil {
+			brought = ref.message
+		}
 	}
 	return clusterSideErr(r.endOtherHeadMerge(ctx, rr, pred, cr, ReasonMergedWithForeignChange, brought))
 }

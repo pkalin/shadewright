@@ -2844,3 +2844,14 @@ func TestHandoffModelRecoveryWaitEndsOnAMergeOnAnotherBase(t *testing.T) {
 		t.Fatal("the sequence did not reach a recovery wait with its pull request merged into another base")
 	}
 }
+
+// #870, seed 47788: the replacement holds a claim on a merge of another head (its content wait after a failed read),
+// its next read of what the merge brought works, and the status write of its record meets a conflict. The claim stays
+// until a write stores the record: the content read removes no wait of its own, so the lost write leaves the claim.
+func TestHandoffModelOtherHeadClaimSurvivesALostRecordWrite(t *testing.T) {
+	m := hmDirected(t, hmStartIntent, []hmStep{{Kind: hFault, Code: 404, Op: "CheckCommit"}, {Kind: hPush},
+		{Kind: hMerge}, stRecRepl, stRecRepl, {Kind: hConflict, Obj: hmRepl}, stRecRepl})
+	if m.merge == nil || m.merge.firstRead != hmRepl || !m.merge.recorded[hmRepl] {
+		t.Fatalf("the merge is not read first and recorded by the replacement: %+v", m.merge)
+	}
+}

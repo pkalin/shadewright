@@ -333,8 +333,10 @@ var unboundedReads = map[string]noBoundReason{
 	"checkFailed":     noBoundPolicyCheck,
 	"heldUnsettled":   noBoundHeldLock,
 	"followHeldMerge": noBoundHeldLock,
-	"requestBound":    "", // noBoundStaleCleanup and noBoundAfterStop, by the request's state.
-	"refuseOrWait":    noBoundRefusedWatch,
+	// A replacement whose recovery ended at the bound of its wait (#786) keeps the lock until a read settles it.
+	"heldRecovery": noBoundHeldLock,
+	"requestBound": "", // noBoundStaleCleanup and noBoundAfterStop, by the request's state.
+	"refuseOrWait": noBoundRefusedWatch,
 	// A request cancelled for its Incident keeps the lock until a read settles its pull request.
 	"followCancelledMerge": noBoundHeldLock,
 	"closeCancelled":       noBoundHeldLock,

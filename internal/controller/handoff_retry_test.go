@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -49,7 +50,8 @@ func pastDeadline(t *testing.T, r *RemediationRequestReconciler, rr *api.Remedia
 }
 
 // A recovery that keeps failing does not hold the target for good: once the grace after the deadline is over,
-// the replacement ends NeedsIntervention with a reason that says why, and its handoff Aborted.
+// the replacement ends NeedsIntervention with a reason that says why. Its commit may be on the pull request, so its
+// handoff stays Reserved and it keeps the lock for the look at stopped holders (heldRecovery, #786).
 func TestRecoveryEndsOnceTheGraceAfterTheDeadlinePassed(t *testing.T) {
 	r, _, _, rr, _, _ := gateWorld(t)
 	ctx := context.Background()
@@ -74,8 +76,9 @@ func TestRecoveryEndsOnceTheGraceAfterTheDeadlinePassed(t *testing.T) {
 	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPROpened); c == nil || c.Reason != ReasonHandoffRecoveryFailed {
 		t.Fatalf("PullRequestOpened: %+v", c)
 	}
-	if got := rr.Status.Handoff.From.Phase; got != api.HandoffAborted {
-		t.Fatalf("the handoff of an ended replacement is %s", got)
+	if got := rr.Status.Handoff.From.Phase; got != api.HandoffReserved || !ptr.Deref(rr.Status.HoldsTarget, false) {
+		t.Fatalf("the handoff of the ended replacement is %s, holdsTarget %v: want it Reserved with the lock kept",
+			got, rr.Status.HoldsTarget)
 	}
 }
 
@@ -102,21 +105,33 @@ func TestRecoveryHonoursRetryAfterPastTheDeadline(t *testing.T) {
 	}
 }
 
-// A recovery that ends through retry (here settings that cannot reach the repository) aborts the handoff.
-func TestRecoveryEndedThroughRetryAbortsTheHandoff(t *testing.T) {
-	r, _, _, rr, _, _ := gateWorld(t)
+// Past the grace, a request whose HandoffRecovery entry stands (its handoff was aborted at a refusal) does not end at
+// the grace: it watches the pull request until the end of that entry (decision of 2026-11-18 on #786), whatever its
+// reads answer meanwhile, and this path reads that end as endPassedWait does.
+func TestRecoveryPastTheGraceKeepsARecordedRefusalWait(t *testing.T) {
+	r, g, _, rr, _, _ := gateWorld(t)
 	ctx := context.Background()
-	r.OpenRepository = func(context.Context, api.GitRepository) (providers.GitProvider, error) {
-		return nil, fmt.Errorf("the key is not a PEM key: %w", providers.ErrInvalidConfig)
-	}
-	if _, err := r.recheck(ctx, rr); err != nil {
+	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Minute)
+	since := metav1.NewTime(r.now().Add(-time.Hour).Truncate(time.Second))
+	rr.Status.GitWaits = []api.GitWait{{Kind: api.GitWaitHandoffRecovery, Since: since,
+		Ends: &metav1.Time{Time: since.Add(recoveryWaitBound)}, Operation: opBranchHead}}
+	if err := r.Status().Update(ctx, rr); err != nil {
 		t.Fatal(err)
 	}
-	if rr.Status.Phase != api.PhaseNeedsIntervention {
-		t.Fatalf("phase %s", rr.Status.Phase)
+	g.SetFail(func(op string) error {
+		if op == opBranchHead {
+			return fmt.Errorf("status 404: %w", providers.ErrNotFound)
+		}
+		return nil
+	})
+	if _, err := r.recheck(ctx, rr); err != nil {
+		t.Fatalf("recheck = %v, want the watch to go on", err)
 	}
-	if got := rr.Status.Handoff.From.Phase; got != api.HandoffAborted {
-		t.Fatalf("the handoff of an ended replacement is %s", got)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.Status.Phase != api.PhasePolicyChecked {
+		t.Fatalf("the recovery ended at the grace with a HandoffRecovery wait standing: %s", rr.Status.Phase)
 	}
 }
 
@@ -443,5 +458,31 @@ func TestReviewGateCompletesTheCheckWhenACommentTimesOut(t *testing.T) {
 	}
 	if got := rr.Status.PullRequest.ReviewCheck.State; got != api.ReviewCheckPassed {
 		t.Fatalf("a comment that timed out kept a passing gate from completing: %s", got)
+	}
+}
+
+// A replacement whose status records the merge of the pull request it took over as seen (its MergeCheck entry names
+// that pull request) has nothing to rewrite there: no title and body are sent to the merged pull request (#786).
+func TestNoRewriteOfAPullRequestRecordedAsMerged(t *testing.T) {
+	r, g, _, rr, _, _ := tookOverWorld(t)
+	ctx := context.Background()
+	rr.Status.Phase = api.PhasePRCreated
+	setMergeWait(rr, r.now())
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	var rewrites atomic.Int32
+	g.SetFail(func(op string) error {
+		if op == opUpdateChangeRequest {
+			rewrites.Add(1)
+		}
+		return nil
+	})
+	if err := r.afterHandoff(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if n := rewrites.Load(); n != 0 || rr.Status.Handoff.From.PullRequestUpdate != "" {
+		t.Fatalf("rewrote a pull request recorded as merged: %d rewrites, recorded %q", n,
+			rr.Status.Handoff.From.PullRequestUpdate)
 	}
 }

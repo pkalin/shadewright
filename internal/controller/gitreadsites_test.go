@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -97,10 +98,15 @@ func failOnce(g interface{ SetFail(func(string) error) }, op string, clock *test
 }
 
 const (
-	helperSite     = "gitread.go:retryGitRead:0"
-	callerBound    = "bound"
-	heldLockBound  = "unboundedRead(noBoundHeldLock)"
-	unboundedCalls = "unboundedRead("
+	helperSite    = "gitread.go:retryGitRead:0"
+	callerBound   = "bound"
+	heldLockBound = "unboundedRead(noBoundHeldLock)"
+	// handoffGraceBound is the bound of the retries of a handoff's recovery: the end of its HandoffGrace wait.
+	handoffGraceBound = "boundBy(waitHandoffGrace)"
+	// handoffRecoveryBound is the bound of the retries of a recovery that waits on a refusal: its HandoffRecovery
+	// wait, which ends at its own end; the write that records it removes the HandoffGrace wait (#786).
+	handoffRecoveryBound = "boundBy(waitHandoffRecovery)"
+	unboundedCalls       = "unboundedRead("
 	// mergeCheckBound is the bound of a read of the merge wait (readOfMergeCheck).
 	mergeCheckBound = "waitMergeCheck"
 )
@@ -150,8 +156,10 @@ var gitReadSites = map[string]gitReadSite{
 			res, err := r.cancelFailed(context.Background(), rr, failedRead(), "read the pull request")
 			return mustWait(t, res, err), false
 		}},
-	helperSite:                   {},
-	"handoff.go:retryRecovery:1": {bound: "boundBy(waitHandoffGrace)", check: checkRecoveryBound},
+	helperSite:                                 {},
+	"handoff.go:retryRecovery:1":               {bound: handoffGraceBound, check: checkRecoveryBound},
+	"recoverywait.go:observeFailed:1":          {bound: handoffRecoveryBound, check: checkRecoveryWaitBound},
+	"recoverywait.go:heldRecovery:1":           {bound: heldLockBound},
 	"incidentcancel.go:followCancelledMerge:1": {bound: heldLockBound},
 	"incidentcancel.go:closeCancelled:1":       {bound: heldLockBound},
 	"merge.go:mergeCheckFailed:1": {bound: mergeCheckBound,
@@ -167,6 +175,20 @@ var gitReadSites = map[string]gitReadSite{
 			}
 			clock.advance(c.during)
 			err := r.mergeCheckFailed(context.Background(), rr, cr, failedRead())
+			res, err := r.waitOrFail(context.Background(), rr, err, unboundedRead(noBoundHeldLock))
+			return mustWait(t, res, err), false
+		}},
+	// A failed look at a pull request whose merge the request records as seen (its MergeCheck wait, #786).
+	"pullrequest.go:awaitedMergeUnread:1": {bound: mergeCheckBound,
+		check: func(t *testing.T, c boundCase) (time.Duration, bool) {
+			r, _, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			clock := clockOf(r)
+			setMergeWait(rr, clock.at.Add(-mergeCommitWait+c.left))
+			if err := r.Status().Update(context.Background(), rr); err != nil {
+				t.Fatal(err)
+			}
+			clock.advance(c.during)
+			err := awaitedMergeUnread(rr, failedRead())
 			res, err := r.waitOrFail(context.Background(), rr, err, unboundedRead(noBoundHeldLock))
 			return mustWait(t, res, err), false
 		}},
@@ -258,6 +280,41 @@ func checkRecoveryBound(t *testing.T, c boundCase) (time.Duration, bool) {
 		// Past the grace: the request ended HandoffRecoveryFailed.
 		return 0, true
 	}
+	return mustWait(t, res, err), false
+}
+
+// checkRecoveryWaitBound: a replacement whose handoff was aborted at a refusal (#786) c.left before the end of its
+// HandoffRecovery entry (recoveryWaitBound from the refusal, the deadline long past) fails a read that takes c.during,
+// alternately refused again and worth retrying (observeFailed). The watch never ends here; only the check at the start
+// of a reconcile ends it (endPassedWait).
+func checkRecoveryWaitBound(t *testing.T, c boundCase) (time.Duration, bool) {
+	r, _, rr := settlementWorld(t, api.PhasePolicyChecked)
+	clock := clockOf(r)
+	ctx := context.Background()
+	// The spec too: the wait's entry is written on the request as the API server holds it (putGitWaits).
+	status := rr.Status.DeepCopy()
+	rr.Spec.Replaces = &api.RequestReplacement{Name: oldName, UID: "old-uid", Hint: api.HintRef{
+		Source: api.HintSourceGitHub, CommentID: 7, Digest: "sha256:" + strings.Repeat("a", 64)}}
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	rr.Status = *status
+	rr.Status.Handoff = &api.Handoff{From: &api.IncomingHandoff{Phase: api.HandoffReserved}}
+	rr.Status.Deadline = &metav1.Time{Time: clock.at.Add(-recoveryWaitBound)}
+	refusedAt := clock.at.Add(-recoveryWaitBound + c.left - time.Second)
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+		Type: api.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue, Reason: ReasonGitForbidden,
+		Message: "The Git host refused the read of the branch", LastTransitionTime: metav1.NewTime(refusedAt)})
+	rr.Status.GitWaits = []api.GitWait{refusalEntry(refusedAt, opBranchHead)}
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(c.during)
+	err := failedRead()
+	if c.during%2 == 0 {
+		err = readFailure(opBranchHead, fmt.Errorf("status 403: %w", providers.ErrForbidden))
+	}
+	res, err := r.observeFailed(ctx, rr, err)
 	return mustWait(t, res, err), false
 }
 
@@ -355,7 +412,8 @@ func gitReadCalls(t *testing.T) map[string]string {
 
 // Every call that bounds the retry of a failed Git read is in gitReadSites, with the bound it passes, and each
 // bound of its own holds by construction, over generated cases of (time left, call duration, --verify-outcomes):
-// a read that fails with the host asking for an hour is looked at again no later than its bound, and a bound that
+// a read that fails with the host asking for an hour is looked at again no later than its bound (or the floor of every
+// time to run again, requeueFloor, when less is left), and a bound that
 // passed while the call ran ends the wait now (at most boundPassedWait), unless the path's own end ran at once. A
 // new call site fails here until it is added with its bound and a check.
 func TestEveryGitReadRetrySiteKeepsItsBound(t *testing.T) {
@@ -402,7 +460,9 @@ func TestEveryGitReadRetrySiteKeepsItsBound(t *testing.T) {
 					case expired:
 					case wait <= 0:
 						t.Fatalf("the retry has no wait (%v)", wait)
-					case rest > 0 && wait > rest:
+					case rest > 0 && wait > max(rest, requeueFloor):
+						// Less than the floor left (requeueFloor): the retry comes at the floor, and the next
+						// reconcile ends the wait from its entry.
 						t.Fatalf("the retry waits %v, past the %v left of its bound", wait, rest)
 					case rest <= 0 && wait > boundPassedWait:
 						t.Fatalf("the bound passed during the call, and the retry still waits %v", wait)

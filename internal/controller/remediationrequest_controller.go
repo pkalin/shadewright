@@ -435,7 +435,9 @@ func (r *RemediationRequestReconciler) reader() client.Reader {
 	return r.Client
 }
 
-// getLive reads a cluster-scoped authorizing object (the policy or the settings) straight from the API server.
+// getLive reads an object straight from the API server: a cluster-scoped authorizing object (the policy or the
+// settings), the request a reconcile works on, and the other request of its handoff wherever a Git write or a wait
+// is decided on it.
 // The cache is not used: a cached copy can still hold a deleted policy, an older approval mode or a repository
 // removed from the settings, and the request's resourceVersion does not change when either of them does, so a
 // stale copy would authorize a request the live configuration refuses. A policy created together with the
@@ -505,8 +507,17 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 			"remediationRequest", req.NamespacedName, "error", err.Error())
 		return ctrl.Result{}, nil
 	}
+	if res.RequeueAfter > 0 && res.RequeueAfter < requeueFloor {
+		// No path asks to run again hot: an end that passed while the reads ran (boundPassedWait), or what is left
+		// of a bound, is looked at no sooner than the floor.
+		res.RequeueAfter = requeueFloor
+	}
 	return res, err
 }
+
+// requeueFloor is the shortest time to run again a reconcile of a request returns (Reconcile): a time computed from
+// an end that has passed, or that lies a moment ahead, is raised to it, so no request is reconciled in a hot loop.
+const requeueFloor = time.Second
 
 // checkFailed handles err, a policy check that did not decide: a failed read of the source mapping or the build tree
 // is a visible retry (the check has no deadline yet); a remote system that asked for a delay (Retry-After) gets it,
@@ -588,7 +599,10 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 
 	rr := &remediationv1alpha1.RemediationRequest{}
 	defer func() { res = r.lookAgainWhileHeld(rr, res, err) }()
-	if err := r.Get(ctx, req.NamespacedName, rr); err != nil {
+	// The request is read from the API server, not the cache (decision of 2026-11-19 on #786): every step decides on
+	// the request as stored, so no reconcile starts from a copy older than a write the executor already made. The
+	// cache still triggers the reconcile and serves the lists.
+	if err := r.getLive(ctx, req.NamespacedName, rr); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.forget(req.NamespacedName)
 			r.reportCounters.forget(req.NamespacedName)
@@ -599,6 +613,8 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// Every Git write of this reconcile passes the record hold of the handoff (recordHeld), in gatedGit.gate.
+	ctx = r.withRecordHold(ctx, rr)
 	if showsGitWait(rr) {
 		// Reconcile removes it after this reconcile if no read is retried; a request without it costs no read.
 		r.gitRetries().shown(req.NamespacedName)
@@ -2159,9 +2175,10 @@ func (r *RemediationRequestReconciler) stillOwns(ctx context.Context, rr *remedi
 	return nil
 }
 
-// clusterError is a failure of a cleanup on the Kubernetes side (stillOwns: a failed read of the request, a request
-// handed over or gone, an intent to hand it over that stands; ownsMarker: a failed read of a request of the supersede
-// chain, #812), not of a step of the Git host. It wraps the error and
+// clusterError is a failure on the Kubernetes side, not of a step of the Git host: of a cleanup (stillOwns: a failed
+// read of the request, a request handed over or gone, an intent to hand it over that stands; ownsMarker: a failed read
+// of a request of the supersede chain, #812), of a write of condition PullRequestUnreadable (setUnreadable), or of a
+// read or write of the recovery of a handoff (clusterSide, #786). It wraps the error and
 // adds no text. A cleanup through a new installation (#290) returns it as it is, outside a *reinstalledError, so it
 // is never said in PullRequestNotClosed as a failure of the Git host (#797).
 type clusterError struct{ err error }
@@ -2174,7 +2191,8 @@ func (e *clusterError) Unwrap() error { return e.err }
 // for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
 // merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
 // settings (for a stale plan's cleanup, also not under a new installation of the GitHub App: cleanupRepository,
-// #290, whose failures come wrapped in a *reinstalledError), [errTargetBranchChanged] when its entry now names another target branch, [errChangeRequestNotOurs]
+// #290, whose failures come wrapped in a *reinstalledError), [errTargetBranchChanged] when its entry now names another
+// target branch (the finalizer instead closes on the branch the plan recorded), [errChangeRequestNotOurs]
 // when a recorded pull request is gone (changeOf: not this request's, or without its marker), and
 // [freshness.ErrPaused] when the settings read now pause writes. A request with an outgoing handoff that stands or is done never closes anything: the pull
 // request is, or may become, its replacement's ([errChangeRequestNotOurs] when handed over,
@@ -2206,8 +2224,9 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err) && deleting:
-		// Still errRepositoryGone for the finalizer, which lets the request go on it; errNoSettings so that its
-		// Warning Event names the settings object that is missing, not an entry (leftUnreachable).
+		// A failure of the cleanup for the finalizer (cleanupDone), not a repository that left the settings: the object
+		// may come back, and the request's pull request may be open (#925). CleanupFailing says so with reason
+		// SettingsNotFound until the object is back or the bound of the cleanup ends.
 		return errNoSettings
 	case apierrors.IsNotFound(err):
 		return errRepositoryGone
@@ -2231,9 +2250,11 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 		if !deleting {
 			return errTargetBranchChanged
 		}
-		// The finalizer closes the request's own pull requests whatever target branch the settings name now (#925):
-		// by the recorded number and by the marker, through a provider for the recorded target branch, and on every
-		// other base, the configured one included (closeOwnOnOtherBases). Only marked pull requests are closed.
+		// The finalizer closes the request's own pull requests whatever target branch the settings name now: they are
+		// still in the plan's repository and may be open, and a deletion that let go of them would leave them open with
+		// no request holding their target (#786, third round; #925). It closes by the recorded number and by the marker,
+		// through a provider for the recorded target branch, and on every other base, the configured one included
+		// (closeOwnOnOtherBases). Every close reads the pull request with this request's marker first.
 		repo.TargetBranch = src.TargetBranch
 	}
 	if reinstalled {

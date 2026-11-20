@@ -59,7 +59,7 @@ type LogRead int
 const (
 	// LogReadOK: the source answered within its bound.
 	LogReadOK LogRead = iota
-	// LogReadNotFound: the pod does not exist.
+	// LogReadNotFound: the pod does not exist, or the node no longer holds the instance's log.
 	LogReadNotFound
 	// LogReadRejected: the source refused the request (no such container, not started, no previous instance).
 	LogReadRejected
@@ -67,6 +67,15 @@ const (
 	LogReadFailed
 	// LogReadOversized: the source answered more than twice what was asked for, and the text was not read.
 	LogReadOversized
+	// LogReadEmpty: the source answered with no log lines.
+	LogReadEmpty
+)
+
+// Fixed header lines of a read that gave no excerpt. None quotes the cluster or the source's answer.
+const (
+	logGone      = "no logs: the node no longer holds the log of this instance"
+	logForbidden = "could not fetch: the API server refused the identity"
+	logEmpty     = "no log lines were returned"
 )
 
 // LogView is one log excerpt rendered for a reader: header lines naming the container and its instance, then
@@ -98,12 +107,18 @@ func RenderLog(r RedactFunc, title string, ex providers.LogExcerpt, err error, a
 	h.add("%s", title)
 	var body string
 	switch {
+	case errors.Is(err, providers.ErrLogGone):
+		v.Read = LogReadNotFound
+		h.add(logGone)
 	case errors.Is(err, providers.ErrNotFound):
 		v.Read = LogReadNotFound
 		h.add("no logs: the pod does not exist")
 	case errors.Is(err, providers.ErrRejected):
 		v.Read = LogReadRejected
 		h.add("no logs: the source refused the request (no such container, it has not started, or it has no previous instance)")
+	case errors.Is(err, providers.ErrForbidden):
+		v.Read = LogReadFailed
+		h.add(logForbidden)
 	case err != nil:
 		v.Read = LogReadFailed
 		h.add("could not fetch")
@@ -116,6 +131,11 @@ func RenderLog(r RedactFunc, title string, ex providers.LogExcerpt, err error, a
 		in := ex.Instance
 		h.add("instance: pod uid %s, container id %s, restarts %d, read at %s", Value(r, in.PodUID),
 			Value(r, in.ContainerID), in.RestartCount, ex.CollectedAt.UTC().Format(time.RFC3339))
+		if ex.Text == "" {
+			v.Read = LogReadEmpty
+			h.add(logEmpty)
+			break
+		}
 		body, v.LeadingDropped = dropLeadingContinuation(ex.Text)
 		v.Truncated, v.EndMissing, v.InstanceUncertain = ex.Truncated, ex.EndMissing, ex.InstanceUncertain
 	}

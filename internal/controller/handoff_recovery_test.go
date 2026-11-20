@@ -6,13 +6,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -301,46 +298,5 @@ func TestRecoverHandoffJudgesTheMergedHeadWhenTheBranchIsGone(t *testing.T) {
 	}
 	if !recovered || rr.Status.Phase != api.PhaseMerged {
 		t.Fatalf("the merge of the handoff's commit was not recovered: recovered=%v, phase=%s", recovered, rr.Status.Phase)
-	}
-}
-
-// A read of the predecessor's pull request that the Git host refuses (403) is an unknown verdict, not a refused
-// write (#688): the recovery retries it before the deadline, and once the grace after it is over ends with the
-// recovery's own reason, never with a refusal of a close.
-func TestRecoverHandoffRetriesARefusedReadUntilTheGraceEnds(t *testing.T) {
-	r, g, _, rr, _, _ := handoffAppendedWorld(t, nil)
-	ctx := context.Background()
-	g.SetFail(func(op string) error {
-		switch op {
-		case opBranchHead:
-			return fmt.Errorf("branch: %w", providers.ErrNotFound)
-		case opGet, opList:
-			return fmt.Errorf("status 403: %w", providers.ErrForbidden)
-		}
-		return nil
-	})
-	if res, err := r.recheck(ctx, rr); err != nil || res.RequeueAfter < r.pullRequestPollInterval() || meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) == nil {
-		t.Fatalf("a refused read needs a visible poll: %+v %v", res, err)
-	}
-	if rr.Status.Phase != api.PhasePolicyChecked {
-		t.Fatalf("a refused read before the deadline ended the replacement: %s", rr.Status.Phase)
-	}
-	pastDeadline(t, r, rr, handoffRecoveryGrace+time.Minute)
-	if _, err := r.recheck(ctx, rr); err != nil {
-		t.Fatal(err)
-	}
-	// The failed read past the grace is a Git wait whose end has passed: the check at the start of the next
-	// reconcile ends the request (endPassedWait), before any read.
-	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
-		t.Fatal(err)
-	}
-	if rr.Status.Phase != api.PhaseNeedsIntervention {
-		t.Fatalf("phase %s", rr.Status.Phase)
-	}
-	if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPROpened); c == nil || c.Reason != ReasonHandoffRecoveryFailed {
-		t.Fatalf("PullRequestOpened: %+v", c)
 	}
 }

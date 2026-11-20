@@ -37,7 +37,7 @@ var verdictTable = map[changeState]verdictRow{
 		retargetCancel: retargetCancelNone, failCheck: failCheckRetry, stoppedCheck: stoppedCheckNone, cancelLook: cancelLookNone, adopt: adoptRetry,
 		refuseOpened: refuseClose, mergedUnrecorded: mergedUnrecordedRetry, watch: watchRetry,
 		closeRecorded: closeRecordedRetry, closeUnrecorded: closeUnrecordedRetry, stopOnOtherBase: stopOnOtherRetry,
-		finalize: finalizeRetry,
+		finalize: finalizeRetry, recovery: recoveryRetry,
 	},
 	changeOpen: {
 		name: "open", failed: false, stopException: stopExceptOpen, heldRecord: heldRecordFound,
@@ -47,7 +47,7 @@ var verdictTable = map[changeState]verdictRow{
 		retargetCancel: retargetCancelNone, failCheck: failCheckWrite, stoppedCheck: stoppedCheckOpen, cancelLook: cancelLookNone, adopt: adoptIt,
 		refuseOpened: refuseClose, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGoOn,
 		closeRecorded: closeRecordedClose, closeUnrecorded: closeUnrecordedGoOn, stopOnOtherBase: stopOnOtherNothing,
-		finalize: finalizeClose,
+		finalize: finalizeClose, recovery: recoveryOpen,
 	},
 	changeMerged: {
 		name: "merged", failed: false, stopException: stopExceptMerged, heldRecord: heldRecordFound,
@@ -57,7 +57,7 @@ var verdictTable = map[changeState]verdictRow{
 		retargetCancel: retargetCancelNone, failCheck: failCheckWrite, stoppedCheck: stoppedCheckNone, cancelLook: cancelLookMerged, adopt: adoptIt,
 		refuseOpened: refuseEnded, mergedUnrecorded: mergedUnrecordedMerged, watch: watchGoOn,
 		closeRecorded: closeRecordedClose, closeUnrecorded: closeUnrecordedGoOn, stopOnOtherBase: stopOnOtherNothing,
-		finalize: finalizeNothing,
+		finalize: finalizeNothing, recovery: recoveryMerged,
 	},
 	changeClosed: {
 		name: "closed", failed: false, stopException: stopExceptNone, heldRecord: heldRecordFound,
@@ -67,7 +67,7 @@ var verdictTable = map[changeState]verdictRow{
 		retargetCancel: retargetCancelClosed, failCheck: failCheckWrite, stoppedCheck: stoppedCheckNone, cancelLook: cancelLookEnd, adopt: adoptIt,
 		refuseOpened: refuseEnded, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGoOn,
 		closeRecorded: closeRecordedClose, closeUnrecorded: closeUnrecordedLookElsewhere,
-		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing,
+		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing, recovery: recoveryNone,
 	},
 	changeGone: {
 		name: "gone", failed: false, stopException: stopExceptNone, heldRecord: heldRecordNone,
@@ -77,7 +77,7 @@ var verdictTable = map[changeState]verdictRow{
 		retargetCancel: retargetCancelClosed, failCheck: failCheckNotOursReinstalled, stoppedCheck: stoppedCheckUnlessReinstalled, cancelLook: cancelLookEnd,
 		adopt: adoptNone, refuseOpened: refuseClose, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGone,
 		closeRecorded: closeRecordedNotOurs, closeUnrecorded: closeUnrecordedLookElsewhere,
-		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing,
+		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing, recovery: recoveryNone,
 	},
 	changeElsewhere: {
 		name: "open on another base", failed: false, stopException: stopExceptNone, heldRecord: heldRecordMoved,
@@ -87,7 +87,7 @@ var verdictTable = map[changeState]verdictRow{
 		retargetCancel: retargetCancelMoved, failCheck: failCheckWriteOtherBase, stoppedCheck: stoppedCheckOpen, cancelLook: cancelLookMoved,
 		adopt: adoptElsewhere, refuseOpened: refuseMoved, mergedUnrecorded: mergedUnrecordedNothing, watch: watchMoved,
 		closeRecorded: closeRecordedMoved, closeUnrecorded: closeUnrecordedGoOn, stopOnOtherBase: stopOnOtherMoved,
-		finalize: finalizeCloseAnyBase,
+		finalize: finalizeCloseAnyBase, recovery: recoveryNone,
 	},
 	changeMergedElsewhere: {
 		name: "merged into another base", failed: false, stopException: stopExceptNone, heldRecord: heldRecordNone,
@@ -97,7 +97,7 @@ var verdictTable = map[changeState]verdictRow{
 		retargetCancel: retargetCancelMergedElsewhere, failCheck: failCheckNotOurs, stoppedCheck: stoppedCheckNone,
 		cancelLook: cancelLookMergedElsewhere, adopt: adoptMergedElsewhere, refuseOpened: refuseMergedElsewhere,
 		mergedUnrecorded: mergedUnrecordedNothing, watch: watchMergedElsewhere, closeRecorded: closeRecordedNotOurs,
-		closeUnrecorded: closeUnrecordedGoOn, stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing,
+		closeUnrecorded: closeUnrecordedGoOn, stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing, recovery: recoveryMergedElsewhere,
 	},
 	changeClosedElsewhere: {
 		name: "closed on another base", failed: false, stopException: stopExceptNone, heldRecord: heldRecordFound,
@@ -107,7 +107,7 @@ var verdictTable = map[changeState]verdictRow{
 		retargetCancel: retargetCancelClosed, failCheck: failCheckWriteOtherBase, stoppedCheck: stoppedCheckNone, cancelLook: cancelLookEnd, adopt: adoptIt,
 		refuseOpened: refuseEnded, mergedUnrecorded: mergedUnrecordedNothing, watch: watchGoOn,
 		closeRecorded: closeRecordedNothing, closeUnrecorded: closeUnrecordedLookElsewhere,
-		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing,
+		stopOnOtherBase: stopOnOtherNothing, finalize: finalizeNothing, recovery: recoveryNone,
 	},
 }
 
@@ -201,6 +201,12 @@ type verdictRow struct {
 	stopOnOtherBase stopOnOtherBase
 	// finalize is closeAllOwn's rule for the recorded pull request.
 	finalize finalizeOutcome
+	// recovery is what a replacement whose handoff was aborted at a refusal does with the read of the pull request it
+	// was to take over (recoverywait.go, #786), and what the rewrite of a taken-over pull request does (handoff.go):
+	// only an open one is rewritten or held for its commit, only a merge into the target branch is recorded, a merge
+	// into another base ends the watch, and closed (on any base), gone or open on another base waits for the lock's
+	// verdict.
+	recovery recovery
 }
 
 // decideVerdict is the row of verdict s; a state with no row is handled as a failed read.
@@ -376,4 +382,15 @@ const (
 	stopOnOtherRetry stopOnOtherBase = iota
 	stopOnOtherMoved
 	stopOnOtherNothing
+)
+
+// recovery is verdictRow.recovery.
+type recovery int
+
+const (
+	recoveryRetry recovery = iota
+	recoveryOpen
+	recoveryMerged
+	recoveryMergedElsewhere
+	recoveryNone
 )

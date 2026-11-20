@@ -635,6 +635,97 @@ func TestSequenceMergeWithoutReceiptReleasesUnderAPause(t *testing.T) {
 	}
 }
 
+// #786: a replacement recovering a handoff whose repository leaves the settings waits on that refusal past the
+// deadline and its grace; its HandoffRecovery wait ends recoveryWaitBound after the first refusal, from recorded state:
+// NeedsIntervention with RecoveryWaitExpired, its handoff still Reserved (the predecessor's Aborted) and the target
+// lock kept, never released without a verdict. The poll interval is an hour, so the bound is reached in few steps;
+// the model's properties hold at each.
+func TestSequenceHandoffRefusalEndsAtItsBound(t *testing.T) {
+	m := scripted(t, modelStart{start: startPolicyChecked, open: true, lasting: time.Minute, handoff: true})
+	m.r.PullRequestPollInterval = time.Hour
+	m.steps(1)
+	m.removeRepository()
+	for i := 0; i < 40 && m.live().Status.Phase == api.PhasePolicyChecked; i++ {
+		m.step()
+	}
+	live := m.live()
+	o := meta.FindStatusCondition(live.Status.Conditions, api.ConditionPROpened)
+	switch {
+	case m.refusedAt.IsZero():
+		m.fatalf("end: the recovery never met the refusal")
+	case live.Status.Phase != api.PhaseNeedsIntervention || o == nil || o.Reason != ReasonRecoveryWaitExpired:
+		m.fatalf("end: phase %s, PullRequestOpened %s; want NeedsIntervention with %s", live.Status.Phase,
+			reasonOf(o), ReasonRecoveryWaitExpired)
+	case m.clock.at.Before(m.refusedAt.Add(recoveryWaitBound)):
+		m.fatalf("end: ended %v after the first refusal, before the bound %v", m.clock.at.Sub(m.refusedAt),
+			recoveryWaitBound)
+	case gitWait(live, waitHandoffGrace) != nil || gitWait(live, waitHandoffRecovery) != nil:
+		m.fatalf("end: a wait of the recovery stands after the end")
+	case live.Status.Handoff == nil || live.Status.Handoff.From == nil ||
+		live.Status.Handoff.From.Phase != api.HandoffReserved:
+		m.fatalf("end: the end moved the handoff on: %+v", live.Status.Handoff)
+	case !holdsLock(live):
+		m.fatalf("end: the target lock was released at the end, with no verdict")
+	}
+	if to := m.predecessor().Status.Handoff.To; to.Phase != api.HandoffAborted {
+		m.fatalf("end: the predecessor's intent is %s, want Aborted", to.Phase)
+	}
+	m.report()
+}
+
+// predecessor is the request a replacement of the model recovers the handoff of (recovering).
+func (m *modelWorld) predecessor() *api.RemediationRequest {
+	p := &api.RemediationRequest{}
+	if err := m.base.Get(context.Background(), client.ObjectKey{Namespace: m.key.Namespace, Name: m.key.Name + "-old"},
+		p); err != nil {
+		m.t.Fatal(err)
+	}
+	return p
+}
+
+// #786, third decision of 2026-11-18, point 1: a failed read ten minutes after the deadline records the grace of the
+// intent; a refusal then aborts the intent (its HandoffRecovery entry), while the write of the abort on the
+// predecessor is lost; an hour later the abort is written again and the Git host answers 503. The grace went with the
+// refusal's entry, so no entry stands past its own end (property "own end"), and the replacement watches on.
+func TestSequenceHandoffGraceGoesWithTheRefusal(t *testing.T) {
+	m := scripted(t, modelStart{start: startPolicyChecked, open: true, lasting: time.Hour, handoff: true})
+	deadline := m.live().Status.Deadline.Time
+	for i := 0; i < 40 && m.clock.at.Before(deadline.Add(10*time.Minute)); i++ {
+		m.step()
+	}
+	if live := m.live(); gitWait(live, waitHandoffGrace) == nil ||
+		!m.clock.at.Before(deadline.Add(handoffRecoveryGrace)) {
+		m.fatalf("setup: at +%v after the deadline, waits %v; want the grace standing before its end",
+			m.clock.at.Sub(deadline), live.Status.GitWaits)
+	}
+	m.removeRepository()
+	m.mu.Lock()
+	m.loseNext, m.passWrites = true, 1
+	m.mu.Unlock()
+	m.step()
+	live := m.live()
+	if gitWait(live, waitHandoffRecovery) == nil || gitWait(live, waitHandoffGrace) != nil {
+		m.fatalf("abort: waits %v; want the HandoffRecovery entry without the grace", live.Status.GitWaits)
+	}
+	if intent(m.predecessor()) == nil {
+		m.fatalf("abort: the write of the abort on the predecessor was not lost")
+	}
+	m.clock.advance(time.Hour)
+	m.restoreRepository()
+	m.mu.Lock()
+	m.fault, m.lastingUntil = opGet, time.Time{}
+	m.mu.Unlock()
+	m.step()
+	live = m.live()
+	if live.Status.Phase != api.PhasePolicyChecked || gitWait(live, waitHandoffRecovery) == nil {
+		m.fatalf("watch: phase %s, waits %v; want the replacement watching", live.Status.Phase, live.Status.GitWaits)
+	}
+	if to := m.predecessor().Status.Handoff.To; to.Phase != api.HandoffAborted {
+		m.fatalf("watch: the predecessor's intent is %s an hour later, want Aborted", to.Phase)
+	}
+	m.report()
+}
+
 // What becomes of the pull request of a stale plan's cleanup that the Git host refused (#808): the close is allowed
 // again, or a person merges it (foundClosed: a person closes it).
 const (
@@ -725,6 +816,47 @@ func TestSequenceStaleCleanupRefusedWithoutARecordedPullRequest(t *testing.T) {
 	}
 }
 
+// Seeds 19084 and 110533 of the Git waits model: a merge reported without its commit is recorded without a receipt
+// when the wait passes, and a reconcile then reads the copy from before the wait, which the request leaves before the
+// reconcile decides (the reconcile reads the API server's copy, so the change comes between that read and the
+// decision). The look on that copy sees the merge without its commit and starts the wait again on the request as the
+// API server holds it: it must add nothing to a
+// request whose merge is recorded (the MergeCheck kind no longer applies), and never replace an entry that stands
+// with a new one of the same kind (a validation rule).
+func TestSequenceStaleCopyStartsNoMergeWaitOnARecordedMerge(t *testing.T) {
+	m := scripted(t, modelStart{start: startRunning, fresh: true})
+	if _, err := m.g.Merge(m.number); err != nil {
+		t.Fatal(err)
+	}
+	m.noCommit = true
+	var before *api.RemediationRequest
+	for range 12 {
+		if live := m.live(); before == nil && gitWait(live, waitMergeCheck) == nil && !mergeRecorded(live) {
+			before = live.DeepCopy()
+		}
+		m.steps(1)
+		if mergeRecorded(m.live()) {
+			break
+		}
+	}
+	if live := m.live(); before == nil || !mergeRecorded(live) {
+		t.Fatalf("setup: want the merge recorded without its commit, got phase %s", live.Status.Phase)
+	}
+	for range 2 {
+		m.mu.Lock()
+		m.staleStart = before.DeepCopy()
+		m.mu.Unlock()
+		m.logf("the next reconcile reads an older copy of the request, which changes before it decides (phase %s, "+
+			"waits %d)", before.Status.Phase, len(before.Status.GitWaits))
+		m.steps(1)
+		if live := m.live(); len(live.Status.GitWaits) > 0 {
+			m.fatalf("end: the request whose merge is recorded (phase %s) holds the waits %v", live.Status.Phase,
+				live.Status.GitWaits)
+		}
+	}
+	m.report()
+}
+
 // settledViolations runs the model's check after the world healed (settled) and returns its violations of kind.
 func settledViolations(m *modelWorld, kind string) []string {
 	m.settled()
@@ -800,6 +932,11 @@ func TestSettledForeignOpenOnAThirdBaseFails(t *testing.T) {
 // person cancels; the read of the merge is retried with the first write of its MergeCheck wait lost, then recorded;
 // the settings name another target branch. The cancel then waits on the changed branch (cancelWatchBranchChanged)
 // and reads nothing, so the wait must still end at its end, after one more look, and never stand past it.
+//
+// Since #786 the cancelled recovery that can open the repository again reads the pull request merged with the head
+// its predecessor recorded, a merge that is the predecessor's to record, and the cancel ends it Cancelled at once:
+// no MergeCheck wait is started on it. The sequence is kept for its end: no MergeCheck wait stands after the branch
+// change and the heal, and the request stays Cancelled.
 func TestSequenceCancelledRecoveryMergeCheckEndsAfterABranchChange(t *testing.T) {
 	m := scripted(t, modelStart{start: startPolicyChecked, open: true, lasting: 10 * time.Minute, handoff: true,
 		focus: focusDeadline})
@@ -820,8 +957,9 @@ func TestSequenceCancelledRecoveryMergeCheckEndsAfterABranchChange(t *testing.T)
 	m.steps(1)
 	m.pause(false)
 	m.steps(2)
-	if gitWait(m.live(), waitMergeCheck) == nil {
-		t.Fatalf("setup: no MergeCheck wait recorded: %v", m.live().Status.GitWaits)
+	if live := m.live(); live.Status.Phase != api.PhaseCancelled || len(live.Status.GitWaits) > 0 {
+		m.fatalf("setup: want the cancel ended once the merge is read, got phase %s, waits %v",
+			live.Status.Phase, live.Status.GitWaits)
 	}
 	m.setConfigured(freshOtherBranch)
 	m.logf("the settings name target branch %s", freshOtherBranch)
@@ -829,8 +967,9 @@ func TestSequenceCancelledRecoveryMergeCheckEndsAfterABranchChange(t *testing.T)
 	m.fault, m.lastingUntil = faultNone, time.Time{}
 	m.logf("heal")
 	m.steps(8)
-	if live := m.live(); gitWait(live, waitMergeCheck) != nil {
-		m.fatalf("end: the MergeCheck wait stands after the world healed (phase %s)", live.Status.Phase)
+	if live := m.live(); gitWait(live, waitMergeCheck) != nil || live.Status.Phase != api.PhaseCancelled {
+		m.fatalf("end: phase %s, waits %v after the world healed; want Cancelled and no MergeCheck wait",
+			live.Status.Phase, live.Status.GitWaits)
 	}
 	m.report()
 }

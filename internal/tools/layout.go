@@ -49,8 +49,8 @@ import (
 // answer shows (a key's signal for the value after it, a match that runs across pieces).
 type pieceRedactor interface {
 	Redactor
-	PiecesWithin(ps []redact.Piece, limit int) []string
-	PiecesFitting(ps []redact.Piece, fits func(out []string) bool) []string
+	PiecesWithin(ps []redact.Piece, limit int) ([]string, bool)
+	PiecesFitting(ps []redact.Piece, fits func(out []string) bool) ([]string, bool)
 }
 
 // answer is a tool's answer being written as pieces.
@@ -77,10 +77,11 @@ func (a *answer) value(key, v string) int {
 //
 // With fits not nil, the markers take the first form at which fits holds of the pieces as decided and made valid
 // UTF-8, in place of the limit (redact.Redactor.PiecesFitting).
-func (s *Set) decide(ps []redact.Piece, limit int, fits func(out []string) bool) []string {
-	var out []string
+//
+// ok is false when redaction withheld the answer whole: the redactor's flag, never the text of a piece.
+func (s *Set) decide(ps []redact.Piece, limit int, fits func(out []string) bool) (out []string, ok bool) {
 	if fits != nil {
-		out = s.redactor.PiecesFitting(ps, func(out []string) bool {
+		out, ok = s.redactor.PiecesFitting(ps, func(out []string) bool {
 			valid := make([]string, len(out))
 			for i := range out {
 				valid[i] = strings.ToValidUTF8(out[i], "?")
@@ -88,21 +89,21 @@ func (s *Set) decide(ps []redact.Piece, limit int, fits func(out []string) bool)
 			return fits(valid)
 		})
 	} else {
-		out = s.redactor.PiecesWithin(ps, limit)
+		out, ok = s.redactor.PiecesWithin(ps, limit)
 	}
 	for i := range out {
 		out[i] = strings.ToValidUTF8(out[i], "?")
 	}
-	return out
+	return out, ok
 }
 
 // lines takes the one decision on a in which every value is written on a line, and returns each piece as
 // shown: a value longer than 1 KiB once decided is left out whole (incidentcontext.Shown), and the text the
-// answer is made of; ok is false when redaction withheld the answer whole (redact.PiecesWithheld), and the
+// answer is made of; ok is false when redaction withheld the answer whole (the flag of decide), and the
 // caller then gives no answer (Result.withhold).
 func (s *Set) lines(a *answer) (pieces []string, text string, ok bool) {
-	out := s.decide(a.pieces, -1, nil)
-	if redact.PiecesWithheld(out) {
+	out, decided := s.decide(a.pieces, -1, nil)
+	if !decided {
 		return nil, "", false
 	}
 	var b strings.Builder
@@ -146,7 +147,7 @@ func (s *Set) jsonAnswer(obj any, limit int) (answer string, leftOut bool, err e
 	}
 	// The markers are fitted to the answer as returned: the keys renamed after the decision (distinctKeys) count
 	// too (#845, fifteenth decision, P4).
-	out := s.decide(t.ps, limit, func(out []string) bool {
+	out, decided := s.decide(t.ps, limit, func(out []string) bool {
 		renamed := slices.Clone(out)
 		distinctKeys(renamed, t.mapOf, t.maps)
 		n := 0
@@ -155,7 +156,7 @@ func (s *Set) jsonAnswer(obj any, limit int) (answer string, leftOut bool, err e
 		}
 		return limit < 0 || n <= limit
 	})
-	if redact.PiecesWithheld(out) {
+	if !decided {
 		return "", false, providers.ErrWithheld
 	}
 	answer, leftOut = leaveOut(out, t, limit)

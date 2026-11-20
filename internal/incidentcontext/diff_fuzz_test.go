@@ -75,7 +75,7 @@ type buildScene struct {
 	series  []providers.Series
 	// excerpt, when set, makes the log source cut and redact the log as the log source does (kube.Excerpt), with
 	// the redactor of its side.
-	excerpt func(data []byte, keep int) (string, bool)
+	excerpt func(data []byte, keep int) (string, bool, error)
 }
 
 // sceneReader answers gets and pod lists from the scene's objects.
@@ -129,7 +129,10 @@ type sceneLogs struct{ scene *buildScene }
 func (s sceneLogs) Logs(_ context.Context, q providers.LogQuery) (providers.LogExcerpt, error) {
 	ex := providers.LogExcerpt{Text: s.scene.logText, Instance: providers.LogInstance{PodUID: "uid-" + crashPod, RestartCount: 4}}
 	if s.scene.excerpt != nil {
-		ex.Text, ex.Truncated = s.scene.excerpt([]byte(s.scene.logText), int(q.MaxBytes))
+		var err error
+		if ex.Text, ex.Truncated, err = s.scene.excerpt([]byte(s.scene.logText), int(q.MaxBytes)); err != nil {
+			return providers.LogExcerpt{}, err
+		}
 	}
 	return ex, nil
 }
@@ -222,8 +225,11 @@ func buildDiff(t testing.TB, in redacttest.Input) []string {
 	ours := &buildScene{objects: objs, logText: logText, series: series}
 	theirs := &buildScene{objects: objs, logText: logText, series: series}
 	if in.Knob&0x10 != 0 {
-		ours.excerpt = func(data []byte, keep int) (string, bool) { return kube.Excerpt(red, data, false, keep) }
-		theirs.excerpt = func(data []byte, keep int) (string, bool) { return mainExcerpt(rec, data, keep) }
+		ours.excerpt = func(data []byte, keep int) (string, bool, error) { return kube.Excerpt(red, data, false, keep) }
+		theirs.excerpt = func(data []byte, keep int) (string, bool, error) {
+			text, truncated := mainExcerpt(rec, data, keep)
+			return text, truncated, nil
+		}
 	}
 	c := diffBuild(t, ours, red, inc.DeepCopy())
 	diffBuild(t, theirs, mainBuildRedactor{rec}, inc.DeepCopy())

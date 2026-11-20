@@ -640,10 +640,12 @@ const canaryMark = "CANARY-7f3a"
 
 func (canary) String(s string) string { return strings.ReplaceAll(s, canaryMark, "[x]") }
 
-func (c canary) PiecesWithin(ps []redact.Piece, _ int) []string { return eachPiece(c, ps) }
+func (c canary) PiecesWithin(ps []redact.Piece, _ int) ([]string, bool) {
+	return eachPiece(c, ps), true
+}
 
-func (c canary) PiecesFitting(ps []redact.Piece, _ func([]string) bool) []string {
-	return eachPiece(c, ps)
+func (c canary) PiecesFitting(ps []redact.Piece, _ func([]string) bool) ([]string, bool) {
+	return eachPiece(c, ps), true
 }
 
 // eachPiece decides the pieces with r one value at a time, for a test redactor: each value redacted alone and

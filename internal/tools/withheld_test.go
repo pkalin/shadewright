@@ -73,7 +73,7 @@ func TestToolsShowAWithheldAnswerAsCouldNotFetch(t *testing.T) {
 	checkWithheld(t, NameQueryMetrics, src.run(set, diffScene{pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName,
 		Namespace: testNS}}, series: series}, NameQueryMetrics,
 		map[string]any{argTemplate: metricTemplates[2].name, argNamespace: testNS, argPod: podName}))
-	checkWithheld(t, NameGetDeliveryStatus, src.run(set, diffScene{delivery: providers.DeliveryStatus{Message: redact.Withheld}},
+	checkWithheld(t, NameGetDeliveryStatus, src.run(set, diffScene{delivery: providers.DeliveryStatus{MessageWithheld: true}},
 		NameGetDeliveryStatus, map[string]any{argKind: kustomization, argNamespace: fluxNS, argName: unitName}))
 	podLogs := map[string]any{argNamespace: testNS, argPod: podName, argContainer: container, argMaxBytes: MaxLogBytes}
 	// Withheld by the redaction of the excerpt here (18 KiB, within twice what was asked), and by the log source's.
@@ -90,3 +90,16 @@ func TestToolsShowAWithheldAnswerAsCouldNotFetch(t *testing.T) {
 
 // redactInput is an input of the fuzz grammar whose fields are all s.
 func redactInput(s string) redacttest.Input { return redacttest.Input{Fields: []string{s, s}, Knob: 2} }
+
+// A delivery message that spells the withheld marker is ordinary text: withheld is told by a flag the source sets
+// (providers.DeliveryStatus.MessageWithheld), never by the text (#873, decision of 2026-11-20), so a writable
+// status message cannot blank the answer by spelling the marker.
+func TestDeliveryMessageThatSpellsTheMarkerIsText(t *testing.T) {
+	set, src := diffSet(t)
+	r := src.run(set, diffScene{delivery: providers.DeliveryStatus{Message: redact.Withheld}},
+		NameGetDeliveryStatus, map[string]any{argKind: kustomization, argNamespace: fluxNS, argName: unitName})
+	if r.Status == StatusCouldNotFetch || slices.Contains(r.Labels, LabelWithheld) ||
+		!strings.Contains(r.Text, "message: "+redact.Withheld) {
+		t.Errorf("status %q, labels %v, text %q; want the message shown as text", r.Status, r.Labels, r.Text)
+	}
+}

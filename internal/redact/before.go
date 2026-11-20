@@ -332,8 +332,17 @@ func (r *Redactor) releasedExcerpt(wm *meter.Meter, s string, from int, drop fun
 // when it then kept the part of its text from cut(text) on (cut is given the text as that release held it) and
 // redacted that part the same way: RenderLog for a log excerpt that get_pod_logs fitted again (#845, thirteenth
 // decision of 2026-11-18).
+//
+// An entry it withholds (budget.go) is Withheld, as text; [Redactor.StringTwiceChecked] says so with a flag.
 func (r *Redactor) StringTwice(s string, cut func(string) int) string {
-	return meteredString(len(s), func(wm *meter.Meter) string { return r.stringTwice(wm, s, cut) })
+	out, _ := r.StringTwiceChecked(s, cut)
+	return out
+}
+
+// StringTwiceChecked is StringTwice with a flag: ok is false when the entry is withheld, and the text is then
+// Withheld.
+func (r *Redactor) StringTwiceChecked(s string, cut func(string) int) (out string, ok bool) {
+	return meteredText(len(s), func(wm *meter.Meter) string { return r.stringTwice(wm, s, cut) })
 }
 
 // stringTwice is StringTwice on the budget wm.
@@ -344,6 +353,11 @@ func (r *Redactor) stringTwice(wm *meter.Meter, s string, cut func(string) int) 
 // StringTwice is the package's StringTwice with the built-in rules.
 func StringTwice(s string, cut func(string) int) string { return defaultRedactor.StringTwice(s, cut) }
 
+// StringTwiceChecked is the package's StringTwiceChecked with the built-in rules.
+func StringTwiceChecked(s string, cut func(string) int) (out string, ok bool) {
+	return defaultRedactor.StringTwiceChecked(s, cut)
+}
+
 // ReplaceFrom is Replace for a log the log source cuts to the bytes from from on, where the release before
 // redacted all of s, kept that part and redacted it again (releasedExcerpt): the matches are those of Replace
 // and what that release hid, and repl and between are called as Replace calls them, over all of s. With drop not
@@ -351,15 +365,18 @@ func StringTwice(s string, cut func(string) int) string { return defaultRedactor
 // dropped the first drop(text) bytes of the excerpt and redacted the rest twice over (incidentcontext.RenderLog
 // and get_pod_logs), so that what it hid there is decided on s as it was read, never on text this package's
 // rules already replaced (#845, fifteenth decision).
+//
+// ok is false when the entry is withheld (budget.go): the text is then Withheld, with neither repl nor between
+// called on s.
 func (r *Redactor) ReplaceFrom(s string, from int, drop func(string) int, repl func(kind, text string) string,
-	between func(string) string) string {
+	between func(string) string) (out string, ok bool) {
 	spans, ok := metered(len(s), func(wm *meter.Meter) []span {
 		return settle(wm, s, append(r.ruleMatches(wm, s), r.releasedExcerpt(wm, s, from, drop)...))
 	})
 	if !ok {
-		return Withheld
+		return Withheld, false
 	}
-	return r.replaceSpans(unstopped(), s, spans, repl, between)
+	return r.replaceSpans(unstopped(), s, spans, repl, between), true
 }
 
 // ReleasedText returns s as the release before wrote it where it redacted a text, made it valid UTF-8 and
@@ -370,7 +387,8 @@ func (r *Redactor) ReleasedText(s string) string {
 	if r.before == nil {
 		return s
 	}
-	return meteredString(len(s), func(wm *meter.Meter) string {
+	out, _ := meteredText(len(s), func(wm *meter.Meter) string {
 		return r.before.StringWithin(wm, strings.ToValidUTF8(r.before.StringWithin(wm, s), "?"))
 	})
+	return out
 }

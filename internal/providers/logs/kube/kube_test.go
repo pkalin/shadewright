@@ -618,6 +618,18 @@ func TestWithheldExcerptIsAnError(t *testing.T) {
 	}
 }
 
+// A log that spells the withheld marker is ordinary text, not an excerpt redaction withheld: withheld is told by
+// a flag of the redactor, never by the text (#873, decision of 2026-11-20), so a writable log line cannot fail
+// the read by spelling the marker.
+func TestALogThatSpellsTheMarkerIsText(t *testing.T) {
+	for _, text := range []string{redact.Withheld, redact.Withheld + "\n"} {
+		got, err := newLogServer(text).source(t).Logs(context.Background(), query())
+		if err != nil || got.Text != text {
+			t.Errorf("Logs(%q) = %q, %v; want the text and no error", text, got.Text, err)
+		}
+	}
+}
+
 func TestInvalidUTF8IsReplaced(t *testing.T) {
 	got, err := newLogServer("bad \xff\xfe byte\n").source(t).Logs(context.Background(), query())
 	if err != nil {
@@ -1166,9 +1178,9 @@ func TestExcerptRedactsBeforeTheCut(t *testing.T) {
 		first := strings.IndexByte(in, '\n')
 		second := first + 1 + strings.IndexByte(in[first+1:], '\n')
 		keep := len(in) - second - 1
-		got, truncated := Excerpt(r, []byte(in), false, keep)
-		if strings.Contains(got, "Qz1000") || !truncated || len(got) > keep || !strings.HasSuffix(got, "ready\n") {
-			t.Errorf("%s: Excerpt(keep %d) = %q, truncated %v", name, keep, got, truncated)
+		got, truncated, err := Excerpt(r, []byte(in), false, keep)
+		if err != nil || strings.Contains(got, "Qz1000") || !truncated || len(got) > keep || !strings.HasSuffix(got, "ready\n") {
+			t.Errorf("%s: Excerpt(keep %d) = %q, truncated %v, %v", name, keep, got, truncated, err)
 		}
 	}
 }

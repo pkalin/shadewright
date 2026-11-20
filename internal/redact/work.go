@@ -25,14 +25,15 @@ import (
 
 // The work of redaction is counted, not timed, by the tests that show it stays linear in the size of the
 // text (#825, #840): a busy machine slows a clock, never a count. The scanning loops and the library calls
-// below report their work to tick. In the product (no build tag) tick does nothing and the package holds no
-// counter; built with the tag redactwork, as make test runs the linearity tests, tick adds to the count of
-// Work (work_counted.go).
+// below report their work to tick. In every build tick spends it on the meter of the entry's work budget (#873,
+// budget.go), which belongs to that one call; the product (no build tag) holds no other counter and no shared
+// state for it (tick.go). Built with the tag redactwork, as make test runs the linearity tests, tick also adds
+// to the count of Work (work_counted.go).
 
 // Tick reports n steps of work done for a decision of this package outside it: the read tools count the bytes
-// of an answer they walk to make its pieces, so that the linearity tests see that work with the redactor's. Like
-// the counting inside the package it does nothing in the product build and adds to the count of Work in a build
-// with the tag redactwork.
+// of an answer they walk to make its pieces, so that the linearity tests see that work with the redactor's. It
+// is outside every entry point, so it spends on no budget: it does nothing in the product build and adds to the
+// count of Work in a build with the tag redactwork.
 func Tick(n int) { tick(nil, n) }
 
 // counted returns t, counting its bytes as the work of the regular expression it is handed to.

@@ -48,6 +48,7 @@ import (
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
+	"github.com/pkalin/shadewright/internal/redact"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
@@ -439,6 +440,15 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		poll()
 		Expect(refusals()).To(HaveKeyWithValue(withheld, remediationv1alpha1.HintRefusalNotRedactable))
 		Expect(fetch().Status.Hints).To(BeEmpty())
+	})
+
+	It("stores a hint that spells the withheld marker as text: withheld is a flag, not a text (#873)", func() {
+		spelled := byWriter("/shadewright reanalyze: " + redact.Withheld)
+		poll()
+		Expect(refusals()).NotTo(HaveKey(spelled))
+		hints := fetch().Status.Hints
+		Expect(hints).To(HaveLen(1))
+		Expect(hints[0].Text).To(Equal(redact.Withheld))
 	})
 
 	It("handles a comment once across restarts, also when it is returned again on the watermark", func() {

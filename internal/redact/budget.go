@@ -40,14 +40,17 @@ const (
 	// WorkFixed is the steps the budget gives every entry besides WorkPerByte per byte: the fixed cost of a call
 	// on a short entry.
 	WorkFixed = 64 << 10
-	// MaxEntry is the longest entry, in bytes, that redaction reads: above what the API server accepts for one
-	// object (a request body of 3 MiB), so no object that can exist is withheld by it.
+	// MaxEntry is the longest entry, in bytes, that redaction reads: above what the API server accepts in one
+	// request body (3 MiB), so no object that can exist is withheld by it; an object stored is smaller still
+	// (about 1.5 MiB with etcd's default request limit).
 	MaxEntry = 4 << 20
 )
 
 // Withheld is what an entry point returns in place of an entry it withholds: a fixed marker, with nothing of the
-// entry in it. A caller compares with it (or uses [IsWithheld]) and shows the entry as it shows a source that
-// failed.
+// entry in it. A caller never tells a withheld entry by this text, since a value from the cluster may spell it: an
+// entry point that returns a flag ([StringChecked], [Redactor.PiecesWithin] and the others) says so, and a caller
+// that shows the entry as a source that failed reads that flag (#873, decision of 2026-11-20). A caller that keeps
+// the text form (String) shows the marker in place of the value, as text.
 const Withheld = "[REDACTED:withheld]"
 
 // Reasons an entry is withheld, the values of the label "reason" of shadewright_redaction_withheld_total.
@@ -68,24 +71,6 @@ func init() {
 	metrics.Registry.MustRegister(withheldTotal)
 	withheldTotal.WithLabelValues(ReasonWork)
 	withheldTotal.WithLabelValues(ReasonSize)
-}
-
-// IsWithheld reports whether s is what an entry point returns for an entry it withheld.
-func IsWithheld(s string) bool { return s == Withheld }
-
-// PiecesWithheld reports whether out, what Pieces, PiecesWithin, PiecesFitting or Strings returned, is an entry
-// withheld: Withheld first and every other string empty. A decided answer that only looks so (a value that is the
-// marker and nothing else around it) is taken for one too, which only ever shows less.
-func PiecesWithheld(out []string) bool {
-	if len(out) == 0 || out[0] != Withheld {
-		return false
-	}
-	for _, s := range out[1:] {
-		if s != "" {
-			return false
-		}
-	}
-	return true
 }
 
 // budgetOf returns the budget of an entry of size bytes.
@@ -122,12 +107,13 @@ func meteredOn[T any](size int, steps int64, f func(wm *meter.Meter) T) (out T, 
 // and a stop there would leave them half done.
 func unstopped() *meter.Meter { return meter.New(math.MaxInt64) }
 
-// meteredString is metered for an entry point that returns a text: Withheld in place of an entry withheld.
-func meteredString(size int, f func(wm *meter.Meter) string) string {
+// meteredText is metered for an entry point that returns a text: Withheld and false in place of an entry
+// withheld.
+func meteredText(size int, f func(wm *meter.Meter) string) (string, bool) {
 	if out, ok := metered(size, f); ok {
-		return out
+		return out, true
 	}
-	return Withheld
+	return Withheld, false
 }
 
 // withheldStrings returns n strings for an entry of n parts that is withheld: the first is Withheld, the others

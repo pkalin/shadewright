@@ -65,9 +65,8 @@ var boundedLoops = map[string]string{
 	"shifted#0":           matchPairs,
 	// The size of an entry, read once before its decision to set its budget (budget.go, #873): no meter exists yet,
 	// and a step counted there would be one no budget holds.
-	"(*Redactor).Strings#0":       entrySize,
-	"(*Redactor).meteredPieces#0": entrySize,
-	"PiecesWithheld#0":            "the strings an entry point returned, one per string or piece of the entry",
+	"(*Redactor).StringsChecked#0": entrySize,
+	"(*Redactor).meteredPieces#0":  entrySize,
 }
 
 // entrySize is the bound of a loop that adds up the lengths of the strings or pieces of one entry.

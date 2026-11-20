@@ -353,7 +353,10 @@ func diffGetPodLogs(set *Set, src *sceneSources) func([]byte) ([]string, bool) {
 		ours := providers.LogExcerpt{Text: text, EndMissing: endMissing}
 		theirs := ours
 		if in.Knob&0x10 != 0 {
-			ours.Text, ours.Truncated = kube.Excerpt(red, []byte(text), endMissing, maxBytes)
+			var err error
+			if ours.Text, ours.Truncated, err = kube.Excerpt(red, []byte(text), endMissing, maxBytes); err != nil {
+				return nil, false // the log source withholds the excerpt (providers.ErrWithheld): nothing is shown
+			}
 			theirs.Text, theirs.Truncated = m.excerpt([]byte(text), endMissing, maxBytes)
 		}
 		r := src.run(set, diffScene{excerpt: ours}, NameGetPodLogs, map[string]any{

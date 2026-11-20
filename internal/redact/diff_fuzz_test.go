@@ -81,15 +81,23 @@ func workFails(what string, total, _ int64, size int) []string {
 	return nil
 }
 
-// withheldFails returns the P5 failure when out, an entry point's output, holds Withheld but is not an entry
-// withheld whole.
-func withheldFails(what string, out []string) []string {
-	if PiecesWithheld(out) {
+// withheldFails returns the P5 failure of out, an entry point's output on in, and ok, its flag: an entry withheld
+// (ok false) is Withheld and nothing else (withheldStrings), and an entry decided (ok true) holds Withheld only
+// where in spells it, so a caller that reads the flag never sees part of an entry withheld (#873).
+func withheldFails(what, in string, out []string, ok bool) []string {
+	if !ok {
+		if !slices.Equal(out, withheldStrings(len(out))) {
+			return []string{fmt.Sprintf("P5: %s withheld the entry but returned %q", what,
+				redacttest.Clip(strings.Join(out, "|")))}
+		}
+		return nil
+	}
+	if strings.Contains(in, Withheld) {
 		return nil
 	}
 	for _, s := range out {
 		if strings.Contains(s, Withheld) {
-			return []string{fmt.Sprintf("P5: %s returned the withheld marker with other text: %q", what,
+			return []string{fmt.Sprintf("P5: %s decided the entry and returned the withheld marker: %q", what,
 				redacttest.Clip(strings.Join(out, "|")))}
 		}
 	}
@@ -159,9 +167,10 @@ func FuzzDiffString(f *testing.F) { fuzzDiff(f, "FuzzDiffString") }
 func diffString(data []byte) ([]string, bool) {
 	in := redacttest.Decode(data, 1).Joined("")
 	var out string
-	total, release, counted := measureWork(func() { out = String(in) })
+	var ok bool
+	total, release, counted := measureWork(func() { out, ok = StringChecked(in) })
 	fails := workFails("String", total, release, len(in))
-	if fails = append(fails, withheldFails("String", []string{out})...); IsWithheld(out) {
+	if fails = append(fails, withheldFails("String", in, []string{out}, ok)...); !ok {
 		return fails, counted
 	}
 	rec := redacttest.NewRecorder()
@@ -178,9 +187,10 @@ func FuzzDiffStringTwice(f *testing.F) { fuzzDiff(f, "FuzzDiffStringTwice") }
 func diffStringTwice(data []byte) ([]string, bool) {
 	in := redacttest.Decode(data, 1).Joined("")
 	var out string
-	total, release, counted := measureWork(func() { out = StringTwice(in, nil) })
+	var ok bool
+	total, release, counted := measureWork(func() { out, ok = StringTwiceChecked(in, nil) })
 	fails := workFails("StringTwice", total, release, len(in))
-	if fails = append(fails, withheldFails("StringTwice", []string{out})...); IsWithheld(out) {
+	if fails = append(fails, withheldFails("StringTwice", in, []string{out}, ok)...); !ok {
 		return fails, counted
 	}
 	rec := redacttest.NewRecorder()
@@ -201,12 +211,13 @@ func diffStrings(data []byte) ([]string, bool) {
 	items := dec.Fields[:int(dec.Knob)%6+1]
 	joined := strings.Join(items, "\n")
 	var out []string
-	total, release, counted := measureWork(func() { out = Strings(items) })
+	var ok bool
+	total, release, counted := measureWork(func() { out, ok = StringsChecked(items) })
 	fails := workFails("Strings", total, release, stringsSize(items))
 	if len(out) != len(items) {
 		fails = append(fails, fmt.Sprintf("P4: Strings returned %d strings for %d", len(out), len(items)))
 	}
-	if fails = append(fails, withheldFails("Strings", out)...); PiecesWithheld(out) {
+	if fails = append(fails, withheldFails("Strings", joined, out, ok)...); !ok {
 		return fails, counted
 	}
 	rec := redacttest.NewRecorder()
@@ -236,11 +247,12 @@ func diffReplaceFrom(data []byte) ([]string, bool) {
 	in := dec.Fields[0]
 	from := excerptFrom([]byte(in), 64*(int(dec.Knob)+1))
 	var out string
+	ok := true
 	total, release, counted := measureWork(func() {
-		out = strings.ToValidUTF8(excerptOf(in, from, defaultRedactor.replaceFromFunc(from), Marker), "?")
+		out = strings.ToValidUTF8(excerptOf(in, from, defaultRedactor.replaceFromFunc(from, &ok), Marker), "?")
 	})
 	fails := workFails("ReplaceFrom", total, release, len(in))
-	if fails = append(fails, withheldFails("the excerpt", []string{out})...); IsWithheld(out) {
+	if fails = append(fails, withheldFails("the excerpt", in, []string{out}, ok)...); !ok {
 		return fails, counted
 	}
 	rec := redacttest.NewRecorder()
@@ -259,10 +271,12 @@ func TestMinimizeCollected(t *testing.T) {
 	redacttest.MinimizeCollected(t, diffBodies, knownDiffFailures)
 }
 
-// replaceFromFunc is ReplaceFrom with from fixed, in the shape of Replace.
-func (r *Redactor) replaceFromFunc(from int) func(string, func(kind, text string) string, func(string) string) string {
+// replaceFromFunc is ReplaceFrom with from fixed, in the shape of Replace; it sets *ok to ReplaceFrom's flag.
+func (r *Redactor) replaceFromFunc(from int, ok *bool) func(string, func(kind, text string) string, func(string) string) string {
 	return func(s string, repl func(kind, text string) string, between func(string) string) string {
-		return r.ReplaceFrom(s, from, nil, repl, between)
+		out, decided := r.ReplaceFrom(s, from, nil, repl, between)
+		*ok = decided
+		return out
 	}
 }
 

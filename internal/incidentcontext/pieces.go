@@ -32,9 +32,9 @@ import (
 // that release did.
 
 // pieceRedactor is a [Redactor] that takes one decision on a text written as pieces (*redact.Redactor's
-// PiecesWithin).
+// PiecesWithin), false when it withheld them whole.
 type pieceRedactor interface {
-	PiecesWithin(ps []redact.Piece, limit int) []string
+	PiecesWithin(ps []redact.Piece, limit int) ([]string, bool)
 }
 
 // piece is one piece of a section: text the builder writes or a value from a source, and the quotable value
@@ -174,10 +174,11 @@ func decide(r Redactor, ps frag, quotes int) (text string, values []string, with
 	}
 	text = strings.Join(out, "")
 	if _, ok := r.(pieceRedactor); !ok {
-		text = Redact(Twice(r), text)
-		if redact.IsWithheld(text) {
+		redacted, decided := checkedTwice(r, text, nil)
+		if !decided {
 			return "", nil, true
 		}
+		text = strings.ToValidUTF8(redacted, "?")
 	}
 	return text, vs, false
 }
@@ -190,14 +191,14 @@ type decidedPiece struct {
 
 // decidedPieces takes the one decision on ps with r and returns each piece as decided, a value shown on its line
 // ([Shown] of the decided value made valid UTF-8), or withheld true when redaction withheld the pieces whole
-// (redact.PiecesWithheld): nothing of them is returned then.
+// (the flag of PiecesWithin, never the text): nothing of them is returned then.
 func decidedPieces(r pieceRedactor, ps frag) (pieces []decidedPiece, withheld bool) {
 	in := make([]redact.Piece, len(ps))
 	for i, p := range ps {
 		in[i] = p.Piece
 	}
-	decided := r.PiecesWithin(in, -1)
-	if redact.PiecesWithheld(decided) {
+	decided, ok := r.PiecesWithin(in, -1)
+	if !ok {
 		return nil, true
 	}
 	out := make([]decidedPiece, len(ps))

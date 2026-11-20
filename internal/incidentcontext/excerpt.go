@@ -24,7 +24,6 @@ import (
 	"unicode"
 
 	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // RedactFunc redacts text. Its output must never be longer than its input, as package redact guarantees.
@@ -34,9 +33,35 @@ type RedactFunc func(string) string
 func (f RedactFunc) String(s string) string { return f(s) }
 
 // twicer is a [Redactor] that also applies the reading of the release before #845 where that release redacted a
-// text, made it valid UTF-8 and redacted it again ([Redact] then; redact.Redactor.StringTwice).
+// text, made it valid UTF-8 and redacted it again ([Redact] then; redact.Redactor.StringTwiceChecked, with its flag).
 type twicer interface {
-	StringTwice(s string, cut func(string) int) string
+	StringTwiceChecked(s string, cut func(string) int) (string, bool)
+}
+
+// checkedRedactor is a [Redactor] that says with a flag when it withholds a text (*redact.Redactor's
+// StringChecked).
+type checkedRedactor interface {
+	StringChecked(s string) (string, bool)
+}
+
+// checkedTwice redacts s as [Twice] of r does (with cut, as StringTwice takes it, when r is a twicer) and reports
+// false when redaction withheld it whole. Withheld is told by the redactor's flag, never by the text, so a value
+// from the cluster that spells redact.Withheld is text like any other (#873, decision of 2026-11-20). A redactor
+// with no flag (a test's) never withholds.
+func checkedTwice(r Redactor, s string, cut func(string) int) (string, bool) {
+	if t, ok := r.(twicer); ok {
+		return t.StringTwiceChecked(s, cut)
+	}
+	if c, ok := r.(checkedRedactor); ok {
+		return c.StringChecked(s)
+	}
+	return r.String(s), true
+}
+
+// checkedValue is [Value] of s with [checkedTwice]: false when redaction withheld s whole.
+func checkedValue(r Redactor, s string) (string, bool) {
+	out, ok := checkedTwice(r, s, nil)
+	return Shown(strings.ToValidUTF8(out, "?")), ok
 }
 
 // Twice returns the RedactFunc for a place where the release before #845 redacted a text twice ([Redact],
@@ -44,7 +69,10 @@ type twicer interface {
 // (#845, thirteenth decision of 2026-11-18), and its String otherwise.
 func Twice(r Redactor) RedactFunc {
 	if t, ok := r.(twicer); ok {
-		return func(s string) string { return t.StringTwice(s, nil) }
+		return func(s string) string {
+			out, _ := t.StringTwiceChecked(s, nil)
+			return out
+		}
 	}
 	return r.String
 }
@@ -136,7 +164,6 @@ type LogView struct {
 // in it) is shown as a read withheld at the source: LogReadWithheld, a header that says so, and nothing of the
 // answer (#873).
 func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, err error, asked, budget int) LogView {
-	r := Twice(red)
 	var v LogView
 	var h lines
 	h.add("%s", title)
@@ -161,8 +188,9 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		h.add("could not fetch: the answer was larger than asked for")
 	default:
 		in := ex.Instance
-		podUID, containerID := Value(r, in.PodUID), Value(r, in.ContainerID)
-		if redact.IsWithheld(podUID) || redact.IsWithheld(containerID) {
+		podUID, okUID := checkedValue(red, in.PodUID)
+		containerID, okID := checkedValue(red, in.ContainerID)
+		if !okUID || !okID {
 			// A value of the header withheld whole withholds the excerpt, as a withheld body does (#873).
 			return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 		}
@@ -171,20 +199,21 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		body, v.LeadingDropped = dropLeadingContinuation(ex.Text)
 		v.Truncated, v.EndMissing, v.InstanceUncertain = ex.Truncated, ex.EndMissing, ex.InstanceUncertain
 	}
-	tw, ok := red.(twicer)
+	_, ok := red.(twicer)
 	if !refit || !ok {
-		header := Redact(r, h.String())
-		redacted := Redact(r, body)
-		if v.Read == LogReadOK && (redact.IsWithheld(header) || redact.IsWithheld(redacted)) {
+		header, okHeader := checkedTwice(red, h.String(), nil)
+		redacted, okBody := checkedTwice(red, body, nil)
+		if v.Read == LogReadOK && (!okHeader || !okBody) {
 			return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 		}
+		header, redacted = strings.ToValidUTF8(header, "?"), strings.ToValidUTF8(redacted, "?")
 		head, _ := keepHead(header, budget)
 		tail, cut := keepTail(redacted, min(asked, budget-len(head)))
 		v.Text, v.HeadLen, v.Cut = head+tail, len(head), cut
 		return v
 	}
-	header := tw.StringTwice(h.String(), func(string) int { return 0 })
-	if v.Read == LogReadOK && redact.IsWithheld(header) {
+	header, okHeader := checkedTwice(red, h.String(), func(string) int { return 0 })
+	if v.Read == LogReadOK && !okHeader {
 		return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 	}
 	head, _ := keepHead(strings.ToValidUTF8(header, "?"), budget)
@@ -194,8 +223,8 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		kept, _ := keepTail(t, n)
 		return len(t) - len(kept)
 	}
-	redacted := tw.StringTwice(body, newest)
-	if v.Read == LogReadOK && redact.IsWithheld(redacted) {
+	redacted, okBody := checkedTwice(red, body, newest)
+	if v.Read == LogReadOK && !okBody {
 		return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 	}
 	tail, cut := keepTail(strings.ToValidUTF8(redacted, "?"), n)

@@ -193,11 +193,11 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 		// instance checked before.
 		after = instance{}
 	}
-	text, truncated := Excerpt(s.redactor, data, over, keep)
-	if redact.IsWithheld(text) {
+	text, truncated, err := Excerpt(s.redactor, data, over, keep)
+	if err != nil {
 		// Redaction withheld the excerpt whole (its work budget ran out): nothing of the log is returned, and the
 		// caller shows the read as failed.
-		return providers.LogExcerpt{}, fmt.Errorf("the log excerpt: %w", providers.ErrWithheld)
+		return providers.LogExcerpt{}, err
 	}
 	return providers.LogExcerpt{
 		Text:              text,
@@ -369,10 +369,11 @@ func fewerLines(data []byte) int64 {
 // more than the last under a secret key it cost about 1,950 steps per byte at 1 MiB before, 36 now), so a read
 // costs at most a few seconds (TestExcerptWorkIsBoundedOnTheLargestInput, TestCanonStairWorkIsLinear in package redact).
 // Whatever the input, the decision stops at the work budget of package redact (#873): the excerpt is then
-// redact.Withheld, and [Source.Logs] returns providers.ErrWithheld instead.
+// withheld: Excerpt returns no text and an error that wraps providers.ErrWithheld, told by the flag of
+// redact.Redactor.ReplaceFrom and never by the text, so a log that spells the marker is a log like any other.
 // It is the step [Source.Logs] takes after its reads, exported so that tests outside the package run the same
 // code.
-func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string, bool) {
+func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (text string, truncated bool, err error) {
 	if endMissing {
 		data = data[:bytes.LastIndexByte(data, '\n')+1]
 	}
@@ -388,7 +389,7 @@ func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string
 		}
 		return f(max(from-start, 0))
 	}
-	text := r.ReplaceFrom(string(data), from, providers.LeadingContinuation,
+	text, ok := r.ReplaceFrom(string(data), from, providers.LeadingContinuation,
 		func(kind, m string) string {
 			return part(len(m), func(skip int) string {
 				if skip == 0 {
@@ -398,7 +399,10 @@ func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string
 			})
 		},
 		func(seg string) string { return part(len(seg), func(skip int) string { return seg[skip:] }) })
-	return strings.ToValidUTF8(text, "?"), truncated
+	if !ok {
+		return "", false, fmt.Errorf("the log excerpt: %w", providers.ErrWithheld)
+	}
+	return strings.ToValidUTF8(text, "?"), truncated, nil
 }
 
 // cut returns the newest whole lines of data that fit in keep bytes. When endMissing, the last line, which

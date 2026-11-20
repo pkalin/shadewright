@@ -38,10 +38,12 @@ type growing struct{}
 
 func (growing) String(s string) string { return strings.ReplaceAll(s, "grow", "grow+") }
 
-func (g growing) PiecesWithin(ps []redact.Piece, _ int) []string { return eachPiece(g, ps) }
+func (g growing) PiecesWithin(ps []redact.Piece, _ int) ([]string, bool) {
+	return eachPiece(g, ps), true
+}
 
-func (g growing) PiecesFitting(ps []redact.Piece, _ func([]string) bool) []string {
-	return eachPiece(g, ps)
+func (g growing) PiecesFitting(ps []redact.Piece, _ func([]string) bool) ([]string, bool) {
+	return eachPiece(g, ps), true
 }
 
 // A log result keeps its header and its newest lines within the bound, however long the header, and also

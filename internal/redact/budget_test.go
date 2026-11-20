@@ -106,8 +106,15 @@ var budgetEntries = []budgetEntry{
 			return r.replaceSpans(wm, in, spans, budgetRepl, func(s string) string { return s })
 		},
 		func(in string) string {
-			return defaultRedactor.ReplaceFrom(in, budgetFrom(in), nil, budgetRepl, func(s string) string { return s })
+			out, _ := defaultRedactor.ReplaceFrom(in, budgetFrom(in), nil, budgetRepl, func(s string) string { return s })
+			return out
 		}},
+	{"Replace", func(in string) int { return len(in) },
+		func(wm *meter.Meter, in string) string {
+			return defaultRedactor.replaceSpans(wm, in, defaultRedactor.spans(wm, in), budgetRepl,
+				func(s string) string { return s })
+		},
+		func(in string) string { return Replace(in, budgetRepl, func(s string) string { return s }) }},
 	{"ReleasedText", func(in string) int { return len(in) },
 		func(wm *meter.Meter, in string) string {
 			b := defaultRedactor.before
@@ -123,7 +130,31 @@ var budgetEntries = []budgetEntry{
 		func(wm *meter.Meter, in string) string {
 			return strings.Join(defaultRedactor.piecesWithin(wm, budgetPieces(in), -1, false, nil), "")
 		},
-		func(in string) string { return strings.Join(defaultRedactor.PiecesWithin(budgetPieces(in), -1), "") }},
+		func(in string) string {
+			out, _ := defaultRedactor.PiecesWithin(budgetPieces(in), -1)
+			return strings.Join(out, "")
+		}},
+	{"PiecesFitting", func(in string) int { return piecesSize(budgetPieces(in)) },
+		func(wm *meter.Meter, in string) string {
+			return strings.Join(defaultRedactor.piecesWithin(wm, budgetPieces(in), -1, false, budgetFits(in)), "")
+		},
+		func(in string) string {
+			out, _ := defaultRedactor.PiecesFitting(budgetPieces(in), budgetFits(in))
+			return strings.Join(out, "")
+		}},
+}
+
+// budgetFits is the check of PiecesFitting for the pieces of in: the answer fits when it is no longer than in, so
+// that the longer forms of a marker are tried and refused before a shorter one fits (a caller's function, which
+// counts no steps).
+func budgetFits(in string) func(out []string) bool {
+	return func(out []string) bool {
+		n := 0
+		for _, s := range out {
+			n += len(s)
+		}
+		return n <= len(in)
+	}
 }
 
 // spentOn returns the steps e takes on in, with no budget to stop it.

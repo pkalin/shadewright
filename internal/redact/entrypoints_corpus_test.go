@@ -68,11 +68,11 @@ var entryPoints = map[string]func(in string) []string{
 	// leave its block bare.
 	"kube.Excerpt": func(in string) []string {
 		out := []string{}
-		text, _ := kube.Excerpt(defaultRedactor(), []byte(in), false, len(in))
+		text, _, _ := kube.Excerpt(defaultRedactor(), []byte(in), false, len(in))
 		out = append(out, text)
 		for i := range len(in) {
 			if in[i] == '\n' && i+1 < len(in) {
-				text, _ := kube.Excerpt(defaultRedactor(), []byte(in), false, len(in)-i-1)
+				text, _, _ := kube.Excerpt(defaultRedactor(), []byte(in), false, len(in)-i-1)
 				out = append(out, text)
 			}
 		}

@@ -1147,16 +1147,23 @@ type seqFound struct {
 // header in one string and its lines in the next). So what String hides in the strings joined, Strings hides in
 // them apart.
 //
-// Strings it withhold (budget.go) come back as as many strings, the first Withheld and the others empty.
+// Strings it withholds (budget.go) come back as as many strings, the first Withheld and the others empty;
+// [Redactor.StringsChecked] says so with a flag.
 func (r *Redactor) Strings(items []string) []string {
+	out, _ := r.StringsChecked(items)
+	return out
+}
+
+// StringsChecked is Strings with a flag: ok is false when the strings are withheld.
+func (r *Redactor) StringsChecked(items []string) (out []string, ok bool) {
 	size := len(items)
 	for _, it := range items {
 		size += len(it)
 	}
 	if out, ok := metered(size, func(wm *meter.Meter) []string { return r.strings(wm, items) }); ok {
-		return out
+		return out, true
 	}
-	return withheldStrings(len(items))
+	return withheldStrings(len(items)), false
 }
 
 // strings is Strings on the budget wm.
@@ -1180,6 +1187,11 @@ func (r *Redactor) strings(wm *meter.Meter, items []string) []string {
 
 // Strings is the package's Strings with the built-in rules.
 func Strings(items []string) []string { return defaultRedactor.Strings(items) }
+
+// StringsChecked is the package's StringsChecked with the built-in rules.
+func StringsChecked(items []string) (out []string, ok bool) {
+	return defaultRedactor.StringsChecked(items)
+}
 
 // seqBoundary matches the boundary between two double-quoted strings of a sequence written in a text: the
 // closing quote, a separator with a comma or a line break in it (plain or escaped, with blanks and a YAML list

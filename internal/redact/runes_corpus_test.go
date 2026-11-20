@@ -232,9 +232,10 @@ var runeEntryOutputs = []struct {
 	{"StringTwice", func(s string) []string { return []string{StringTwice(s, func(t string) int { return len(t) / 3 })} }},
 	{"Strings", func(s string) []string { return Strings(strings.Split(s, "\n")) }},
 	{"ReplaceFrom", func(s string) []string {
-		return []string{defaultRedactor.ReplaceFrom(s, 0, func(t string) int { return len(t) / 5 },
+		out, _ := defaultRedactor.ReplaceFrom(s, 0, func(t string) int { return len(t) / 5 },
 			func(kind, text string) string { return Marker(kind, len(text)) },
-			func(t string) string { return t })}
+			func(t string) string { return t })
+		return []string{out}
 	}},
 	{"Pieces", func(s string) []string { return defaultRedactor.Pieces([]Piece{{Text: s, Data: true, Form: JSON}}) }},
 }

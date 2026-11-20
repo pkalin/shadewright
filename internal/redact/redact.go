@@ -251,6 +251,12 @@ func String(s string) string {
 	return defaultRedactor.String(s)
 }
 
+// StringChecked is String with a flag: ok is false when the entry is withheld (budget.go), and the text is then
+// Withheld.
+func StringChecked(s string) (out string, ok bool) {
+	return defaultRedactor.StringChecked(s)
+}
+
 // StringKeeping is String, except that a match of a rule that lies wholly inside whole occurrences of strings
 // in keep stays as it is. keep holds values the caller has verified are not secrets (an object name it read back
 // from the API server, for example), never text from a model, a user or the cluster; s may be any text, a
@@ -270,7 +276,8 @@ func Clean(s string, keep ...string) bool {
 
 // StringKeeping is the package's StringKeeping with r's rules.
 func (r *Redactor) StringKeeping(s string, keep ...string) string {
-	return meteredString(len(s), func(wm *meter.Meter) string { return r.stringKeeping(wm, s, keep) })
+	out, _ := meteredText(len(s), func(wm *meter.Meter) string { return r.stringKeeping(wm, s, keep) })
+	return out
 }
 
 // stringKeeping is StringKeeping on the budget wm.
@@ -463,8 +470,15 @@ type span struct {
 
 // String returns s with every match of every rule replaced by a marker. Overlapping matches are merged
 // into one, named after the match that starts first (the first rule, on a tie).
+// An entry it withholds (budget.go) is Withheld, as text; [Redactor.StringChecked] says so with a flag.
 func (r *Redactor) String(s string) string {
-	return meteredString(len(s), func(wm *meter.Meter) string { return render(wm, s, r.spans(wm, s)) })
+	out, _ := r.StringChecked(s)
+	return out
+}
+
+// StringChecked is String with a flag: ok is false when the entry is withheld, and the text is then Withheld.
+func (r *Redactor) StringChecked(s string) (out string, ok bool) {
+	return meteredText(len(s), func(wm *meter.Meter) string { return render(wm, s, r.spans(wm, s)) })
 }
 
 // spans returns the matches of every rule in s, sorted, with overlapping matches merged into one named after
@@ -630,14 +644,25 @@ func Replace(s string, repl func(kind, text string) string, between func(string)
 	return defaultRedactor.Replace(s, repl, between)
 }
 
+// ReplaceChecked is Replace with a flag: ok is false when the entry is withheld, and the text is then Withheld.
+func ReplaceChecked(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
+	return defaultRedactor.ReplaceChecked(s, repl, between)
+}
+
 // Replace is the package's Replace with r's rules.
 // An entry it withholds (budget.go) is Withheld, with neither repl nor between called on its text.
 func (r *Redactor) Replace(s string, repl func(kind, text string) string, between func(string) string) string {
+	out, _ := r.ReplaceChecked(s, repl, between)
+	return out
+}
+
+// ReplaceChecked is Replace with a flag: ok is false when the entry is withheld, and the text is then Withheld.
+func (r *Redactor) ReplaceChecked(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
 	spans, ok := metered(len(s), func(wm *meter.Meter) []span { return r.spans(wm, s) })
 	if !ok {
-		return Withheld
+		return Withheld, false
 	}
-	return r.replaceSpans(unstopped(), s, spans, repl, between)
+	return r.replaceSpans(unstopped(), s, spans, repl, between), true
 }
 
 // replaceSpans is Replace with the sorted, disjoint spans given.

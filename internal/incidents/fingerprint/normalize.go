@@ -183,9 +183,10 @@ func normalize(o Observation, mode quantityMode) string {
 	// Redact the note as it was read, before any character is replaced: sanitize turns ">" into ")", which
 	// would hide a folded block scalar indicator from the rules (#840). Each match becomes its placeholder
 	// at once, and only the text between matches is sanitized.
-	s := redact.Replace(o.Note, rawPlaceholder, sanitize)
-	if redact.IsWithheld(s) {
-		// Redaction withheld the note whole (its work budget ran out): it stands as a note too long to read.
+	s, ok := redact.ReplaceChecked(o.Note, rawPlaceholder, sanitize)
+	if !ok {
+		// Redaction withheld the note whole (its work budget ran out): it stands as a note too long to read. The
+		// flag says so, never the text: a note that spells the marker is a note like any other (#873).
 		return placeholderRedacted
 	}
 	s = expandShortIPv6(s)

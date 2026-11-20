@@ -91,3 +91,32 @@ func TestRenderLogWithheldHeaderValue(t *testing.T) {
 		}
 	}
 }
+
+// A log header value or a log body that spells the withheld marker is ordinary text: withheld is told by a flag of
+// the redactor, never by the text (#873, decision of 2026-11-20), so a writable value cannot blank the log section
+// by spelling the marker. Each field alone, both modes.
+func TestRenderLogMarkerTextIsNotWithheld(t *testing.T) {
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"container id", "pod uid", "body"} {
+		ex := providers.LogExcerpt{Text: "starting server on port 8080\n", CollectedAt: testNow,
+			Instance: providers.LogInstance{PodUID: "uid-1", ContainerID: "containerd://abc"}}
+		switch field {
+		case "container id":
+			ex.Instance.ContainerID = redact.Withheld
+		case "pod uid":
+			ex.Instance.PodUID = redact.Withheld
+		default:
+			ex.Text = redact.Withheld
+		}
+		for _, refit := range []bool{false, true} {
+			v := RenderLog(red, refit, "pod p container c, current instance", ex, nil, 4096, 8192)
+			if v.Read != LogReadOK || !strings.Contains(v.Text, redact.Withheld) ||
+				strings.Contains(v.Text, "withheld by redaction") {
+				t.Errorf("%s spells the marker, refit %v: read %d, text %q", field, refit, v.Read, v.Text)
+			}
+		}
+	}
+}

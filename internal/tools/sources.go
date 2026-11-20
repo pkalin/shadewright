@@ -34,7 +34,6 @@ import (
 
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // Bounds of get_pod_logs.
@@ -406,7 +405,7 @@ func (s *Set) deliveryStatus(ctx context.Context, a deliveryArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	if redact.IsWithheld(st.Message) {
+	if st.MessageWithheld {
 		// The source redacted the message whole before it bounded it, and redaction withheld it.
 		r.withhold()
 		return nil

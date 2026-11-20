@@ -59,8 +59,9 @@ var (
 
 // tokenEndRun is a flag followed by a comma with no value: repeated, alone or with a closing brace, it is the
 // fourth shape of #873, on which the reading of the release before reads each value to the end of the run
-// (released.tokenEnd) and its work grows with the square of the text. That reading is the release's, kept byte
-// for byte (TestReleasedIsTheReleaseBefore), and not fixed: the budget withholds such an entry instead. The work
+// (released.tokenEnd) and its work grows with the square of the text. That reading is the release's code (with the
+// linearity change of #873 that left its output unchanged, TestReleasedIsTheReleaseBefore and kept_test.go), and
+// not fixed for this shape (#962): the budget withholds such an entry instead. The work
 // of this package on it is linear: the plain run of plainWordEnd reads the run of flags once, where each flag
 // read up to maxValueExtent bytes of it before (377,785, 1,326,458, 3,571,606 and 8,061,008 steps for 2,304 to
 // 18,432 bytes of "--token,}").
@@ -71,8 +72,8 @@ const tokenEndRun = "--" + canonTokenKey + ","
 // still does (so an entry here cannot hide a shape that became linear) and that String withholds it at the
 // largest size; the work of this package on them is held to the linear bound as on every other shape.
 var complexityKnownSuperlinear = map[string]string{
-	tokenEndRun:       "released.tokenEnd reads each value to the end of the run (#873, the fourth shape)",
-	tokenEndRun + "}": "released.tokenEnd reads each value to the end of the run (#873, the fourth shape)",
+	tokenEndRun:       "released.tokenEnd reads each value to the end of the run (#873, the fourth shape; #962)",
+	tokenEndRun + "}": "released.tokenEnd reads each value to the end of the run (#873, the fourth shape; #962)",
 }
 
 // complexityUnits returns every unit: each token, and each pair of core tokens.
@@ -146,7 +147,8 @@ func TestTokenShapesWorkIsLinear(t *testing.T) {
 					after, own)
 			}
 			_, _, _, releaseOver := doublingOver(rel, size)
-			withheld := IsWithheld(String(in))
+			_, decided := StringChecked(in)
+			withheld := !decided
 			if reason, known := complexityKnownSuperlinear[unit]; known {
 				if !releaseOver || !withheld {
 					fail("%q + %q, known superlinear in the release's reading (%s): superlinear %v (release work %v), "+
@@ -183,7 +185,7 @@ func TestTokenEndRunWithheldFrom(t *testing.T) {
 	// there alone.
 	decided := map[string]int{}
 	for field := range strings.FieldsSeq(`String=4608 StringKeeping=4608 Clean=4608 StringTwice=4608
-		ReplaceFrom=4608 ReleasedText=4608 Strings=2304 PiecesWithin=4608`) {
+		ReplaceFrom=4608 Replace=4608 ReleasedText=4608 Strings=2304 PiecesWithin=4608 PiecesFitting=4608`) {
 		name, size, _ := strings.Cut(field, "=")
 		n, err := strconv.Atoi(size)
 		if err != nil {

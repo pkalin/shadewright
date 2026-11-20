@@ -142,7 +142,13 @@ func SecretCollection(name string) bool {
 // piece and one over the answer, and four passes of the release before's over the answer, as its tools made
 // them), apart from the sorts of the matches (mergeSpans): m log m comparisons for m matches, and m is at most
 // linear in that length.
-func (r *Redactor) Pieces(ps []Piece) []string { return r.PiecesWithin(ps, -1) }
+//
+// An answer it withholds (budget.go) comes back as one string per piece, the first Withheld and the others empty;
+// [Redactor.PiecesWithin] says so with a flag.
+func (r *Redactor) Pieces(ps []Piece) []string {
+	out, _ := r.PiecesWithin(ps, -1)
+	return out
+}
 
 // PiecesWithin is Pieces for an answer bounded to limit bytes (none when limit is negative): the decision is
 // the same, and when the pieces joined with the usual markers are longer than limit, each replacement takes the
@@ -151,8 +157,9 @@ func (r *Redactor) Pieces(ps []Piece) []string { return r.PiecesWithin(ps, -1) }
 // replacements of this package may be longer than those of the release before, which wrote its markers on the
 // values before they were escaped. The work is linear in the length of the pieces.
 //
-// An answer it withholds (budget.go) comes back as one string per piece, the first Withheld and the others empty.
-func (r *Redactor) PiecesWithin(ps []Piece, limit int) []string {
+// ok is false when it withholds the answer (budget.go): it then comes back as one string per piece, the first
+// Withheld and the others empty. A caller tells a withheld answer by ok, never by its text.
+func (r *Redactor) PiecesWithin(ps []Piece, limit int) (out []string, ok bool) {
 	return r.meteredPieces(ps, func(wm *meter.Meter) []string { return r.piecesWithin(wm, ps, limit, false, nil) })
 }
 
@@ -161,21 +168,22 @@ func (r *Redactor) PiecesWithin(ps []Piece, limit int) []string {
 // longer than the pieces joined (get_resource, which renames two map keys decided alike) checks its own answer
 // (#845, fifteenth decision, P4). The decision is the same as Pieces'; fits is called at most once per form,
 // so the work is linear in the length of the pieces and in what fits does.
-// An answer it withholds comes back as PiecesWithin returns it, with fits not called on it.
-func (r *Redactor) PiecesFitting(ps []Piece, fits func(out []string) bool) []string {
+// An answer it withholds comes back as PiecesWithin returns it, ok false, with fits not called on it.
+func (r *Redactor) PiecesFitting(ps []Piece, fits func(out []string) bool) (out []string, ok bool) {
 	return r.meteredPieces(ps, func(wm *meter.Meter) []string { return r.piecesWithin(wm, ps, -1, false, fits) })
 }
 
 // meteredPieces runs f, a decision on ps, on the budget of the pieces' bytes, their keys included (budget.go).
-func (r *Redactor) meteredPieces(ps []Piece, f func(wm *meter.Meter) []string) []string {
+// ok is false when the answer is withheld.
+func (r *Redactor) meteredPieces(ps []Piece, f func(wm *meter.Meter) []string) (out []string, ok bool) {
 	size := 0
 	for _, p := range ps {
 		size += len(p.Text) + len(p.Key)
 	}
 	if out, ok := metered(size, f); ok {
-		return out
+		return out, true
 	}
-	return withheldStrings(len(ps))
+	return withheldStrings(len(ps)), false
 }
 
 // piecesWithin is PiecesWithin; with joined true it also hides, cut at each piece's ends, everything String hides

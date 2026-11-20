@@ -873,7 +873,8 @@ func (r *RemediationRequestReconciler) endMergeWait(ctx context.Context, rr *api
 }
 
 // takenOverMerge reports whether pr, the pull request of rr's MergeCheck entry, is the merged pull request rr's
-// takeover found with rr's handoff commit as its head, whose record was lost: rr is a replacement before its takeover
+// takeover found with rr's handoff commit as its head, whose record was lost, or, of rr's MergeContent entry, the one
+// rr found merged with another head while it held the lock (recordOtherHeadMerge, #870): rr is a replacement before its takeover
 // (its handoff Reserved, its source recorded, no pull request of its own recorded), and pr is the pull request its
 // predecessor records. Only the takeover starts such an entry on such a request, and only on a merged head that is
 // rr's commit (afterUpdate, recordFoundMerge): the wait is the stored record of that first read (decision of
@@ -911,6 +912,19 @@ func (r *RemediationRequestReconciler) takenOverMerge(ctx context.Context, rr *a
 // Only a failed Kubernetes read is returned, for the error backoff.
 func (r *RemediationRequestReconciler) endContentUnreadable(ctx context.Context, rr *api.RemediationRequest,
 	w api.GitWait, last string) error {
+	// A replacement before its takeover that holds the lock started the wait on a merge of the pull request it was to
+	// take over with another head than its commit (recordOtherHeadMerge, #870): that merge is recorded on it, with the
+	// takeover in the same write, as the read would have recorded it.
+	switch pred, taken, err := r.takenOverMerge(ctx, rr, w.PullRequest); {
+	case err != nil:
+		return err
+	case taken:
+		pr := w.PullRequest
+		cr := providers.ChangeRequest{Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA,
+			BaseBranch: string(pr.BaseBranch), MergeCommit: pr.MergeCommitSHA, State: providers.ChangeRequestMerged}
+		return r.endOtherHeadMerge(ctx, rr, pred, cr, ReasonMergeContentUnreadable,
+			"it could not be read: "+contentUnreadableMessage(last))
+	}
 	if rr.Status.PullRequest == nil && w.PullRequest != nil {
 		recordFound(rr, providers.ChangeRequest{Number: w.PullRequest.Number, URL: w.PullRequest.URL,
 			HeadSHA: w.PullRequest.HeadSHA, State: providers.ChangeRequestMerged})

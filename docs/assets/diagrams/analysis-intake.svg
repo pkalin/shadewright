@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 600" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Scoring analysis records outside the cluster</title>
-  <desc id="d">Overview of ADR-0047. The analyzer of the www cluster, which we do not run, creates a record in its records container. Blob created goes through an Event Grid system topic to a storage queue. A Container Apps job that scales to zero takes one message per execution. It checks the size and the schema, runs the redactor again and quarantines the record on any hit before any model call, ends without a model call when the record is already scored or the month's cap is reached, then makes one judge call from the other model family than the analysis, with allowlisted fields, a fixed prompt, a fixed answer schema and one tool, a cross-check by a second model asked at most once. It creates the score and deletes the message. The job runs in the intake's own small virtual network and reaches the records account through a storage service endpoint. Before each model call it creates a spend reservation. Anthropic through workload identity federation if the account accepts it, otherwise a capped key; OpenAI a capped key; each capped at 40 to 50 USD a month in its provider's console and in code, paid from the providers' allowances, not Azure credits. Scores, reservations and quarantined records are in the intake's own containers with a retention period. One managed identity reads records, reads and creates scores, writes quarantine, processes one queue and reads the Key Vault secrets. It has no storage key and no cluster credential.</desc>
+  <desc id="d">Overview of ADR-0047. The analyzer of the www cluster, which we do not run, creates a record in its records container. Blob created goes through an Event Grid system topic to a storage queue. A Container Apps job that scales to zero takes one message per execution. It checks the size and the schema, runs the redactor again and quarantines the record on any hit before any model call, ends without a model call when the record is already scored or the month's cap is reached, then makes one judge call from the other model family than the analysis, with allowlisted fields, a fixed prompt, a fixed answer schema and one tool, a cross-check by a second model asked at most once. It creates the score and deletes the message. The job runs in the intake's own small virtual network and reaches the records account through a storage service endpoint. Before each model call it creates a spend reservation named with the provider, the message, the dequeue count, the call index and the tokens; a monthly cap applies to each provider. The family of the judge is read from the model IDs of the record. The keys are put in the vault out of band and resolved by the platform, up to 30 minutes behind the vault. Anthropic through workload identity federation if the account accepts it, otherwise a capped key; OpenAI a capped key; each capped at 40 to 50 USD a month in its provider's console and in code, paid from the providers' allowances, not Azure credits. Scores, reservations and quarantined records are in the intake's own containers with a retention period. One managed identity reads records, reads and creates scores, writes quarantine, processes one queue and reads the Key Vault secrets. It has no storage key and no cluster credential.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
@@ -47,10 +47,10 @@
   <text class="h" x="54" y="208">Before any model call</text>
   <text class="s" x="54" y="228">1  Name and size: bad ID or over 1 MiB, quarantine, not downloaded</text>
   <text class="s" x="54" y="246">2  Schema: known fields and version only; otherwise quarantine</text>
-  <text class="s" x="54" y="264">3  Redactor Clean on every string and key; any hit quarantines the record</text>
-  <text class="s" x="54" y="282">4  Already scored (ID and hash) or month cap reached: no model call</text>
+  <text class="s" x="54" y="264">3  Redactor Clean on every string and key (id, names kept by shape only); a hit quarantines</text>
+  <text class="s" x="54" y="282">4  Already scored (ID and hash) or provider's month cap reached: no model call</text>
   <text class="h" x="54" y="312">Then</text>
-  <text class="s" x="54" y="328">5  Reserve the run's tokens, then one judge call: allowlisted fields,</text>
+  <text class="s" x="54" y="328">5  Reserve each call's tokens, then one judge call: allowlisted fields,</text>
   <text class="s" x="54" y="346">   fixed prompt and schema, one tool (cross_check, once, counted in code).</text>
   <text class="s" x="54" y="366">6  Create the score (create-only), then delete the message; a failed read retries.</text>
   <text class="s" x="54" y="382">   Cap refused: budget entry. Retries spent: error entry. Neither is a score.</text>
@@ -69,7 +69,7 @@
   <rect class="box" x="800" y="304" width="284" height="92" rx="12"/>
   <text class="h" x="816" y="330">Scores and quarantine</text>
   <text class="s" x="816" y="352">own containers and retention;</text>
-  <text class="s" x="816" y="370">also spend reservations;</text>
+  <text class="s" x="816" y="370">also spend reservations by provider;</text>
   <text class="s" x="816" y="386">30 and 365 days (proposed)</text>
 
   <rect class="box" x="36" y="416" width="1048" height="80" rx="12"/>

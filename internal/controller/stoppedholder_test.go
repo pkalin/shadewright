@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -157,6 +159,67 @@ func TestStoppedHolderRetriesARefusedCheckWhileTheLockIsHeld(t *testing.T) {
 	}
 	if c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed); c != nil {
 		t.Fatalf("ReviewCheckNotFailed %+v after the write: want it removed", c)
+	}
+}
+
+// deletedChangeRequest is the repository seen through gitView with change request n deleted from the host: the read
+// by its number answers 404 and no listing shows it.
+type deletedChangeRequest struct {
+	providers.GitProvider
+	n int64
+}
+
+func (d *deletedChangeRequest) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	if n == d.n {
+		return providers.ChangeRequest{}, fmt.Errorf("pull request %d: %w", n, providers.ErrNotFound)
+	}
+	return d.GitProvider.GetChangeRequest(ctx, n)
+}
+
+func (d *deletedChangeRequest) ListChangeRequests(ctx context.Context, head string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	all, err := d.GitProvider.ListChangeRequests(ctx, head, openOnly)
+	return slices.DeleteFunc(all, func(cr providers.ChangeRequest) bool { return cr.Number == d.n }), err
+}
+
+func (d *deletedChangeRequest) ListChangeRequestsAnyBase(ctx context.Context, head string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	all, err := d.GitProvider.ListChangeRequestsAnyBase(ctx, head, openOnly)
+	return slices.DeleteFunc(all, func(cr providers.ChangeRequest) bool { return cr.Number == d.n }), err
+}
+
+// Seed 1456 of TestGitWaitModel (#925, "one rule"): a stopped holder whose own pull request was deleted while another
+// open pull request from its branch keeps the lock. The first look that finds the number missing settles nothing
+// (errGoneUnconfirmed: only a later look may conclude gone), and it leaves the lock held, so the one rule applies to it
+// as to any look whose reads worked: the failed check is written on the recorded head in that look, not one look
+// (heldRecheckInterval) later. Before, the unsettled look wrote nothing and the pass stayed last for that look.
+func TestStoppedHolderFailsItsCheckAtAnUnconfirmedGoneLook(t *testing.T) {
+	r, g, get, head := stoppedHolderWorld(t, ownClosed)
+	n := get().Status.PullRequest.Number
+	open := r.OpenRepository
+	r.OpenRepository = func(ctx context.Context, repo api.GitRepository) (providers.GitProvider, error) {
+		git, err := open(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		return &deletedChangeRequest{GitProvider: git, n: n}, nil
+	}
+	if _, err := r.checkHeld(context.Background(), get()); err != nil {
+		t.Fatalf("checkHeld: %v", err)
+	}
+	live := get()
+	if !holdsLock(live) {
+		t.Fatalf("the first look at a missing number released the lock: %s", conditionsOf(live))
+	}
+	if last := lastReviewCheck(g.CheckRuns(head)); last == nil || last.Status != providers.CheckRunFailure ||
+		last.Title != stoppedCheckTitle {
+		t.Fatalf("check runs on the recorded head %+v after the first look at a missing number: want the stop's "+
+			"failed check last", g.CheckRuns(head))
+	}
+	if !staleOnHead(live) || meta.FindStatusCondition(live.Status.Conditions,
+		api.ConditionReviewCheckNotFailed) != nil {
+		t.Fatalf("Stale on head %v, conditions %s: want Stale recorded and no ReviewCheckNotFailed",
+			staleOnHead(live), conditionsOf(live))
 	}
 }
 

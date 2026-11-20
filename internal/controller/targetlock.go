@@ -763,6 +763,15 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return reconcile.Result{}, errors.Join(err, v.err)
 	}
 	if err != nil || v.failed() {
+		if err == nil && c == nil && answeredUnknown(v.err) {
+			// The reads worked and the Git host answered, but only a later look may settle the answer (a first look
+			// at a missing number, contradicting reads): the look leaves the lock held, so the one rule applies to it
+			// as to a settled look (failCheckAfterLook), and the failed check does not wait one more look (seed 1456
+			// of the Git waits model, #925). Which pull request keeps the lock is not read in such a look.
+			if err := r.failCheckAfterUnsettledLook(ctx, rr); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
 		return r.heldUnsettled(ctx, rr, v, err, c != nil)
 	}
 	if res, done, err := r.settleStopException(ctx, rr, v); done {
@@ -1270,6 +1279,27 @@ func (r *RemediationRequestReconciler) lockWaiters(ctx context.Context, obj clie
 		}
 	}
 	return out
+}
+
+// failCheckAfterUnsettledLook is failCheckAfterLook for a look whose reads worked but settled nothing yet
+// (answeredUnknown): the lock stays held, so the failed check is owed on the recorded head as after any look that
+// leaves it held. The change to the status (Stale on the head, or condition ReviewCheckNotFailed) is written here,
+// since heldUnsettled writes none for such a look. A conflict or any other failed status write is returned for the
+// error backoff: the check run is then written already, and the next look reads it last (stoppedCheckShown) or writes
+// it once more. Only a failure of the Kubernetes API is returned besides.
+func (r *RemediationRequestReconciler) failCheckAfterUnsettledLook(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) error {
+	before := rr.Status.DeepCopy()
+	if err := r.failCheckAfterLook(ctx, rr, nil); err != nil {
+		return err
+	}
+	if equality.Semantic.DeepEqual(before, &rr.Status) {
+		return nil
+	}
+	if err := r.Status().Update(ctx, rr); err != nil {
+		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	return nil
 }
 
 // releaseLock releases rr's lock in status for the verdict v (lockverdict.Release), for the caller's status write.

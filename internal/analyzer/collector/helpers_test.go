@@ -49,6 +49,8 @@ const (
 	// labelApp is the label key the test workloads select on.
 	labelApp = "app.kubernetes.io/name"
 	intruder = "intruder"
+	// testFinalizer holds a deleted test pod, so it stays with its deletionTimestamp set.
+	testFinalizer = "test.shadewright.io/hold"
 )
 
 var (

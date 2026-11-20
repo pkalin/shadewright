@@ -195,7 +195,7 @@ type RemediationSettingsSpec struct {
 	// analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its
 	// limits take their defaults and no model is configured. maxAnalysesPerDay is read by the analysis
 	// trigger; the analysis loop, which the analyzer starts only with its --triage-model flag, reads and
-	// enforces the rest, maxTokensPerDay within one analysis only until the spend counter of #208. The
+	// enforces the rest, maxTokensPerDay as a ceiling for one analysis only until the spend counter of #208. The
 	// endpoints decide where the analyzer sends its Entra ID token and the redacted context, so write access
 	// to this object is security-relevant (threat model).
 	// +kubebuilder:default={}
@@ -399,7 +399,9 @@ type ModelDeployment struct {
 	// +optional
 	InferenceAPI InferenceAPI `json:"inferenceAPI,omitempty"`
 
-	// maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not)
+	// maxTokensPerDay is meant as the daily spend cap of this deployment, in tokens per UTC day, but it is not
+	// yet counted across analyses: today it is a ceiling for one analysis, so the daily bound on spend is
+	// maxAnalysesPerDay times this ceiling. It counts input (cached or not)
 	// plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input
 	// estimate plus maxOutputTokens), except a call the adapter marks as refused by its host before processing
 	// (a 429 on every attempt from a Microsoft-operated Azure OpenAI or Foundry host), counted as 0. Required, with no default, so the admin chooses the cap of each

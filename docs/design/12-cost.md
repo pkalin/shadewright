@@ -57,7 +57,7 @@ The count lives in the ConfigMap `shadewright-analysis-budget` in the operator n
 
 ### The spend limit
 
-The spend limit is a count of tokens per model deployment and UTC day (`maxTokensPerDay`), not an amount of money.
+The spend limit is a count of tokens per model deployment and UTC day (`maxTokensPerDay`), not an amount of money. Until the daily counter exists it is a ceiling for one analysis, and the daily bound on spend is `maxAnalysesPerDay` times this ceiling.
 
 - **Why tokens.** Tokens are what the provider reports and bills, and they are whole numbers with no rounding. A money limit would need a price list in the settings that goes stale.
 - **Why per deployment.** The triage and escalation models differ in price.

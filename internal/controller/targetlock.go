@@ -1284,8 +1284,8 @@ func (r *RemediationRequestReconciler) lockWaiters(ctx context.Context, obj clie
 // request keeps the lock is not read in such a look. A look whose reads failed writes nothing; the next look tries.
 // The change to the status (Stale on the head, or condition ReviewCheckNotFailed) is written here,
 // since heldUnsettled writes none for such a look. A conflict or any other failed status write is returned for the
-// error backoff: the check run is then written already, and the next look reads it last (stoppedCheckShown) or writes
-// it once more. Only a failure of the Kubernetes API is returned besides.
+// error backoff: the check run is then written already, but Stale is not recorded, so each retry looks again and
+// writes the same failed run once more without reading it first (ADR-0046 limit (g)). Only a failure of the Kubernetes API is returned besides.
 func (r *RemediationRequestReconciler) failCheckAfterUnsettledLook(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, v changeVerdict, err error, said bool) error {
 	if err != nil || said || !v.failed() || !answeredUnknown(v.err) {

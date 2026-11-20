@@ -324,7 +324,10 @@ func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 // installation makes the plan stale (the digest covers it), and the same URL is the same repository, so its pull
 // request can still be closed there; but every caller reads the pull request through that entry with this request's
 // marker (request UID and plan digest, invariant 5) before it fails the review check or closes it, and the provider
-// opened for it writes nothing else (openPlanEntry). Another URL is never accepted: closing a number elsewhere could
+// opened for it writes nothing else (openPlanEntry). One write is the exception: the failed check of a stopped
+// holder's look that settles nothing yet (failCheckAfterUnsettledLook, ADR-0046) follows no read that confirmed the
+// pull request, and names only the recorded head. The entry applies only while stale holds (the stale mark, or
+// staleCleanupStopped, as planEntry passes it). Another URL is never accepted: closing a number elsewhere could
 // close someone else's pull request.
 func cleanupRepository(settings *remediationv1alpha1.RemediationSettings, rr *remediationv1alpha1.RemediationRequest,
 	stale bool) (repo remediationv1alpha1.GitRepository, reinstalled, ok bool) {

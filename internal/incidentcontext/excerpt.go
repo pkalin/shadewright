@@ -131,6 +131,10 @@ type LogView struct {
 // and the excerpt it kept a second time: with a redactor that has StringTwice, what that release hid when it cut
 // the excerpt to its newest lines and redacted them again is hidden too (#845, thirteenth decision of
 // 2026-11-18).
+//
+// An excerpt that redaction withholds (package redact, budget.go: the body, the header, or a value of the instance
+// in it) is shown as a read withheld at the source: LogReadWithheld, a header that says so, and nothing of the
+// answer (#873).
 func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, err error, asked, budget int) LogView {
 	r := Twice(red)
 	var v LogView
@@ -157,23 +161,33 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		h.add("could not fetch: the answer was larger than asked for")
 	default:
 		in := ex.Instance
-		h.add("instance: pod uid %s, container id %s, restarts %d, read at %s", Value(r, in.PodUID),
-			Value(r, in.ContainerID), in.RestartCount, ex.CollectedAt.UTC().Format(time.RFC3339))
+		podUID, containerID := Value(r, in.PodUID), Value(r, in.ContainerID)
+		if redact.IsWithheld(podUID) || redact.IsWithheld(containerID) {
+			// A value of the header withheld whole withholds the excerpt, as a withheld body does (#873).
+			return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
+		}
+		h.add("instance: pod uid %s, container id %s, restarts %d, read at %s", podUID, containerID,
+			in.RestartCount, ex.CollectedAt.UTC().Format(time.RFC3339))
 		body, v.LeadingDropped = dropLeadingContinuation(ex.Text)
 		v.Truncated, v.EndMissing, v.InstanceUncertain = ex.Truncated, ex.EndMissing, ex.InstanceUncertain
 	}
 	tw, ok := red.(twicer)
 	if !refit || !ok {
-		head, _ := keepHead(Redact(r, h.String()), budget)
+		header := Redact(r, h.String())
 		redacted := Redact(r, body)
-		if redact.IsWithheld(redacted) {
+		if v.Read == LogReadOK && (redact.IsWithheld(header) || redact.IsWithheld(redacted)) {
 			return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 		}
+		head, _ := keepHead(header, budget)
 		tail, cut := keepTail(redacted, min(asked, budget-len(head)))
 		v.Text, v.HeadLen, v.Cut = head+tail, len(head), cut
 		return v
 	}
-	head, _ := keepHead(strings.ToValidUTF8(tw.StringTwice(h.String(), func(string) int { return 0 }), "?"), budget)
+	header := tw.StringTwice(h.String(), func(string) int { return 0 })
+	if v.Read == LogReadOK && redact.IsWithheld(header) {
+		return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
+	}
+	head, _ := keepHead(strings.ToValidUTF8(header, "?"), budget)
 	n := min(asked, budget-len(head))
 	// The release before cut its excerpt to its newest lines in n bytes, then redacted what it kept again.
 	newest := func(t string) int {
@@ -181,7 +195,7 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		return len(t) - len(kept)
 	}
 	redacted := tw.StringTwice(body, newest)
-	if redact.IsWithheld(redacted) {
+	if v.Read == LogReadOK && redact.IsWithheld(redacted) {
 		return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 	}
 	tail, cut := keepTail(strings.ToValidUTF8(redacted, "?"), n)

@@ -372,7 +372,7 @@ func (r *Redactor) hasKind(wm *meter.Meter, kind string) bool {
 
 // mergeRanges sorts ranges by start and joins the ones that overlap or touch.
 func mergeRanges(wm *meter.Meter, rs []span) []span {
-	slices.SortFunc(rs, func(a, b span) int { return a.start - b.start })
+	sortFunc(wm, rs, func(a, b span) int { return a.start - b.start })
 	out := rs[:0]
 	for _, x := range rs {
 		tick(wm, 1)
@@ -539,7 +539,7 @@ func mergeSpans(wm *meter.Meter, spans []span) []span {
 	if len(spans) == 0 {
 		return nil
 	}
-	slices.SortFunc(spans, func(a, b span) int {
+	sortFunc(wm, spans, func(a, b span) int {
 		if a.start != b.start {
 			return a.start - b.start
 		}
@@ -1601,7 +1601,7 @@ func newLineContext(wm *meter.Meter, s string, ls, le int) *lineContext {
 			}
 		}
 	}
-	slices.SortFunc(ctx.flows, func(a, b [3]int) int { return a[0] - b[0] })
+	sortFunc(wm, ctx.flows, func(a, b [3]int) int { return a[0] - b[0] })
 	return ctx
 }
 
@@ -2334,7 +2334,7 @@ func extendedValueSpan(wm *meter.Meter, s string, pos, boundary, keyCol, ctx, ke
 		return start, end
 	}
 	if boundary == boundaryWhitespace && escapeLevel(wm, s, pos) == 0 && !opensGroup(wm, s, pos) {
-		if end := plainWordEnd(wm, s, pos, extentLimit(wm, s, pos), keyPos, wide); end > pos {
+		if end := plainWordEnd(wm, s, pos, extentLimit(wm, s, pos), keyPos, wide, nil); end > pos {
 			return pos, end
 		}
 	}
@@ -2896,7 +2896,7 @@ func keyNameValue(wm *meter.Meter, s string, pos, keyStart int, closed bool, ext
 		}
 	}
 	if ext != extNone && level == 0 {
-		if start, end, ok := flagWordSpan(wm, s, pos, ext); ok {
+		if start, end, ok := flagWordSpan(wm, s, pos, ext, tm.plain()); ok {
 			return start, end
 		}
 	}
@@ -2935,11 +2935,11 @@ func keyNameValue(wm *meter.Meter, s string, pos, keyStart int, closed bool, ext
 // flagWordSpan is the extent rule's part of keyNameValue for a value at pos that opens with no escaped quote:
 // with extShell a shell word (plainWordEnd, quotedWordSpan), with extLiteral a quoted string read literally
 // (groupEnd); a quote that does not close within maxValueExtent takes the rest of its line
-// (unclosedQuoteEnd). ok is false where the rule gives no extent.
-func flagWordSpan(wm *meter.Meter, s string, pos int, ext extentMode) (int, int, bool) {
+// (unclosedQuoteEnd). ok is false where the rule gives no extent. pr is as in plainWordEnd.
+func flagWordSpan(wm *meter.Meter, s string, pos int, ext extentMode, pr *plainRun) (int, int, bool) {
 	if !opensGroup(wm, s, pos) {
 		if ext == extShell {
-			if end := plainWordEnd(wm, s, pos, extentLimit(wm, s, pos), noKey, true); end > pos {
+			if end := plainWordEnd(wm, s, pos, extentLimit(wm, s, pos), noKey, true, pr); end > pos {
 				return pos, end, true
 			}
 		}
@@ -3001,6 +3001,16 @@ func compoundValueSpansFor() spansFunc {
 type tokenMemo struct {
 	from, end int
 	ok        bool
+	// words is the plain run plainWordEnd read furthest in the same pass (#873).
+	words plainRun
+}
+
+// plain returns the plain run of the pass for plainWordEnd, or nil when tm keeps nothing.
+func (tm *tokenMemo) plain() *plainRun {
+	if tm == nil {
+		return nil
+	}
+	return &tm.words
 }
 
 // tokenEnd is tokenEnd(s, pos), with the memory of the last read.

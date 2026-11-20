@@ -59,7 +59,8 @@ func TestReleasedIsTheReleaseBefore(t *testing.T) {
 
 // unmetered returns src, a file of this package, as Go source with the work budget of #873 (package meter, decision
 // of 2026-11-20) taken out: the parameter wm of every function and function type, the first argument (wm or nil)
-// of every call of a function or rule field that takes it, and the import of package meter. The budget was added
+// of every call of a function or rule field that takes it, the metered sort (sortFunc, read back as
+// slices.SortFunc) and the import of package meter. The budget was added
 // to the kept files by that change alone, so what is left is the release's code, printed by go/printer.
 // isWM reports whether p is the meter parameter: wm, or _ where the function does not use it.
 func isWM(p *ast.Field) bool {
@@ -133,6 +134,10 @@ func unmetered(t *testing.T, name string, src []byte) string {
 				if id, ok := x.Args[0].(*ast.Ident); ok && (id.Name == "wm" || id.Name == "nil") {
 					x.Args = x.Args[1:]
 				}
+			}
+			// The metered sort (sortFunc, #873) is the release's slices.SortFunc with the budget taken out.
+			if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "sortFunc" {
+				x.Fun = &ast.SelectorExpr{X: ast.NewIdent("slices"), Sel: ast.NewIdent("SortFunc")}
 			}
 		}
 		return true

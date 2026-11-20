@@ -17,6 +17,7 @@ limitations under the License.
 package redact
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/pkalin/shadewright/internal/redact/meter"
@@ -76,4 +77,14 @@ func found(_ *meter.Meter, i, n, size int) int {
 		return size
 	}
 	return i + n
+}
+
+// sortFunc is slices.SortFunc that counts each comparison as one step on wm (#873, decision of 2026-11-20): a
+// sort of the spans of a text costs comparisons in proportion to n log n of them, which the budget sees like any
+// other work and stops when it runs out.
+func sortFunc[S ~[]E, E any](wm *meter.Meter, x S, cmp func(a, b E) int) {
+	slices.SortFunc(x, func(a, b E) int {
+		tick(wm, 1)
+		return cmp(a, b)
+	})
 }

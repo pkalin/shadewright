@@ -16,7 +16,11 @@ limitations under the License.
 
 package released
 
-import "github.com/pkalin/shadewright/internal/redact/meter"
+import (
+	"slices"
+
+	"github.com/pkalin/shadewright/internal/redact/meter"
+)
 
 // This package is the redactor of the release before #845 (origin/main at 0701cd3a): redact.go, extent.go and
 // work.go are that release's files of package redact, apart from the package clause and the change of #873, and
@@ -27,7 +31,8 @@ import "github.com/pkalin/shadewright/internal/redact/meter"
 // the places and in the order of passes the tools of that release applied it (#845, thirteenth decision of
 // 2026-11-18), so that what the release before hid is hidden because its own code says so. Only this file, lines.go
 // and the tick files are new. The work budget of #873 (decision of 2026-11-20, package meter) is threaded
-// through every function of the kept files as a first parameter wm and spent where they count their work;
+// through every function of the kept files as a first parameter wm and spent where they count their work and
+// on each comparison of their sorts (sortFunc);
 // TestReleasedIsTheReleaseBefore pins the kept files with it taken out. The package is retired, with its reading, by its own issue (pkalin/shadewright#922)
 // once a release has run with both readings.
 
@@ -62,3 +67,13 @@ func (r *Redactor) StringWithin(wm *meter.Meter, s string) string {
 
 // MarkerWithin is Marker that counts its work on wm, as SpansWithin does.
 func MarkerWithin(wm *meter.Meter, kind string, n int) string { return marker(wm, kind, n) }
+
+// sortFunc is slices.SortFunc that counts each comparison as one step on wm (#873, decision of 2026-11-20), as
+// in package redact. The kept files call it where the release called slices.SortFunc;
+// TestReleasedIsTheReleaseBefore reads the call back as slices.SortFunc when it takes the budget out.
+func sortFunc[S ~[]E, E any](wm *meter.Meter, x S, cmp func(a, b E) int) {
+	slices.SortFunc(x, func(a, b E) int {
+		tick(wm, 1)
+		return cmp(a, b)
+	})
+}

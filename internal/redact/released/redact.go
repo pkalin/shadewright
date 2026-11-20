@@ -281,7 +281,7 @@ func (r *Redactor) hasKind(wm *meter.Meter, kind string) bool {
 
 // mergeRanges sorts ranges by start and joins the ones that overlap or touch.
 func mergeRanges(wm *meter.Meter, rs []span) []span {
-	slices.SortFunc(rs, func(a, b span) int { return a.start - b.start })
+	sortFunc(wm, rs, func(a, b span) int { return a.start - b.start })
 	out := rs[:0]
 	for _, x := range rs {
 		tick(wm, 1)
@@ -429,7 +429,7 @@ func (r *Redactor) spans(wm *meter.Meter, s string) []span {
 	if len(spans) == 0 {
 		return nil
 	}
-	slices.SortFunc(spans, func(a, b span) int {
+	sortFunc(wm, spans, func(a, b span) int {
 		if a.start != b.start {
 			return a.start - b.start
 		}
@@ -1390,7 +1390,7 @@ func newLineContext(wm *meter.Meter, s string, ls, le int) *lineContext {
 			}
 		}
 	}
-	slices.SortFunc(ctx.flows, func(a, b [3]int) int { return a[0] - b[0] })
+	sortFunc(wm, ctx.flows, func(a, b [3]int) int { return a[0] - b[0] })
 	return ctx
 }
 

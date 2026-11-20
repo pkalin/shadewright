@@ -29,13 +29,16 @@ import (
 // braces read the rest of the line again at each brace (152,137, 565,577 and 2,178,889 steps for n = 512, 1024
 // and 2048 on 38cf1a37). Each shape is an opening (nothing, or a key in one of its forms) followed by a unit of
 // one or two tokens (keys, separators, brackets, quotes, block markers, line ends, invisible characters)
-// repeated n, 2n, 4n and 8n times; the work of the decision of String may at most double when the input doubles,
-// with complexitySlack for the constant part.
+// repeated n, 2n, 4n and 8n times; the work may at most double when the input doubles, with complexitySlack for
+// the constant part.
 //
 // The work is that of the decision without a budget (render on spans with a nil meter, what String returns
 // inside its budget): the budget (budget.go) stops an entry at a work linear in its size, so the work of String
-// itself grows linearly on any shape and could not show one that is not. That a superlinear shape costs an
-// entry its text shows instead in the check that String withholds no shape (#873).
+// itself grows linearly on any shape and could not show one that is not. It is split in two (decision of
+// 2026-11-20 on #873): the work of this package (the total less the reading of the release before,
+// countWorkOfReleased) is held to the bound on every shape, with no exception; the reading of the release before
+// is held to it too, except on the units named in complexityKnownSuperlinear. That a superlinear shape costs an
+// entry its text shows in the check that String withholds no other shape.
 
 // complexityOpenings are what a shape starts with.
 var complexityOpenings = []string{
@@ -57,13 +60,16 @@ var (
 // tokenEndRun is a flag followed by a comma with no value: repeated, alone or with a closing brace, it is the
 // fourth shape of #873, on which the reading of the release before reads each value to the end of the run
 // (released.tokenEnd) and its work grows with the square of the text. That reading is the release's, kept byte
-// for byte (TestReleasedIsTheReleaseBefore), and not fixed: the budget withholds such an entry instead.
+// for byte (TestReleasedIsTheReleaseBefore), and not fixed: the budget withholds such an entry instead. The work
+// of this package on it is linear: the plain run of plainWordEnd reads the run of flags once, where each flag
+// read up to maxValueExtent bytes of it before (377,785, 1,326,458, 3,571,606 and 8,061,008 steps for 2,304 to
+// 18,432 bytes of "--token,}").
 const tokenEndRun = "--" + canonTokenKey + ","
 
-// complexityKnownSuperlinear are the units whose shapes, after every opening, are known to cost more than
-// twice as much at twice the size, each with the reason. TestTokenShapesWorkIsLinear checks that each of them
-// still is (so an entry here cannot hide a shape that became linear, or one that grows for another reason
-// unseen) and that String withholds it at the largest size.
+// complexityKnownSuperlinear are the units on which the reading of the release before (and only it) is known to
+// cost more than twice as much at twice the size, each with the reason. TestTokenShapesWorkIsLinear checks that it
+// still does (so an entry here cannot hide a shape that became linear) and that String withholds it at the
+// largest size; the work of this package on them is held to the linear bound as on every other shape.
 var complexityKnownSuperlinear = map[string]string{
 	tokenEndRun:       "released.tokenEnd reads each value to the end of the run (#873, the fourth shape)",
 	tokenEndRun + "}": "released.tokenEnd reads each value to the end of the run (#873, the fourth shape)",
@@ -83,19 +89,41 @@ func complexityUnits() []string {
 // complexityN is the smallest count of units; complexitySlack is how much more than twice the work a doubling
 // may cost, for the part of the work that does not grow with n. complexityWindowStep is how much more again a
 // doubling across windowMinText may cost: texts shorter than it are read whole and longer ones by windows
-// (windows.go), whose fixed cost per byte is higher, a one-time step (the largest measured is 2.92 times the
-// work for "{\"a\": \"" + ":-" from 2,055 to 4,103 bytes; the doublings on either side cost at most 2.2 times).
+// (windows.go), whose fixed cost per byte is higher, a one-time step. It is measured on the work of this package
+// alone, which the windows are part of and the reading of the release before is not: the largest is 3.61 times
+// the work for "args: [\"--password\", " + ":-" from 2,070 to 4,118 bytes, where the doublings on either side
+// cost at most 2.2 times.
 const (
 	complexityN          = 256
 	complexitySlack      = 1.1
-	complexityWindowStep = 1.4
+	complexityWindowStep = 1.7
 )
 
-// decisionWork returns the work of the decision String takes on in, with no budget to stop it.
-func decisionWork(t *testing.T, in string) int64 {
-	return countWork(t, func() { render(nil, in, defaultRedactor.spans(nil, in)) })
+// decisionWork returns the work of the decision String takes on in, with no budget to stop it, and the part of it
+// the reading of the release before (package released) took.
+func decisionWork(t *testing.T, in string) (total, release int64) {
+	return countWorkOfReleased(t, func() { render(nil, in, defaultRedactor.spans(nil, in)) })
 }
 
+// doublingOver returns the first doubling of work, measured at the sizes of size, that costs more than the
+// linear bound, as the count of units before it and the work on either side, and false when none does.
+func doublingOver(work, size [4]int64) (units int, before, after int64, over bool) {
+	for i := 1; i < len(work); i++ {
+		bound := 2 * complexitySlack
+		if (size[i-1] < windowMinText) != (size[i] < windowMinText) {
+			bound *= complexityWindowStep
+		}
+		if float64(work[i]) > bound*float64(work[i-1]) {
+			return complexityN << (i - 1), work[i-1], work[i], true
+		}
+	}
+	return 0, 0, 0, false
+}
+
+// The work of this package (the total less the reading of the release before) is held to the linear bound on
+// every shape, with no shape excused: a change to the kept code that makes a shape superlinear fails here
+// whatever the reading of the release does on it. Only that reading may be excused, by the name of its unit in
+// complexityKnownSuperlinear.
 func TestTokenShapesWorkIsLinear(t *testing.T) {
 	shapes, failed := 0, 0
 	fail := func(format string, args ...any) {
@@ -106,34 +134,28 @@ func TestTokenShapesWorkIsLinear(t *testing.T) {
 	for _, open := range complexityOpenings {
 		for _, unit := range complexityUnits() {
 			shapes++
-			var work, size [4]int
+			var own, rel, size [4]int64
 			var in string
-			for i := range work {
+			for i := range own {
 				in = open + strings.Repeat(unit, complexityN<<i)
-				work[i], size[i] = int(decisionWork(t, in)), len(in)
+				total, release := decisionWork(t, in)
+				own[i], rel[i], size[i] = total-release, release, int64(len(in))
 			}
-			superlinear := false
-			for i := 1; i < len(work); i++ {
-				bound := 2 * complexitySlack
-				if (size[i-1] < windowMinText) != (size[i] < windowMinText) {
-					bound *= complexityWindowStep
-				}
-				if float64(work[i]) > bound*float64(work[i-1]) {
-					superlinear = true
-					if _, known := complexityKnownSuperlinear[unit]; !known {
-						fail("%q + %q x %d: work %d, at twice as many units %d", open, unit, complexityN<<(i-1),
-							work[i-1], work[i])
-						break
-					}
-				}
+			if n, before, after, over := doublingOver(own, size); over {
+				fail("%q + %q x %d: own work %d, at twice as many units %d (own work %v)", open, unit, n, before,
+					after, own)
 			}
+			_, _, _, releaseOver := doublingOver(rel, size)
 			withheld := IsWithheld(String(in))
 			if reason, known := complexityKnownSuperlinear[unit]; known {
-				if !superlinear || !withheld {
-					fail("%q + %q, known superlinear (%s): superlinear %v (work %v), withheld at %d bytes %v",
-						open, unit, reason, superlinear, work, len(in), withheld)
+				if !releaseOver || !withheld {
+					fail("%q + %q, known superlinear in the release's reading (%s): superlinear %v (release work %v), "+
+						"withheld at %d bytes %v", open, unit, reason, releaseOver, rel, len(in), withheld)
 				}
 				continue
+			}
+			if releaseOver {
+				fail("%q + %q: the release's reading is superlinear (release work %v)", open, unit, rel)
 			}
 			if withheld {
 				fail("%q + %q x %d: String withheld %d bytes", open, unit, complexityN<<3, len(in))
@@ -147,7 +169,8 @@ func TestTokenShapesWorkIsLinear(t *testing.T) {
 	for _, n := range []int{512, 1024, 2048} {
 		open := "{" + passwordKey + ": marigold"
 		in := open + strings.Repeat("}", n)
-		t.Logf("%q and %d closing braces: %d steps", open, n, decisionWork(t, in))
+		total, release := decisionWork(t, in)
+		t.Logf("%q and %d closing braces: %d steps, %d of them the release's", open, n, total, release)
 	}
 }
 
@@ -159,8 +182,8 @@ func TestTokenEndRunWithheldFrom(t *testing.T) {
 	// The largest size decided, by entry point, as one text so that the names of budgetEntries stay literals
 	// there alone.
 	decided := map[string]int{}
-	for field := range strings.FieldsSeq(`String=2304 StringKeeping=2304 Clean=2304 StringTwice=2304
-		ReplaceFrom=2304 ReleasedText=4608 Strings=1152 PiecesWithin=2304`) {
+	for field := range strings.FieldsSeq(`String=4608 StringKeeping=4608 Clean=4608 StringTwice=4608
+		ReplaceFrom=4608 ReleasedText=4608 Strings=2304 PiecesWithin=4608`) {
 		name, size, _ := strings.Cut(field, "=")
 		n, err := strconv.Atoi(size)
 		if err != nil {

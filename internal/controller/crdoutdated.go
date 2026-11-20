@@ -23,6 +23,8 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -39,6 +41,13 @@ import (
 // CustomResourceDefinitionOutdated is recorded on the request, and every later status write of that request in the
 // same reconcile is refused with the same error, so nothing that depends on the lost field is decided. It needs no
 // read of the CustomResourceDefinition and no new RBAC: the answer to the write is the evidence.
+//
+// An enum value added since v0.5.2 is not pruned but refused: the API server answers the whole write with 422
+// Invalid, a cause of type FieldValueNotSupported on the field. Such a refusal of a value in storedValues, the
+// value this write sent, is the same case (#895): the same error for the error backoff, the same Warning Event,
+// and the same refusal of later status writes in the reconcile. Nothing is written without the value to get past
+// it; the request waits for the CustomResourceDefinitions as the upgrade order says. Any other Invalid answer is
+// returned as it is.
 
 // EventCustomResourceDefinitionOutdated is the reason of the Warning Event recorded on a request when the API
 // server dropped a status field the executor wrote.
@@ -67,6 +76,54 @@ var storedFields = []storedField{
 	}},
 }
 
+// storedValue is an enum value of a status field added after v0.5.2 that the executor writes: sent returns the
+// value a request holds in that field, empty when it holds none.
+type storedValue struct {
+	path  string
+	value string
+	sent  func(*api.RemediationRequest) string
+}
+
+// storedValues are the values the check covers. ExecutorRestarted records a restart of the executor in the
+// executor's verification window (#895).
+var storedValues = []storedValue{
+	{path: "status.verification.lastReset.reason", value: string(api.ResetExecutorRestarted),
+		sent: func(rr *api.RemediationRequest) string {
+			if v := rr.Status.Verification; v != nil && v.LastReset != nil {
+				return string(v.LastReset.Reason)
+			}
+			return ""
+		}},
+}
+
+// refusedValues returns, for a status write of rr that err answered, the stored values the API server refused as
+// not supported: the paths, each with the value. Empty for any other error.
+func refusedValues(rr *api.RemediationRequest, err error) []string {
+	if !apierrors.IsInvalid(err) {
+		return nil
+	}
+	status, ok := errors.AsType[interface {
+		error
+		apierrors.APIStatus
+	}](err)
+	if !ok || status.Status().Details == nil {
+		return nil
+	}
+	var out []string
+	for _, v := range storedValues {
+		if v.sent(rr) != v.value {
+			continue
+		}
+		for _, c := range status.Status().Details.Causes {
+			if c.Type == metav1.CauseTypeFieldValueNotSupported && c.Field == v.path {
+				out = append(out, fmt.Sprintf("%s (value %s)", v.path, v.value))
+				break
+			}
+		}
+	}
+	return out
+}
+
 func one(b bool) int {
 	if b {
 		return 1
@@ -78,22 +135,47 @@ func one(b bool) int {
 // sent: the installed CustomResourceDefinition of RemediationRequest is older than the executor.
 type CRDOutdatedError struct {
 	Request types.NamespacedName
-	// Fields are the paths of the fields the API server did not store.
+	// Fields are the paths of the fields the API server did not store; for a refused value, each path with
+	// the value.
 	Fields []string
+	// Refused is set when the API server refused the write (422 Invalid, a value it does not support) rather
+	// than pruning a field from a write that succeeded. Err is that answer.
+	Refused bool
+	Err     error
 }
 
 func (e *CRDOutdatedError) Error() string {
-	return fmt.Sprintf("the API server did not store %s of RemediationRequest %s: the installed "+
+	return fmt.Sprintf("the API server %s %s of RemediationRequest %s: the installed "+
 		"CustomResourceDefinition of RemediationRequest is older than the executor; apply the "+
-		"CustomResourceDefinitions of this release before the executor (%s)", strings.Join(e.Fields, ", "),
-		e.Request, upgradeDocsURL)
+		"CustomResourceDefinitions of this release before the executor (%s)", e.verb(),
+		strings.Join(e.Fields, ", "), e.Request, upgradeDocsURL) + e.answer()
 }
 
-// eventMessage is the text of the Warning Event: fixed text and field paths only.
+// answer is the API server's answer of a refused write, for the log: one 422 can name other causes besides the
+// value this executor's CRD does not know, and those must not hide behind the advice to apply the CRDs. The
+// Event keeps to fixed text (eventMessage).
+func (e *CRDOutdatedError) answer() string {
+	if !e.Refused || e.Err == nil {
+		return ""
+	}
+	return "; the API server answered: " + e.Err.Error()
+}
+
+// Unwrap returns the API server's answer of a refused write, nil for a pruned field.
+func (e *CRDOutdatedError) Unwrap() error { return e.Err }
+
+func (e *CRDOutdatedError) verb() string {
+	if e.Refused {
+		return "refused the status write, as it does not support"
+	}
+	return "did not store"
+}
+
+// eventMessage is the text of the Warning Event: fixed text, field paths and the executor's own enum values only.
 func (e *CRDOutdatedError) eventMessage() string {
-	return fmt.Sprintf("The API server did not store %s: the installed CustomResourceDefinition of "+
+	return fmt.Sprintf("The API server %s %s: the installed CustomResourceDefinition of "+
 		"RemediationRequest is older than the executor. Apply the CustomResourceDefinitions of this release (%s).",
-		strings.Join(e.Fields, ", "), upgradeDocsURL)
+		e.verb(), strings.Join(e.Fields, ", "), upgradeDocsURL)
 }
 
 // sizes returns what obj holds of each stored field, nil for an object that is not a request.
@@ -141,20 +223,26 @@ func (r *RemediationRequestReconciler) checkedWrite(obj client.Object, write fun
 		return prev.(error)
 	}
 	sent := sizes(obj)
+	var e *CRDOutdatedError
 	if err := write(); err != nil {
-		return err
-	}
-	got := sizes(obj)
-	var lost []string
-	for i, f := range storedFields {
-		if got[i] < sent[i] {
-			lost = append(lost, f.path)
+		refused := refusedValues(obj.(*api.RemediationRequest), err)
+		if len(refused) == 0 {
+			return err
 		}
+		e = &CRDOutdatedError{Request: key, Fields: refused, Refused: true, Err: err}
+	} else {
+		got := sizes(obj)
+		var lost []string
+		for i, f := range storedFields {
+			if got[i] < sent[i] {
+				lost = append(lost, f.path)
+			}
+		}
+		if len(lost) == 0 {
+			return nil
+		}
+		e = &CRDOutdatedError{Request: key, Fields: lost}
 	}
-	if len(lost) == 0 {
-		return nil
-	}
-	e := &CRDOutdatedError{Request: key, Fields: lost}
 	err := &clusterError{err: e}
 	r.outdatedCRD.Store(key, err)
 	if r.Recorder != nil {

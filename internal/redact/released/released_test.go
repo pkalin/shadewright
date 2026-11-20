@@ -80,6 +80,23 @@ func isWM(p *ast.Field) bool {
 	return ok && pkg.Name == "meter" && (p.Names[0].Name == "wm" || p.Names[0].Name == "_")
 }
 
+// releasedFindAll turns the charged search, ru.findAll(s) once the meter is taken out (rule.findAll in find.go,
+// #873), back into the release's ru.re.FindAllStringSubmatchIndex(counted(s), -1).
+func releasedFindAll(x *ast.CallExpr) {
+	sel, ok := x.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "findAll" || len(x.Args) != 1 {
+		return
+	}
+	x.Fun = &ast.SelectorExpr{
+		X:   &ast.SelectorExpr{X: sel.X, Sel: ast.NewIdent("re")},
+		Sel: ast.NewIdent("FindAllStringSubmatchIndex"),
+	}
+	x.Args = []ast.Expr{
+		&ast.CallExpr{Fun: ast.NewIdent("counted"), Args: x.Args},
+		&ast.UnaryExpr{Op: token.SUB, X: &ast.BasicLit{Kind: token.INT, Value: "1"}},
+	}
+}
+
 func unmetered(t *testing.T, name string, src []byte) string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -140,18 +157,7 @@ func unmetered(t *testing.T, name string, src []byte) string {
 			if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "sortFunc" {
 				x.Fun = &ast.SelectorExpr{X: ast.NewIdent("slices"), Sel: ast.NewIdent("SortFunc")}
 			}
-			// The charged search (rule.findAll, find.go, #873) is the release's FindAllStringSubmatchIndex on
-			// counted(s), with the budget taken out.
-			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "findAll" && len(x.Args) == 1 {
-				x.Fun = &ast.SelectorExpr{
-					X:   &ast.SelectorExpr{X: sel.X, Sel: ast.NewIdent("re")},
-					Sel: ast.NewIdent("FindAllStringSubmatchIndex"),
-				}
-				x.Args = []ast.Expr{
-					&ast.CallExpr{Fun: ast.NewIdent("counted"), Args: x.Args},
-					&ast.UnaryExpr{Op: token.SUB, X: &ast.BasicLit{Kind: token.INT, Value: "1"}},
-				}
-			}
+			releasedFindAll(x)
 		}
 		return true
 	})

@@ -39,8 +39,8 @@ var findAlphabet = []string{"a", "b", "z", " ", "\n", "=", "é", "\xe2\x82", "\x
 
 // FindAll returns what FindAllStringSubmatchIndex returns, for every expression on generated texts.
 func TestFindAllIsFindAllStringSubmatchIndex(t *testing.T) {
-	rng := rand.New(rand.NewPCG(873, 20261120))
-	texts := []string{""}
+	rng := rand.New(rand.NewPCG(873, 20261120)) //nolint:gosec // a fixed seed keeps the texts the same on every run
+	texts := make([]string, 1, 401)
 	for range 400 {
 		var b strings.Builder
 		for range rng.IntN(24) {

@@ -17,6 +17,7 @@ limitations under the License.
 package meter
 
 import (
+	"fmt"
 	"io"
 	"regexp"
 	"unicode/utf8"
@@ -36,10 +37,23 @@ type Expr struct {
 	cont *regexp.Regexp
 }
 
-// NewExpr returns re as an Expr. It panics if re cannot be wrapped, which happens only for an expression that
-// does not compile.
+// NewExpr returns re as an Expr. It panics where [CompileExpr] fails: on the built-in expressions, which do not,
+// and on a pattern [CompileExpr] accepted.
 func NewExpr(re *regexp.Regexp) *Expr {
-	return &Expr{re: re, cont: regexp.MustCompile(`\A(?s:.)(?s:.)*?(` + re.String() + `)`)}
+	e, err := CompileExpr(re)
+	if err != nil {
+		panic(err)
+	}
+	return e
+}
+
+// CompileExpr returns re as an Expr, or an error when the search of re from a later start does not compile.
+func CompileExpr(re *regexp.Regexp) (*Expr, error) {
+	cont, err := regexp.Compile(`\A(?s:.)(?s:.)*?(` + re.String() + `)`)
+	if err != nil {
+		return nil, fmt.Errorf("the search of %q from a later start: %w", re.String(), err)
+	}
+	return &Expr{re: re, cont: cont}, nil
 }
 
 // Regexp returns the expression.
@@ -56,6 +70,8 @@ type reader struct {
 	spend   func(n int)
 }
 
+// ReadRune reads the next character of the text, as utf8.DecodeRuneInString does (an invalid byte is U+FFFD of
+// width 1), and charges its bytes.
 func (r *reader) ReadRune() (rune, int, error) {
 	if r.i >= len(r.s) {
 		return 0, 0, io.EOF
@@ -69,6 +85,7 @@ func (r *reader) ReadRune() (rune, int, error) {
 	return c, size, nil
 }
 
+// flush charges the bytes read and not charged yet.
 func (r *reader) flush() {
 	if r.pending > 0 {
 		n := r.pending

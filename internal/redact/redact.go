@@ -213,6 +213,9 @@ func New(extra ...Pattern) (*Redactor, error) {
 		if err != nil {
 			return nil, fmt.Errorf("extra pattern %d (%s): %w", i, p.Kind, err)
 		}
+		if _, err := meter.CompileExpr(re); err != nil {
+			return nil, fmt.Errorf("extra pattern %d (%s): %w", i, p.Kind, err)
+		}
 		r := rule{kind: p.Kind, re: re}
 		for g := 1; g <= re.NumSubexp(); g++ {
 			tick(nil, 1)

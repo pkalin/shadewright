@@ -1,7 +1,7 @@
 # ADR-0046: The failed review check of a stopped holder while the lock is held
 
-- Status: Proposed
-- Date: 2026-11-20, revised 2026-11-21
+- Status: Accepted
+- Date: 2026-11-21 (proposed 2026-11-20)
 
 ## Context
 
@@ -56,7 +56,7 @@ Not covered, known limits:
 
 - (a) Deletion ([#984](https://github.com/pkalin/shadewright/issues/984)). Deleting a stopped request ends `ReviewCheckNotFailed` in the first write of the deletion and writes no check; the finalizer closes only the pull requests with the request's marker and releases the lock. An unmarked open pull request from the same branch keeps a pass written before the stop, which can decide its merge. The first write of the deletion logs at Info, once per deletion, that a check written before the stop may stay on the head whenever the recorded head is not known to show the failed check: the condition was set, or no state `Stale` is recorded for that head while the request owns its review check and holds the lock. Writing the check at a deletion would widen a write again and needs its own decision.
 - (b) Reads that keep failing ([#979](https://github.com/pkalin/shadewright/issues/979)). A look whose reads failed writes nothing; the next look tries. While the reads keep failing (condition `GitReadRetry` says so) no look writes the check, and `ReviewCheckNotFailed` does not say it is owed. On a head already recorded `Stale`, a look that cannot read the check records only the Warning Event `StoppedCheckUnread` once, which goes when the Event expires.
-- (c) A look a stop exception takes over: a look that settles the lock but goes to a step of its own before the rule runs writes nothing in that look: the cleanup of an expired request whose own pull request is open, the retried close after a stale cleanup stopped on a refusal, a cancel settled for its Incident, the record of a merge, and a failed read of who records a merge after a handoff. The next look that reaches the rule writes.
+- (c) A look a stop exception takes over: a look that settles the lock but goes to a step of its own before the rule runs writes nothing in that look: the cleanup of an expired request whose own pull request is open, the retried close after a stale cleanup stopped on a refusal, a cancel settled for its Incident, the record of a merge, and a failed read of who records a merge after a handoff. The next look that reaches the rule writes. Closing this limit is [#1008](https://github.com/pkalin/shadewright/issues/1008).
 - (d) A new installation writes with no read that ties a pull request to the request. A repository reached through it that does not have the recorded commit refuses the write, and `ReviewCheckNotFailed` says so at each look while the lock is held. A repository that has it can only have that commit blocked.
 - (e) ADR-0045 limits (a), (b), (c), (e) and (f) hold for these writes too: the check blocks only where the base's ruleset requires it from the App, a new commit on the pull request has no run, a move between read and write can only block, and the failed check is final for the request. Limit (c), a late or missing write, says differently which condition shows it in each case, and each leaves a pass in place for as long as it lasts:
   - writes paused: on a head not recorded `Stale`, the look of a stopped holder waits and condition `WritesPaused` says so, not `ReviewCheckNotFailed`, and a stop's own write sets `ReviewCheckNotFailed` with reason `WritesPaused`. On a head already recorded `Stale` (`failStaleCheck` can record it before the stop for a pull request read gone), the look and the stop's own write alike only record the Warning Event `StoppedCheckUnread` once and do not set `ReviewCheckNotFailed`, as limit (b) says for a failed read;
@@ -79,4 +79,4 @@ Not covered, known limits:
 
 ## Amendments
 
-None. The revision of 2026-11-21 was made while the ADR was Proposed.
+None. The revision of 2026-11-21 was made while the ADR was Proposed; the maintainer accepted it on 2026-11-21 with limit (c) as written.

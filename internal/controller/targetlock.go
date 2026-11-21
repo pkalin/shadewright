@@ -702,6 +702,7 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 	}
 	held := ptr.Deref(rr.Status.HoldsTarget, false)
 	if held && expiredCleanupOver(rr, r.now()) {
+		r.tookStopException()
 		return r.closeExpiredOnceMore(ctx, rr)
 	}
 	if s, ok := r.settleRecordedMerge(rr); ok && held {
@@ -770,6 +771,7 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return r.heldUnsettled(ctx, rr, v, err, c != nil)
 	}
 	if res, done, err := r.settleStopException(ctx, rr, v); done {
+		r.tookStopException()
 		return res, err
 	}
 	if err := r.afterHeldLook(ctx, rr, v); err != nil {
@@ -784,6 +786,16 @@ func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remedi
 		return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
 	return r.heldLookResult(ctx, rr, free, held, holding, v.pr)
+}
+
+// tookStopException says that a stop exception took a stopped holder's look over before the failed review check's
+// rule (failCheckAfterLook) could run: the expired cleanup past its cutoff (closeExpiredOnceMore) or a step of
+// settleStopException. Such a look writes no check; the next look that reaches the rule does (ADR-0046 limit (c),
+// #1008). It only tells the Git waits model (stopExceptionTaken) and decides nothing.
+func (r *RemediationRequestReconciler) tookStopException() {
+	if r.stopExceptionTaken != nil {
+		r.stopExceptionTaken()
+	}
 }
 
 // afterHeldLook is checkHeld's change to rr's status in memory after a look v that settled the lock and that no stop

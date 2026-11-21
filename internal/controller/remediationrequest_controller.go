@@ -230,6 +230,10 @@ type RemediationRequestReconciler struct {
 	process string
 	// renderCheck is the render check of checkRender; nil is semdiff.Check. Tests replace it.
 	renderCheck func(context.Context, semdiff.Input) (semdiff.Result, error)
+	// stopExceptionTaken is called when a stop exception of ADR-0046 limit (c) takes a stopped holder's look over
+	// (tookStopException); nil outside the Git waits model, which waits for the next look before it asks for the
+	// failed review check (property "stopped holder").
+	stopExceptionTaken func()
 	// reportCounters holds, per request in Verifying, the executor's memory of its VerificationReport's sample
 	// counter (clearing.go). Memory only: after a restart success waits one more check. Dropped when the request
 	// ends, is being deleted or is gone, not with forget, which runs on every reconcile of a request after the

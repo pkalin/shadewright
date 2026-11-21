@@ -30,8 +30,8 @@ import (
 // A replacement that took the pull request over records its merge with another head as a foreign change
 // (NeedsIntervention, Approved False with ReasonMergedWithForeignChange): that write stores no mergedAt and no
 // receipt. It still holds the record of the merge (holdsMergeRecord through undeliveredMerge), so the predecessor's
-// rule gives the merge to the replacement and the predecessor records nothing (#949). The handoff model does not
-// reach this case, so this test pins it.
+// rule gives the merge to the replacement (#949). The handoff tests reach this through whole reconciles; this test
+// pins the two predicates directly.
 func TestUndeliveredMergeWithoutMergedAtIsTheReplacementsRecord(t *testing.T) {
 	r, g, p, rr, cr, _ := tookOverWorld(t)
 	ctx := context.Background()
@@ -68,6 +68,4 @@ func TestUndeliveredMergeWithoutMergedAtIsTheReplacementsRecord(t *testing.T) {
 		t.Fatalf("predecessorMergeOwner = %v, %v; want ownerReplacement (%v): the replacement holds the record, "+
 			"so the predecessor records nothing", owner, err, ownerReplacement)
 	}
-	stored := storedRR(t, r, p)
-	noRecordOnPredecessor(t, stored)
 }

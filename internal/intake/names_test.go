@@ -69,8 +69,8 @@ func TestNamesReplacedCorpus(t *testing.T) {
 		hex := strings.TrimPrefix(rec.Incident.Fingerprint, "sha256:")
 		_, occ, _ := remediationv1alpha1.ParseIncidentName(rec.Incident.Name)
 		pieces := []struct{ text, word string }{
-			{rec.ID, "<record>"}, {rec.Incident.Name, "<incident>"}, {rec.Request, "<request>"},
-			{rec.Incident.Fingerprint, "<fingerprint>"}, {hex, "<fingerprint>"},
+			{rec.ID, wordRecord}, {rec.Incident.Name, wordIncident}, {rec.Request, wordRequest},
+			{rec.Incident.Fingerprint, wordFingerprint}, {hex, wordFingerprint},
 			{"ab" + hex, ""}, {hex + "cd", ""},
 			{remediationv1alpha1.IncidentName(rec.Incident.Fingerprint, occ+1), ""},
 			{"the pod", ""}, {"memory", ""}, {"limit", ""},

@@ -25,7 +25,7 @@ A symptom seen once opens nothing. It opens an Incident when it is seen again be
 
 A restart of the analyzer loses nothing that matters. First sightings are held in memory only, and a real symptom comes back.
 
-A crash loop produces many follow-on events (`BackOff`, failing probes). When the pod status already shows the cause (an out-of-memory kill or a non-zero exit in the last 10 minutes, or a wait on an image or a configuration), those events are counted on the cause's Incident and open none of their own. The node's `Evicted` event about a pod whose status shows the eviction opens nothing either.
+A crash loop produces many follow-on events (`BackOff`, failing probes). When the pod status already shows the cause (an out-of-memory kill or a non-zero exit in the last 10 minutes, or a wait on an image or a configuration), those events are counted on the cause's Incident and open none of their own. An evicted pod counts once: the node's `Evicted` event about it and its status give one observation, and evictions of one workload that differ only in the amounts in the node's message share one Incident.
 
 ```mermaid
 flowchart LR

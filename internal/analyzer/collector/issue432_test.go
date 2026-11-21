@@ -43,7 +43,8 @@ import (
 //     containers' terminations and the kubelet's Evicted events open none of their own.
 //   - P4: an evicted pod's message is kept in the eviction's symptom.
 //   - P5: an Evicted event alone hides nothing: about a pod whose status never shows the eviction, or about
-//     a pod that is gone, it is still an observation.
+//     a pod that is gone, it delivers the pod's eviction observation; it is skipped only once that observation
+//     was delivered (decided 2026-11-21).
 
 // incidentKeys returns the Incident each observation lands on: the cause's fingerprint for a consequence the
 // collector linked, its own fingerprint otherwise.
@@ -245,9 +246,9 @@ func TestIssue432EvictionOpensThreeIncidents(t *testing.T) {
 	}
 }
 
-// evictedEvent is the kubelet's Evicted warning about pod name with uid, at at.
-func evictedEvent(name, pod string, uid types.UID, at time.Time) *eventsv1.Event {
-	ev := warning(name, 0)
+// evictedEvent is the kubelet's Evicted warning ev-evicted about pod name with uid, at at.
+func evictedEvent(pod string, uid types.UID, at time.Time) *eventsv1.Event {
+	ev := warning("ev-evicted", 0)
 	ev.Reason, ev.Action = ReasonEvicted, ""
 	ev.Note = "The node was low on resource: ephemeral-storage."
 	ev.EventTime = metav1.NewMicroTime(at)
@@ -257,35 +258,57 @@ func evictedEvent(name, pod string, uid types.UID, at time.Time) *eventsv1.Event
 
 // TestIssue432EvictedEventWaitsForThePodStatus is P3 and P5 in the order the kubelet writes them: the Evicted
 // event comes before the pod's status shows the eviction. The collector waits EvictionSettleGrace, by its own
-// clock, and skips the event once the status shows it; when the status never does, or the pod is gone, the
-// event is an observation as before.
+// clock, for the status. The eviction is then one observation, delivered by whichever reconciler comes first,
+// with one fingerprint and one occurrence ID whether it was read from the pod's status or from the event
+// (decided 2026-11-21): when the status never shows it, or the pod is gone, the event delivers it.
 func TestIssue432EvictedEventWaitsForThePodStatus(t *testing.T) {
 	d, rs, _ := workload()
 	running := specPod()
 	running.Status.Phase = corev1.PodRunning
+	const note = "The node was low on resource: ephemeral-storage. "
+	// fromStatus: the observation was read from the pod's status, a cause; from the event's note it keeps the
+	// event as its origin and has no class (an Event never sets status.cause).
+	want := func(t *testing.T, h *harness, o Observation, fromStatus bool) {
+		t.Helper()
+		origin, class := fingerprint.SourcePodStatus, ClassCause
+		if !fromStatus {
+			origin, class = fingerprint.SourceEvent, ClassNone
+		}
+		_, _, pod := workload()
+		fp := h.c.evictionFingerprint(testNS, string(d.UID), pod.Name, running.UID, note)
+		occ := termination{id: evictionID, evicted: true}.occurrence(running.UID)
+		if o.Reason != ReasonEvicted || o.Origin != origin || o.Class != class ||
+			o.Fingerprint != fp || o.Occurrence != occ || o.Count != 1 {
+			t.Errorf("got %s from %s, class %q, fingerprint %s, occurrence %s, count %d; want the pod's eviction "+
+				"%s, %s, counted once", o.Reason, o.Origin, o.Class, o.Fingerprint, o.Occurrence, o.Count, fp, occ)
+		}
+	}
 	t.Run("status shows the eviction during the wait", func(t *testing.T) {
 		h := newHarness(t, Config{}, d, rs, running.DeepCopy())
 		h.clock.set(t0)
-		h.create(evictedEvent("ev-evicted", running.Name, running.UID, t0))
+		ev := evictedEvent(running.Name, running.UID, t0)
+		ev.Note = note
+		h.create(ev)
 		if res := h.reconcileEvent("ev-evicted"); res.RequeueAfter != EvictionSettleGrace {
 			t.Fatalf("first look: requeue after %v, want %v", res.RequeueAfter, EvictionSettleGrace)
 		}
 		h.none()
 		cur := readPod(t, h, running.Name)
 		cur.Status = evictedPod(running.Name, running.UID, reasonError, "containerd://a", t0).Status
+		cur.Status.Message = note
 		h.update(cur)
 		h.clock.set(t0.Add(10 * time.Second))
+		h.reconcilePod(running.Name)
+		want(t, h, h.one(), true)
 		h.reconcileEvent("ev-evicted")
 		h.none()
-		h.reconcilePod(running.Name)
-		if o := h.one(); o.Reason != ReasonEvicted || o.Origin != fingerprint.SourcePodStatus {
-			t.Errorf("pod reconcile emitted %s from %s, want the eviction from pod status", o.Reason, o.Origin)
-		}
 	})
 	t.Run("status never shows it", func(t *testing.T) {
 		h := newHarness(t, Config{}, d, rs, running.DeepCopy())
 		h.clock.set(t0)
-		h.create(evictedEvent("ev-evicted", running.Name, running.UID, t0))
+		ev := evictedEvent(running.Name, running.UID, t0)
+		ev.Note = note
+		h.create(ev)
 		h.reconcileEvent("ev-evicted")
 		h.none()
 		h.clock.set(t0.Add(EvictionSettleGrace - time.Second))
@@ -295,18 +318,25 @@ func TestIssue432EvictedEventWaitsForThePodStatus(t *testing.T) {
 		h.none()
 		h.clock.set(t0.Add(EvictionSettleGrace))
 		h.reconcileEvent("ev-evicted")
-		if o := h.one(); o.Reason != ReasonEvicted || o.Origin != fingerprint.SourceEvent {
-			t.Errorf("got %s from %s, want the Evicted event", o.Reason, o.Origin)
-		}
+		want(t, h, h.one(), false)
 	})
 	t.Run("pod gone", func(t *testing.T) {
-		h := newHarness(t, Config{}, d, rs)
+		// The event's first look reads the running pod and its owner; the pod is deleted (a StatefulSet deletes
+		// a failed pod at once) before the pod reconciler delivers anything.
+		h := newHarness(t, Config{}, d, rs, running.DeepCopy())
 		h.clock.set(t0)
-		h.create(evictedEvent("ev-evicted", running.Name, running.UID, t0))
+		ev := evictedEvent(running.Name, running.UID, t0)
+		ev.Note = note
+		h.create(ev)
 		h.reconcileEvent("ev-evicted")
-		if o := h.one(); o.Reason != ReasonEvicted || o.Origin != fingerprint.SourceEvent {
-			t.Errorf("got %s from %s, want the Evicted event", o.Reason, o.Origin)
+		h.none()
+		if err := h.cl.Delete(t.Context(), running.DeepCopy()); err != nil {
+			t.Fatal(err)
 		}
+		h.reconcilePod(running.Name)
+		h.clock.set(t0.Add(5 * time.Second))
+		h.reconcileEvent("ev-evicted")
+		want(t, h, h.one(), false)
 	})
 }
 

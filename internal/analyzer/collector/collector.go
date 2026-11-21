@@ -271,6 +271,9 @@ type Collector struct {
 	// probes remembers the probe failures whose decision is put off while their pod starts (probe.go), and the
 	// kubelet Evicted events that wait for their pod's status to show the eviction (eviction.go).
 	probes *probeDeferrals
+	// evictions remembers, per pod, whether its eviction was delivered and the container terminations an
+	// eviction may count on (eviction.go).
+	evictions *evictionDeliveries
 	// holds remembers the consequences held for at most ConsequenceGrace (hold.go).
 	holds *consequenceHolds
 	// holdOff, set by tests of the observation's fields only, emits a consequence without holding it.
@@ -317,6 +320,8 @@ func New(cfg Config) (*Collector, error) {
 		now:    cfg.Now,
 		series: newSeriesTracker(cfg.MaxEvents),
 		pods:   newTerminationTracker(cfg.MaxPods),
+		// Keyed by pod UID: the delivery of a pod's eviction outlives the pod (eviction.go).
+		evictions: newEvictionDeliveries(cfg.MaxPods),
 		// A tracker of its own, keyed by kind and name, so a pod and a watched object of the same name, or two
 		// watched kinds, keep apart.
 		conditions: newStateTracker(cfg.MaxObjects),

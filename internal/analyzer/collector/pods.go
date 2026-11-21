@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -56,6 +57,9 @@ type termination struct {
 	waiting   bool
 	evicted   bool
 	message   string
+	// observed is set when finished is the time the collector read the pod, not a time the kubelet wrote (an
+	// eviction with no finish time and no DisruptionTarget condition).
+	observed bool
 }
 
 // terminations returns the abnormal terminations in a pod's status: OOMKilled or a non-zero exit code, in
@@ -338,11 +342,26 @@ func (tr *terminationTracker) commit(key types.NamespacedName, uid types.UID, t 
 	}
 	s.handled[t.slot()] = ids
 	// A wait's finish time is the collector's first sight of it, not a time the cluster reported: it must not move
-	// the eviction bound, which would mark later terminations of other pods MayRepeat.
-	if !t.waiting && t.finished.After(s.newest) {
+	// the eviction bound, which would mark later terminations of other pods MayRepeat. Nor must an eviction's
+	// time of reading.
+	if !t.waiting && !t.observed && t.finished.After(s.newest) {
 		s.newest = t.finished
 	}
 	tr.seen.put(key, s)
+}
+
+// unhandled returns how many of ts the tracker has not handled for the pod.
+func (tr *terminationTracker) unhandled(key types.NamespacedName, uid types.UID, ts []termination) int {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	s, ok := tr.seen.get(key)
+	n := 0
+	for _, t := range ts {
+		if !ok || s.uid != uid || !slices.Contains(s.handled[t.slot()], t.id) {
+			n++
+		}
+	}
+	return n
 }
 
 func (tr *terminationTracker) forget(key types.NamespacedName) {
@@ -377,15 +396,28 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, err
 	}
 	ts := podSymptoms(&pod)
+	now := r.c.now()
 	for i := range ts {
 		// A finish time in the future would otherwise keep later terminations of other pods marked
 		// MayRepeat once this pod's state is dropped.
 		ts[i].finished = r.c.notFuture(ts[i].finished)
+		if ts[i].evicted && ts[i].finished.IsZero() {
+			// No time from the kubelet (decided 2026-11-21): the time of this read, so the eviction is new to
+			// this process and not marked MayRepeat.
+			ts[i].finished, ts[i].observed = now, true
+		}
 	}
-	now := r.c.now()
 	pending := r.c.pods.pending(req.NamespacedName, pod.UID, ts, start, now)
 	if len(pending) == 0 {
 		return r.repeatLater(req.NamespacedName, pod.UID, now), nil
+	}
+	if pending[0].evicted {
+		// The eviction replaces the pod's container terminations (eviction.go): one not handled yet, even one
+		// whose delivery is being retried, is dropped here and never reported.
+		if n := r.c.pods.unhandled(req.NamespacedName, pod.UID, terminations(&pod)); n > 0 {
+			logf.FromContext(ctx).Info("Dropped container terminations of an evicted Pod, its eviction is the cause",
+				"terminations", n)
+		}
 	}
 	subject, owner, v, err := r.c.owners.podSubject(ctx, &pod)
 	if err != nil {
@@ -411,6 +443,19 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return r.repeatLater(req.NamespacedName, pod.UID, now), nil
 	}
 	for _, t := range pending {
+		if t.evicted {
+			obs := r.c.evictionObservation(subject, pod.Namespace, pod.Name, pod.UID, t.message, t.finished,
+				t.mayRepeat, true)
+			out, err := r.c.deliverEviction(ctx, pod.UID, obs, shownTerminations(&pod))
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if out == evictionRetry {
+				return ctrl.Result{RequeueAfter: retryAfter}, nil
+			}
+			r.c.pods.commit(req.NamespacedName, pod.UID, t.termination, now)
+			continue
+		}
 		note := t.note()
 		at := t.finished
 		if t.repeat {
@@ -441,6 +486,9 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 		if !sent {
 			return ctrl.Result{RequeueAfter: retryAfter}, nil
+		}
+		if !t.waiting && !t.repeat {
+			r.c.evictions.noteTermination(pod.UID, t.termination, obs.Fingerprint)
 		}
 		r.c.pods.commit(req.NamespacedName, pod.UID, t.termination, now)
 	}

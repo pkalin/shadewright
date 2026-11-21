@@ -124,10 +124,10 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 # The shards of the run of internal/redact with the tag redactwork in make test (top-level test names, joined
 # with |): the tests that took longest in that run, one or a few to a binary.
 REDACT_SHARD_1 := TestRepeatedPatternsStayLinear
-REDACT_SHARD_2 := TestTokenShapesWorkIsLinear
+REDACT_SHARD_2 := TestTokenShapesWorkIsLinearExceptTwo
 REDACT_SHARD_3 := TestCanonEntryPointsLeakNothingMainHid|TestCanonStairWorkIsLinear|TestEveryStepIsMetered|TestCanonCorpusWorkIsLinear|TestNestedBlocksStayLinear|TestMonotonicStaysLinear
 REDACT_SHARD_4 := TestReadingsKeepTheSignalOfAHiddenText|TestConnStringsThroughEveryEntryPointAgainstMain|TestSpansOnRuneBoundariesCanonCorpus|TestSpansOnRuneBoundariesMultiByteCorpus|TestReplacementsEndOnCharacterBoundaries|TestFieldsOfEveryToolHideWhatMainHid|TestWindowedChunksFindWhatTheExpressionFinds|TestStringsDecidesAsTheJoinedText
-REDACT_SHARD_5 := TestBudgetFactorCoversTheCorpus|TestBlockCorporaThroughEveryEntryPoint
+REDACT_SHARD_5 := TestCorpusWorkGrowsLinearly|TestBlockCorporaThroughEveryEntryPoint
 
 # make test runs each test line through gotestsum. Every line writes <name>.xml (junit) and <name>.json
 # (go test -json) under TEST_REPORT_DIR, which CI uploads and reads for the slowest tests. TEST_FORMAT keeps the

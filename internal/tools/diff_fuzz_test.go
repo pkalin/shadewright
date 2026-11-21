@@ -234,19 +234,9 @@ func fuzzTool(f *testing.F, target string) {
 	}
 	body := toolBodies(diffSet(f))[target]
 	f.Fuzz(func(t *testing.T, data []byte) {
-		before := redacttest.WorkWithheld()
 		fails, counted := body(data)
-		// P6: no answer of an input under redacttest.SmallInput is withheld for work (#873, decision of 2026-11-20).
-		size := redacttest.Decode(data, toolFields[target]).Size()
-		fails = append(fails, redacttest.SmallWithheldFails(target, size, before)...)
 		redacttest.Check(t, knownToolFailures[target], data, counted, fails)
 	})
-}
-
-// toolFields are the fields each target decodes its input into, as its body does: the size of the input P6 reads.
-var toolFields = map[string]int{
-	"FuzzDiffGetResource": 6, "FuzzDiffGetPodLogs": 3, "FuzzDiffListEvents": 6, "FuzzDiffQueryMetrics": 6,
-	"FuzzDiffDeliveryStatus": 2, "FuzzDiffCheckMissingReference": 6, "FuzzDiffGitTools": 2,
 }
 
 // TestMinimizeCollected makes the inputs a collecting run wrote small and prints them by kind

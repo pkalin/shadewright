@@ -23,7 +23,6 @@ import (
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 // FuzzLogExcerpt checks the order of redaction and cuts on untrusted log text: whatever the text around it
@@ -47,8 +46,6 @@ func FuzzLogExcerpt(f *testing.F) {
 		}
 		i := min(int(at), len(text))
 		text = text[:i] + "\n" + leakJWT + "\n" + text[i:]
-		before := redacttest.WorkWithheld()
-		defer redacttest.FailSmallWithheld(t, "the log excerpt", len(text), before)
 		n := max(int(budget), 256)
 		pick := logPick{namespace: testNS, pod: crashPod, container: appName, previous: true}
 		blk, failed := b.logBlock(pick, providers.LogExcerpt{Text: text}, nil, n)

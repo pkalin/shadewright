@@ -77,34 +77,14 @@ func TestToolsShowAWithheldAnswerAsCouldNotFetch(t *testing.T) {
 		NameGetDeliveryStatus, map[string]any{argKind: kustomization, argNamespace: fluxNS, argName: unitName}))
 	podLogs := map[string]any{argNamespace: testNS, argPod: podName, argContainer: container, argMaxBytes: MaxLogBytes}
 	// Withheld by the redaction of the excerpt here (18 KiB, within twice what was asked), and by the log source's.
-	// No known shape outgrows the budget within twice the largest excerpt asked (32 KiB: "--token,}" takes about
-	// 4,000 steps per byte of StringTwice there, the budget's factor), so the excerpt is withheld by a redactor that
-	// withholds that run, as the budget does past it.
 	excerpt := providers.LogExcerpt{Text: tokenRun[:len(tokenRun)/4]}
-	excerptSet, err := New(Config{Pods: src, Events: src, Objects: src, Logs: src,
-		Redactor: withholdingRuns{set.redactor.(*redact.Redactor)}, Namespaces: []string{testNS}, Now: set.now})
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkWithheld(t, NameGetPodLogs+" (excerpt)", src.run(excerptSet, diffScene{excerpt: excerpt},
-		NameGetPodLogs, podLogs))
+	checkWithheld(t, NameGetPodLogs+" (excerpt)", src.run(set, diffScene{excerpt: excerpt}, NameGetPodLogs, podLogs))
 	logSet, err := New(Config{Pods: src, Events: src, Objects: src, Logs: withheldLogs{src}, Redactor: set.redactor,
 		Namespaces: []string{testNS}, Now: set.now})
 	if err != nil {
 		t.Fatal(err)
 	}
 	checkWithheld(t, NameGetPodLogs+" (source)", src.run(logSet, diffScene{}, NameGetPodLogs, podLogs))
-}
-
-// withholdingRuns is the redactor of the tools, except that it withholds any text that holds a run of
-// "--token,}" from the reading of a log excerpt, with the flag, as the work budget withholds a longer run.
-type withholdingRuns struct{ *redact.Redactor }
-
-func (w withholdingRuns) StringTwiceChecked(s string, cut func(string) int) (string, bool) {
-	if strings.Contains(s, "--token,}--token,}") {
-		return redact.Withheld, false
-	}
-	return w.Redactor.StringTwiceChecked(s, cut)
 }
 
 // redactInput is an input of the fuzz grammar whose fields are all s.

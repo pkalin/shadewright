@@ -426,7 +426,7 @@ func sortStrings(s []string) {
 }
 
 // KnownFailure is an input of a fuzz target that fails one property on the current build: Property is its name
-// ("P1" to "P6"), Reason says what the input is.
+// ("P1" to "P5"), Reason says what the input is.
 type KnownFailure struct {
 	Property, Reason string
 }

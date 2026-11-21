@@ -162,9 +162,9 @@ Every issue names the ADRs it is tied to:
   such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a few minutes weekly, one job per target; a
   target in a package with a file built only with `redactwork` (the differential targets of `internal/redact`, of
   its kept reading of the release before and of the context builder) runs with that tag. The budget stops the work of an entry where it would pass its bound and withholds
-  the entry, so a fuzz target finds a reading whose work grows faster than the text by its withhold: every target
-  that reaches redaction fails an input under 64 KiB that redaction withholds for work (P6,
-  `redacttest.SmallInput`, any build), and the fuzzer keeps that input. A failing input it finds is committed to
+  the entry whole, whatever its shape; the fuzz targets check that nothing withheld is released in part, not how
+  the work grows. Growth is checked by the corpus tests (`TestCorpusWorkGrowsLinearly`: the work at 64 KiB at most
+  2.3 times the work at 32 KiB on every shape, two quadratic shapes of #962 excused by name). A failing input it finds is committed to
   the package's `testdata/fuzz/` with the fix, or listed as a known failure with its issue.
 
 ## Design choices

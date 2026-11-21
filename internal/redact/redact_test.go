@@ -25,7 +25,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/redact/meter"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 // The corpus builds every token-shaped value at run time from obviously synthetic parts, so no realistic
@@ -869,8 +868,6 @@ func FuzzString(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, in string) {
-		before := redacttest.WorkWithheld()
-		defer redacttest.FailSmallWithheld(t, "String", len(in), before)
 		out := String(in)
 		if len(out) > len(in) {
 			t.Fatalf("output grew from %d to %d bytes", len(in), len(out))

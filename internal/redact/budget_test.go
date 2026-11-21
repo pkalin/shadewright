@@ -31,15 +31,14 @@ import (
 // The work budget of an entry (#873, decision of 2026-11-20; budget.go). The meter counts the steps of one
 // redaction in every build, so these tests need no build tag: what an entry spent is what its meter counted.
 //
-//	B1: every entry of the corpus tables, at every entry point, fits its budget with headroom (budgetHeadroom):
-//	    the budget withholds nothing the rules decide today, so nothing they hide or show changes.
+//	B1: on every shape of the corpus (corpusShapes), at every entry point, the work counted with no budget grows
+//	    at most maxGrowth times when the input doubles from 32 to 64 KiB, except on the two shapes of #962
+//	    (growthExcused), which are checked to still grow faster (decision of 2026-11-21 on #873). The budget,
+//	    not a factor that covers every shape, is what bounds the work: a linear shape above WorkPerByte per byte
+//	    is withheld, and a shape whose work grows faster than the text fails here.
 //	B2: the work stays inside the budget for every input: an entry stops within one counting step of it.
 //	B3: an entry is either decided whole, as without a budget, or withheld whole (Withheld, nothing of it),
 //	    wherever its budget runs out; and an entry longer than MaxEntry is withheld before any work.
-
-// budgetHeadroom is how many times its work the budget of every entry of the corpus tables must be at least: the
-// margin of a half WorkPerByte is set with (decision of 2026-11-21 on #873).
-const budgetHeadroom = 1.5
 
 // budgetEntry is one entry point as the budget sees it: run decides on in with the meter wm (nil: none) and
 // returns the output joined, size is the size of the entry its budget is set from, and public is the exported
@@ -166,112 +165,143 @@ func spentOn(e budgetEntry, in string) int64 {
 	return wm.Spent()
 }
 
-// budgetCost is the largest work of one entry point on the inputs measured: per byte on the inputs of 16 KiB or
-// more, where the fixed cost of a call is small beside it, and above WorkPerByte per byte on any input, the part
-// WorkFixed covers.
-type budgetCost struct {
-	perByte float64
-	at      string
-	fixed   int64
-	fixedAt string
-}
-
-func (c *budgetCost) add(name string, spent int64, size int) {
-	if f := spent - WorkPerByte*int64(size); f > c.fixed {
-		c.fixed, c.fixedAt = f, name
-	}
-	if size >= 16<<10 {
-		if pb := float64(spent) / float64(size); pb > c.perByte {
-			c.perByte, c.at = pb, name
-		}
-	}
-}
-
-// checkBudget checks B1 for one input at one entry point.
-func checkBudget(t *testing.T, e budgetEntry, what, in string, cost *budgetCost) {
-	t.Helper()
-	spent, size := spentOn(e, in), e.size(in)
-	cost.add(what, spent, size)
-	if budgetHeadroom*float64(spent) > float64(budgetOf(size)) {
-		t.Errorf("B1: %s on %s: %d steps on %d bytes, more than 1/%.1f of its budget %d", e.name, what, spent, size,
-			budgetHeadroom, budgetOf(size))
-	}
-}
-
-// budgetMeasures are the inputs of the cost tests (canonWorkMeasures) at their smaller size: every form of the
-// canonical corpus, the staircases at 64 KiB and the lines of repeated quoted keys. Their work per byte is the
-// same at the larger sizes (TestCanonCorpusWorkIsLinear, TestCanonStairWorkIsLinear).
-func budgetMeasures() map[string]string {
+// corpusShapes are the shapes the work tests build, each to about n bytes: every form of the canonical corpus
+// (repeated), every staircase, the line of repeated quoted keys, the glued quoted pairs, the four shapes of the
+// budget (budgetShapes), "-password," repeated and TOKEN="a" repeated before a long blank line (the last two found
+// by the fuzz targets of #845).
+func corpusShapes(n int) map[string]string {
 	cases := canonCorpus()
-	sizes := map[string]int{}
-	for _, c := range cases {
-		sizes[c.form] += len(c.in) + 1
-	}
 	out := map[string]string{}
 	for _, form := range canonForms {
-		out["form "+form] = canonFormText(cases, form, max(16<<10, sizes[form]))
+		out["form "+form] = canonFormText(cases, form, n)
 	}
 	for _, line := range canonStairLines {
-		out[fmt.Sprintf("stair %q", line)] = canonStair(line, 64<<10)
+		out[fmt.Sprintf("stair %q", line)] = canonStair(line, n)
 	}
-	for _, n := range []int{512, 2048} {
-		out[fmt.Sprintf("repeated quoted keys %d", n)] = repeatedQuotedKeys(n)
-	}
-	maps.Copy(out, gluedQuotedPairs(64<<10))
+	out["repeated quoted keys"] = repeatedQuotedKeys(n / len(repeatedQuotedKeys(1)))
+	maps.Copy(out, gluedQuotedPairs(n))
+	maps.Copy(out, budgetShapes(n))
+	out[passwordFlagRun] = strings.Repeat("-password,", n/len("-password,"))
+	out[`TOKEN="a" before a blank line`] = strings.Repeat(`TOKEN="a"`, n/len(`TOKEN="a"`)) + "\"\n" +
+		strings.Repeat(" ", 4096) + "\"："
 	return out
 }
 
+// passwordFlagRun names "-password," repeated in corpusShapes.
+const passwordFlagRun = "-password, repeated"
+
 // gluedQuotedPairs are lines of quoted pairs glued with no separator (auth="a" repeated), with and without a
 // tail, of about n bytes each: the release before reads each pair's value again for every key before it on the
-// line, up to a window, so the cost per byte rises to about 1,200 steps of that reading at 64 KiB and stays
-// there (1,201 at 1 MiB), and Strings, which takes that reading twice, to about 2,500 (decision of 2026-11-21 on
-// #873; found by FuzzDiffGetPodLogs).
+// line, up to a window, so the cost per byte rises to about 1,100 steps of that reading at 64 KiB and stays
+// there (1,201 at 1 MiB), and Strings, which takes that reading twice, to about 2,300 to 2,600: a linear shape
+// above WorkPerByte, which String withholds past 32 KiB and Strings past 8 KiB (decision of 2026-11-21 on #873;
+// found by FuzzDiffGetPodLogs).
 func gluedQuotedPairs(n int) map[string]string {
 	out := map[string]string{}
 	for _, unit := range []string{`auth="a"`, `token="a"`} {
-		for _, tail := range []string{"", "\uff1ax"} {
+		for _, tail := range []string{"", "：x"} {
 			out[fmt.Sprintf("glued %s tail %q", unit, tail)] = strings.Repeat(unit, n/len(unit)) + tail
 		}
 	}
 	return out
 }
 
-// B1: every input of the corpus tables (releasedInputs) and of the cost tests fits the budget of every entry
-// point with budgetHeadroom to spare. The largest cost per byte is logged: the factor of the budget is set from it
-// (docs/adr/0015, amendment of 2026-11-20).
-func TestBudgetFactorCoversTheCorpus(t *testing.T) {
-	inputs := releasedInputs(t)
-	measures := budgetMeasures()
-	if raceDetector {
-		// Under -race each entry point checks its own seeded sample of the corpus and none of the measures, which
-		// are 16 to 140 KiB each; make test runs this package again without -race on all of them (decision of
-		// 2026-11-21 on #873).
-		measures = nil
+// maxGrowth is how many times its work at 32 KiB an entry may take at 64 KiB (decision of 2026-11-21 on #873):
+// twice, and a margin for the part of the work that is not proportional to the text. The largest measured outside
+// growthExcused is 2.29 (PiecesWithin on TOKEN="a" before a blank line, whose blank line is a fixed 4 KiB), then
+// 2.22 on the glued quoted pairs; every form and staircase grows at most 2.05 times.
+const maxGrowth = 2.3
+
+// growthExcused are the shapes of corpusShapes on which the work is known to grow faster than the text, each with
+// its reason and its measured growth: the release's reading of a flag followed by a comma reads each value to the
+// end of the run (released.tokenEnd), and almost all the work is that reading. #962 makes them linear and removes
+// them from here. They are measured at String alone (their work at 64 KiB is 430 to 510 million steps) and must
+// still grow faster than maxGrowth there, so a shape made linear cannot stay excused. The budget withholds them
+// whole (TestBudgetWithholdsTheQuadraticTokenShapes).
+var growthExcused = map[string]string{
+	"--token,} repeated": "#962: the release's reading of a flag repeated, 3.77 times from 32 to 64 KiB",
+	passwordFlagRun:      "#962: the release's reading of a flag repeated, 3.96 times from 32 to 64 KiB",
+}
+
+// growthOf returns how many times its work on small e takes on large, an input about twice as long: the work is
+// counted with no budget, and its ratio is scaled to an exact doubling, as the texts built are not exactly 32 and
+// 64 KiB.
+func growthOf(e budgetEntry, small, large string) (growth float64, wSmall, wLarge int64) {
+	wSmall, wLarge = spentOn(e, small), spentOn(e, large)
+	return float64(wLarge) / float64(wSmall) * 2 * float64(e.size(small)) / float64(e.size(large)), wSmall, wLarge
+}
+
+// growthFails returns the growth of e on the shape name, built at small and at twice its size at large, and its
+// B1 failure or nothing; excused is the reason of growthExcused, empty for a shape that must grow linearly.
+func growthFails(e budgetEntry, name, excused, small, large string) (growth float64, fail string) {
+	g, ws, wl := growthOf(e, small, large)
+	switch {
+	case excused == "" && g > maxGrowth:
+		return g, fmt.Sprintf("B1: %s on %s: %d steps on %d bytes, %d on %d: %.2f times for twice the size, over %.1f",
+			e.name, name, ws, e.size(small), wl, e.size(large), g, maxGrowth)
+	case excused != "" && g <= maxGrowth:
+		return g, fmt.Sprintf("B1: %s on %s grows %.2f times for twice the size, at most %.1f: remove it from "+
+			"growthExcused (%s)", e.name, name, g, maxGrowth, excused)
 	}
-	names := slices.Sorted(func(yield func(string) bool) {
-		for n := range measures {
-			if !yield(n) {
-				return
-			}
-		}
-	})
+	return g, ""
+}
+
+// B1: the work on every shape of the corpus grows linearly at every entry point, from 32 to 64 KiB, except on the
+// shapes of growthExcused. Both sizes are read by windows (windowMinText is 4 KiB), so the one-time step from
+// reading a text whole to reading it by windows is not in the doubling.
+func TestCorpusWorkGrowsLinearly(t *testing.T) {
+	if raceDetector {
+		t.Skip("it counts work on texts of 32 and 64 KiB, 10 to 20 times slower under -race; make test runs this " +
+			"package again without it")
+	}
+	small, large := corpusShapes(32<<10), corpusShapes(64<<10)
+	names := slices.Sorted(maps.Keys(small))
 	for _, e := range budgetEntries {
 		t.Run(e.name, func(t *testing.T) {
 			t.Parallel()
-			cost := &budgetCost{}
-			for i, in := range inputs {
-				if !raceKeeps(t.Name(), i) {
+			worst, worstAt := 0.0, ""
+			for _, name := range names {
+				excused := growthExcused[name]
+				if excused != "" && e.name != budgetEntries[0].name { // String alone
 					continue
 				}
-				checkBudget(t, e, fmt.Sprintf("corpus input %d", i), in, cost)
+				g, fail := growthFails(e, name, excused, small[name], large[name])
+				if fail != "" {
+					t.Error(fail)
+				}
+				if excused != "" {
+					t.Logf("%s on %s (excused, %s): %.2f times", e.name, name, excused, g)
+				} else if g > worst {
+					worst, worstAt = g, name
+				}
 			}
-			for _, n := range names {
-				checkBudget(t, e, n, measures[n], cost)
-			}
-			t.Logf("%s: at most %.1f steps per byte on 16 KiB or more (%s); at most %d steps above %d per byte (%s)",
-				e.name, cost.perByte, cost.at, cost.fixed, WorkPerByte, cost.fixedAt)
+			t.Logf("%s: at most %.2f times from 32 to 64 KiB (%s)", e.name, worst, worstAt)
 		})
 	}
+}
+
+// B1 can fail: a reading that reads the rest of the text again at every line, as the staircases once did (#845),
+// grows 2.9 times for twice the size (a staircase of twice the bytes has fewer than twice the lines) and fails the
+// check unless excused.
+func TestCorpusGrowthCheckFindsAQuadraticReading(t *testing.T) {
+	quadratic := budgetEntry{name: "a quadratic reading", size: func(in string) int { return len(in) },
+		run: func(wm *meter.Meter, in string) string {
+			for i := range len(in) {
+				if in[i] == '\n' {
+					wm.Spend(len(in) - i)
+				}
+			}
+			return in
+		}}
+	small, large := canonStair("pass: |", 4<<10), canonStair("pass: |", 8<<10)
+	g, fail := growthFails(quadratic, "stair", "", small, large)
+	if fail == "" {
+		t.Errorf("the growth check passed a quadratic reading: %.2f times for twice the size", g)
+	}
+	if _, fail := growthFails(quadratic, "stair", "a reason", small, large); fail != "" {
+		t.Errorf("an excused quadratic reading failed: %s", fail)
+	}
+	t.Logf("a quadratic reading on the staircase: %.2f times for twice the size", g)
 }
 
 // budgetShapes are the four inputs on which the work grew faster than the text before the budget (#873,
@@ -340,6 +370,39 @@ func TestBudgetBoundsTheFourShapes(t *testing.T) {
 					}
 					t.Logf("%s on %s of %d bytes: %d steps (%.0f per byte), decided %v", e.name, name, size, spent,
 						float64(spent)/float64(size), ok)
+				}
+			}
+		})
+	}
+}
+
+// B2, B3: the budget bounds the two shapes whose work grows with the square of the text (growthExcused, #962). At
+// 128 KiB, where their work with no budget is several times their budget, every entry point stops within one
+// counting step of its budget and withholds the entry whole: its output is Withheld and nothing of the text.
+func TestBudgetWithholdsTheQuadraticTokenShapes(t *testing.T) {
+	if raceDetector {
+		t.Skip("each entry spends its whole budget on 128 KiB, 10 to 20 times slower under -race; make test runs " +
+			"this package again without it")
+	}
+	shapes := corpusShapes(128 << 10)
+	for _, e := range budgetEntries {
+		t.Run(e.name, func(t *testing.T) {
+			t.Parallel()
+			for _, name := range slices.Sorted(maps.Keys(growthExcused)) {
+				in := shapes[name]
+				size := e.size(in)
+				out, ok, spent := meteredSpent(e, in, budgetOf(size))
+				if ok || out != "" {
+					t.Errorf("%s on %s of %d bytes: decided %v inside a budget of %d, returned %q", e.name, name,
+						size, ok, budgetOf(size), redacttest.Clip(out))
+				}
+				if spent > budgetOf(size)+budgetOverrun(size) {
+					t.Errorf("%s on %s of %d bytes spent %d steps, budget %d", e.name, name, size, spent,
+						budgetOf(size))
+				}
+				if got := e.public(in); !withheldOut(got) {
+					t.Errorf("%s on %s of %d bytes returned %q, not withheld whole", e.name, name, size,
+						redacttest.Clip(got))
 				}
 			}
 		})

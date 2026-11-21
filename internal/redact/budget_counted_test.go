@@ -33,8 +33,8 @@ func TestEveryStepIsMetered(t *testing.T) {
 			inputs = append(inputs, in)
 		}
 	}
-	measures := budgetMeasures()
-	for _, name := range []string{`stair "pass\u200b: |"`, "form key and value in two strings", "repeated quoted keys 512"} {
+	measures := corpusShapes(16 << 10)
+	for _, name := range []string{`stair "pass\u200b: |"`, "form key and value in two strings", "repeated quoted keys"} {
 		in, ok := measures[name]
 		if !ok {
 			t.Fatalf("no measure %s", name)

@@ -329,12 +329,7 @@ func capFields(in redacttest.Input) redacttest.Input {
 func buildBodies(t testing.TB) map[string]func([]byte) ([]string, bool) {
 	return map[string]func([]byte) ([]string, bool){
 		"FuzzDiffBuild": func(data []byte) ([]string, bool) {
-			before := redacttest.WorkWithheld()
-			in := capFields(redacttest.Decode(data, 8))
-			fails := buildDiff(t, in)
-			// P6: no section of an input under redacttest.SmallInput is withheld for work (#873, decision of
-			// 2026-11-20).
-			return append(fails, redacttest.SmallWithheldFails("Build", in.Size(), before)...), false
+			return buildDiff(t, capFields(redacttest.Decode(data, 8))), false
 		},
 	}
 }

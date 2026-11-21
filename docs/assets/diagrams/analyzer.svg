@@ -1,144 +1,72 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 824" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1150 540" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Shadewright analyzer</title>
-  <desc id="d">Zoom into the analyzer identity. Built: the collector watches events, pod status and, for the symptom sources of active modules, HPAs, pods and the KEDA, Flux and Kyverno kinds the chart grants (a KEDA replica ceiling becomes an Incident about the ScaledObject, a cloudflared replica not ready for 2 minutes one about its Deployment) in the watched namespaces, resolves owners (dropping the evidence of pods whose workload has retired their template and the readiness or startup probe failures that are part of a pod's start or shutdown), holds a BackOff or Unhealthy event whose pod status shows no cause for 2 minutes and drops it if the container recovered, and one whose pod status shows a cause until the Incident controller tells the collector it has seen that cause (no poll), at most 2 minutes, then emits it with its cause, redacts and fingerprints them; two levels of deduplication feed a durable, bounded Incident CR; the analysis trigger decides when an Incident is due. The trigger reads spec.analysis.maxAnalysesPerDay from the RemediationSettings and reads and updates the daily count in the Budget ConfigMap shadewright-analysis-budget in the operator namespace; an unreadable budget means not due. Separately, the analyzer reports platform and integration detection in the settings status; no component reads that status to decide anything. Prometheus (approved templates, watched namespaces, optional with --prometheus-url) and pod logs (bounded, redacted, watched namespaces, get on pods/log through the watch role) have adapters that the analyzer creates and gives to the context builder. The context builder takes selected data from the sources and makes a bounded (48 KiB), redacted context in provenance-tagged blocks. The analysis loop runs only when the analyzer is started with --triage-model (off by default): when an Incident is due it claims it (phase Analyzing, identified by lastAnalysisTime), builds the context, takes one unit of the daily budget, makes one structured call to the triage model and, on a deterministic escalation signal only, calls the escalation model with the read tools bound to the incident's namespace; it refuses a reply from another model than the configured one, validates the result against the schema, takes the previous memory limit from the pod template and the previous maxReplicaCount from the ScaledObject it read once before the call (a ScaledObject that is not ready is not offered that action and ends ScalerNotReady), checks the catalog, rechecks its claim live and creates the typed RemediationRequest for the executor, or hands off to a person. The model provider outside the cluster is reached through the configured provider, only at an endpoint inside the operator's host allow-list, with the analyzer's workload identity.</desc>
+  <desc id="d">Zoom into the analyzer identity. Built: the collector watches events, pod status and, for the symptom sources of active modules, HPAs, pods and the KEDA, Flux and Kyverno kinds the chart grants (a KEDA replica ceiling becomes an Incident about the ScaledObject, a cloudflared replica not ready for 2 minutes one about its Deployment) in the watched namespaces, resolves owners (dropping the evidence of pods whose workload has retired their template and the readiness or startup probe failures that are part of a pod's start or shutdown), holds a BackOff or Unhealthy event whose pod status shows no cause for 2 minutes and drops it if the container recovered, and one whose pod status shows a cause until the Incident controller tells the collector it has seen that cause (no poll), at most 2 minutes, then emits it with its cause, redacts and fingerprints them; two levels of deduplication feed a durable, bounded Incident CR; the analysis trigger decides when an Incident is due. The trigger reads spec.analysis.maxAnalysesPerDay from the RemediationSettings and reads and updates the daily count in the Budget ConfigMap shadewright-analysis-budget in the operator namespace; an unreadable budget means not due. Separately, the analyzer reports platform and integration detection in the settings status; no component reads that status to decide anything. Prometheus (approved templates, watched namespaces, optional with --prometheus-url) and pod logs (bounded, redacted, watched namespaces, get on pods/log through the watch role) have adapters that the analyzer creates and gives to the context builder. The context builder takes selected data from the sources and makes a bounded (48 KiB), redacted context in provenance-tagged blocks. The analysis loop runs only when the analyzer is started with --triage-model (off by default): when an Incident is due it claims it (phase Analyzing, identified by lastAnalysisTime), builds the context, takes one unit of the daily budget, makes one structured call to the triage model and, on a deterministic escalation signal only, calls the escalation model with the read tools bound to the incident's namespace; it refuses a reply from another model than the configured one, validates the result against the schema, takes the previous memory limit from the pod template and the previous maxReplicaCount from the ScaledObject it read once before the call (a ScaledObject that is not ready is not offered that action and ends ScalerNotReady), checks the catalog, rechecks its claim live and creates the typed RemediationRequest for the executor, or hands off to a person. The model provider outside the cluster is reached through the configured provider, only at an endpoint inside the operator's host allow-list, with the analyzer's workload identity. Caps on the Incident: 256 held per Incident, 2,500 per source namespace, at most 500 Incidents. The analysis trigger also applies a debounce and a cooldown. With no evidence the analyzer proposes nothing and hands off to a human. The model provider gets a redacted, bounded context and returns one structured result; it has no tools with write access, and it is reached through the host allow-list and the workload identity. The Prometheus and pod log adapters are wired to the context builder only. Caps on the Incident: 256 held per Incident, 2,500 per source namespace, at most 500 Incidents. The analysis trigger also applies a debounce and a cooldown. With no evidence the analyzer proposes nothing and hands off to a human. The model provider gets a redacted, bounded context and returns one structured result; it has no tools with write access, and it is reached through the host allow-list and the workload identity. The Prometheus and pod log adapters are wired to the context builder only.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
     <style>
-      .lane{fill:#13121c;stroke:#2a2740}
-      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
       .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
       .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
       .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
       .pl{fill:#1d1b2b;stroke:#5a5478;stroke-width:1.2;stroke-dasharray:5 4}
-      .plk{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6;stroke-dasharray:6 4}
-      .ple{fill:#16222a;stroke:#2f5d63;stroke-width:1.2;stroke-dasharray:5 4}
-      .pn{fill:#8a85a8;font-size:10px;font-weight:600;letter-spacing:.06em}
+      .frame{fill:none;stroke:#7c24fc;stroke-opacity:.55;stroke-dasharray:5 5;stroke-width:1.2}
       .h{fill:#f1edff;font-size:15px;font-weight:650}
       .s{fill:#a9a4c4;font-size:12.5px}
-      .id{fill:none;stroke:#7c24fc;stroke-opacity:.55;stroke-dasharray:5 5;stroke-width:1.2}
-      .idt{fill:#a879ff;font-size:11.5px;font-weight:600;letter-spacing:.06em}
       .f{stroke:#a879ff;stroke-width:1.8;fill:none}
-      .fp{stroke:#a879ff;stroke-width:1.8;fill:none;stroke-dasharray:7 5}
       .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
-      .lbl{fill:#c6a8ff;font-size:11.5px}
-      .no{fill:#ff8fa3;font-size:11.5px;font-weight:600}
+      .l{fill:#c6a8ff;font-size:12.5px;font-weight:600}
+      .ft{fill:#7d7999;font-size:12.5px;font-weight:600;letter-spacing:.12em}
+      .cap{fill:#7d7999;font-size:12.5px}
     </style>
   </defs>
-
-  <rect width="1120" height="824" rx="18" fill="#0e0e16"/>
-
-  <!-- lanes -->
-  <rect class="lane" x="24" y="24" width="250" height="776" rx="14"/>
-  <text class="lanet" x="44" y="54">CLUSTER</text>
-  <rect class="lane" x="292" y="24" width="536" height="776" rx="14"/>
-  <text class="lanet" x="312" y="54">SHADEWRIGHT</text>
-  <rect class="lane" x="846" y="24" width="250" height="776" rx="14"/>
-  <text class="lanet" x="866" y="54">OUTSIDE THE CLUSTER</text>
-
-  <!-- identity -->
-  <rect class="id" x="312" y="74" width="496" height="702" rx="12"/>
-  <text class="idt" x="794" y="94" text-anchor="end">ANALYZER IDENTITY · read-only + model</text>
-
-  <!-- cluster lane -->
-  <rect class="box" x="44" y="110" width="210" height="72" rx="10"/>
-  <text class="h" x="60" y="136">Workloads</text>
-  <text class="s" x="60" y="157">events · pods · add-on kinds</text>
-  <text class="s" x="60" y="173">watched namespaces only</text>
-  <text class="lbl" x="160" y="224">detection report</text>
-  <rect class="box" x="44" y="270" width="210" height="72" rx="10"/>
-  <text class="h" x="60" y="296">RemediationSettings</text>
-  <text class="s" x="60" y="317">spec.analysis · status</text>
-  <text class="s" x="60" y="333">owned by the cluster admin</text>
-  <rect class="box" x="44" y="380" width="210" height="88" rx="10"/>
-  <text class="h" x="60" y="406">Budget ConfigMap</text>
-  <text class="s" x="60" y="427">shadewright-analysis-budget</text>
-  <text class="s" x="60" y="443">in the operator namespace</text>
-  <text class="s" x="60" y="459">get and update</text>
-  <rect class="box" x="44" y="510" width="210" height="72" rx="10"/>
-  <text class="h" x="60" y="536">Prometheus</text>
-  <text class="s" x="60" y="557">approved templates only</text>
-  <text class="s" x="60" y="573">watched namespaces</text>
-  <text class="pn" x="44" y="602">wired to the context builder</text>
-  <rect class="box" x="44" y="626" width="210" height="72" rx="10"/>
-  <text class="h" x="60" y="652">Pod logs</text>
-  <text class="s" x="60" y="673">bounded · redacted</text>
-  <text class="s" x="60" y="689">watched namespaces</text>
-  <text class="pn" x="44" y="718">wired to the context builder</text>
-
-  <!-- analyzer: built -->
-  <rect class="box" x="332" y="110" width="210" height="72" rx="10"/>
-  <text class="h" x="348" y="136">Collector</text>
-  <text class="s" x="348" y="157">watched namespaces · owners</text>
-  <text class="s" x="348" y="173">redaction · fingerprint</text>
-  <text class="lbl" x="332" y="204">BackOff/Unhealthy held up to 2 min:</text>
-  <text class="lbl" x="332" y="220">no cause, or cause not yet seen</text>
-  <rect class="box" x="578" y="110" width="210" height="72" rx="10"/>
-  <text class="h" x="594" y="136">Deduplication</text>
-  <text class="s" x="594" y="157">two levels: occurrence</text>
-  <text class="s" x="594" y="173">then fingerprint</text>
-  <rect class="box" x="578" y="240" width="210" height="72" rx="10"/>
-  <text class="h" x="594" y="266">Incident CR</text>
-  <text class="s" x="594" y="287">durable · bounded</text>
-  <text class="s" x="594" y="303">one per fingerprint</text>
-  <text class="lbl" x="578" y="334">caps: 256 held per Incident,</text>
-  <text class="lbl" x="578" y="350">2,500 per source namespace,</text>
-  <text class="lbl" x="578" y="366">at most 500 Incidents</text>
-  <rect class="box" x="332" y="270" width="210" height="72" rx="10"/>
-  <text class="h" x="348" y="296">Analysis trigger</text>
-  <text class="s" x="348" y="317">due · daily budget</text>
-  <text class="s" x="348" y="333">debounce · cooldown</text>
-  <text class="no" x="332" y="366">unreadable budget → not due</text>
-
-  <!-- analyzer: analysis, built, on with the triage-model flag -->
-  <rect class="box" x="332" y="540" width="210" height="72" rx="10"/>
-  <text class="h" x="348" y="566">Context builder</text>
-  <text class="s" x="348" y="587">48 KiB · redacted</text>
-  <text class="s" x="348" y="603">provenance-tagged blocks</text>
-  <text class="pn" x="332" y="630">called by the analysis loop</text>
-
-  <rect class="key" x="420" y="660" width="280" height="56" rx="12"/>
-  <text class="h" x="440" y="685">RemediationRequest</text>
-  <text class="s" x="440" y="704">a typed proposal, never authority</text>
-
-  <!-- outside -->
-  <rect class="ext" x="866" y="540" width="210" height="72" rx="10"/>
-  <text class="h" x="882" y="566">Model provider</text>
-  <text class="s" x="882" y="587">redacted, bounded context</text>
-  <text class="s" x="882" y="603">one structured result</text>
-  <text class="pn" x="1060" y="556" text-anchor="end">configured</text>
-  <text class="lbl" x="866" y="632">no tools with write access</text>
-  <text class="lbl" x="866" y="648">host allow-list · workload identity</text>
-
-  <!-- legend -->
-  <rect class="box" x="866" y="700" width="30" height="16" rx="4"/>
-  <text class="lbl" x="906" y="713">built</text>
-  <rect class="pl" x="866" y="726" width="30" height="16" rx="4"/>
-  <text class="lbl" x="906" y="739">planned</text>
-
-  <!-- flow -->
-  <path class="f" d="M254 146H326" marker-end="url(#a)"/>
-  <path class="f" d="M542 146H572" marker-end="url(#a)"/>
-  <path class="f" d="M683 182V234" marker-end="url(#a)"/>
-  <path class="f" d="M572 276H548" marker-end="url(#a)"/>
-  <path class="r" d="M254 292H326" marker-end="url(#m)"/>
-  <text class="lbl" x="262" y="264">spec.analysis.maxAnalysesPerDay</text>
-  <path class="r" d="M254 420H290V322H326" marker-end="url(#m)" marker-start="url(#m)"/>
-  <path class="f" d="M312 230H150V264" marker-end="url(#a)"/>
-  <path class="f" d="M520 342V534" marker-end="url(#a)"/>
-  <text class="lbl" x="530" y="432">when due: the analysis loop</text>
-  <text class="lbl" x="530" y="448">claims it (with --triage-model)</text>
-  <path class="f" d="M254 546H326" marker-end="url(#a)"/>
-  <text class="lbl" x="262" y="534">selected, bounded</text>
-  <path class="f" d="M254 662H290V586H326" marker-end="url(#a)"/>
-  <path class="f" d="M149 504V488H971V534" marker-end="url(#m)" marker-start="url(#m)"/>
-  <text class="lbl" x="600" y="480">read tools, on escalation</text>
-  <path class="f" d="M542 576H860" marker-end="url(#m)" marker-start="url(#m)"/>
-  <text class="lbl" x="590" y="568">context out, structured result in</text>
-  <path class="f" d="M437 612V654" marker-end="url(#a)"/>
-  <text class="lbl" x="447" y="640">model, schema, previous value, catalog, evidence, claim, propose</text>
-
-  <!-- refusal -->
-  <text class="no" x="332" y="752">no evidence → no proposal, hand off to a human</text>
+  <rect width="1150" height="540" rx="18" fill="#0e0e16"/>
+<rect class="ext" x="40" y="150" width="170" height="70" rx="12"/>
+  <text class="h" x="125.0" y="180.0" text-anchor="middle">Workloads</text>
+  <text class="s" x="125.0" y="199.0" text-anchor="middle">events, pods</text>
+  <rect class="box" x="265" y="150" width="170" height="70" rx="12"/>
+  <text class="h" x="350.0" y="180.0" text-anchor="middle">Collector</text>
+  <text class="s" x="350.0" y="199.0" text-anchor="middle">redact, fingerprint</text>
+  <rect class="box" x="490" y="150" width="170" height="70" rx="12"/>
+  <text class="h" x="575.0" y="180.0" text-anchor="middle">Deduplication</text>
+  <text class="s" x="575.0" y="199.0" text-anchor="middle">two levels</text>
+  <rect class="box" x="715" y="150" width="170" height="70" rx="12"/>
+  <text class="h" x="800.0" y="180.0" text-anchor="middle">Incident CR</text>
+  <text class="s" x="800.0" y="199.0" text-anchor="middle">durable, bounded</text>
+  <rect class="box" x="940" y="150" width="170" height="70" rx="12"/>
+  <text class="h" x="1025.0" y="180.0" text-anchor="middle">Analysis trigger</text>
+  <text class="s" x="1025.0" y="199.0" text-anchor="middle">due, debounce</text>
+  <rect class="ext" x="940" y="30" width="170" height="60" rx="12"/>
+  <text class="h" x="1025.0" y="55.0" text-anchor="middle">Budget ConfigMap</text>
+  <text class="s" x="1025.0" y="74.0" text-anchor="middle">daily count</text>
+  <rect class="key" x="940" y="290" width="170" height="70" rx="12"/>
+  <text class="h" x="1025.0" y="320.0" text-anchor="middle">Analysis loop</text>
+  <text class="s" x="1025.0" y="339.0" text-anchor="middle">claims a due Incident</text>
+  <rect class="box" x="715" y="290" width="170" height="70" rx="12"/>
+  <text class="h" x="800.0" y="320.0" text-anchor="middle">Context builder</text>
+  <text class="s" x="800.0" y="339.0" text-anchor="middle">48 KiB, redacted</text>
+  <rect class="ext" x="490" y="290" width="170" height="70" rx="12"/>
+  <text class="h" x="575.0" y="320.0" text-anchor="middle">Model provider</text>
+  <text class="s" x="575.0" y="339.0" text-anchor="middle">one structured call</text>
+  <rect class="key" x="265" y="290" width="170" height="70" rx="12"/>
+  <text class="h" x="350.0" y="320.0" text-anchor="middle">RemediationRequest</text>
+  <text class="s" x="350.0" y="339.0" text-anchor="middle">a proposal only</text>
+  <rect class="ext" x="715" y="420" width="170" height="70" rx="12"/>
+  <text class="h" x="800.0" y="450.0" text-anchor="middle">Prometheus, logs</text>
+  <text class="s" x="800.0" y="469.0" text-anchor="middle">bounded, redacted</text>
+  <path class="f" d="M210 185H265" marker-end="url(#a)"/>
+  <path class="f" d="M435 185H490" marker-end="url(#a)"/>
+  <path class="f" d="M660 185H715" marker-end="url(#a)"/>
+  <path class="f" d="M885 185H940" marker-end="url(#a)"/>
+  <path class="f" d="M1025.0 90V150" marker-start="url(#a)" marker-end="url(#a)"/>
+  <path class="f" d="M1025.0 220V290" marker-end="url(#a)"/>
+  <text class="l" x="1035.0" y="262" text-anchor="start">when due</text>
+  <path class="f" d="M940  325H885" marker-end="url(#a)"/>
+  <path class="f" d="M715  325H660" marker-end="url(#a)"/>
+  <path class="f" d="M490  325H435" marker-end="url(#a)"/>
+  <text class="l" x="913" y="317" text-anchor="middle">build</text>
+  <text class="l" x="688" y="317" text-anchor="middle">context</text>
+  <text class="l" x="463" y="317" text-anchor="middle">result</text>
+  <path class="f" d="M800.0 420V360" marker-end="url(#a)"/>
+  <text class="cap" x="40" y="500" text-anchor="start">Teal: outside the analyzer. The analyzer identity is read-only plus the model.</text>
 </svg>

@@ -144,7 +144,7 @@ Every issue names the ADRs it is tied to:
   image, findings do not fail the run, scanner errors do) on `v*` tags, after the Images workflow pushed them,
   and weekly against the latest release. `scorecard.yml` (OpenSSF Scorecard, results published for the README
   badge) runs on pushes to main, weekly and on branch protection changes, and contains only the steps the action
-  allows with `publish_results`. `fuzz.yml` runs `make fuzz` weekly and by hand, and uploads any failing input as an
+  allows with `publish_results`. `fuzz.yml` runs one matrix job per fuzz target (`make fuzz-one`, list from `make fuzz-list`) weekly and by hand, and uploads any failing input as an
   artifact. The Trivy misconfiguration scan of the rendered chart and `config/` is the
   `trivy-config` job of `chart-test.yml`, so it runs only when the `chart` group changed; HIGH and CRITICAL
   findings fail it unless `.trivyignore.yaml` lists them with a statement of why.
@@ -185,7 +185,7 @@ make verify-generated     # regenerate all of the above from scratch; fails on a
 make lint-fix             # golangci-lint, config in .golangci.yml
 make vulncheck            # govulncheck ./...; standard library findings depend on the local Go patch release
 make test                 # unit + envtest (real kube-apiserver and etcd, no cluster needed); race detector, needs a C compiler
-make fuzz                 # each Go fuzz target for FUZZTIME (default 30s), or only FUZZ=<dir>:<FuzzName>; CI runs it weekly (fuzz.yml; cancelled at 30 min before the differential targets until #999)
+make fuzz                 # each Go fuzz target for FUZZTIME (default 30s), or only FUZZ=<dir>:<FuzzName>; `make fuzz-one TARGET=<dir>:<FuzzName>` runs one, `make fuzz-list` prints the list as JSON; CI runs one job per target weekly (fuzz.yml)
 KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.37.0 --bin-dir "$PWD/bin" -p path)" \
   go test ./internal/controller/... -ginkgo.focus "RemediationRequest"   # one spec; run `make test` once first, the bin dir must be absolute
 make test-e2e             # installs the pinned kind (KIND_VERSION) into bin/ and creates an isolated cluster; CI runs it, not needed locally

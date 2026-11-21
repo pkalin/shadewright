@@ -50,6 +50,9 @@ const plusBase = "release+1"
 // movedBranch is a third base: neither the recorded target branch (main) nor the configured one (release).
 const movedBranch = "hotfix"
 
+// stopBranch is the stop of movedBaseWorld for TargetBranchChanged.
+const stopBranch = "branch"
+
 // movedBaseWorld is a stopped holder (stop: "branch" for TargetBranchChanged, "cancel" for a cancel for its
 // Incident, "lost" for TargetBranchChanged with the write that recorded the pull request lost) whose recorded target
 // branch is main, with the settings naming release, and whose open pull request a person moved to base hotfix. It
@@ -117,7 +120,7 @@ func lookMoved(t *testing.T, r *RemediationRequestReconciler, rr *api.Remediatio
 // before, and nothing records it as the request's merge (no receipt, no phase after a merge, PullRequestOpened not
 // marked merged).
 func TestSettlementMovedBaseKeepsLockWhileOpen(t *testing.T) {
-	for _, stop := range []string{"branch", pathCancel, stopLost} {
+	for _, stop := range []string{stopBranch, pathCancel, stopLost} {
 		for _, end := range []string{foundClosed, endMerged} {
 			t.Run(stop+"/"+end, func(t *testing.T) {
 				r, g, rr, clock, n := movedBaseWorld(t, stop)
@@ -160,7 +163,7 @@ func TestSettlementMovedBaseFailedReadKeepsLock(t *testing.T) {
 		stop, op string
 		fail     error
 	}{
-		"by number, host error": {"branch", opGet, &providers.RetryableError{Err: errors.New("server error")}},
+		"by number, host error": {stopBranch, opGet, &providers.RetryableError{Err: errors.New("server error")}},
 		"listing, host error":   {stopLost, opListAnyBase, &providers.RetryableError{Err: errors.New("server error")}},
 		"listing, untrusted": {stopLost, opListAnyBase,
 			fmt.Errorf("an entry from another branch: %w", providers.ErrUntrustedAnswer)},
@@ -219,6 +222,85 @@ func movedBaseFailedRead(t *testing.T, stop, op string, fail error) {
 	}
 }
 
+// #925, review state of 2026-11-19: a stopped holder whose own pull request is merged on the target branch lists the
+// open pull requests of its branch to every base before the lock may go (lockLooksElsewhere). A listing that keeps
+// failing (the host's error, an answer too large or not trusted) holds the record of that merge, and says so: no
+// error for the rate limiter, the look's pace of heldRecheckInterval, and condition GitReadRetry naming the listing,
+// with a Paced wait and no end (noBoundHeldLock), as every failed read of a stopped holder. The first look whose
+// listing works records the merge. This pins today's behaviour; it changes nothing.
+func TestSettlementListingFailsMergeOnTargetIsSaid(t *testing.T) {
+	for name, fail := range map[string]error{
+		"host error": &providers.RetryableError{Err: errors.New("server error")},
+		"too large":  fmt.Errorf("more than the adapter reads: %w", providers.ErrTooLarge),
+		"untrusted":  fmt.Errorf("an entry from another branch: %w", providers.ErrUntrustedAnswer),
+	} {
+		for _, stop := range []string{stopBranch, "another stop"} {
+			t.Run(name+"/"+stop, func(t *testing.T) {
+				r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+				ctx := context.Background()
+				if stop != stopBranch {
+					setTargetMain(t, r)
+					meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionApproved,
+						Status: metav1.ConditionFalse, Reason: ReasonChangeRequestOnOtherBase, Message: "stopped"})
+					if err := r.Status().Update(ctx, rr); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := g.Merge(rr.Status.PullRequest.Number); err != nil {
+					t.Fatal(err)
+				}
+				failing := true
+				g.SetFail(func(op string) error {
+					if op == opListAnyBase && failing {
+						return fail
+					}
+					return nil
+				})
+				clock := clockOf(r)
+				live := &api.RemediationRequest{}
+				for range 4 {
+					if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+						t.Fatal(err)
+					}
+					res, err := r.checkHeld(ctx, live)
+					if err != nil || res.RequeueAfter < heldRecheckInterval {
+						t.Fatalf("checkHeld: %+v, %v; want the look's pace and no error", res, err)
+					}
+					clock.advance(confirmWait + time.Minute)
+				}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+					t.Fatal(err)
+				}
+				c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry)
+				if mergeRecorded(live) || !holdsLock(live) || c == nil || c.Status != metav1.ConditionTrue ||
+					!strings.Contains(c.Message, "every base") || len(live.Status.GitWaits) != 1 ||
+					live.Status.GitWaits[0].Kind != api.GitWaitPaced {
+					t.Fatalf("merged %v, holds %v, GitReadRetry %+v, waits %+v: want the merge not yet recorded, "+
+						"the lock kept and the failed listing said", mergeRecorded(live), holdsLock(live), c,
+						live.Status.GitWaits)
+				}
+				failing = false
+				for range 3 {
+					if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := r.checkHeld(ctx, live); err != nil {
+						t.Logf("checkHeld: %v", err)
+					}
+					clock.advance(confirmWait + time.Minute)
+				}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
+					t.Fatal(err)
+				}
+				if !mergeRecorded(live) {
+					t.Fatalf("phase %s, conditions %s: want the merge recorded once the listing works",
+						live.Status.Phase, conditionsOf(live))
+				}
+			})
+		}
+	}
+}
+
 // #892, decision of 2026-11-19: with no pull request recorded, a closed pull request with the request's marker on
 // the target branch is no verdict by itself. A second one with the marker, open on another base, keeps the lock:
 // the listing over every base runs before any release.
@@ -266,7 +348,7 @@ func TestSettlementMovedBaseMessageBoundsTheBase(t *testing.T) {
 		"long": strings.Repeat("b", 4096),
 	} {
 		t.Run(name, func(t *testing.T) {
-			r, g, rr, clock, n := movedBaseWorld(t, "branch")
+			r, g, rr, clock, n := movedBaseWorld(t, stopBranch)
 			ctx := context.Background()
 			head, err := g.BranchHead(ctx, mainBranch)
 			if err != nil {
@@ -432,7 +514,7 @@ func moveTo(t *testing.T, g *fakegit.Git, n int64, base string) {
 func TestSettlementMovedBaseUnnamedKeepsLock(t *testing.T) {
 	for name, base := range unnamedBases {
 		t.Run(name, func(t *testing.T) {
-			r, g, rr, clock, n := movedBaseWorld(t, "branch")
+			r, g, rr, clock, n := movedBaseWorld(t, stopBranch)
 			moveTo(t, g, n, base)
 			g.HideBaseName(base)
 			live := lookMoved(t, r, rr, clock)
@@ -456,12 +538,14 @@ func TestSettlementMovedBaseUnnamedKeepsLock(t *testing.T) {
 	}
 }
 
-// #892, decision of 2026-11-19: a pull request from the request's branch that is not its own (another number, no
-// marker) open on another base never keeps the lock, whatever its base is called.
-func TestSettlementForeignOnOtherBaseReleases(t *testing.T) {
+// #925, decision of 2026-11-19: a pull request from the request's branch that is not its own (another number, no
+// marker) open on another base has the branch head, which carries the request's commit, and a person can move it to
+// the target branch and merge it: it keeps the lock as one open on the target branch does, whatever its base is
+// called. It is never adopted or closed. Its close releases the lock. On main it was released at once.
+func TestSettlementForeignOnOtherBaseKeepsLock(t *testing.T) {
 	for name, base := range map[string]string{"named": movedBranch, "unnamed": plusBase} {
 		t.Run(name, func(t *testing.T) {
-			r, g, rr, clock, n := movedBaseWorld(t, "branch")
+			r, g, rr, clock, n := movedBaseWorld(t, stopBranch)
 			ctx := context.Background()
 			if err := g.SetBase(n, mainBranch); err != nil {
 				t.Fatal(err)
@@ -479,11 +563,51 @@ func TestSettlementForeignOnOtherBaseReleases(t *testing.T) {
 				}
 				g.HideBaseName(base)
 			}
-			if _, err := g.AddOpenChangeRequest(freshness.BranchName(rr), base, "a person's change"); err != nil {
+			foreign, err := g.AddOpenChangeRequest(freshness.BranchName(rr), base, "a person's change")
+			if err != nil {
+				t.Fatal(err)
+			}
+			live := lookMoved(t, r, rr, clock)
+			held := meta.FindStatusCondition(live.Status.Conditions, api.ConditionTargetHeld)
+			if !holdsLock(live) || held == nil || !strings.Contains(held.Message, fmt.Sprintf("#%d", foreign)) {
+				t.Fatalf("a foreign pull request open on %s: holds=%v TargetHeld=%+v; want the lock held and the "+
+					"pull request named", base, holdsLock(live), held)
+			}
+			if live.Status.PullRequest.Number != n {
+				t.Fatalf("the foreign pull request was taken as the request's own: %+v", live.Status.PullRequest)
+			}
+			if got, _ := g.GetChangeRequest(ctx, foreign); got.State != providers.ChangeRequestOpen {
+				t.Fatalf("the foreign pull request was closed: %+v", got)
+			}
+			if err := g.Close(foreign); err != nil {
 				t.Fatal(err)
 			}
 			if live := lookMoved(t, r, rr, clock); holdsLock(live) {
-				t.Fatalf("a foreign pull request on %s keeps the lock: %+v", base, live.Status.Conditions)
+				t.Fatalf("the foreign pull request on %s is closed and the lock is held: %+v", base,
+					live.Status.Conditions)
+			}
+		})
+	}
+}
+
+// #925, case 1: the read of the recorded pull request by its number answers 404 again and again, while the pull
+// request is open on a base a person moved it to: the listings of the recorded and the configured target branch
+// confirm it gone there, but "gone" is concluded only after every base was looked at, so the lock is kept. On main
+// the lock was released on the target branches' listings alone.
+func TestSettlementGoneByNumberOpenElsewhereKeepsLock(t *testing.T) {
+	for _, stop := range []string{stopBranch, pathCancel} {
+		t.Run(stop, func(t *testing.T) {
+			r, g, rr, clock, n := movedBaseWorld(t, stop)
+			g.SetFail(func(op string) error {
+				if op == opGet {
+					return fmt.Errorf("pull request %d: %w", n, providers.ErrNotFound)
+				}
+				return nil
+			})
+			live := lookMoved(t, r, rr, clock)
+			if !holdsLock(live) {
+				t.Fatalf("pull request #%d open on %s and missing by its number: the lock was released: %+v", n,
+					movedBranch, live.Status.Conditions)
 			}
 		})
 	}

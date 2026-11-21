@@ -2623,6 +2623,27 @@ func TestTokenRefusalIsForbidden(t *testing.T) {
 	}
 }
 
+// A token whose App JWT GitHub rejects (401: a wrong private key or a deleted App) keeps ErrUnauthorized through
+// tokenError, and so does a 401 on a call made with a token GitHub no longer takes, so the caller can say to fix
+// the App or its key (#925); it is neither forbidden nor retryable, and no text of the token source stays reachable.
+func TestTokenRejectionIsUnauthorized(t *testing.T) {
+	h := newHarness(t)
+	leak := errors.New("installation token: status 401 for https://api.github.com ghs_leaked")
+	h.p.token = func(context.Context) (string, error) {
+		return "", fmt.Errorf("%w: %w", leak, providers.ErrUnauthorized)
+	}
+	_, err := h.p.BranchHead(ctx, target)
+	if !providers.IsUnauthorized(err) || providers.IsForbidden(err) || providers.IsRetryable(err) || errors.Is(err, leak) {
+		t.Fatalf("got %v, want ErrUnauthorized only", err)
+	}
+	if strings.Contains(err.Error(), "ghs_leaked") {
+		t.Fatalf("token source text leaked: %v", err)
+	}
+	if err := statusError("op", http.StatusUnauthorized); !providers.IsUnauthorized(err) || providers.IsForbidden(err) {
+		t.Fatalf("a 401 on a call: got %v, want ErrUnauthorized", err)
+	}
+}
+
 func mustRead(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", name))

@@ -202,6 +202,17 @@ fuzz: ## Run each fuzz target (FUZZ, default all) for FUZZTIME (default 30s); a 
 		go test -tags "$$tags" -run '^$$' -fuzz "^$${t##*:}\$$" -fuzztime "$(FUZZTIME)" "./$${t%%:*}" || exit 1; \
 	done
 
+# One line of JSON for the matrix of .github/workflows/fuzz.yml: every entry of FUZZ_TARGETS as <package dir>:<FuzzName>.
+.PHONY: fuzz-list
+fuzz-list: ## Print FUZZ_TARGETS as a JSON array (the Fuzz workflow matrix).
+	@hack/fuzz-targets.sh "$(CURDIR)" $(FUZZ_TARGETS)
+	@printf '[%s]\n' "$$(printf '"%s",' $(FUZZ_TARGETS) | sed 's/,$$//')"
+
+.PHONY: fuzz-one
+fuzz-one: ## Run one fuzz target, TARGET=<package dir>:<FuzzName> from FUZZ_TARGETS, for FUZZTIME (a Fuzz workflow job).
+	@$(if $(filter $(TARGET),$(FUZZ_TARGETS)),,echo "TARGET must be one of FUZZ_TARGETS, got '$(TARGET)'" >&2; exit 1)
+	@$(MAKE) --no-print-directory fuzz FUZZ="$(TARGET)" FUZZTIME="$(FUZZTIME)"
+
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The kind target installs the pinned Kind (KIND_VERSION) into bin/. The setup builds/loads the Manager Docker image locally.
 # kubectl kuberc is disabled by default for test isolation; enable with:

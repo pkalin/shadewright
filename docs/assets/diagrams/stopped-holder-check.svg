@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 584" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">The failed review check of a stopped holder while the lock is held</title>
-  <desc id="d">Overview of ADR-0046. A stopped request that holds the target lock, with reviewer hints on, looks at its lock every 10 minutes (faster after a failed status write). After each look that leaves the lock held, by its own pull request on any base or by another open pull request from its branch, it writes the stop's failed check run shadewright/review on the recorded head commit, unless the Git host already shows it last. Four writes are new against ADR-0045: the look no longer waits for condition ReviewCheckNotFailed, it writes when its own pull request was merged on another base, it writes at a look that settles nothing yet, and, after a stale cleanup stopped on a refusal, it writes through a new installation of the repository, settled or not, whichever pull request keeps the lock, and so does the stop for a pull request read gone that a waiting request with the stale mark makes. The check can only keep that commit from merging. A refused write sets ReviewCheckNotFailed and is tried again at the next look. Not covered: a deleted request (issue 984), reads that keep failing (issue 979), a look that a stop exception takes over, a request with hints off or a handoff (logged at Info), a pause, a target branch change or a repository gone, a pass on an earlier head of the branch, and a stopped holder whose installation changed after another stop, which leave a pass in place while the lock is held, and a request whose lock nothing holds. No new read and no new grant.</desc>
+  <desc id="d">Overview of ADR-0046. A stopped request that holds the target lock, with reviewer hints on, looks at its lock every 10 minutes (faster after a failed status write). After each look that leaves the lock held, by its own pull request on any base or by another open pull request from its branch, it writes the stop's failed check run shadewright/review on the recorded head commit, unless the Git host already shows it last. Four writes are new against ADR-0045: the look no longer waits for condition ReviewCheckNotFailed, it writes when its own pull request was merged on another base, it writes at a look that settles nothing yet, and, after a stale cleanup stopped on a refusal, it writes through a new installation of the repository, settled or not, whichever pull request keeps the lock, and so does the stop for a pull request read gone that a waiting request with the stale mark makes. The check can only keep that commit from merging. A refused write sets ReviewCheckNotFailed and is tried again at the next look. Not covered: a deleted request (issue 984), reads that keep failing (issue 979), a request with hints off or a handoff (logged at Info), a pause, a target branch change or a repository gone, a pass on an earlier head of the branch, and a stopped holder whose installation changed after another stop, which leave a pass in place while the lock is held, and a request whose lock nothing holds. No new read and no new grant.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
@@ -63,12 +63,11 @@
   <rect class="ext" x="574" y="274" width="510" height="190" rx="12"/>
   <text class="tag" x="592" y="300">NOT COVERED</text>
   <text class="s" x="592" y="322">Deleted request (#984). Reads that keep failing (#979).</text>
-  <text class="s" x="592" y="340">A look a stop exception takes over writes nothing then.</text>
-  <text class="s" x="592" y="362">Hints off or a handoff: nothing, logged at Info.</text>
-  <text class="s" x="592" y="384">Pause, another target branch, repository gone: late.</text>
-  <text class="s" x="592" y="406">Lock released: no look.</text>
-  <text class="s" x="592" y="428">A pass on an earlier head of the branch stays.</text>
-  <text class="s" x="592" y="446">Other stops after an installation change: nothing.</text>
+  <text class="s" x="592" y="340">Hints off or a handoff: nothing, logged at Info.</text>
+  <text class="s" x="592" y="362">Pause, another target branch, repository gone: late.</text>
+  <text class="s" x="592" y="384">Lock released: no look.</text>
+  <text class="s" x="592" y="406">A pass on an earlier head of the branch stays.</text>
+  <text class="s" x="592" y="428">Other stops after an installation change: nothing.</text>
 
   <rect class="box" x="36" y="488" width="1048" height="72" rx="12"/>
   <text class="no" x="54" y="516">No new read, no new grant</text>

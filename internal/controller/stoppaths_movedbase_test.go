@@ -1021,11 +1021,12 @@ func TestStoppedHolderSaysTheCheckWasNotFailed(t *testing.T) {
 	}
 }
 
-// #925: a look whose status write is lost (the request changed between its read and its write) leaves the stored
-// status as it was, and the next look tells that from what it stands for: a condition ReviewCheckNotFailed that was
-// not stored is set again, and a failed check whose Stale was not stored is written again and recorded, removing the
-// condition.
-func TestStoppedHolderCheckNoteSurvivesALostWrite(t *testing.T) {
+// #925, #1008: the status write of a look's failed review check (checkHeld's exit, recordCheckOutcome) whose request
+// changed between its read and its write (an annotation) is not lost: on the conflict the request is read again and
+// the outcome carried over, so a condition ReviewCheckNotFailed is stored by that look, and so is Stale once the check
+// is written, which removes the condition. Before the single exit the conflict was returned and the outcome waited for
+// the next look.
+func TestStoppedHolderCheckOutcomeSurvivesAConflict(t *testing.T) {
 	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
 	ctx := context.Background()
 	r.ReviewerHints = true
@@ -1048,7 +1049,7 @@ func TestStoppedHolderCheckNoteSurvivesALostWrite(t *testing.T) {
 		}
 		return live
 	}
-	lostLook := func() {
+	touchedLook := func() {
 		t.Helper()
 		stale := get()
 		other := get()
@@ -1059,38 +1060,27 @@ func TestStoppedHolderCheckNoteSurvivesALostWrite(t *testing.T) {
 		if err := r.Update(ctx, other); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := r.checkHeld(ctx, stale); !apierrors.IsConflict(err) {
-			t.Fatalf("checkHeld on a stale copy: %v; want a conflict", err)
+		if _, err := r.checkHeld(ctx, stale); err != nil {
+			t.Fatalf("checkHeld on a copy read before the annotation: %v; want the write carried over", err)
+		}
+		if live := get(); live.Annotations["example.com/touched"] != other.Annotations["example.com/touched"] {
+			t.Fatalf("annotations %v: the write of the look put back the copy it read", live.Annotations)
 		}
 	}
 	note := func(live *api.RemediationRequest) *metav1.Condition {
 		return meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
 	}
-	lostLook()
-	if c := note(get()); c != nil {
-		t.Fatalf("ReviewCheckNotFailed %+v stored by a lost write", c)
-	}
-	live := get()
-	if _, err := r.checkHeld(ctx, live); err != nil {
-		t.Fatal(err)
-	}
+	touchedLook()
 	if c := note(get()); c == nil || c.Reason != ReasonGitFailed {
-		t.Fatalf("ReviewCheckNotFailed %+v after the lost write: want it set by the next look", c)
+		t.Fatalf("ReviewCheckNotFailed %+v after a look whose write met a conflict: want it stored", c)
 	}
 	failing = false
-	lostLook()
-	if !failedOnly(g.CheckRuns(head)) || note(get()) == nil {
-		t.Fatalf("check runs %+v, conditions %s: want the check written and the condition still stored",
-			g.CheckRuns(head), conditionsOf(get()))
-	}
-	live = get()
-	if _, err := r.checkHeld(ctx, live); err != nil {
-		t.Fatal(err)
-	}
-	live = get()
-	if rc := live.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale || note(live) != nil {
-		t.Fatalf("review check %+v, conditions %s: want Stale recorded and the condition removed", rc,
-			conditionsOf(live))
+	touchedLook()
+	live := get()
+	if rc := live.Status.PullRequest.ReviewCheck; !failedOnly(g.CheckRuns(head)) || rc == nil ||
+		rc.State != api.ReviewCheckStale || note(live) != nil {
+		t.Fatalf("check runs %+v, review check %+v, conditions %s: want the check written, Stale recorded and the "+
+			"condition removed by that look", g.CheckRuns(head), rc, conditionsOf(live))
 	}
 }
 

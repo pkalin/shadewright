@@ -228,16 +228,16 @@ var modelGoneSeeds = []uint64{165, 202, 210}
 
 // modelUnsettledSeeds are the seeds above 240 whose sequence has a stopped holder kept by another pull request from
 // its branch at a look that settles nothing yet (the first look at a missing number): property "stopped holder" fails
-// on each of them when that look does not write the failed check (failCheckAfterUnsettledLook, #925). They are the
+// on each of them when that look does not write the failed check (unsettledRuleApplies, #925). They are the
 // only seeds of 1 to 4000 that do, so the fixed set adds them in every run. A change of the model's draws can move
 // them; the new ones are found with the call removed and SHADEWRIGHT_MODEL_SEED_RANGE.
 var modelUnsettledSeeds = []uint64{1456, 3796, 3895}
 
 // modelExceptionSeeds are seeds whose sequence has a stopped holder kept by another pull request from its branch at a
 // look a stop exception takes over (a cancel settled for its Incident that closes its own pull request after a heal):
-// property "stopped holder" lets that look go without the failed check and asks for it at the next look (ADR-0046
-// limit (c), last decision of 2026-11-21 on #925). Found by a run of seeds 1 to 200000; the fixed set adds them in
-// every run, so the exception is reached there. A change of the model's draws can move them.
+// property "stopped holder" fails on each of them when such a look does not write the failed check in that look
+// (checkHeld's single exit, #1008, which closed ADR-0046 limit (c)). Found by a run of seeds 1 to 200000; the fixed set
+// adds them in every run, so the exception is reached there. A change of the model's draws can move them.
 var modelExceptionSeeds = []uint64{90477, 175302}
 
 // modelSeeds is the fixed seed set: 1 to n, modelGoneSeeds under the race detector or -short, modelUnsettledSeeds
@@ -311,14 +311,14 @@ func TestGitWaitModel(t *testing.T) {
 		modelHeldChecks.mu.Lock()
 		defer modelHeldChecks.mu.Unlock()
 		t.Logf("looks of a stopped holder kept by another pull request from its branch, checked: %d, of which taken "+
-			"over by a stop exception and let go for one look: %d", modelHeldChecks.count, modelHeldChecks.excused)
+			"over by a stop exception: %d", modelHeldChecks.count, modelHeldChecks.exceptions)
 		if fixedSeeds && modelHeldChecks.count == 0 && !t.Failed() {
 			t.Errorf("property \"stopped holder\" was never reached on the fixed seeds: a change of the model's " +
 				"events no longer draws a stopped holder kept by another pull request (#925)")
 		}
-		if fixedSeeds && modelHeldChecks.excused == 0 && !t.Failed() {
-			t.Errorf("property \"stopped holder\" never let a look a stop exception took over go on the fixed seeds: " +
-				"a change of the model's events moved modelExceptionSeeds (ADR-0046 limit (c), #925)")
+		if fixedSeeds && modelHeldChecks.exceptions == 0 && !t.Failed() {
+			t.Errorf("property \"stopped holder\" never checked a look a stop exception took over on the fixed seeds: " +
+				"a change of the model's events moved modelExceptionSeeds (#1008)")
 		}
 	})
 	for _, seed := range modelSeeds(t) {
@@ -477,10 +477,9 @@ type modelWorld struct {
 	// afterLift counts the reconciles since the last lift with reads working and no write made to fail; -1 when
 	// none is counted (no lift yet, or a fault since).
 	afterLift int
-	// exceptionLook: a stop exception of ADR-0046 limit (c) took the reconcile running over (stopExceptionTaken).
-	// excused: property "stopped holder" let the last look it reached go without the failed check for that reason,
-	// so the next look it reaches must show the check.
-	exceptionLook, excused bool
+	// exceptionLook: a stop exception took the reconcile running over (stopExceptionTaken), counted by property
+	// "stopped holder" (modelHeldChecks.exceptions).
+	exceptionLook bool
 }
 
 // pauseSpan is a pause from its start to its lift, or a time the executor was down.
@@ -2147,8 +2146,8 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 var modelHeldChecks struct {
 	mu    sync.Mutex
 	count int
-	// excused counts the looks a stop exception took over that the property let go without the check.
-	excused int
+	// exceptions counts the checked looks a stop exception took over, which get no allowance (#1008).
+	exceptions int
 }
 
 // stoppedHolderProperty: a stopped holder whose own pull request is not open (closed, merged, gone or never found)
@@ -2159,10 +2158,10 @@ var modelHeldChecks struct {
 // its own pull request. The model reaches no new installation of the App; the rule has no exception for one
 // (decision of 2026-11-21 on #925, ADR-0046), and the directed tests cover that path.
 //
-// One look is let go without the check: a look that a stop exception took over (ADR-0046 limit (c), last decision of
-// 2026-11-21 on #925; closing it is #1008), told by the step the reconcile took (exceptionLook, set through
-// stopExceptionTaken), never by the seed. The next look the property reaches must show the check, whatever took it
-// over: a second look in a row without it fails the run (excused).
+// A look that a stop exception took over (the expired cleanup past its cutoff, a step of settleStopException) gets no
+// allowance: checkHeld runs the rule at its single exit, so that look writes the check too (#1008, which closed
+// ADR-0046 limit (c)). Such looks are counted (exceptionLook, set through stopExceptionTaken), so the fixed seed set
+// shows they were checked.
 func (m *modelWorld) stoppedHolderProperty(live *api.RemediationRequest, err error, faulted bool) {
 	if !m.r.ReviewerHints || err != nil || faulted || m.lastFailedCalls > 0 || len(m.history) < 2 {
 		return
@@ -2185,57 +2184,43 @@ func (m *modelWorld) stoppedHolderProperty(live *api.RemediationRequest, err err
 		meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry) != nil {
 		return
 	}
+	m.mu.Lock()
+	exception := m.exceptionLook
+	m.mu.Unlock()
 	modelHeldChecks.mu.Lock()
 	modelHeldChecks.count++
+	if exception {
+		modelHeldChecks.exceptions++
+	}
 	modelHeldChecks.mu.Unlock()
 	if meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil {
 		// The write failed or the settings permit none (another target branch, a pause): the look says so.
-		m.excused = false
 		return
 	}
 	if last := lastReviewCheck(m.g.CheckRuns(pr.HeadSHA)); last == nil || last.Status != providers.CheckRunFailure {
-		if m.excuseStopException() {
-			return
-		}
-		looks := 1
-		if m.excused {
-			looks = 2
-		}
 		m.fatalf("stopped holder: the request stopped (phase %s) and keeps the lock through #%d from its branch while "+
 			"its own pull request is not open, and the last review check of its recorded head %.12s is not failed, "+
-			"and condition ReviewCheckNotFailed does not say so (looks in a row without it: %d): %+v",
-			live.Status.Phase, m.unmarked, pr.HeadSHA, looks,
-			m.g.CheckRuns(pr.HeadSHA))
-		return
+			"and condition ReviewCheckNotFailed does not say so (a stop exception took the look over: %t): %+v",
+			live.Status.Phase, m.unmarked, pr.HeadSHA, exception, m.g.CheckRuns(pr.HeadSHA))
 	}
-	m.excused = false
 }
 
-// TestStoppedHolderPropertyLetsGoOneStopExceptionLook drives property "stopped holder" through scripted looks of a
-// stopped holder whose own pull request is closed while an unmarked one from its branch keeps the lock and no failed
-// check is on the recorded head: only a look a stop exception took over goes without the check, and only once in a
-// row (last decision of 2026-11-21 on #925, ADR-0046 limit (c)).
-func TestStoppedHolderPropertyLetsGoOneStopExceptionLook(t *testing.T) {
+// TestStoppedHolderPropertyAllowsNoStopExceptionLook drives property "stopped holder" through one scripted look of a
+// stopped holder whose own pull request is closed while an unmarked one from its branch keeps the lock: a look a stop
+// exception took over fails the property without the failed check on the recorded head, as any other look does (#1008).
+func TestStoppedHolderPropertyAllowsNoStopExceptionLook(t *testing.T) {
 	schema := requestStatusSchema(t)
 	for _, tc := range []struct {
-		name string
-		// looks says, per look, whether a stop exception took it over; checkAt the look before which the failed
-		// check is written on the head (-1: never).
-		looks   []bool
-		checkAt int
-		fails   bool
+		name             string
+		exception, check bool
+		fails            bool
 	}{
-		{name: "a look without an exception", looks: []bool{false}, checkAt: -1, fails: true},
-		{name: "one exception look", looks: []bool{true}, checkAt: -1},
-		{name: "an exception look, then a look without the check", looks: []bool{true, false}, checkAt: -1,
-			fails: true},
-		{name: "two exception looks in a row without the check", looks: []bool{true, true}, checkAt: -1, fails: true},
-		{name: "an exception look, then the check", looks: []bool{true, false}, checkAt: 1},
-		{name: "the check, then an exception look, then the check is gone", looks: []bool{false, true, false},
-			checkAt: 0, fails: true},
+		{name: "a look without an exception, no check", fails: true},
+		{name: "an exception look, no check", exception: true, fails: true},
+		{name: "an exception look with the check", exception: true, check: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// #nosec G404 -- a fixed seed: the scripted looks draw nothing.
+			// #nosec G404 -- a fixed seed: the scripted look draws nothing.
 			rng := rand.New(rand.NewPCG(1, 2))
 			m := newModelFrom(t, 1, rng, schema, modelStart{start: stopCancelled, focus: focusNone})
 			m.r.ReviewerHints, m.checkFails = true, false
@@ -2248,53 +2233,23 @@ func TestStoppedHolderPropertyLetsGoOneStopExceptionLook(t *testing.T) {
 				t.Fatalf("the scripted world is not a stopped holder kept by an unmarked pull request: holds %t, "+
 					"pull request %v, unmarked open %t", holdsLock(live), live.Status.PullRequest, m.unmarkedOpen())
 			}
-			head := live.Status.PullRequest.HeadSHA
 			m.history = []*api.RemediationRequest{live.DeepCopy(), live.DeepCopy()}
-			for i, exception := range tc.looks {
-				status := providers.CheckRunStatus("")
-				switch {
-				case i == tc.checkAt:
-					status = providers.CheckRunFailure
-				case tc.checkAt >= 0 && i > tc.checkAt:
-					// A pass written after the failed check: the head no longer shows the stop.
-					status = providers.CheckRunSuccess
+			if tc.check {
+				if err := m.g.CreateCheckRun(context.Background(), live.Status.PullRequest.HeadSHA, providers.CheckRun{
+					Name: providers.CheckRunName, Status: providers.CheckRunFailure}); err != nil {
+					t.Fatal(err)
 				}
-				if status != "" {
-					if err := m.g.CreateCheckRun(context.Background(), head, providers.CheckRun{
-						Name: providers.CheckRunName, Status: status}); err != nil {
-						t.Fatal(err)
-					}
-				}
-				m.exceptionLook = exception
-				m.stoppedHolderProperty(live, nil, false)
 			}
+			m.exceptionLook = tc.exception
+			m.stoppedHolderProperty(live, nil, false)
 			failed := slices.ContainsFunc(m.violations, func(v string) bool {
 				return strings.HasPrefix(v, "stopped holder:")
 			})
 			if failed != tc.fails {
-				t.Fatalf("property \"stopped holder\" failed: %t, want %t; violations %v; trace:\n  %s", failed, tc.fails,
-					m.violations, strings.Join(m.trace, "\n  "))
+				t.Fatalf("property \"stopped holder\" failed: %t, want %t; violations %v", failed, tc.fails, m.violations)
 			}
 		})
 	}
-}
-
-// excuseStopException reports whether property "stopped holder" lets the look just checked go without the failed
-// check: a stop exception took it over (exceptionLook) and the look before it that the property reached was not let
-// go too (ADR-0046 limit (c): the next look that reaches the rule writes the check).
-func (m *modelWorld) excuseStopException() bool {
-	m.mu.Lock()
-	exception := m.exceptionLook
-	m.mu.Unlock()
-	if !exception || m.excused {
-		return false
-	}
-	m.excused = true
-	modelHeldChecks.mu.Lock()
-	modelHeldChecks.excused++
-	modelHeldChecks.mu.Unlock()
-	m.logf("stopped holder: a stop exception took the look over, the check is owed at the next look")
-	return true
 }
 
 // modelGoneStops counts, over every seed of a run, the stops for a pull request read gone with reviewer hints on that

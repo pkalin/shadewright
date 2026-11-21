@@ -174,7 +174,10 @@ func TestCollectedAnswerCorpus(t *testing.T) {
 			continue
 		}
 		text++
-		want, _ := Excerpt(s.redactor, []byte(c.body), false, DefaultBytes)
+		want, _, werr := Excerpt(s.redactor, []byte(c.body), false, DefaultBytes)
+		if werr != nil {
+			t.Fatalf("%d %s: the expected excerpt was withheld: %v", i, c.name, werr)
+		}
 		if err != nil || got.Text != want {
 			t.Errorf("%d %s (previous %v, id %q): body %q gave %q, %v; want the log text %q", i, c.name,
 				c.previous, c.id, c.body, got.Text, err, want)

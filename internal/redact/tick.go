@@ -18,6 +18,13 @@ limitations under the License.
 
 package redact
 
-// tick reports n steps of work. Without the build tag redactwork nothing counts them: the product build holds
-// no counter and no other shared state for it (#840).
-func tick(int) {}
+import "github.com/pkalin/shadewright/internal/redact/meter"
+
+// tick reports n steps of work to wm, the budget of the redaction it is part of (package meter, #873). Without
+// the build tag redactwork nothing else counts them: the product build holds no counter and no other shared state
+// for it (#840).
+func tick(wm *meter.Meter, n int) { wm.Spend(n) }
+
+// tickExpression reports n bytes handed to a regular expression to wm; without the build tag redactwork nothing
+// else counts them.
+func tickExpression(wm *meter.Meter, n int) { wm.Spend(n) }

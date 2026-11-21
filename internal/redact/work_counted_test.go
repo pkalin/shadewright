@@ -20,5 +20,20 @@ package redact
 
 import "testing"
 
+// skipUncounted skips a test that checks nothing but counted work, before it does any: here work is counted, so
+// it does nothing.
+func skipUncounted(*testing.T) {}
+
 // countWork returns the work ([Work]) of f.
 func countWork(_ *testing.T, f func()) int64 { return Work(f) }
+
+// countWorkOfReleased returns the work of f and the part of it the reading of the release before took
+// ([WorkOfReleased]).
+func countWorkOfReleased(_ *testing.T, f func()) (total, release int64) { return WorkOfReleased(f) }
+
+// measureWork is countWorkOfReleased for a check that must not skip its input when work is not counted: it
+// reports whether it counted (here always).
+func measureWork(f func()) (total, release int64, counted bool) {
+	total, release = WorkOfReleased(f)
+	return total, release, true
+}

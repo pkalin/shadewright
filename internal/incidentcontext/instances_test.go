@@ -316,7 +316,7 @@ func TestLogReadsMetricIsBounded(t *testing.T) {
 	want := map[string]metricguard.Labels{
 		"shadewright_analyzer_context_log_reads_without_lines_total": {logReasonLabelName: logReadReasons},
 	}
-	metricguard.Check(t, metrics.Registry, want)
+	metricguard.Check(t, metrics.Registry, metricguard.WithRedaction(want))
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), want)
 }
 

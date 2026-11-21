@@ -29,6 +29,7 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/fake"
 	"github.com/pkalin/shadewright/internal/providers/metrics/prometheus"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // growing lengthens every "grow" on each pass, so the second redaction of a result makes it longer than the
@@ -36,6 +37,14 @@ import (
 type growing struct{}
 
 func (growing) String(s string) string { return strings.ReplaceAll(s, "grow", "grow+") }
+
+func (g growing) PiecesWithin(ps []redact.Piece, _ int) ([]string, bool) {
+	return eachPiece(g, ps), true
+}
+
+func (g growing) PiecesFitting(ps []redact.Piece, _ func([]string) bool) ([]string, bool) {
+	return eachPiece(g, ps), true
+}
 
 // A log result keeps its header and its newest lines within the bound, however long the header, and also
 // after the second redaction pass grows the text.

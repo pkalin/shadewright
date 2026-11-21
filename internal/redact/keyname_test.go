@@ -46,6 +46,8 @@ type mainRedaction struct {
 // range the redactor replaces now. A rule change that narrows a value (such as a reference suffix applied to
 // a form it does not belong to) fails here. It guards against regressions and is expected to pass on main.
 func TestStillRedactsWhatMainRedactedForKeyNames(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	f, err := os.Open(mainRedactionTable)
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +65,10 @@ func TestStillRedactsWhatMainRedactedForKeyNames(t *testing.T) {
 		if len(c.Spans) > 0 {
 			redacted++
 		}
-		now := defaultRedactor.spans(c.In)
+		if !raceKeeps(t.Name(), cases-1) {
+			continue // a seeded sample under -race; all of them without it
+		}
+		now := defaultRedactor.spans(nil, c.In)
 		for _, want := range c.Spans {
 			if !coveredBy(want, now) {
 				t.Errorf("main redacted %q, now kept:\n in: %q\nmain: %q\n now: %q",
@@ -221,18 +226,34 @@ func TestQuotedValueAfterAKeyName(t *testing.T) {
 		t.Errorf("String(%q) = %q, want %q", in, String(in), want)
 	}
 	// A value never starts in the middle of a quoted string it did not open: the quote after the blank closes
-	// the argument that holds the flag.
+	// the argument that holds the flag, which stays whole. The flag's value is the next string of the sequence,
+	// whole, in a text and in the arguments apart ([Redactor.Strings]), whatever it looks like (#845, third
+	// decision of 2026-11-18).
 	for _, in := range []string{
 		`args: ["--password ", "--region", "x"]`,
 		`"args":"[\"--password \",\"--region\"]"`,
 		`"a":"{\"args\":\"[\\\"--password \\\",\\\"--region\\\"]\"}"`,
 		`"b":"{\"a\":\"{\\\"args\\\":\\\"[\\\\\\\"--password \\\\\\\",\\\\\\\"--region\\\\\\\"]\\\"}\"}"`,
 	} {
-		if out := String(in); out != in {
-			t.Errorf("value taken from the next argument:\n in: %q\nout: %q", in, out)
+		flag, next := spacedPasswordFlag, regionFlag
+		out := String(in)
+		if !strings.Contains(out, flag) || strings.Contains(out, next) {
+			t.Errorf("flag or its value in the next argument wrong:\n in: %q\nout: %q", in, out)
+		}
+		if got := Strings([]string{flag, next, "x"}); got[0] != flag || strings.Contains(got[1], next) || got[2] != "x" {
+			t.Errorf("Strings = %q, want the flag and the last string whole and the flag after it redacted", got)
+		}
+		if got := Strings([]string{flag, "Qz55555xK9w", next}); got[0] != flag || got[1] == "Qz55555xK9w" || got[2] != next {
+			t.Errorf("Strings = %q, want the flags whole and the value between them redacted", got)
 		}
 	}
 }
+
+// spacedPasswordFlag is a secret-named flag with a blank inside its quotes, and regionFlag a flag that must stay.
+const (
+	spacedPasswordFlag = "--password "
+	regionFlag         = "--region"
+)
 
 // A key name that holds the word "secret" never takes the reference suffix "id"; "name", "ref", "file" and
 // "path" stay references with it (#585).
@@ -352,9 +373,6 @@ func TestKeyNameKnownLeaks(t *testing.T) {
 		"short flag":                "mysql -u root -p " + k,
 		"one-word name and a blank": "vault write auth/x secret " + k,
 		"one-word token name":       "app set token " + k,
-		// The separator after a flag takes no JSON escape for whitespace ("\n"): such an escape is the start
-		// of the value.
-		"escaped json lines": `"args":"[\n  \"--client-secret\",\n  \"` + k + `\"\n]"`,
 		// Only a double quote escaped as JSON inside a string opens a quoted value: after "\'" the value is
 		// the quote and one token.
 		"escaped single quote": `--password \'horse battery ` + k + `\' --region x`,
@@ -579,7 +597,7 @@ func TestKeepsWhatMainKept(t *testing.T) {
 				mainRedacted[i] = true
 			}
 		}
-		for _, sp := range defaultRedactor.spans(r.in) {
+		for _, sp := range defaultRedactor.spans(nil, r.in) {
 			for i := sp.start; i < sp.end; i++ {
 				if !mainRedacted[i] {
 					t.Errorf("removed %q, which main kept:\n  in: %q\nmain: %q\n now: %q",

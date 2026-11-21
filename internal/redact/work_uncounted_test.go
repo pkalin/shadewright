@@ -20,10 +20,31 @@ package redact
 
 import "testing"
 
+// skipUncounted skips a test that checks nothing but counted work, before it runs any redaction: without the tag
+// such a test would redact its input (seconds under -race) only to skip.
+func skipUncounted(t *testing.T) {
+	t.Helper()
+	t.Skip("work is counted only with -tags redactwork (make test runs it)")
+}
+
 // countWork skips the test: work is counted only in a build with the tag redactwork, which make test runs
 // for this package.
 func countWork(t *testing.T, _ func()) int64 {
 	t.Helper()
 	t.Skip("work is counted only with -tags redactwork (make test runs it)")
 	return 0
+}
+
+// countWorkOfReleased skips the test, as countWork.
+func countWorkOfReleased(t *testing.T, _ func()) (total, release int64) {
+	t.Helper()
+	t.Skip("work is counted only with -tags redactwork (make test runs it)")
+	return 0, 0
+}
+
+// measureWork runs f and reports that work is not counted in this build, so that a fuzz target checks its other
+// properties and leaves out the one about work.
+func measureWork(f func()) (total, release int64, counted bool) {
+	f()
+	return 0, 0, false
 }

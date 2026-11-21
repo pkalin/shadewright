@@ -291,6 +291,35 @@ func TestStatusReaderRedactsTheMessageBeforeItIsCut(t *testing.T) {
 	}
 }
 
+// A message redaction withholds whole is empty, with MessageWithheld set; a message that spells the withheld
+// marker is text, with MessageWithheld unset: the flag of the redactor decides, never the text (#873).
+func TestStatusReaderFlagsAWithheldMessage(t *testing.T) {
+	for _, tc := range []struct {
+		message  string
+		withheld bool
+	}{
+		{strings.Repeat("--token,}", 4096), true},
+		{redact.Withheld, false},
+	} {
+		u := recorded(t, readyFile)
+		u.Object["status"].(map[string]any)["conditions"].([]any)[0].(map[string]any)["message"] = tc.message
+		applied := fluxstatus.AppliedRevision(fluxstatus.Status(u.Object))
+		sr, err := flux.NewStatusReader(&reader{obj: u, others: []*unstructured.Unstructured{source(t, applied)}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := sr.Status(t.Context(), unitOf(u))
+		want := tc.message
+		if tc.withheld {
+			want = ""
+		}
+		if err != nil || st.MessageWithheld != tc.withheld || st.Message != want {
+			t.Errorf("message of %d bytes: %v, withheld %v, message %q", len(tc.message), err, st.MessageWithheld,
+				st.Message[:min(len(st.Message), 80)])
+		}
+	}
+}
+
 func TestInvalidUnitIsNotRead(t *testing.T) {
 	r := &reader{obj: recorded(t, readyFile)}
 	v, err := flux.New(r, ancestry{})

@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 // crdPattern is the Incident spec.fingerprint pattern.
@@ -528,6 +530,8 @@ func FuzzNormalize(f *testing.F) {
 		f.Add(s[0], s[1])
 	}
 	f.Fuzz(func(t *testing.T, prefix, suffix string) {
+		before := redacttest.WorkWithheld()
+		defer redacttest.FailSmallWithheld(t, "Normalize", len(prefix)+len(suffix)+len(canary)+2, before)
 		for _, note := range []string{prefix + suffix, prefix + " " + canary + " " + suffix} {
 			o := Observation{Note: note, Reason: prefix, ReportingController: suffix}
 			for _, got := range []string{Normalize(o), Symptom(o), Value(note)} {
@@ -549,4 +553,13 @@ func FuzzNormalize(f *testing.F) {
 			}
 		}
 	})
+}
+
+// A note whose redaction is withheld whole (its work ran out of the budget of redaction, #873) stands as a note
+// too long to read: nothing of it reaches the symptom. "--token,}" repeated costs the reading of the release
+// before more than that budget.
+func TestWithheldNoteIsRedacted(t *testing.T) {
+	if got := normalize(Observation{Note: strings.Repeat("--token,}", 4096)}, keepAfterKeyOrWhole); got != placeholderRedacted {
+		t.Fatalf("normalize = %q, want %q", got[:min(len(got), 80)], placeholderRedacted)
+	}
 }

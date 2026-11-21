@@ -96,12 +96,12 @@ type summaryWant struct {
 // wantSummary returns what the summary of inc is checked against, built by b from [unbounded].
 func wantSummary(t *testing.T, b *Builder, inc *remediationv1alpha1.Incident) summaryWant {
 	t.Helper()
-	s := inc.Spec
+	vals, kind, namespace, typ, _, _, _ := b.summaryValues(inc)
 	return summaryWant{text: fullSummary(t, b, inc), plain: map[string]string{
-		"subject: ":     "subject: " + b.value(s.Subject.Kind) + " " + b.value(s.Subject.Namespace) + "/" + b.value(s.Subject.Name),
-		"reason: ":      "reason: " + b.value(s.Reason) + " (" + b.value(s.Type) + ")",
-		"reported by: ": "reported by: " + b.value(s.ReportingController),
-		"symptom: ":     "symptom: " + b.value(s.Symptom),
+		"subject: ":     "subject: " + kind + " " + namespace + "/" + vals[cutName],
+		"reason: ":      "reason: " + vals[cutReason] + " (" + typ + ")",
+		"reported by: ": "reported by: " + vals[cutController],
+		"symptom: ":     "symptom: " + vals[cutSymptom],
 	}}
 }
 
@@ -324,7 +324,7 @@ func TestFitSummarySettlesAnEmptyCutDamagedByRedaction(t *testing.T) {
 						tails[cutSymptom] = summaryTail{line: 0, text: tail}
 					}
 					return &l, tails
-				}, 0)
+				}, 0, b.redact)
 				close(done)
 			}()
 			select {
@@ -363,7 +363,7 @@ func TestFitSummaryBacksOffByWord(t *testing.T) {
 					tails[cutSymptom] = summaryTail{line: 0, text: tail}
 				}
 				return &l, tails
-			}, tc.bound)
+			}, tc.bound, b.redact)
 			if tc.name == "spaced words" {
 				if finalKeep > 0 && tc.value[finalKeep-1] != ' ' {
 					t.Errorf("cut at byte %d is not at a word boundary", finalKeep)

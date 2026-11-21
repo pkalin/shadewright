@@ -27,7 +27,7 @@ import (
 // tests of other packages that take their secrets from there cover every rule, and a new rule fails here until
 // it has one.
 func TestEveryRuleHasASample(t *testing.T) {
-	rules, samples := builtinRules(), redacttest.Samples()
+	rules, samples := builtinRules(nil), redacttest.Samples()
 	if len(samples) != len(rules) {
 		t.Fatalf("%d samples for %d built-in rules: add one to package redacttest for each new rule", len(samples), len(rules))
 	}

@@ -173,8 +173,11 @@ type containerReads struct {
 	out   []Block
 	notes strings.Builder
 	// failed: the first read failed (the source failed, timed out, refused the identity or answered
-	// oversized). A second read that failed is only named in notes.
+	// oversized), or a read was withheld by redaction. A second read that failed otherwise is only named in
+	// notes.
 	failed bool
+	// withheld: redaction withheld a read whole (#873); its blocks carry LabelWithheld.
+	withheld bool
 }
 
 // wantsSecond reports whether the container's other instance is read after its first read: the other
@@ -197,11 +200,17 @@ func (r *containerReads) blocks() []Block {
 		if r.failed {
 			blk.Availability = CouldNotFetch
 		}
+		if r.withheld {
+			blk.addLabel(LabelWithheld)
+		}
 		blk.headLen = len(blk.Text)
 		return []Block{blk}
 	}
 	out := slices.Clone(r.out)
 	out[0].Text, out[0].headLen = r.notes.String()+out[0].Text, r.notes.Len()+out[0].headLen
+	if r.withheld {
+		out[0].addLabel(LabelWithheld)
+	}
 	return out
 }
 
@@ -247,6 +256,11 @@ func (b *Builder) readInstance(ctx context.Context, r *containerReads, previous 
 	if r.reads == 1 && (v.Read == LogReadFailed || v.Read == LogReadOversized) {
 		r.failed = true
 	}
+	if v.Read == LogReadWithheld {
+		// A withheld read is a failed source whichever read it is, as the decision of 2026-11-20 on #873 has
+		// it for every caller of the log source.
+		r.failed, r.withheld = true, true
+	}
 	return nil
 }
 
@@ -262,7 +276,7 @@ func instanceName(previous bool) string {
 // ([Builder.renderBlock]). It reports whether the source failed.
 func (b *Builder) logBlock(pick logPick, ex providers.LogExcerpt, err error, budget int) (Block, bool) {
 	blk, v := b.renderBlock(pick, ex, err, budget)
-	failed := v.Read == LogReadFailed || v.Read == LogReadOversized
+	failed := v.Read == LogReadFailed || v.Read == LogReadOversized || v.Read == LogReadWithheld
 	if failed {
 		blk.Availability = CouldNotFetch
 	}
@@ -277,8 +291,12 @@ func (b *Builder) renderBlock(pick logPick, ex providers.LogExcerpt, err error, 
 	if pick.init {
 		kind = "init container"
 	}
-	title := "pod " + b.value(pick.pod) + " " + kind + " " + b.value(pick.container) + ", " + instanceName(pick.previous)
-	v := RenderLog(b.redactor.String, title, ex, err, budget, budget)
+	title := "pod " + b.shown(pick.pod) + " " + kind + " " + b.shown(pick.container) + ", " + instanceName(pick.previous)
+	v := RenderLog(b.redactor, false, title, ex, err, budget, budget)
+	if v.Read == LogReadWithheld {
+		blk.Availability = CouldNotFetch
+		blk.addLabel(LabelWithheld)
+	}
 	for _, m := range []struct {
 		on bool
 		l  Label
@@ -303,12 +321,14 @@ const (
 	reasonFailed
 	reasonOversized
 	reasonEmpty
+	reasonWithheld
 )
 
 // logReadReasons are every value of the label "reason" of logReadsWithoutLines, by reason.
 var logReadReasons = []string{
 	reasonLogGone: "collected", reasonPodNotFound: "pod_not_found", reasonRejected: "rejected",
 	reasonForbidden: "forbidden", reasonFailed: "failed", reasonOversized: "oversized", reasonEmpty: "empty",
+	reasonWithheld: "withheld",
 }
 
 // logReasonLabelName is the label of logReadsWithoutLines.
@@ -319,7 +339,7 @@ const logReasonLabelName = "reason"
 var logReadsWithoutLines = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "shadewright_analyzer_context_log_reads_without_lines_total",
 	Help: "Log reads of the incident context builder that gave no lines, by reason (collected, pod_not_found, " +
-		"rejected, forbidden, failed, oversized, empty).",
+		"rejected, forbidden, failed, oversized, empty, withheld).",
 }, []string{logReasonLabelName})
 
 func init() {
@@ -347,6 +367,8 @@ func noLinesReason(read LogRead, err error) int {
 		return reasonFailed
 	case LogReadOversized:
 		return reasonOversized
+	case LogReadWithheld:
+		return reasonWithheld
 	default:
 		return reasonEmpty
 	}

@@ -20,10 +20,10 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"reflect"
+	"errors"
+	"fmt"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/internal/analyzer/refcheck"
+	"github.com/pkalin/shadewright/internal/providers"
 )
 
 // Kinds of the allow lists.
@@ -124,20 +125,28 @@ func (s *Set) getResource(ctx context.Context, a getResourceArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	// Every string of the object is redacted as it was read, before JSON escapes its line breaks and quotes
-	// (a block under a secret key is found by its lines), and the encoding leaves out HTML escapes (an
-	// escaped ">" hid a folded block indicator from the second pass over the whole answer, #840).
-	view := reflect.ValueOf(strip(obj))
-	redactStrings(view, s.redact)
-	var b strings.Builder
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", " ")
-	if err := enc.Encode(view.Interface()); err != nil {
+	// The object's JSON is the answer, decided once on its bytes (#845, jsonAnswer). The encoding leaves out HTML
+	// escapes, so a reader sees the values as decided. The object is only read, never written (it may be the
+	// cache's).
+	stripped := strip(obj)
+	if stripped == nil {
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	r.Text, r.raw = b.String(), true
+	text, leftOut, err := s.jsonAnswer(stripped, resourceBytes)
+	if errors.Is(err, providers.ErrWithheld) {
+		r.withhold()
+		return nil
+	}
+	if err != nil {
+		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
+		return nil
+	}
+	if leftOut {
+		// Values left out to keep the answer within its bound and valid JSON: the answer is cut, as one the bound cut.
+		r.addLabel(LabelCut)
+	}
+	r.Text, r.raw = text, true
 	return nil
 }
 
@@ -173,59 +182,6 @@ func strip(obj client.Object) any {
 		return c
 	}
 	return nil
-}
-
-// redactStrings replaces every exported string reachable from v with f of it. It writes through pointers,
-// slices and maps into new copies, never into what v shares with the object that was read (a cache's).
-// Unexported fields (a time, a quantity) hold no free text and are left as they are.
-func redactStrings(v reflect.Value, f func(string) string) {
-	switch v.Kind() {
-	case reflect.Pointer:
-		if v.IsNil() {
-			return
-		}
-		c := reflect.New(v.Elem().Type())
-		c.Elem().Set(v.Elem())
-		redactStrings(c.Elem(), f)
-		if v.CanSet() {
-			v.Set(c)
-		} else {
-			v.Elem().Set(c.Elem())
-		}
-	case reflect.Struct:
-		for _, field := range v.Fields() {
-			if field.CanSet() {
-				redactStrings(field, f)
-			}
-		}
-	case reflect.Slice:
-		if v.IsNil() || !v.CanSet() {
-			return
-		}
-		c := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
-		reflect.Copy(c, v)
-		for i := range c.Len() {
-			redactStrings(c.Index(i), f)
-		}
-		v.Set(c)
-	case reflect.Map:
-		if v.IsNil() || !v.CanSet() {
-			return
-		}
-		c := reflect.MakeMapWithSize(v.Type(), v.Len())
-		for it := v.MapRange(); it.Next(); {
-			e := reflect.New(v.Type().Elem()).Elem()
-			e.Set(it.Value())
-			redactStrings(e, f)
-			c.SetMapIndex(it.Key(), e)
-		}
-		v.Set(c)
-	case reflect.String:
-		if v.CanSet() {
-			v.SetString(f(v.String()))
-		}
-	default:
-	}
 }
 
 func tm(apiVersion, kind string) metav1.TypeMeta {
@@ -365,14 +321,32 @@ func (s *Set) listEvents(ctx context.Context, a listEventsArgs, r *Result) error
 	slices.SortStableFunc(evs, func(x, y *eventsv1.Event) int {
 		return cmp.Or(eventTime(y).Compare(eventTime(x)), cmp.Compare(x.Name, y.Name))
 	})
-	var l lines
-	l.add("%d events match; the newest %d are shown", len(evs), min(len(evs), a.Limit.v))
+	// The answer is one text, decided once on the lines it returns (layout.go).
+	var ans answer
+	ans.text(fmt.Sprintf("%d events match; the newest %d are shown\n", len(evs), min(len(evs), a.Limit.v)))
+	var at []int
 	for _, e := range evs[:min(len(evs), a.Limit.v)] {
-		l.add("%s %s %s %s/%s count %d: %s", eventTime(e).UTC().Format(time.RFC3339), l.data(s.value(e.Type)),
-			l.data(s.value(e.Reason)), l.data(s.value(e.Regarding.Kind)), l.data(s.value(e.Regarding.Name)),
-			eventCount(e), l.data(s.value(e.Note)))
+		ans.text(eventTime(e).UTC().Format(time.RFC3339) + " ")
+		at = append(at, ans.value("type", e.Type))
+		ans.text(" ")
+		at = append(at, ans.value("reason", e.Reason))
+		ans.text(" ")
+		at = append(at, ans.value("kind", e.Regarding.Kind))
+		ans.text("/")
+		at = append(at, ans.value("name", e.Regarding.Name))
+		ans.text(fmt.Sprintf(" count %d: ", eventCount(e)))
+		at = append(at, ans.value("note", e.Note))
+		ans.text("\n")
 	}
-	r.Text, r.Values = l.String(), l.values
+	out, text, ok := s.lines(&ans)
+	if !ok {
+		r.withhold()
+		return nil
+	}
+	r.Text = text
+	for _, i := range at {
+		r.Values = append(r.Values, out[i])
+	}
 	return nil
 }
 
@@ -439,22 +413,30 @@ func (s *Set) checkReference(ctx context.Context, a checkReferenceArgs, r *Resul
 		return nil
 	}
 	res := refcheck.Check(&pod, list.Items, refcheck.Kind(a.Kind), a.Name, s.now())
-	var l lines
-	l.add("answer: %s", res.Answer)
-	l.add("referenced by the pod spec: %s", strconv.FormatBool(res.Referenced))
+	// The answer is one text, decided once on the lines it returns (layout.go).
+	var ans answer
+	ans.text("answer: " + string(res.Answer) + "\n")
+	ans.text("referenced by the pod spec: " + strconv.FormatBool(res.Referenced) + "\n")
+	var at []int
 	if res.Answer == refcheck.Missing {
-		l.add("what is missing: %s", res.What)
-		l.add("evidence: %s", res.Source)
-		if res.Key != "" {
-			l.add("key: %s", l.data(s.value(res.Key)))
-		}
-		if res.Container != "" {
-			l.add("container: %s", l.data(s.value(res.Container)))
-		}
-		if res.Volume != "" {
-			l.add("volume: %s", l.data(s.value(res.Volume)))
+		ans.text("what is missing: " + string(res.What) + "\n")
+		ans.text("evidence: " + string(res.Source) + "\n")
+		for _, f := range []struct{ name, v string }{{"key", res.Key}, {"container", res.Container}, {"volume", res.Volume}} {
+			if f.v != "" {
+				ans.text(f.name + ": ")
+				at = append(at, ans.value(f.name, f.v))
+				ans.text("\n")
+			}
 		}
 	}
-	r.Text, r.Values = l.String(), l.values
+	out, text, ok := s.lines(&ans)
+	if !ok {
+		r.withhold()
+		return nil
+	}
+	r.Text = text
+	for _, i := range at {
+		r.Values = append(r.Values, out[i])
+	}
 	return nil
 }

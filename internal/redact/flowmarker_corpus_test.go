@@ -76,7 +76,7 @@ func TestFlowAndMarkerFormsRedactEverySecret(t *testing.T) {
 	failed := 0
 	cases := flowMarkerCorpus()
 	for _, c := range cases {
-		leaked, lost := formLeaks(c, defaultRedactor.spans(c.in))
+		leaked, lost := formLeaks(c, defaultRedactor.spans(nil, c.in))
 		if len(leaked)+len(lost) > 0 {
 			failed++
 			if failed <= 20 {

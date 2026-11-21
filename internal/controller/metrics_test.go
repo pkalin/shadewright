@@ -190,7 +190,7 @@ func TestExecutorMetricsAreBoundedAndDocumented(t *testing.T) {
 	requestPhases.source.Set(requestsIn(t, remediationv1alpha1.PhasePending, "a phase from the cluster", ""))
 	t.Cleanup(func() { requestPhases.source.Set(nil) })
 
-	metricguard.Check(t, metrics.Registry, executorMetrics())
+	metricguard.Check(t, metrics.Registry, metricguard.WithRedaction(executorMetrics()))
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), executorMetrics())
 }
 

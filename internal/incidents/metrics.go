@@ -50,14 +50,17 @@ const (
 	dropFingerprintConflict = "fingerprint_conflict"
 	dropStopped             = "stopped"
 	dropDeleted             = "deleted"
+	dropStaleOnStart        = "stale_on_start"
 )
 
 // droppedBatches counts the batches of observations that were not stored, by reason: the API server refused
 // them as invalid, an Incident of the expected name holds another fingerprint, the process stopped
-// before they could be written, or they were meant for a later occurrence someone deleted.
+// before they could be written, they were meant for a later occurrence someone deleted, or they were a fold only
+// observation (an old event of a gone pod listed at start, #996) with no Incident to fold into (one per
+// observation).
 var droppedBatches = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "shadewright_incident_batches_dropped_total",
-	Help: "Batches of observations not stored in an Incident, by reason (invalid, fingerprint_conflict, stopped, deleted).",
+	Help: "Batches of observations not stored in an Incident, by reason (invalid, fingerprint_conflict, stopped, deleted, stale_on_start).",
 }, []string{"reason"})
 
 // overflowedOccurrences counts the observations of an occurrence that were not counted because the caps on
@@ -204,7 +207,7 @@ func init() {
 		analysisReservations, analysesUsedToday, analysesPerDayLimit, triggerPassErrors, notRecentSkips, incidentWriteErrors,
 		incidentCap, incidentCapNear, incidentPhases)
 	// The closed sets start at zero, so a rate is defined before the first event.
-	for _, r := range []string{dropInvalid, dropFingerprintConflict, dropStopped, dropDeleted} {
+	for _, r := range []string{dropInvalid, dropFingerprintConflict, dropStopped, dropDeleted, dropStaleOnStart} {
 		droppedBatches.WithLabelValues(r)
 	}
 	for _, r := range []string{reserveReserved, reserveBudgetSpent, reserveBudgetNotFound, reserveBudgetBad,

@@ -65,6 +65,9 @@ func TestStillRedactsWhatMainRedactedForKeyNames(t *testing.T) {
 		if len(c.Spans) > 0 {
 			redacted++
 		}
+		if !raceKeeps(t.Name(), cases-1) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		now := defaultRedactor.spans(nil, c.In)
 		for _, want := range c.Spans {
 			if !coveredBy(want, now) {

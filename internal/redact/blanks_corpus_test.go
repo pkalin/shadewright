@@ -127,6 +127,9 @@ func TestBlanksStillRedactsWhatMainRedacted(t *testing.T) {
 		if len(c.Spans) > 0 {
 			redacted++
 		}
+		if !raceKeeps(t.Name(), cases-1) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		now := defaultRedactor.spans(nil, c.In)
 		for _, want := range c.Spans {
 			for i := want[0]; i < want[1]; i++ {
@@ -266,6 +269,9 @@ func checkKnownExtent(t *testing.T, corpus []knownValue, classes int) {
 	failed := 0
 	byClass := make([]int, classes)
 	for i, k := range corpus {
+		if !raceKeeps(t.Name(), i) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		in := k.b.String()
 		now := defaultRedactor.spans(nil, in)
 		bad := ""

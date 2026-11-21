@@ -49,8 +49,9 @@ const CanonEntryLeaks = "testdata/canonical-leaks-entry.tsv"
 // main has; its first lines name the commit and list the entry points.
 const CanonMainEntryLeaks = "testdata/canonical-main-entry.tsv"
 
-// canonSampleDivisor is the share of the corpus checked under the race detector and in short mode: one input
-// in 32, chosen with a fixed seed. The full corpus runs in the pass without -race (make test).
+// canonSampleDivisor is the share of the corpus checked in short mode: one input in 32, chosen with a fixed seed.
+// Under the race detector it is one in 2*raceSampleEvery (decision of 2026-11-21 on #873). The full corpus runs in
+// the pass without -race (make test).
 const canonSampleDivisor = 32
 
 // canonSample returns cases, or under the race detector and in short mode a seeded sample of them, and
@@ -59,10 +60,14 @@ func canonSample(cases []canonCase) ([]canonCase, bool) {
 	if !raceDetector && !testing.Short() {
 		return cases, false
 	}
+	divisor := canonSampleDivisor
+	if raceDetector {
+		divisor = 2 * raceSampleEvery
+	}
 	rng := rand.New(rand.NewPCG(845, 8)) //nolint:gosec // a fixed seed keeps the sample the same on every run
 	var out []canonCase
 	for _, c := range cases {
-		if rng.IntN(canonSampleDivisor) == 0 {
+		if rng.IntN(divisor) == 0 {
 			out = append(out, c)
 		}
 	}

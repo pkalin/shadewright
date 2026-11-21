@@ -138,6 +138,9 @@ func TestCommaFieldsStillRedactWhatMainRedacted(t *testing.T) {
 		if len(c.Spans) > 0 {
 			redacted++
 		}
+		if !raceKeeps(t.Name(), cases-1) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		now := defaultRedactor.spans(nil, c.In)
 	spans:
 		for _, want := range c.Spans {

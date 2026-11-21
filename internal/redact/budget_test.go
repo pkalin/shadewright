@@ -18,6 +18,7 @@ package redact
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -222,13 +223,14 @@ func budgetMeasures() map[string]string {
 // point with budgetHeadroom to spare. The largest cost per byte is logged: the factor of the budget is set from it
 // (docs/adr/0015, amendment of 2026-11-20).
 func TestBudgetFactorCoversTheCorpus(t *testing.T) {
-	var inputs []string
-	for i, in := range releasedInputs(t) {
-		if !raceDetector || raceKeeps("budget", i) {
-			inputs = append(inputs, in)
-		}
-	}
+	inputs := releasedInputs(t)
 	measures := budgetMeasures()
+	if raceDetector {
+		// Under -race each entry point checks its own seeded sample of the corpus and none of the measures, which
+		// are 16 to 140 KiB each; make test runs this package again without -race on all of them (decision of
+		// 2026-11-21 on #873).
+		measures = nil
+	}
 	names := slices.Sorted(func(yield func(string) bool) {
 		for n := range measures {
 			if !yield(n) {
@@ -241,12 +243,12 @@ func TestBudgetFactorCoversTheCorpus(t *testing.T) {
 			t.Parallel()
 			cost := &budgetCost{}
 			for i, in := range inputs {
+				if !raceKeeps(t.Name(), i) {
+					continue
+				}
 				checkBudget(t, e, fmt.Sprintf("corpus input %d", i), in, cost)
 			}
 			for _, n := range names {
-				if raceDetector && !raceKeeps("budget measures", len(n)) {
-					continue
-				}
 				checkBudget(t, e, n, measures[n], cost)
 			}
 			t.Logf("%s: at most %.1f steps per byte on 16 KiB or more (%s); at most %d steps above %d per byte (%s)",
@@ -290,11 +292,17 @@ func TestBudgetBoundsTheFourShapes(t *testing.T) {
 	if raceDetector {
 		sizes = sizes[:1]
 	}
-	for _, e := range budgetEntries {
+	shapeNames := slices.Sorted(maps.Keys(budgetShapes(0)))
+	for ei, e := range budgetEntries {
 		t.Run(e.name, func(t *testing.T) {
 			t.Parallel()
 			for _, n := range sizes {
 				for name, in := range budgetShapes(n) {
+					if raceDetector && name != shapeNames[ei%len(shapeNames)] {
+						// Under -race each entry point checks one of the four shapes, the entry points in turn
+						// all four; make test runs this package again without -race on every pair.
+						continue
+					}
 					size := e.size(in)
 					out, ok, spent := meteredSpent(e, in, budgetOf(size))
 					if spent > budgetOf(size)+budgetOverrun(size) {

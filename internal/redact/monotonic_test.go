@@ -152,7 +152,10 @@ const monotonicCorpusSize = 12000
 // On every input of the generated corpus, each byte main's redactor removes is removed too.
 func TestMonotonicAgainstMain(t *testing.T) {
 	n := monotonicCorpusSize
-	if testing.Short() || raceDetector {
+	switch {
+	case raceDetector:
+		n /= 32 // the full corpus runs without -race (decision of 2026-11-21 on #873)
+	case testing.Short():
 		n /= 8
 	}
 	failed, redacted := 0, 0

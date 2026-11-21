@@ -18,6 +18,7 @@ package redact
 
 import (
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"reflect"
 	"regexp"
@@ -46,6 +47,26 @@ func windowExprs(t *testing.T) map[string]*regexp.Regexp {
 	for i, ru := range r.rules {
 		if ru.re != nil {
 			out[fmt.Sprintf("rule %d", i)] = ru.re
+		}
+	}
+	return out
+}
+
+// windowExprsSharing is the share of the expressions a generated text checks under -race: one in four.
+const windowExprsSharing = 4
+
+// windowExprNames returns the names of exprs in order. Under -race it returns one in windowExprsSharing of
+// them, the quarter chosen by at, so that the texts checked in turn see every expression; make test runs this
+// package again without -race, where every text checks every expression (decision of 2026-11-21 on #873).
+func windowExprNames(exprs map[string]*regexp.Regexp, at int) []string {
+	names := slices.Sorted(maps.Keys(exprs))
+	if !raceDetector {
+		return names
+	}
+	var out []string
+	for k, n := range names {
+		if k%windowExprsSharing == at%windowExprsSharing {
+			out = append(out, n)
 		}
 	}
 	return out
@@ -126,7 +147,8 @@ func TestWindowedFindsWhatTheExpressionFinds(t *testing.T) {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			t.Parallel()
 			s := windowText(rand.New(rand.NewPCG(873, uint64(i)))) // #nosec G404 G115 -- reproducible generated texts; i is below 160
-			for name, re := range exprs {
+			for _, name := range windowExprNames(exprs, i) {
+				re := exprs[name]
 				w := newWindowed(nil, re)
 				if got, want := w.findAll(nil, s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
 					t.Errorf("%s (%q): windows found %v, the whole text %v in %q", name, re.String(), got, want, s)
@@ -170,14 +192,15 @@ func TestWindowedSharedAcrossTexts(t *testing.T) {
 	t.Parallel()
 	run := strings.Repeat("aws_secret_access_key", windowMinText/20)
 	exprs := windowExprs(t)
-	for _, tail := range []string{"\ufe55\ufeff\xbf\u200b", ":", ": |\n  v", "=x", "\n", ""} {
+	for ti, tail := range []string{"\ufe55\ufeff\xbf\u200b", ":", ": |\n  v", "=x", "\n", ""} {
 		texts := make([]string, 0, 11)
 		texts = append(texts, run+tail)
 		for _, lead := range []string{"{", "\n", "x", " ", ",", "- ", "\ufe55", "\"", "password: |\n"} {
 			texts = append(texts, strings.Repeat("tmpl"+lead+run+tail+"=\"\",pod=\"p\"} 1\n", 3))
 		}
 		texts = append(texts, run+tail)
-		for name, re := range exprs {
+		for _, name := range windowExprNames(exprs, ti) {
+			re := exprs[name]
 			w := newWindowed(nil, re)
 			ids := &windowIDs{}
 			for _, s := range texts {
@@ -302,7 +325,8 @@ func TestWindowedChunksFindWhatTheExpressionFinds(t *testing.T) {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			t.Parallel()
 			label, answer := chunkText(rand.New(rand.NewPCG(8733, uint64(i)))) // #nosec G404 G115 -- reproducible generated texts; i is below 160
-			for name, re := range exprs {
+			for _, name := range windowExprNames(exprs, i) {
+				re := exprs[name]
 				w := newWindowed(nil, re)
 				ids := &windowIDs{}
 				for _, s := range []string{label, answer, answer + label} {

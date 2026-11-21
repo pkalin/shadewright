@@ -151,8 +151,9 @@ Every issue names the ADRs it is tied to:
 - **Tests.** Every bug fix gets a test that fails without it; every new API rule gets a refusal test.
   `make test` runs with the race detector (`-race`), then runs `internal/redact`, the log source and the context
   builder, and the kept reading of the release before (`internal/redact/released`), once more without it and with
-  the build tag `redactwork`: the timing tests skip under `-race`, the generated corpora of block values and
-  connection strings check a seeded sample there and every input without it, and the linearity tests count
+  the build tag `redactwork`: the timing tests skip under `-race`, the generated corpora (block values, connection
+  strings, and those compared with main or with the release before) check a seeded sample there and every input
+  without it, and the linearity tests count
   redaction work only with that tag (the product build spends each step on the meter of its call, the work budget,
   and holds no shared counter). Dynamic
   analysis is the race detector and the Go fuzz targets: a `Fuzz` function in a parser or matcher of untrusted

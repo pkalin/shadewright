@@ -59,6 +59,9 @@ func TestStringsTakesAFlagAfterAFlagAsItsValue(t *testing.T) {
 	cases, flags := flagAfterFlagCases()
 	failed := 0
 	for i, items := range cases {
+		if !raceKeeps(t.Name(), i) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		got := Strings(items)
 		if got[0] != items[0] || strings.Contains(got[1], flags[i]) || strings.ContainsAny(got[1], "=-") {
 			if failed++; failed <= 10 {

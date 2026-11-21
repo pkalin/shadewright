@@ -1102,6 +1102,12 @@ func keyParts(k string) []string {
 // seeds is the number of seeded keys or names each case of the slash-split tests runs with.
 const seeds = 1000
 
+// raceKeepsSeed is raceKeeps for a seed of these tests: under -race a case checks a seeded sample of its seeds,
+// and make test runs this package again without -race on all of them (decision of 2026-11-21 on #873).
+func raceKeepsSeed(name string, seed uint64) bool {
+	return raceKeeps(name, int(seed)) // #nosec G115 -- seed is below 2*seeds
+}
+
 // A standard base64 secret whose slashes cut it into parts shorter than minTokenLength is redacted by the
 // long-token rule wherever it stands: after its key name and a blank (a CLI flag, "aws configure set"), in
 // prose, and at the start, in the middle or at the end of a path or a URL, also after a long lower-case path.
@@ -1124,6 +1130,9 @@ func TestSlashSplitBase64IsRedacted(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			leaks, lost := 0, 0
 			for seed := range uint64(seeds) {
+				if !raceKeepsSeed(t.Name(), seed) {
+					continue
+				}
 				k := seededKey(seed)
 				in := c.before + k + c.after
 				out := String(in)
@@ -1160,6 +1169,9 @@ func TestSlashSplitBase64IsRedacted(t *testing.T) {
 	const middle = "/api/v1/namespaces/orders/pods/orders-worker-7db6d8ff4d-x2x9q/"
 	bridged := 0
 	for seed := range uint64(seeds) {
+		if !raceKeepsSeed(t.Name(), seed) {
+			continue
+		}
 		a, b := seededKey(seed), seededKey(seed+seeds)
 		in := "GET https://example.com/" + a + middle + b + " 404"
 		out := String(in)
@@ -1219,6 +1231,9 @@ func TestSlashSplitRuleKeepsPaths(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			changed := 0
 			for seed := range uint64(seeds) {
+				if !raceKeepsSeed(t.Name(), seed) {
+					continue
+				}
 				in := text(seed)
 				if out := String(in); out != in {
 					if changed++; changed <= 3 {
@@ -1311,6 +1326,9 @@ func TestBase64WithoutSlashOrDigitIsRedacted(t *testing.T) {
 	const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+"
 	leaks := 0
 	for seed := range uint64(seeds) {
+		if !raceKeepsSeed(t.Name(), seed) {
+			continue
+		}
 		k := seededName(seed, 40, letters)
 		in := "aws configure set aws_secret_access_key " + k + "\nnext: field"
 		if out := String(in); strings.Contains(out, k) {
@@ -1675,6 +1693,9 @@ func TestEntraClientSecretIsRedacted(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			leaks := 0
 			for seed := range uint64(seeds) {
+				if !raceKeepsSeed(t.Name(), seed) {
+					continue
+				}
 				k := seededEntraSecret(seed)
 				in := c.before + k + c.after
 				if out := String(in); out != c.before+"[REDACTED:token]"+c.after {

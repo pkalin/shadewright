@@ -127,8 +127,11 @@ func TestFieldAfterCommaMatchesMain(t *testing.T) {
 	rng := rand.New(rand.NewPCG(845, 16)) // #nosec G404 -- reproducible generated texts
 	names := []string{passwordKey, "PASSWORD", "db_pass", "api-key", userKey, "next", "a", "to\u212aen", "\u017fecret", sasKeyName, "blobSas", "x.y"}
 	seps := []string{"=", ":", ":=", " ", "\t=", "  ", "==", "= ", "", ",", "\u212a"}
-	commas := 0
-	for range 20000 {
+	commas, minCommas := 0, 100000
+	if raceDetector {
+		minCommas /= 2 * raceSampleEvery
+	}
+	for n := range 20000 {
 		var b strings.Builder
 		for range 1 + rng.IntN(6) {
 			if rng.IntN(3) == 0 {
@@ -138,6 +141,9 @@ func TestFieldAfterCommaMatchesMain(t *testing.T) {
 			b.WriteString("," + names[rng.IntN(len(names))] + seps[rng.IntN(len(seps))])
 		}
 		s := b.String()
+		if !raceKeeps(t.Name(), n) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		for i := 0; i < len(s); i++ {
 			if s[i] != ',' {
 				continue
@@ -156,7 +162,7 @@ func TestFieldAfterCommaMatchesMain(t *testing.T) {
 			}
 		}
 	}
-	if commas < 100000 {
+	if commas < minCommas {
 		t.Fatalf("only %d commas checked", commas)
 	}
 }

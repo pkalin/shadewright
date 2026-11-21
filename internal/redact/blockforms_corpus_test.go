@@ -350,7 +350,10 @@ func TestBlockFormsCorpusRedactsEverySecret(t *testing.T) {
 	cases := formCorpus()
 	failed := 0
 	byForm := map[string]int{}
-	for _, c := range cases {
+	for i, c := range cases {
+		if !raceKeeps(t.Name(), i) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		leaked, lost := formLeaks(c, defaultRedactor.spans(nil, c.in))
 		if len(leaked)+len(lost) == 0 {
 			continue
@@ -470,6 +473,9 @@ func TestBlockFormsStillRedactWhatMainRedacted(t *testing.T) {
 		}
 		if i >= len(gen) || formHash(gen[i].in) != row.Hash {
 			t.Fatalf("%s line %d does not match its generator: regenerate it from the commit it names", formMainTable, i+1)
+		}
+		if !raceKeeps(t.Name(), i) {
+			return // a seeded sample under -race; all of them without it
 		}
 		in := gen[i].in
 		red := formRedacted(in, defaultRedactor.spans(nil, in))

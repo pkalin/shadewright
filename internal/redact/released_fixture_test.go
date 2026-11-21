@@ -133,13 +133,16 @@ func TestReleasedReproducesTheReleaseBefore(t *testing.T) {
 		t.Fatal(err)
 	}
 	found := map[string]bool{}
-	for _, in := range releasedInputs(t) {
+	for i, in := range releasedInputs(t) {
 		h := releasedHash(in)
 		w, ok := want[h]
 		if !ok || found[h] {
 			continue
 		}
 		found[h] = true
+		if !raceKeeps(t.Name(), i) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		if got := releasedHash(released.String(in)); got != w {
 			t.Errorf("the kept reading differs from the release before on %q: %q", in, released.String(in))
 		}

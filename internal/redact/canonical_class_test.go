@@ -44,6 +44,9 @@ func TestInvisibleAfterValueGoesWithIt(t *testing.T) {
 			for _, written := range []string{key, key[:at] + canonInvisibles[(ci+7)%len(canonInvisibles)] + key[at:]} {
 				for _, after := range []string{"", "\nnext: ok", "\r\nnext: ok"} {
 					n++
+					if !raceKeeps(t.Name(), n) {
+						continue // a seeded sample under -race; all of them without it
+					}
 					v := fmt.Sprintf("Qz%05dxK9w", 60000+n)
 					in := written + ": " + v + run + after
 					spans := defaultRedactor.spans(nil, in)

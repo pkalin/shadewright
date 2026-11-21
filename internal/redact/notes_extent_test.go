@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 	"github.com/pkalin/shadewright/internal/tools"
 )
 
@@ -113,8 +114,9 @@ func (s noteShown) String() string {
 	return string(b)
 }
 
-// notesAnswers calls list_events and get_resource for each note and returns what each showed.
-func notesAnswers(t *testing.T) (events, objects []noteShown) {
+// notesAnswers calls list_events and get_resource for each note and returns what each showed. With sample set,
+// only the notes raceKeeps keeps are called under -race; the others are left out of kept and show nothing.
+func notesAnswers(t *testing.T, sample bool) (events, objects []noteShown, kept []bool) {
 	t.Helper()
 	rd := &notesReader{}
 	set, err := tools.New(tools.Config{Pods: rd, Events: rd, Objects: rd, Redactor: defaultRedactor(), Namespaces: []string{toolNS}})
@@ -132,7 +134,13 @@ func notesAnswers(t *testing.T) (events, objects []noteShown) {
 		}
 		return r.Text
 	}
-	for _, c := range notesCases() {
+	for i, c := range notesCases() {
+		keep := !sample || redact.RaceKeeps(t.Name(), i)
+		kept = append(kept, keep)
+		if !keep {
+			events, objects = append(events, noteShown{}), append(objects, noteShown{})
+			continue // a seeded sample under -race; all of them without it
+		}
 		rd.note = c.note
 		for _, a := range []struct {
 			text string
@@ -145,7 +153,7 @@ func notesAnswers(t *testing.T) (events, objects []noteShown) {
 			*a.dst = append(*a.dst, noteShown{strings.Contains(a.text, v), strings.Contains(a.text, c.first), strings.Contains(a.text, c.second)})
 		}
 	}
-	return events, objects
+	return events, objects, kept
 }
 
 func TestNotesHideAsFarAsMain(t *testing.T) {
@@ -174,9 +182,12 @@ func TestNotesHideAsFarAsMain(t *testing.T) {
 	if len(main) != len(cases) {
 		t.Fatalf("%s has %d rows, the cases are %d: write it again from main", notesMainTable, len(main), len(cases))
 	}
-	events, objects := notesAnswers(t)
+	events, objects, kept := notesAnswers(t, true)
 	leaks, lost := 0, 0
 	for i, c := range cases {
+		if !kept[i] {
+			continue
+		}
 		for j, got := range []noteShown{events[i], objects[i]} {
 			tool := []string{tools.NameListEvents, tools.NameGetResource}[j]
 			was := main[i][j]
@@ -206,7 +217,7 @@ func TestWriteNotesMainTable(t *testing.T) {
 	if path == "" {
 		t.Skip("NOTES_MAIN_TABLE is not set")
 	}
-	events, objects := notesAnswers(t)
+	events, objects, _ := notesAnswers(t, false)
 	var b strings.Builder
 	b.WriteString("# What list_events and get_resource showed of each note of notesCases at main " + os.Getenv("NOTES_MAIN_COMMIT") +
 		" (#845): the value, the first and the second word after the line break, 1 for shown.\n# note (Go-quoted)\tlist_events\tget_resource\n")

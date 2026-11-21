@@ -153,9 +153,10 @@ func TestRecoveryMergeRecordedWithThePredecessorGone(t *testing.T) {
 	}
 }
 
-// With the predecessor gone, a merged head that is not the replacement's commit (a person pushed another change to
-// the target file) records nothing on the replacement: its handoff can no longer happen, so it ends Cancelled
-// (HandoffAborted, no failure for the breaker), its handoff Aborted and its lock released (endOnOtherMerge, #786).
+// With the predecessor gone, a merged head with a person's commit on top of the replacement's commit (a person pushed
+// another change to the target file) is recorded on the replacement, which holds the lock, as a foreign change:
+// NeedsIntervention with MergedWithForeignChange, no receipt, the pull request recorded, and the lock released by the
+// look after that record (decision of 2026-11-20 on #870). Before, it ended Cancelled with nothing recorded.
 func TestRecoveryForeignMergeWithThePredecessorGone(t *testing.T) {
 	r, g, p, rr, cr, move := endedWatch(t)
 	ctx := context.Background()
@@ -177,24 +178,38 @@ func TestRecoveryForeignMergeWithThePredecessorGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	move(time.Hour)
-	for range 3 {
-		_, _ = reconcileOnce(t, r, rr)
+	got, err := reconcileOnce(t, r, rr)
+	if err != nil {
+		t.Fatal(err)
 	}
-	got := storedRR(t, r, rr)
-	if got.Status.MergeReceipt != nil || tookOver(got) || got.Status.Phase != api.PhaseCancelled ||
-		got.Status.Handoff.From.Phase != api.HandoffAborted {
-		t.Fatalf("phase %q, receipt %v, handoff %q: want no merge recorded and the handoff ended on the merge",
-			got.Status.Phase, got.Status.MergeReceipt, got.Status.Handoff.From.Phase)
+	foreignRecordedOnReplacement(t, got, cr.Number)
+	if !ptr.Deref(got.Status.HoldsTarget, false) {
+		t.Fatal("the lock went in the write of the record; it is released by the look after it")
 	}
+	move(heldRecheckInterval)
+	for range 2 {
+		got, _ = reconcileOnce(t, r, rr)
+	}
+	foreignRecordedOnReplacement(t, got, cr.Number)
 	if ptr.Deref(got.Status.HoldsTarget, false) {
-		t.Fatal("the merged pull request did not settle the lock")
+		t.Fatal("the recorded merge did not settle the lock")
 	}
-	// The merged head may carry the replacement's commit under a person's (#870): the message says the head is not
-	// this request's commit, never that the commit is absent (fourth round of #786).
-	c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionPROpened)
-	if c == nil || !strings.Contains(c.Message, "which is not this request's commit") ||
-		strings.Contains(c.Message, "without this request's commit") {
-		t.Fatalf("PullRequestOpened = %+v: want a message saying the merged head is not this request's commit", c)
+}
+
+// foreignRecordedOnReplacement fails unless rr records the merge of pull request number as a foreign change (#870):
+// NeedsIntervention with MergedWithForeignChange, no receipt, the pull request recorded and the handoff Done.
+func foreignRecordedOnReplacement(t *testing.T, rr *api.RemediationRequest, number int64) {
+	t.Helper()
+	c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionApproved)
+	if rr.Status.Phase != api.PhaseNeedsIntervention || c == nil || c.Reason != ReasonMergedWithForeignChange ||
+		rr.Status.MergeReceipt != nil || rr.Status.PullRequest == nil || rr.Status.PullRequest.Number != number ||
+		!tookOver(rr) {
+		t.Fatalf("phase %q, Approved %+v, receipt %v, pull request %+v, handoff %q: want the merge recorded as a "+
+			"foreign change", rr.Status.Phase, c, rr.Status.MergeReceipt, rr.Status.PullRequest,
+			rr.Status.Handoff.From.Phase)
+	}
+	if !strings.Contains(c.Message, "not the commit Shadewright pushed for this request") {
+		t.Fatalf("Approved message %q does not say the merged head is not this request's commit", c.Message)
 	}
 }
 

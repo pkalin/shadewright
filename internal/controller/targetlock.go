@@ -154,8 +154,9 @@ func heldForVerification(rr *remediationv1alpha1.RemediationRequest, verify bool
 
 // handingOverMerge reports whether rr, a stopped holder, leaves what v found to its outgoing handoff: always while the
 // handoff stands or is Done; once it is Aborted, only a merge whose head the rule for who records a merge
-// (mergedHeadOwner) gives to the replacement (owner). A merge of its own head, or of any other head (a deleted
-// replacement's commit included), is rr's to record.
+// (mergedHeadOwner) gives to the replacement (owner): its commit, or any other head while it holds the lock before its
+// takeover (#870). A merge of its own head, or of any other head the rule leaves (a deleted replacement's commit
+// included), is rr's to record.
 func handingOverMerge(rr *remediationv1alpha1.RemediationRequest, v changeVerdict, owner mergeOwner) bool {
 	if rr.Status.Handoff == nil || rr.Status.Handoff.To == nil {
 		return false
@@ -218,9 +219,9 @@ func (r *RemediationRequestReconciler) settleStopException(ctx context.Context,
 	cancelReason, cancelled := cancelledForIncident(rr)
 	// A request handing its pull request over (an outgoing handoff) leaves the merge to the handoff, which gives it
 	// to the replacement when the merged head is the replacement's commit (followHandoff). An aborted one leaves only a
-	// merge of another head than its own recorded one: that may be the replacement's commit, recorded on the
-	// replacement (recordWatchedMerge, #786) when the head is exactly that commit, never on this request. A merge of its
-	// own head is its own. A head with further commits on top of the replacement's is recorded by no request (#870).
+	// merge of another head than its own recorded one: the replacement's commit, recorded on the replacement
+	// (recordWatchedMerge, #786), or any other head while the replacement holds the lock before its takeover, recorded
+	// there as a foreign change (recordsEveryMerge, #870), never on this request. A merge of its own head is its own.
 	owner, res, done, err := r.settleReplacementOwned(ctx, rr, v)
 	if done {
 		return res, true, err

@@ -343,7 +343,8 @@ func (g *gatedGit) UpdateChangeRequest(ctx context.Context, number int64, title,
 }
 
 // CreateCheckRun is gated like every write. On a stale plan it lets through a failed check run shadewright/review,
-// the one write besides the close that a stale plan's pull request gets (#713): it can only block a merge.
+// the one write besides the close that a stale plan's pull request gets (#713): it can only block a merge. The gate
+// checks the name and the status, not the head: its callers write only on the recorded head (failStoppedCheck).
 func (g *gatedGit) CreateCheckRun(ctx context.Context, head string, run providers.CheckRun) error {
 	gate := g.gateWrite
 	if run.Name == providers.CheckRunName && run.Status == providers.CheckRunFailure {

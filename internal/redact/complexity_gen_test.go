@@ -150,6 +150,12 @@ func TestTokenShapesWorkIsLinear(t *testing.T) {
 			_, decided := StringChecked(in)
 			withheld := !decided
 			if reason, known := complexityKnownSuperlinear[unit]; known {
+				// A known shape is withheld at four times the largest count measured (from 64 KiB): at the count
+				// itself (18 KiB of "--token,}") it is inside the budget since its factor is 4,000 (decision of
+				// 2026-11-21 on #873).
+				in = open + strings.Repeat(unit, complexityN<<5)
+				_, decided := StringChecked(in)
+				withheld = !decided
 				if !releaseOver || !withheld {
 					fail("%q + %q, known superlinear in the release's reading (%s): superlinear %v (release work %v), "+
 						"withheld at %d bytes %v", open, unit, reason, releaseOver, rel, len(in), withheld)

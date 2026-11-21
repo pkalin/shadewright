@@ -104,15 +104,15 @@ func TestIssue432EvictionFoldsItsPodsConsequence(t *testing.T) {
 	ns := namespace(t)
 	r := start(t, ns, Config{Window: 100 * time.Millisecond})
 	at := time.Now().Add(-time.Hour).Truncate(time.Second)
-	r.obs <- consequenceOf(2, 0, "web", reasonBackOff, 1, 2, at)
+	r.obs <- consequenceOf(2, 0, foldContainer, reasonBackOff, 1, 2, at)
 	eventually(t, ns, 2, countIs(2))
 	evict := symptomOf(11, "Evicted", terminationID(1), 1, fingerprint.SourcePodStatus, "", collector.ClassCause,
 		at.Add(time.Minute))
 	evict.Began = at.Add(time.Minute - RecurAfter)
-	evict.PodContainers = []string{"init", "web"}
+	evict.PodContainers = []string{"init", foldContainer}
 	r.obs <- evict
 	cause := eventually(t, ns, 11, func(inc *remediationv1alpha1.Incident) bool { return inc.Status.Cause })
-	if !slices.Equal(cause.Status.Containers, []remediationv1alpha1.Name{"init", "web"}) {
+	if !slices.Equal(cause.Status.Containers, []remediationv1alpha1.Name{"init", foldContainer}) {
 		t.Errorf("eviction Incident names containers %v, want its pod's init and web", cause.Status.Containers)
 	}
 	got := eventually(t, ns, 2, func(inc *remediationv1alpha1.Incident) bool { return inc.Status.FoldedInto != nil })

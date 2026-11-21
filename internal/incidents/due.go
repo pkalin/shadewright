@@ -48,6 +48,9 @@ const triggerFieldOwner = "shadewright-analysis-trigger"
 // PassTimeout, shorter than the interval: ctx lasts as long as the controller, so a call that stalls without
 // a deadline would stop every later pass.
 func (c *Controller) triggerLoop(ctx context.Context) {
+	// The conditions are written with second precision, so a NotRecent this loop writes in its first second is
+	// not taken for one written before it began ([Controller.reportSkips]).
+	c.triggerStart = c.cfg.Now().Truncate(time.Second)
 	tick := time.NewTicker(c.cfg.TriggerInterval)
 	defer tick.Stop()
 	for {
@@ -126,6 +129,7 @@ func (c *Controller) markDue(ctx context.Context) error {
 	s := TriggerSettings{Debounce: c.cfg.Debounce, SettleLimit: c.cfg.SettleLimit, Cooldown: c.cfg.Cooldown,
 		AnalysisTimeout: c.cfg.AnalysisTimeout, RecentWindow: c.cfg.RecentWindow}
 	c.watch(list.Items, now, s)
+	c.reportSkips(list.Items)
 	used, closed, readErr := c.readBudget(ctx, now, &s)
 
 	items := list.Items
@@ -179,11 +183,11 @@ func (c *Controller) markDue(ctx context.Context) error {
 			}
 			continue
 		}
-		due, reason, wrote, err := c.setDue(ctx, inc, now, due, reason, decide, "")
+		due, reason, _, err := c.setDue(ctx, inc, now, due, reason, decide, "")
 		if closed == "" {
 			c.rememberWaiting(inc.UID, reason, now)
 		}
-		if err := c.account(inc, due, reason, wrote, wasDue, err, &used); err != nil {
+		if err := c.account(inc, due, reason, wasDue, err, &used); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -203,7 +207,7 @@ func (c *Controller) markDue(ctx context.Context) error {
 		if wrote || err != nil {
 			writes++
 		}
-		if err := c.account(inc, false, ReasonNotRecent, wrote, wasDue, err, nil); err != nil {
+		if err := c.account(inc, false, ReasonNotRecent, wasDue, err, nil); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -238,6 +242,9 @@ type trace struct {
 	lastSeen     time.Time
 	sampled      time.Time
 	lasting      bool
+	// skipReported is the lastTransitionTime of the NotRecent condition last reported ([Controller.reportNotRecent]),
+	// or zero.
+	skipReported time.Time
 }
 
 // decider returns the decision of [Due] for one Incident, with what the controller knows of it ([Memory])
@@ -265,14 +272,12 @@ func (c *Controller) settles(inc *remediationv1alpha1.Incident) bool {
 	return c.hintsListed && c.analysisRequest != nil && SettlesWithoutAnalysis(inc, c.hintRequestsOf(inc))
 }
 
-// account reports a NotRecent that setDue wrote, counts a unit of the budget in *used (when used is not nil)
-// for a mark that says due, and returns err: a failed write may still have landed (a lost answer), and a
-// mark it did not change still says due (wasDue), so either way the Incident takes its unit.
-func (c *Controller) account(inc *remediationv1alpha1.Incident, due bool, reason string, wrote, wasDue bool, err error,
+// account counts a unit of the budget in *used (when used is not nil) for a mark that says due, and returns
+// err: a failed write may still have landed (a lost answer), and a mark it did not change still says due
+// (wasDue), so either way the Incident takes its unit. A NotRecent written is reported by [Controller.setDue]
+// or, when its answer was lost, by [Controller.reportSkips].
+func (c *Controller) account(inc *remediationv1alpha1.Incident, due bool, reason string, wasDue bool, err error,
 	used *int) error {
-	if wrote && reason == ReasonNotRecent {
-		c.reportNotRecent(inc)
-	}
 	// A lost hint run the analysis ends without a model call takes no unit ([SettlesWithoutAnalysis]).
 	settles := reason == ReasonAnalysisTimedOut && c.settles(inc)
 	if used != nil && (due || (err != nil && wasDue)) && !settles {
@@ -453,13 +458,43 @@ func (c *Controller) heldLocked(fp string) time.Time {
 	return t
 }
 
+// reportSkips reports, from the cached Incidents of the pass, each NotRecent condition this trigger loop wrote
+// whose report is still owed: one whose write landed but whose answer was lost (the deadline ran out), so
+// [Controller.setDue] did not report it. Such a condition says not due, NotRecent, with a lastTransitionTime at
+// or after the loop began (truncated to the second) that differs from the one last reported for that Incident.
+// A NotRecent written before the loop began (a restart, a new leader) is not reported: the process that wrote
+// it did, so a restart sends no burst of events. One the previous leader wrote in the loop's first second may
+// be reported a second time. What is remembered goes with the Incident's [trace], so a deleted Incident's is
+// forgotten ([Controller.watch]). It is kept while the condition says something else, so a cache that lags
+// behind the write does not make it reported twice; the next NotRecent of that Incident has a new transition
+// time, since only a mark that says due takes NotRecent away.
+func (c *Controller) reportSkips(items []remediationv1alpha1.Incident) {
+	for i := range items {
+		inc := &items[i]
+		t := c.memory[inc.UID]
+		if t == nil || !saysNotRecent(inc) {
+			continue
+		}
+		at := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue).LastTransitionTime.Time
+		if at.Before(c.triggerStart) || at.Equal(t.skipReported) {
+			continue
+		}
+		c.reportNotRecent(inc)
+	}
+}
+
 // reportNotRecent counts an Incident newly marked NotRecent and reports it in a Normal event about the
-// Incident, so a skipped analysis is visible. It runs once per write of that reason ([conditionAgrees]), not on
-// every pass: the condition keeps NotRecent until the Incident is next marked due, so a second quiet spell
-// before that is neither written nor counted again. The event is written in the operator namespace, the
+// Incident, so a skipped analysis is visible, and remembers the condition's lastTransitionTime in the
+// Incident's [trace]. It runs once per write of that reason ([conditionAgrees]), from [Controller.setDue] when
+// the write's answer arrives and from [Controller.reportSkips] when it was lost, not on every pass: the
+// condition keeps NotRecent until the Incident is next marked due, so a second quiet spell before that is
+// neither written nor counted again. The event is written in the operator namespace, the
 // Incident's, with the grant on core Events the analyzer holds there; its message holds nothing from the
 // cluster. It names the window [Due] applies ([recentWindow]).
 func (c *Controller) reportNotRecent(inc *remediationv1alpha1.Incident) {
+	if t, cond := c.memory[inc.UID], meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue); t != nil && cond != nil {
+		t.skipReported = cond.LastTransitionTime.Time
+	}
 	notRecentSkips.Inc()
 	if c.cfg.Recorder == nil {
 		return
@@ -568,6 +603,11 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 			return err
 		}
 		wrote = true
+		if !due && reason == ReasonNotRecent {
+			// inc holds the stored copy the answer returned, so the transition time remembered is the one the
+			// cache will show ([Controller.reportSkips]).
+			c.reportNotRecent(inc)
+		}
 		return nil
 	})
 	if apierrors.IsNotFound(err) {

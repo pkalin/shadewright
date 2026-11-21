@@ -19,7 +19,6 @@ package intake
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -173,15 +172,15 @@ func secretKeyWords(t *testing.T) []string {
 	var out []string
 	var expand func(string)
 	expand = func(w string) {
-		if i := strings.Index(w, "[_-]?"); i >= 0 {
+		if before, after, ok := strings.Cut(w, "[_-]?"); ok {
 			for _, sep := range []string{"", "_", "-"} {
-				expand(w[:i] + sep + w[i+len("[_-]?"):])
+				expand(before + sep + after)
 			}
 			return
 		}
-		if i := strings.Index(w, "?"); i > 0 {
-			expand(w[:i-1] + w[i+1:])
-			expand(w[:i] + w[i+1:])
+		if before, after, ok := strings.Cut(w, "?"); ok && before != "" {
+			expand(before[:len(before)-1] + after)
+			expand(before + after)
 			return
 		}
 		if strings.ContainsAny(w, `[]()?*+\|{}.^$`) {
@@ -189,7 +188,7 @@ func secretKeyWords(t *testing.T) []string {
 		}
 		out = append(out, w)
 	}
-	for _, w := range strings.Split(words+"|"+short, "|") {
+	for w := range strings.SplitSeq(words+"|"+short, "|") {
 		expand(w)
 	}
 	return out
@@ -305,35 +304,27 @@ func randomValue(rng *rand.Rand) string {
 	return string(b)
 }
 
-// renderJudgeUser renders the judge's user message as the prompt contract says, apart from judgeMessages.
+// renderJudgeUser renders the judge's user message as the prompt contract says, with its own copy of the
+// field list, apart from judgeMessages.
 func renderJudgeUser(t *testing.T, rec analysis.Record) string {
 	t.Helper()
 	missing := rec.MissingData
 	if missing == nil {
 		missing = []string{}
 	}
-	data, err := json.Marshal(map[string]any{"incidentReason": rec.Incident.Reason,
-		"subjectKind": rec.Incident.SubjectKind, "summary": rec.Summary, "missingData": missing,
-		"escalated": rec.Escalated, "calls": rec.Calls, "toolCalls": rec.ToolCalls})
+	data, err := json.Marshal(struct {
+		Reason  string   `json:"incidentReason"`
+		Kind    string   `json:"subjectKind"`
+		Summary string   `json:"summary"`
+		Missing []string `json:"missingData"`
+		Escal   bool     `json:"escalated"`
+		Calls   int      `json:"calls"`
+		Tools   int      `json:"toolCalls"`
+	}{rec.Incident.Reason, rec.Incident.SubjectKind, rec.Summary, missing, rec.Escalated, rec.Calls, rec.ToolCalls})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// encoding/json writes a map's keys sorted; the judge input keeps its field order. Re-order by decoding
-	// into the field list.
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		t.Fatal(err)
-	}
-	var b strings.Builder
-	b.WriteString("<record>\n{")
-	for i, k := range []string{"incidentReason", "subjectKind", "summary", "missingData", "escalated", "calls", "toolCalls"} {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		fmt.Fprintf(&b, "%q:%s", k, fields[k])
-	}
-	b.WriteString("}\n</record>")
-	return b.String()
+	return "<record>\n" + string(data) + "\n</record>"
 }
 
 // TestOrdinaryCorpusUnderTheSentCheck runs the existing clean corpus through the whole check. Its summaries name

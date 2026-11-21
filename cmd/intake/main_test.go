@@ -163,7 +163,7 @@ func TestBudgetOutcomeLogsAWarning(t *testing.T) {
 		t.Fatalf("stdout = %s (%v)", stdout.String(), err)
 	}
 	var warned bool
-	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(stderr.String()), "\n") {
 		var entry map[string]any
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			t.Fatalf("log line %q: %v", line, err)

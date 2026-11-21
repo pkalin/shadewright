@@ -92,11 +92,11 @@ func (r *RemediationRequestReconciler) settleClaim(ctx context.Context, rr *reme
 	// changeOf may record PullRequestUnreadable through the copy: rr takes that write, never the copy's handoff.
 	rr.ResourceVersion, rr.Status.Conditions = inheriting.ResourceVersion, inheriting.Status.Conditions
 	key := client.ObjectKeyFromObject(rr)
-	switch {
-	case v.state == changeUnknown:
+	switch rule := v.rule().recovery; {
+	case rule == recoveryRetry:
 		res, err := r.claimReadFailed(ctx, rr, via, recoveryStepErr(ctx, readCtx, v.err))
 		return res, false, err
-	case v.state == changeMerged && v.pr.Number == claim.Number && v.pr.HeadSHA == claim.HeadSHA:
+	case rule == recoveryMerged && v.pr.Number == claim.Number && v.pr.HeadSHA == claim.HeadSHA:
 		switch err := recoveryStepErr(ctx, readCtx, r.recordOtherHeadMerge(readCtx, git, rr, pred, v.pr)); {
 		case err == nil, errors.Is(err, errStopped):
 			return reconcile.Result{RequeueAfter: stepDelay}, true, nil
@@ -104,7 +104,7 @@ func (r *RemediationRequestReconciler) settleClaim(ctx context.Context, rr *reme
 			res, err := r.claimReadFailed(ctx, rr, via, err)
 			return res, false, err
 		}
-	case v.state == changeMerged:
+	case rule == recoveryMerged:
 		// Another merged head than the one the claim's first read stored: a pull request merges once, so the answers
 		// about it disagree.
 		r.gitRetries().noteDisagreed(key)
@@ -171,7 +171,10 @@ func (r *RemediationRequestReconciler) claimReadFailed(ctx context.Context, rr *
 	if !gitReadFailure(read) {
 		read = readFailure(readOp(err), err)
 	}
-	res, err := r.retryGitRead(ctx, rr, read, via.bound)
+	// The path's bound: the HandoffRecovery entry during the watch, none of its own after it (claimDuringWatch,
+	// claimAfterWatch); the claim's own entry bounds every retry either way.
+	bound := via.bound
+	res, err := r.retryGitRead(ctx, rr, read, bound)
 	if err != nil {
 		return reconcile.Result{}, err
 	}

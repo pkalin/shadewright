@@ -145,11 +145,11 @@ import (
 //	   rule over the state): it releases in the write that records the merge, or after it reads the predecessor's
 //	   record (mayReleaseOnMerge). Every such release is checked and counted, and the default seed set must reach one
 //	   (hmP13Reach), under the race detector too;
-//	P14 a reconcile of a request being deleted never hands a failure of the Git host or of the settings to the error
-//	   backoff, where it would retry invisibly: only a failure of the Kubernetes API is returned, and anything else
-//	   is a paced retry that a condition shows (#1057: a claim holder deleted while its settings entry cannot be
-//	   used). Every deletion that meets an unusable entry is counted, and the default seed set must reach one
-//	   (hmP14Reach), under the race detector too;
+//	P14 a reconcile of a request being deleted never hands settings that cannot reach the repository (an entry that
+//	   cannot be used, the repository or the settings object gone) to the error backoff, where it would retry with
+//	   nothing but CleanupFailing shown: it is a paced retry that condition PullRequestUnreadable names (#1057: a claim
+//	   holder deleted while its settings entry cannot be used). Every deletion that meets an unusable entry is counted,
+//	   and the default seed set must reach one (hmP14Reach), under the race detector too;
 //	P9 the predecessor never stores the abort of an intent whose takeover the replacement, as stored at that write,
 //	   recorded (from Done), whatever ends it, unless a person put the predecessor's own head back on the pull
 //	   request (fourth round of #786).
@@ -1963,7 +1963,7 @@ func (m *hmWorld) reconcile(who string) {
 			res.RequeueAfter)
 	}
 	m.checkClaimNotBackedOff(who, claimPast, faulted, err)
-	m.checkDeletionNotBackedOff(who, deleting, faulted, err)
+	m.checkDeletionNotBackedOff(who, deleting, err)
 	// P5: a reconcile that could act ends every wait that stood past its own end at its start.
 	if after != nil && err == nil && !faulted && !m.paused {
 		for _, w := range before.Status.GitWaits {
@@ -2450,11 +2450,12 @@ func (m *hmWorld) checkClaimNotBackedOff(who string, claimPast, faulted bool, er
 	}
 }
 
-// checkDeletionNotBackedOff is P14: the reconcile of who, being deleted at its start, returned err; only a failure of
-// the Kubernetes API (or a fault the model injected there, a crash, a pause) may go to the error backoff.
-func (m *hmWorld) checkDeletionNotBackedOff(who string, deleting, faulted bool, err error) {
-	if !deleting || err == nil || faulted || m.paused || errors.Is(err, errHMCrash) || isClusterError(err) ||
-		apierrors.IsServiceUnavailable(err) {
+// checkDeletionNotBackedOff is P14: the reconcile of who, being deleted at its start, returned err, which must not be
+// settings that cannot reach the repository. Other failures of a deletion follow the table of #688 (answers that
+// disagree go to the error backoff with CleanupFailing).
+func (m *hmWorld) checkDeletionNotBackedOff(who string, deleting bool, err error) {
+	if !deleting || err == nil || isClusterError(err) || !errors.Is(err, freshness.ErrRepositoryUnusable) &&
+		!errors.Is(err, errRepositoryGone) {
 		return
 	}
 	m.fail("P14", "the %s is being deleted and its reconcile returned %v to the error backoff", who, err)
@@ -3074,8 +3075,8 @@ func hmSeeds(t *testing.T) []uint64 {
 // predecessor is made again under its name (hRemakePred, armed for that shape too); P12 and P13 fail when the look at
 // stopped holders sends that claim to the generic look, which releases the lock with no record (seeds 911 and 2464
 // too, in the run of 1 to 6,000). 2941 (#1057): a claim holder is deleted while its settings entry cannot be used, and
-// its finalizer handed that failure to the error backoff (P14); 460: the same deletion met answers that disagree.
-var hmFixedSeeds = []uint64{45273, 398, 2941, 460}
+// its finalizer handed that failure to the error backoff (P14).
+var hmFixedSeeds = []uint64{45273, 398, 2941}
 
 func TestHandoffModel(t *testing.T) {
 	schema := requestStatusSchema(t)

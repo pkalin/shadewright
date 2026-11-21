@@ -81,10 +81,10 @@ import (
 //	   when that request is the replacement and it is deleted before it recorded the merge, on the predecessor as
 //	   MergedWithForeignChange with no receipt (#786, decision 2 of the model result of 2026-11-18), a completed
 //	   takeover included (without a receipt when the host reports no merge commit ID); never on both, and, once
-//	   reads answer, never on none. A merged head with further commits on
-//	   top of the replacement's commit is the documented gap #870, and the predecessor's commit put back by a force
+//	   reads answer, never on none. A merged head with further commits on top of the replacement's commit, or with
+//	   no commit of the replacement, is P12's, and the predecessor's commit put back by a force
 //	   push after the replacement took the pull request over, with the predecessor handed off or gone, is a foreign
-//	   change to the replacement: both are left out. A merge is identified at its first read (decision of
+//	   change to the replacement: both are left out here. A merge is identified at its first read (decision of
 //	   2026-11-19 on #880): the request that first stores a record of it (a wait of kind MergeCheck or MergeContent
 //	   naming the pull request, or the merge recorded in any form, MergedWithForeignChange included) is the one that
 //	   records it. Whatever the merged head, the two requests never hold a record of it at the same time, and a live
@@ -125,7 +125,26 @@ import (
 //	   nothing to read: after a reconcile with every read answering that leaves it in that wait, it shows no
 //	   refusal of its recovery (condition PullRequestUnreadable with a reason of recoveryWaitReasons), its
 //	   HandoffRecovery entry says it has nothing to read (recoveryNothingToRead), and the entry keeps its start and
-//	   end (review pass 14 of #786, 2026-11-20);
+//	   end (review pass 14 of #786, 2026-11-20); a replacement that holds a claim on a merge of another head (its
+//	   MergeContent wait, #870) reads that merge on whatever the predecessor is (gone, made again under the same name:
+//	   the step hRemakePred, or no longer naming it; decision of 2026-11-21 on #870) and is not checked;
+//	P12 a merge whose head is neither request's own commit (further commits on top of the replacement's commit, or a
+//	   head without it) is recorded once (decision of 2026-11-20 on #870): when the replacement, before its takeover,
+//	   held the target lock, existed and was not being deleted at the merge, the replacement records it (no receipt,
+//	   MergedWithForeignChange or MergeContentUnreadable) and the predecessor records none while the replacement
+//	   lives, nor ends a failure for the breaker on it; that replacement does not release the lock before its record;
+//	   and, once reads answer, the merge is recorded on one request while either lives. A merge of the predecessor's
+//	   own head before the takeover is the predecessor's while it is present (P1); once it is gone or being deleted
+//	   without a record of it while that replacement holds the lock (predLeft, third case of the same decision), the
+//	   replacement records it with the same reasons and the predecessor none; a predecessor that recorded it ends the
+//	   replacement in that pass, so the replacement never records it too, also once the predecessor went (record,
+//	   delete, look: the step hDeleteRecorder; replRecordsPredRecord). The default seed set must reach both shapes
+//	   (hmP12Reach), under the race detector too, and the order look, delete, look (the step hDeleteAfterLook);
+//	P13 a replacement before its takeover, not being deleted, never lets go of the target lock on a merge of the pull
+//	   request it was to take over while no request holds the record of that merge (decision of 2026-11-20 on #870, one
+//	   rule over the state): it releases in the write that records the merge, or after it reads the predecessor's
+//	   record (mayReleaseOnMerge). Every such release is checked and counted, and the default seed set must reach one
+//	   (hmP13Reach), under the race detector too;
 //	P9 the predecessor never stores the abort of an intent whose takeover the replacement, as stored at that write,
 //	   recorded (from Done), whatever ends it, unless a person put the predecessor's own head back on the pull
 //	   request (fourth round of #786).
@@ -149,7 +168,7 @@ import (
 // to 500, 1 to 100 under the race detector or -short; the code was checked against the seeds 1 to 9,000 and then
 // 9,001 to 13,000, in the fifth round of #786 against 1 to 24,000, for #880 against 1 to 60,000, and for its second decision (a wait is a claim) against 1 to 260,000 with the
 // deletion of the claim holder drawn, and for the live copies of the requests (decision of 2026-11-19 on #786) against 1 to
-// 260,000 with the cache lagging behind a change of the other request drawn. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
+// 260,000 with the cache lagging behind a change of the other request drawn. For #870 (P12) it was checked against 1 to 120,000, and for its third case (predLeft) against 1 to 36,000 (seed 59 broke P12 without the change, seed 175 without its part for a predecessor that is gone, both drawn before the record-then-delete step existed). With that step (decision of 2026-11-20 on #870 replacing the third row), seed 10 breaks P12 when the predecessor does not end the replacement on its record. With the step for look, delete, look and P13 (decision of 2026-11-20 on #870, one rule over the state), seed 47 breaks P13 when the replacement releases at its look without the predecessor's record (seeds 4, 55 and 75 too, among the seeds 1 to 100 under the race detector). The seeds of hmFixedSeeds run with the default set: 45273 breaks P5 when the watch after a refusal goes idle with the predecessor gone while it holds a claim on a merge of another head (seeds 52328 and 52693 too, found in the run of 2,501 to 60,000); with the step hRemakePred (decision of 2026-11-21 on #870) the same seed makes the predecessor again under its name while the claim stands, and breaks P5 when the watch goes idle with the predecessor made again. SHADEWRIGHT_HANDOFF_MODEL_SEED=s runs one seed, SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=a-b the seeds a
 // to b instead, SHADEWRIGHT_HANDOFF_MODEL_TRACE=1 prints the trace of every seed
 // (SHADEWRIGHT_HANDOFF_MODEL_CONDITIONS=1 adds the conditions after each reconcile). The log of every run (go test -v)
 // holds the count of failures per property, of the exclusions, and of what the sequences reached.
@@ -200,6 +219,19 @@ const (
 	// hDeleteClaim is drawn by the generator only and becomes a deletion of the request holding only a claim on the
 	// merge (hDelete, deleteClaimHolder).
 	hDeleteClaim hmKind = "delete-claim-holder"
+	// hDeleteRecorder is drawn by the generator only and becomes a deletion of the predecessor once it records the
+	// merge of its own head (hDelete, deleteRecorder).
+	hDeleteRecorder hmKind = "delete-merge-recorder"
+	// hDeleteAfterLook is drawn by the generator only and becomes a deletion of the predecessor once the replacement
+	// that holds the lock before its takeover looked at the merge of the predecessor's own head while the predecessor
+	// holds no record of it (hDelete, deleteAfterLook).
+	hDeleteAfterLook hmKind = "delete-after-replacement-look"
+	// hRemakePred is a person deleting the predecessor and making a request again under its name, with another UID
+	// (decision of 2026-11-21 on #870): armed until the replacement's watch after a refusal holds a claim on a merge of
+	// another head (otherHeadClaim), then the predecessor is deleted, and once it is gone a request with its spec,
+	// spec.cancel set, is made under its name (remakeArmedPred). The made-again request is not the predecessor: the
+	// model's checks see the predecessor as gone (get), and its reconciles run without them.
+	hRemakePred hmKind = "delete-and-make-again-predecessor"
 	// hRestartLate is a restart after the executor was down for longer than the longest wait a request records
 	// (hmLongestWait): every wait that stands is past its end at the first reconcile.
 	hRestartLate hmKind = "restart-after-every-wait"
@@ -241,6 +273,15 @@ const (
 	// deleteClaimHolder is the variant of a deletion (hDelete) that deletes the request holding only a claim on the
 	// merge (holdsOnlyClaim), and does nothing when neither does.
 	deleteClaimHolder = "claim-holder"
+	// deleteRecorder is the variant of a deletion (hDelete) that deletes the predecessor once it holds the record of
+	// the merge of its own head, made before the takeover (deleteArmedRecorder): record, then delete, then the
+	// replacement looks (decision of 2026-11-20 on #870 replacing the third row).
+	deleteRecorder = "merge-recorder"
+	// deleteAfterLook is the variant of a deletion (hDelete) that deletes the predecessor once the replacement, which
+	// holds the lock before its takeover, looked at the merge of the predecessor's own head while the predecessor holds
+	// no record of it (deleteArmedAfterLook): look (the replacement keeps the lock, or before the decision of 2026-11-20
+	// on #870 released it), then delete, then the replacement looks again (P13).
+	deleteAfterLook = "after-replacement-look"
 
 	// hmOtherBranch is the target branch a settings change names; hmOtherURL the repository that replaces the plan's.
 	hmOtherBranch = "release"
@@ -275,6 +316,8 @@ func (s hmStep) String() string {
 	switch s.Kind {
 	case hRecPred, hRecRepl, hAnswer, hRestart, hRestartLate, hPause, hLift, hPush, hClose, hReopen, hBranch, hMoveBase:
 		return string(s.Kind)
+	case hRemakePred:
+		return string(s.Kind) + " once the replacement's watch holds a claim on a merge of another head"
 	case hForce, hSettings:
 		return string(s.Kind) + " " + s.Variant
 	case hClock:
@@ -290,6 +333,12 @@ func (s hmStep) String() string {
 	case hDelete:
 		if s.Variant == deleteClaimHolder {
 			return string(s.Kind) + " the request holding only a claim on the merge"
+		}
+		if s.Variant == deleteRecorder {
+			return string(s.Kind) + " the predecessor once it records the merge of its own head"
+		}
+		if s.Variant == deleteAfterLook {
+			return string(s.Kind) + " the predecessor once the replacement looked at the merge of its head"
 		}
 		return string(s.Kind) + " " + s.Obj
 	case hLose, hConflict, hStale:
@@ -349,6 +398,17 @@ type hmWorld struct {
 	// claimDeleteArmed: a deletion of the request holding only a claim on the merge waits for that shape
 	// (deleteArmedClaimHolder).
 	claimDeleteArmed bool
+	// recorderDeleteArmed: a deletion of the predecessor waits for its record of the merge of its own head
+	// (deleteArmedRecorder).
+	recorderDeleteArmed bool
+	// lookDeleteArmed: a deletion of the predecessor waits for the replacement's look at the merge of the
+	// predecessor's own head (deleteArmedAfterLook).
+	lookDeleteArmed bool
+	// remakeArmed: the deletion and making again of the predecessor waits for the replacement's claim
+	// (remakeArmedPred); remakePending: the predecessor was deleted for it and is made again once gone.
+	remakeArmed, remakePending bool
+	// predSpec is the predecessor's spec at the start, which the request made again under its name takes.
+	predSpec *api.RemediationRequestSpec
 
 	t      *testing.T
 	schema *statusSchema
@@ -466,6 +526,56 @@ type hmMerge struct {
 	noID bool
 	// firstRead is the request that first stored a record of the merge (readRecord), "" until one did.
 	firstRead string
+	// replHeld: the replacement, before its takeover, held the target lock, existed and was not being deleted when
+	// the merge was made, so it records a merge of any head that is not the predecessor's own (P12, #870).
+	replHeld bool
+	// predLeft: the predecessor's own head was merged before the takeover, and the predecessor was gone, being
+	// deleted, or ended and released its lock on a verdict with no intent (mayStillRecord false), without a record or a
+	// claim, while the replacement held the target lock before its takeover, existed
+	// and was not being deleted: the replacement records it (P12, third case of the decision of 2026-11-20 on #870).
+	predLeft bool
+	// recordedTwice: P12 found the predecessor's record of the merge of its own head and one on the replacement
+	// (replRecordsPredRecord), reported once.
+	recordedTwice bool
+}
+
+// notePredLeft notes predLeft once it holds, on reqs as they are after a step.
+func (m *hmWorld) notePredLeft(reqs map[string]*api.RemediationRequest) {
+	mg, p := m.merge, reqs[hmPred]
+	if mg == nil || mg.owner != hmPred || mg.afterTakeover || mg.predLeft || mg.recorded[hmPred] || recordsMerge(p) ||
+		(p != nil && p.DeletionTimestamp.IsZero() && (!ended(p.Status.Phase) || mayStillRecord(p) ||
+			holdsOnlyClaim(p, m.number))) ||
+		!m.replHoldsBeforeTakeover() {
+		return
+	}
+	mg.predLeft = true
+	m.reach["pred-head-merge-pred-left"] = true
+	m.logf("  the predecessor left its merged head unrecorded while the replacement holds the lock")
+}
+
+// predHeadOnReplacement reports the record a merge of the predecessor's own head, before the takeover, has once the
+// predecessor left it (predLeft) or is gone without a record of it: on the replacement, without a receipt, as
+// MergedWithForeignChange or MergeContentUnreadable. A predecessor that recorded the merge ended the replacement in
+// that pass, so the replacement never records it a second time once the predecessor went (decision of 2026-11-20 on
+// #870 replacing the third row; replRecordsPredRecord).
+func (m *hmWorld) predHeadOnReplacement(reqs map[string]*api.RemediationRequest) bool {
+	mg, repl := m.merge, reqs[hmRepl]
+	if mg == nil || mg.owner != hmPred || mg.afterTakeover || mg.recorded[hmPred] ||
+		(!mg.predLeft && reqs[hmPred] != nil) {
+		return false
+	}
+	if repl == nil {
+		return mg.recorded[hmRepl]
+	}
+	return recordedAsForeign(repl)
+}
+
+// recordedAsForeign reports whether x records a merge without a receipt as a foreign change or as one whose content
+// could not be read.
+func recordedAsForeign(x *api.RemediationRequest) bool {
+	c := meta.FindStatusCondition(x.Status.Conditions, api.ConditionApproved)
+	return x.Status.MergeReceipt == nil && c != nil &&
+		(c.Reason == ReasonMergedWithForeignChange || c.Reason == ReasonMergeContentUnreadable)
 }
 
 // foreignOnReplacement reports the other record a merge of the predecessor's commit may have once the replacement took
@@ -513,8 +623,8 @@ var hmShapes = []struct {
 		return m.goneShape(m.goneMissing, about, false)
 	}},
 	// A person pushed on top of the replacement's commit (#870): the head of the pull request carries the
-	// replacement's commit with further commits on it. The merge of such a head is excluded from P1 and P2 by its
-	// owner (gap870); P3 asks nothing of the lock of that head.
+	// replacement's commit with further commits on it. P3 asks nothing of the lock of that head while the pull request
+	// is open; its merge is P12's.
 	{name: "#870 commits on top of the replacement's", excuses: "P3", matching: func(m *hmWorld, _ string) bool {
 		return m.ownerOf(m.pr().HeadSHA) == "gap870"
 	}},
@@ -604,7 +714,7 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 	ctx := context.Background()
 	m := &hmWorld{t: t, schema: schema, start: start, g: g, base: r.Client.(client.WithWatch),
 		keys:   map[string]client.ObjectKey{hmPred: client.ObjectKeyFromObject(p), hmRepl: client.ObjectKeyFromObject(rr)},
-		number: cr.Number, branch: cr.HeadBranch, predCommit: p.Status.PullRequest.HeadSHA,
+		number: cr.Number, branch: cr.HeadBranch, predCommit: p.Status.PullRequest.HeadSHA, predSpec: p.Spec.DeepCopy(),
 		personCommits: map[string]bool{}, replCommits: map[string]bool{}, once: map[string]error{},
 		lose: map[string]bool{}, conflict: map[string]bool{}, crashAt: -1, writers: map[string]bool{}, awaiting: map[string]bool{},
 		gone288: map[string]bool{}, goneMissing: map[string]bool{},
@@ -691,6 +801,8 @@ const (
 	hmPolicy  = "handoff-model"
 	hmPredUID = "0ad0ff00-0000-4000-8000-000000000001"
 	hmReplUID = "0ad0ff00-0000-4000-8000-000000000002"
+	// hmPredAgainUID is the UID of the request made again under the predecessor's name (hRemakePred).
+	hmPredAgainUID = "0ad0ff00-0000-4000-8000-000000000003"
 )
 
 // hmFixture is handoffAppendedWorld with a status every write of which the CRD schema accepts: UUIDs, a full source, a
@@ -1220,8 +1332,18 @@ func (m *hmWorld) checkAbortAfterTakeover(old, stored *api.RemediationRequest) {
 	}
 }
 
-// get reads who as stored, nil when gone.
+// get reads who as stored, nil when gone. A request made again under the predecessor's name (hRemakePred) is not the
+// predecessor: get returns nil for it, as for a predecessor that is gone; stored returns it.
 func (m *hmWorld) get(who string) *api.RemediationRequest {
+	rr := m.stored(who)
+	if rr != nil && who == hmPred && rr.UID != hmPredUID {
+		return nil
+	}
+	return rr
+}
+
+// stored reads the request stored under who's name, whatever its UID, nil when there is none.
+func (m *hmWorld) stored(who string) *api.RemediationRequest {
 	rr := &api.RemediationRequest{}
 	switch err := m.base.Get(context.Background(), m.keys[who], rr); {
 	case apierrors.IsNotFound(err):
@@ -1446,8 +1568,10 @@ func (m *hmWorld) observeMerge(reqs map[string]*api.RemediationRequest) {
 	if mg == nil || (mg.owner != hmPred && mg.owner != hmRepl) {
 		return
 	}
+	m.replRecordsPredRecord(reqs)
 	other := map[string]string{hmPred: hmRepl, hmRepl: hmPred}[mg.owner]
-	if recordsMerge(reqs[other]) && !m.foreignForGone(reqs) && !m.foreignOnReplacement(reqs) {
+	if recordsMerge(reqs[other]) && !m.foreignForGone(reqs) && !m.foreignOnReplacement(reqs) &&
+		!m.predHeadOnReplacement(reqs) {
 		m.fail("P1", "the merge of the %s's commit is recorded on the %s (%s)", mg.owner, other, describe(reqs[other]))
 	}
 	for who, x := range reqs {
@@ -1455,7 +1579,7 @@ func (m *hmWorld) observeMerge(reqs map[string]*api.RemediationRequest) {
 			mg.recorded[who] = true
 		}
 	}
-	if len(mg.recorded) > 1 {
+	if len(mg.recorded) > 1 && !m.predHeadOnReplacement(reqs) {
 		m.fail("P1", "the merge of the %s's commit is recorded on both requests", mg.owner)
 	}
 	successes := 0
@@ -1469,6 +1593,96 @@ func (m *hmWorld) observeMerge(reqs map[string]*api.RemediationRequest) {
 	}
 }
 
+// replRecordsPredRecord checks P12 for a merge of the predecessor's own head, before the takeover, that the
+// predecessor recorded: the replacement never records it too, also once the predecessor is gone (record, delete,
+// look; decision of 2026-11-20 on #870 replacing the third row), so it never counts a failure for it.
+func (m *hmWorld) replRecordsPredRecord(reqs map[string]*api.RemediationRequest) {
+	mg := m.merge
+	if mg.owner != hmPred || mg.afterTakeover || mg.recordedTwice {
+		return
+	}
+	if recordsMerge(reqs[hmPred]) {
+		mg.recorded[hmPred] = true
+	}
+	if mg.recorded[hmPred] && recordsMerge(reqs[hmRepl]) {
+		mg.recordedTwice = true
+		m.fail("P12", "the replacement records the merge of the predecessor's head %s, which the predecessor "+
+			"recorded (pred: %s, repl: %s)", short(mg.head), describe(reqs[hmPred]), describe(reqs[hmRepl]))
+	}
+}
+
+// replHoldsBeforeTakeover reports whether the replacement exists, is not being deleted and holds the target lock before
+// its takeover (its handoff Reserved, its commit possibly pushed): the model's own reading, for P12.
+func (m *hmWorld) replHoldsBeforeTakeover() bool {
+	repl := m.get(hmRepl)
+	return repl != nil && repl.DeletionTimestamp.IsZero() && mayCarryHandoffCommit(repl) &&
+		repl.Status.Handoff.From.Phase == api.HandoffReserved && ptr.Deref(repl.Status.HoldsTarget, false)
+}
+
+// otherMerge reports whether a person merged a head that is neither request's own commit (P12).
+func (m *hmWorld) otherMerge() bool {
+	return m.merge != nil && m.merge.owner != hmPred && m.merge.owner != hmRepl
+}
+
+// recordsOn reports whether x records the merge of pull request number in any form (recordsMerge), its claim aside.
+func recordsOn(x *api.RemediationRequest, number int64) bool {
+	return x != nil && x.Status.PullRequest != nil && x.Status.PullRequest.Number == number && recordsMerge(x)
+}
+
+// observeOtherMerge checks P12 after every step, for a merge whose head is neither request's own commit: the
+// predecessor records none while the replacement that held the lock at the merge lives and is not being deleted, and
+// the record is noted for the settled checks.
+func (m *hmWorld) observeOtherMerge(reqs map[string]*api.RemediationRequest) {
+	if !m.otherMerge() {
+		return
+	}
+	mg := m.merge
+	for who, x := range reqs {
+		if recordsOn(x, m.number) {
+			mg.recorded[who] = true
+		}
+	}
+	p, repl := reqs[hmPred], reqs[hmRepl]
+	if mg.replHeld && recordsOn(p, m.number) && repl != nil && repl.DeletionTimestamp.IsZero() && !mg.recorded[hmRepl] {
+		m.fail("P12", "the predecessor recorded the merge of %s, which the replacement holding the lock records "+
+			"(pred: %s, repl: %s)", short(mg.head), describe(p), describe(repl))
+	}
+}
+
+// settledOtherRecord checks P12 after the settling run: the merge of a head that is neither request's own commit is
+// recorded on the replacement that held the lock at the merge while it lives, and on one request otherwise while either
+// lives (the predecessor ended HandedOff records nothing, as P1 for #875).
+func (m *hmWorld) settledOtherRecord(mg *hmMerge, reqs map[string]*api.RemediationRequest) {
+	if m.releasedAtReopen[hmPred] || m.releasedAtReopen[hmRepl] {
+		m.excused["reopen after a release"]++
+		return
+	}
+	p, repl := reqs[hmPred], reqs[hmRepl]
+	live := func(x *api.RemediationRequest) bool { return x != nil && x.DeletionTimestamp.IsZero() }
+	switch {
+	case !mg.replHeld && p == nil && !mg.recorded[hmPred] && !mg.recorded[hmRepl]:
+		// No request held the lock that records it at the merge, and the predecessor went before it recorded it: a
+		// request deleted before it records the merge of its pull request records nothing (finalize reads it merged
+		// and lets go), as for #875.
+		m.excused["#870 merge after the replacement let go, predecessor deleted"]++
+	case mg.replHeld && live(repl):
+		if !recordsOn(repl, m.number) || repl.Status.MergeReceipt != nil {
+			m.failAbout("P12", aboutUnrecorded, "the replacement that held the lock does not record the merge of %s "+
+				"without a receipt (pred: %s, repl: %s)", short(mg.head), describe(p), describe(repl))
+		}
+		if p != nil && breakerOutcome(p) == outcomeFailure && !mg.failed[hmPred] {
+			m.fail("P12", "the breaker counts the merge of %s on the predecessor too (pred: %s)", short(mg.head),
+				describe(p))
+		}
+	case mg.recorded[hmPred] || mg.recorded[hmRepl]:
+	case !live(p) && !live(repl), !live(repl) && p != nil && handedOff(p):
+		// Nothing left that may record it.
+	default:
+		m.failAbout("P12", aboutUnrecorded, "the merge of %s is recorded on neither request (pred: %s, repl: %s)",
+			short(mg.head), describe(p), describe(repl))
+	}
+}
+
 // observe checks the properties that hold after every step, and notes what later checks need.
 func (m *hmWorld) observe() {
 	p, rr := m.get(hmPred), m.get(hmRepl)
@@ -1478,11 +1692,85 @@ func (m *hmWorld) observe() {
 	m.prEnded = cr.State != providers.ChangeRequestOpen || m.branchGone
 	m.mu.Unlock()
 	m.note(p, rr)
+	m.notePredLeft(reqs)
 	// P1 and P2 after a merge of a request's own commit; the first read of P1 after a merge of any head.
 	m.observeFirstRead(reqs)
 	m.observeMerge(reqs)
+	m.observeOtherMerge(reqs)
 	m.observeLock(reqs)
 	m.deleteArmedClaimHolder()
+	m.deleteArmedRecorder()
+	m.deleteArmedAfterLook()
+	m.remakeArmedPred()
+}
+
+// deleteArmedRecorder carries out an armed deletion of the predecessor (deleteRecorder) once it records the merge of
+// its own head, made before the takeover, and is not being deleted, and disarms it. The replacement has not looked at
+// the merge since that record when the step ends with this deletion, so its next look comes after the predecessor
+// went: the order of the finding of 2026-11-20 on #870 (record, delete, look).
+func (m *hmWorld) deleteArmedRecorder() {
+	mg, p := m.merge, m.get(hmPred)
+	if !m.recorderDeleteArmed || mg == nil || mg.owner != hmPred || mg.afterTakeover || p == nil ||
+		!p.DeletionTimestamp.IsZero() || !recordsMerge(p) {
+		return
+	}
+	m.recorderDeleteArmed = false
+	mg.recorded[hmPred] = true
+	if mg.replHeld {
+		m.reach["pred-head-recorded-then-deleted"] = true
+	}
+	m.logf("  a person deletes the predecessor, which recorded the merge of its own head")
+	m.deleteRequest(hmPred)
+}
+
+// deleteArmedAfterLook carries out an armed deletion of the predecessor (deleteAfterLook) once the replacement looked
+// at the merge of the predecessor's own head, made before the takeover, while the predecessor is present and holds no
+// record of it, and disarms it. When the replacement has not looked yet but ended before its takeover holding the lock,
+// it reconciles first (a random order rarely puts its look before the predecessor's record). The order of the finding
+// of 2026-11-20 on #870 (look, delete, look): the replacement must keep the lock at its first look and record the
+// merge once the predecessor went without one (P12, P13).
+func (m *hmWorld) deleteArmedAfterLook() {
+	mg, p, repl := m.merge, m.get(hmPred), m.get(hmRepl)
+	waits := func() bool {
+		return mg != nil && mg.owner == hmPred && !mg.afterTakeover && p != nil && p.DeletionTimestamp.IsZero() &&
+			!recordsMerge(p) && repl != nil && repl.DeletionTimestamp.IsZero()
+	}
+	if !m.lookDeleteArmed || !waits() {
+		return
+	}
+	if !replLookedAtPredHead(repl) {
+		if !endedBeforeTakeover(repl) || !ptr.Deref(repl.Status.HoldsTarget, false) {
+			return
+		}
+		m.lookDeleteArmed = false
+		m.logf("  the replacement looks at the merge of the predecessor's head before the predecessor records it")
+		m.reconcile(hmRepl)
+		m.observe()
+		p, repl = m.get(hmPred), m.get(hmRepl)
+		if !waits() || !replLookedAtPredHead(repl) {
+			return
+		}
+	}
+	m.lookDeleteArmed = false
+	m.reach["pred-head-looked-then-deleted"] = true
+	m.logf("  a person deletes the predecessor after the replacement looked at the merge of its head")
+	m.deleteRequest(hmPred)
+	// The deletion follows the checks of this step: what it leaves to the replacement is noted now.
+	m.notePredLeft(map[string]*api.RemediationRequest{hmPred: m.get(hmPred), hmRepl: m.get(hmRepl)})
+}
+
+// replLookedAtPredHead reports whether repl, before its takeover, shows a look at the merge of its predecessor's own
+// head that the predecessor did not record yet: it keeps the lock and waits for that record (TargetHeld with
+// MergeRecordPending), or it let go of the lock with its handoff Aborted and no record of its own (the release the
+// decision of 2026-11-20 on #870 withdrew; P13 fails on it).
+func replLookedAtPredHead(repl *api.RemediationRequest) bool {
+	if c := meta.FindStatusCondition(repl.Status.Conditions, api.ConditionTargetHeld); c != nil &&
+		c.Reason == ReasonMergeRecordPending {
+		return true
+	}
+	ho := repl.Status.Handoff
+	return ho != nil && ho.From != nil && ho.From.Phase == api.HandoffAborted && repl.Status.PullRequest == nil &&
+		!ptr.Deref(repl.Status.HoldsTarget, false) && !recordsMerge(repl)
 }
 
 // note records what the sequence reached and the shapes later checks excuse.
@@ -1553,15 +1841,7 @@ func (m *hmWorld) observeLock(reqs map[string]*api.RemediationRequest) {
 			free = false
 		}
 		if m.held[who] && !holds && x != nil && !repoGone {
-			switch {
-			case cr.State == providers.ChangeRequestOpen && who == hmRepl && m.carriesOwn(cr.HeadSHA, hmRepl):
-				m.fail("P3", "the replacement released the lock while its commit is on the open pull request (%s)",
-					describe(x))
-			case cr.State == providers.ChangeRequestMerged && m.merge != nil && m.merge.owner == who && !recordsMerge(x) &&
-				!m.foreignOnReplacement(reqs) && (!m.merge.afterTakeover || who != hmPred || !handedOff(x)):
-				m.fail("P3", "the %s released the lock on a merge of its commit it does not record (%s)", who,
-					describe(x))
-			}
+			m.checkRelease(who, x, reqs, cr)
 		}
 		m.held[who] = holds
 	}
@@ -1572,10 +1852,56 @@ func (m *hmWorld) observeLock(reqs map[string]*api.RemediationRequest) {
 	}
 }
 
+// checkRelease checks P3 and P12 for who, which held the target lock before this step and no longer does (x as it is
+// now, cr the pull request).
+func (m *hmWorld) checkRelease(who string, x *api.RemediationRequest, reqs map[string]*api.RemediationRequest,
+	cr providers.ChangeRequest) {
+	switch {
+	case cr.State == providers.ChangeRequestOpen && who == hmRepl && m.carriesOwn(cr.HeadSHA, hmRepl):
+		m.fail("P3", "the replacement released the lock while its commit is on the open pull request (%s)",
+			describe(x))
+	case cr.State == providers.ChangeRequestMerged && m.merge != nil && m.merge.owner == who && !recordsMerge(x) &&
+		!m.foreignOnReplacement(reqs) && (!m.merge.afterTakeover || who != hmPred || !handedOff(x)) &&
+		(who != hmPred || !m.predHeadOnReplacement(reqs)):
+		m.fail("P3", "the %s released the lock on a merge of its commit it does not record (%s)", who,
+			describe(x))
+	case cr.State == providers.ChangeRequestMerged && who == hmRepl && m.merge != nil &&
+		((m.otherMerge() && m.merge.replHeld) || m.merge.predLeft) && !recordsMerge(x):
+		m.fail("P12", "the replacement released the lock on the merge of %s before it recorded it (%s)",
+			short(m.merge.head), describe(x))
+	}
+	m.checkReleaseRecorded(who, x, reqs, cr)
+}
+
+// checkReleaseRecorded checks P13 for who, which held the target lock before this step and no longer does: a
+// replacement before its takeover, not being deleted, that lets go of the lock on a merge of the pull request it was to
+// take over does so only while a request holds the record of that merge (its own, stored in the same write, or its
+// predecessor's), or one that is gone recorded it (decision of 2026-11-20 on #870, one rule over the state). Each
+// release it checks is counted (hmP13Reach), so a seed set that never reaches one fails the model.
+func (m *hmWorld) checkReleaseRecorded(who string, x *api.RemediationRequest, reqs map[string]*api.RemediationRequest,
+	cr providers.ChangeRequest) {
+	if who != hmRepl || cr.State != providers.ChangeRequestMerged || m.merge == nil || m.merge.afterTakeover ||
+		tookOver(x) || !x.DeletionTimestamp.IsZero() || x.Spec.Replaces == nil {
+		return
+	}
+	m.reach["release-on-merge-before-takeover"] = true
+	for w, y := range reqs {
+		if (y != nil && recordsOn(y, m.number)) || (y == nil && m.merge.recorded[w]) {
+			return
+		}
+	}
+	m.fail("P13", "the replacement released the lock on the merge of %s while no request holds its record "+
+		"(pred: %s, repl: %s)", short(m.merge.head), describe(reqs[hmPred]), describe(x))
+}
+
 // reconcile runs one reconcile of who and checks what it left.
 func (m *hmWorld) reconcile(who string) {
 	before := m.get(who)
 	if before == nil {
+		if again := m.stored(who); again != nil {
+			m.reconcileMadeAgain(who)
+			return
+		}
 		m.logf("%s is gone", who)
 		return
 	}
@@ -1585,6 +1911,8 @@ func (m *hmWorld) reconcile(who string) {
 	m.mu.Unlock()
 	p10 := m.p10Applies(who, before)
 	p11 := m.p11Applies(who, before)
+	m.noteClaimWithPredGone(who, before)
+	claimPast := m.claimPastEnd(who, before)
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.keys[who]})
 	m.mu.Lock()
 	m.actor = ""
@@ -1625,6 +1953,7 @@ func (m *hmWorld) reconcile(who string) {
 		m.fail("P7", "the reconcile of the %s asked to run again after %v, below the floor of a second", who,
 			res.RequeueAfter)
 	}
+	m.checkClaimNotBackedOff(who, claimPast, faulted, err)
 	// P5: a reconcile that could act ends every wait that stood past its own end at its start.
 	if after != nil && err == nil && !faulted && !m.paused {
 		for _, w := range before.Status.GitWaits {
@@ -1705,15 +2034,10 @@ func (m *hmWorld) apply(s hmStep) {
 			m.t.Fatal(err)
 		}
 	case hDelete:
-		if s.Variant == deleteClaimHolder {
-			// A person deletes the request that holds only a claim on the merge (second decision of 2026-11-19 on
-			// #880): now, if one does and the other request has read the merge, or else at the end of the first later
-			// step after which that holds (deleteArmedClaimHolder).
-			m.claimDeleteArmed = true
-			m.deleteArmedClaimHolder()
-			return
-		}
-		m.deleteRequest(s.Obj)
+		m.deleteStep(s)
+	case hRemakePred:
+		m.remakeArmed = true
+		m.remakeArmedPred()
 	case hSettings:
 		m.changeSettings(s.Variant)
 	case hMerge, hPush, hClose, hForce, hMoveBase:
@@ -1729,6 +2053,26 @@ func (m *hmWorld) apply(s hmStep) {
 		}
 		m.branchGone = true
 		m.reach["branch-deleted"] = true
+	}
+}
+
+// deleteStep applies a deletion (hDelete) of s.Obj, or arms one of its variants.
+func (m *hmWorld) deleteStep(s hmStep) {
+	switch s.Variant {
+	case deleteClaimHolder:
+		// A person deletes the request that holds only a claim on the merge (second decision of 2026-11-19 on #880):
+		// now, if one does and the other request has read the merge, or else at the end of the first later step after
+		// which that holds (deleteArmedClaimHolder).
+		m.claimDeleteArmed = true
+		m.deleteArmedClaimHolder()
+	case deleteRecorder:
+		m.recorderDeleteArmed = true
+		m.deleteArmedRecorder()
+	case deleteAfterLook:
+		m.lookDeleteArmed = true
+		m.deleteArmedAfterLook()
+	default:
+		m.deleteRequest(s.Obj)
 	}
 }
 
@@ -1785,6 +2129,8 @@ func (m *hmWorld) deleteArmedClaimHolder() {
 			}
 			m.logf("  a person deletes the %s, which holds only a claim on the merge", who)
 			m.deleteRequest(who)
+			// The deletion follows the checks of this step: what it leaves to the replacement is noted now.
+			m.notePredLeft(map[string]*api.RemediationRequest{hmPred: m.get(hmPred), hmRepl: m.get(hmRepl)})
 			return
 		}
 	}
@@ -1951,6 +2297,7 @@ func (m *hmWorld) personEvent(s hmStep) {
 				m.merge.failed[who] = true
 			}
 		}
+		m.merge.replHeld = m.replHoldsBeforeTakeover()
 		m.logf("  merged head %s, the %s's commit", short(cr.HeadSHA), m.merge.owner)
 		m.reach["merge"] = true
 		if m.merge.owner == hmPred || m.merge.owner == hmRepl {
@@ -2061,15 +2408,137 @@ func (m *hmWorld) checkEndedOnOtherBase(after *api.RemediationRequest) {
 	}
 }
 
+// noteClaimWithPredGone notes the reach of a reconcile of the replacement that starts in the watch after a refusal
+// holding a claim on a merge of another head (otherHeadClaim) while the predecessor is gone: P5 checks that the claim
+// still ends at its own end (#870, seed 45273).
+func (m *hmWorld) noteClaimWithPredGone(who string, before *api.RemediationRequest) {
+	if who == hmRepl && before != nil && endedBeforeTakeover(before) && otherHeadClaim(before) &&
+		ptr.Deref(before.Status.HoldsTarget, false) && m.get(hmPred) == nil && m.stored(hmPred) != nil {
+		// After the end of the watch, the predecessor made again while the claim stands (decision of 2026-11-21 on
+		// #870, narrow): the look at stopped holders sends the claim through the claim rule (P12, P13, seed 398).
+		m.reach["other-head-claim-after-watch-pred-made-again"] = true
+	}
+	if who != hmRepl || before == nil || !abortedOnRefusal(before) || !otherHeadClaim(before) || m.get(hmPred) != nil {
+		return
+	}
+	m.reach["other-head-claim-pred-gone"] = true
+	if m.stored(hmPred) != nil {
+		// Made again under the same name (hRemakePred, decision of 2026-11-21 on #870).
+		m.reach["other-head-claim-pred-made-again"] = true
+	}
+}
+
+// checkClaimNotBackedOff checks P5 for the reconcile of who that returned err: a claim on a merge of another head
+// that stood past its own end at its start (claimPast) is never handed to the error backoff for an answer of the Git
+// host (decision of 2026-11-21 on #870, count 4): the reconcile ends without an error, so the claim ends there
+// (endAfterLastRead). Only a failed Kubernetes call (a lost or conflicting status write, faulted) may return one.
+func (m *hmWorld) checkClaimNotBackedOff(who string, claimPast, faulted bool, err error) {
+	if claimPast && err != nil && !faulted && !m.paused && !errors.Is(err, errHMCrash) && !isClusterError(err) &&
+		!apierrors.IsServiceUnavailable(err) {
+		m.fail("P5", "the claim of the %s stood past its own end and the reconcile returned %v to the error backoff",
+			who, err)
+	}
+}
+
+// claimPastEnd reports whether who, about to be reconciled from before, is the replacement holding a claim on a merge
+// of another head (otherHeadClaim) whose end has passed, so the reconcile must end it (P5). A request being deleted is
+// left to the bounds of its cleanup. A claim past its end met
+// with a Git fault armed is counted (hmP5Reach): the fault is what may make the read answer with a disagreement, a 404
+// by number while the branch lists the pull request.
+func (m *hmWorld) claimPastEnd(who string, before *api.RemediationRequest) bool {
+	if who != hmRepl || before == nil || !otherHeadClaim(before) || !before.DeletionTimestamp.IsZero() {
+		return false
+	}
+	w := gitWait(before, waitMergeContent)
+	if w.Ends == nil || w.Ends.After(m.now) {
+		return false
+	}
+	m.mu.Lock()
+	armed := m.sticky != nil || len(m.once) > 0
+	m.mu.Unlock()
+	if armed {
+		m.reach["other-head-claim-past-end-git-fault"] = true
+	}
+	return true
+}
+
 // p11Applies reports whether P11 checks the reconcile of who about to start from before: the replacement in its
-// recovery wait, its predecessor gone or not naming it (namesReplacement false), and nothing armed against the
-// reconcile, as for P10.
+// recovery wait, its predecessor gone, made again or not naming it (namesReplacement false), and nothing armed against
+// the reconcile, as for P10. A replacement that holds a claim on a merge of another head (otherHeadClaim) is not
+// checked: it reads that merge on through the chain's branch whatever the predecessor is (gone, made again or no
+// longer naming it, decision of 2026-11-21 on #870), so it has something to read, and a read of it that fails (the
+// merge commit not reported yet) is named on the recovery wait. The step hRemakePred reaches the made-again case,
+// where P5 checks that the claim still ends at its own end.
 func (m *hmWorld) p11Applies(who string, before *api.RemediationRequest) bool {
 	m.mu.Lock()
 	quiet := m.sticky == nil && len(m.once) == 0 && len(m.lose) == 0 && len(m.conflict) == 0 && m.interleave == "" &&
 		m.crashAt < 0 && !m.paused && m.settings == ""
 	m.mu.Unlock()
-	return who == hmRepl && quiet && before != nil && abortedOnRefusal(before) && !m.namesReplacement()
+	return who == hmRepl && quiet && before != nil && abortedOnRefusal(before) && !m.namesReplacement() &&
+		!otherHeadClaim(before)
+}
+
+// reconcileMadeAgain reconciles the request made again under who's name (hRemakePred). It is not one of the model's
+// requests, so only P7 is checked on it.
+func (m *hmWorld) reconcileMadeAgain(who string) {
+	m.mu.Lock()
+	m.actor = who
+	m.mu.Unlock()
+	res, err := m.r.Reconcile(context.Background(), reconcile.Request{NamespacedName: m.keys[who]})
+	m.mu.Lock()
+	m.actor = ""
+	clear(m.lag)
+	m.interleave = ""
+	crashed := m.crashed
+	m.crashed, m.crashAt = false, -1
+	m.mu.Unlock()
+	m.logf("  -> %s made again: %s (requeue %v, err %v)", who, describe(m.stored(who)), res.RequeueAfter, err)
+	if crashed {
+		m.logf("  the executor crashed and restarts")
+		m.restart()
+		return
+	}
+	if err == nil && res.RequeueAfter > 0 && res.RequeueAfter < time.Second {
+		m.fail("P7", "the reconcile of the request made again as the %s asked to run again after %v", who,
+			res.RequeueAfter)
+	}
+}
+
+// remakeArmedPred carries out an armed hRemakePred: once the replacement's watch after a refusal, or the replacement
+// after the end of that watch (endedBeforeTakeover), holds a claim on a merge of another head (otherHeadClaim), a person deletes the predecessor (if it is not gone or being deleted), and
+// once nothing is stored under its name a request is made there with the predecessor's spec, spec.cancel set, and
+// another UID. The replacement's next reconcile then meets a predecessor made again while it holds the claim, which
+// must still end at its own end (P5, decision of 2026-11-21 on #870).
+func (m *hmWorld) remakeArmedPred() {
+	if m.remakeArmed {
+		repl := m.get(hmRepl)
+		if repl == nil || !abortedOnRefusal(repl) && !endedBeforeTakeover(repl) || !otherHeadClaim(repl) {
+			return
+		}
+		m.remakeArmed, m.remakePending = false, true
+		if p := m.get(hmPred); p != nil && p.DeletionTimestamp.IsZero() {
+			m.logf("  a person deletes the predecessor while the replacement holds a claim, to make it again")
+			m.deleteRequest(hmPred)
+			m.notePredLeft(map[string]*api.RemediationRequest{hmPred: m.get(hmPred), hmRepl: m.get(hmRepl)})
+		}
+	}
+	if !m.remakePending || m.stored(hmPred) != nil {
+		return
+	}
+	m.remakePending = false
+	key := m.keys[hmPred]
+	again := &api.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name,
+		UID: hmPredAgainUID}, Spec: *m.predSpec.DeepCopy()}
+	again.Spec.Cancel = true
+	if err := m.base.Create(context.Background(), again); err != nil {
+		m.t.Fatal(err)
+	}
+	m.mu.Lock()
+	delete(m.prev, key.Name)
+	delete(m.stale, key.Name)
+	m.mu.Unlock()
+	m.reach["pred-made-again"] = true
+	m.logf("  a person makes a request again under the predecessor's name")
 }
 
 // checkNothingToRead checks P11 on the replacement as stored after a reconcile that began in its recovery wait with
@@ -2123,7 +2592,8 @@ func latest(a, b time.Time) time.Time {
 // checks what must hold once reads answer.
 func (m *hmWorld) settle() {
 	m.logf("settle")
-	m.claimDeleteArmed = false
+	m.claimDeleteArmed, m.recorderDeleteArmed, m.lookDeleteArmed = false, false, false
+	m.remakeArmed, m.remakePending = false, false
 	m.mu.Lock()
 	m.sticky, m.once, m.lose, m.conflict, m.crashAt = nil, map[string]error{}, map[string]bool{}, map[string]bool{}, -1
 	m.mu.Unlock()
@@ -2148,6 +2618,9 @@ func (m *hmWorld) settle() {
 	}
 	m.liveness()
 	mg := m.merge
+	if m.otherMerge() && m.settings != settingsRemoved {
+		m.settledOtherRecord(mg, map[string]*api.RemediationRequest{hmPred: m.get(hmPred), hmRepl: m.get(hmRepl)})
+	}
 	if mg == nil || (mg.owner != hmPred && mg.owner != hmRepl) {
 		return
 	}
@@ -2165,7 +2638,8 @@ func (m *hmWorld) settle() {
 // was made.
 func (m *hmWorld) settledBreaker(mg *hmMerge, reqs map[string]*api.RemediationRequest) {
 	for _, who := range []string{hmPred, hmRepl} {
-		if (who == hmPred && m.foreignForGone(reqs)) || (who == hmRepl && m.foreignOnReplacement(reqs)) {
+		if (who == hmPred && m.foreignForGone(reqs)) || (who == hmRepl && m.foreignOnReplacement(reqs)) ||
+			(who == hmRepl && m.predHeadOnReplacement(reqs)) {
 			// #786, decision 2 of the model result of 2026-11-18: MergedWithForeignChange is a failure for the
 			// breaker, as on main.
 			continue
@@ -2192,6 +2666,10 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 		return
 	}
 	owner := m.get(mg.owner)
+	if mg.predLeft {
+		m.settledPredHeadRecord(mg, reqs)
+		return
+	}
 	if mg.afterTakeover && (owner == nil || !owner.DeletionTimestamp.IsZero()) && !mg.recorded[hmPred] {
 		// The predecessor went before it recorded the merge of its commit put back after the takeover: the replacement
 		// records it as a foreign change.
@@ -2224,6 +2702,22 @@ func (m *hmWorld) settledRecord(mg *hmMerge, reqs map[string]*api.RemediationReq
 	if (owner.Status.MergeReceipt == nil || owner.Status.MergeReceipt.HeadSHA != mg.head) && !m.foreignOnReplacement(reqs) {
 		m.failAbout("P1", aboutUnrecorded, "the merge of the %s's commit %s is not recorded on it with its receipt (pred: %s, repl: %s)",
 			mg.owner, short(mg.head), describe(m.get(hmPred)), describe(m.get(hmRepl)))
+	}
+}
+
+// settledPredHeadRecord checks P12 after the settling run for a merge of the predecessor's own head that the
+// predecessor left (predLeft): the replacement records it without a receipt while it lives and is not being deleted,
+// and the predecessor, if still there, records none.
+func (m *hmWorld) settledPredHeadRecord(mg *hmMerge, reqs map[string]*api.RemediationRequest) {
+	p, repl := reqs[hmPred], reqs[hmRepl]
+	if recordsMerge(p) {
+		m.fail("P12", "the predecessor, which left the merge of its head %s to the replacement, records it (pred: %s, "+
+			"repl: %s)", short(mg.head), describe(p), describe(repl))
+	}
+	if repl != nil && repl.DeletionTimestamp.IsZero() && !recordedAsForeign(repl) {
+		m.failAbout("P12", aboutUnrecorded, "the replacement that held the lock does not record the merge of the "+
+			"predecessor's head %s, which the predecessor left (pred: %s, repl: %s)", short(mg.head), describe(p),
+			describe(repl))
 	}
 }
 
@@ -2392,7 +2886,7 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 	weights := []weighted{{6, hRecPred}, {6, hRecRepl}, {4, hClock}, {3, hFault}, {2, hAnswer}, {1, hLose},
 		{1, hConflict}, {1, hRestart}, {1, hCrash}, {1, hPause}, {1, hLift}, {1, hDelete}, {2, hMerge}, {1, hPush},
 		{1, hClose}, {1, hReopen}, {1, hBranch}, {1, hForce}, {1, hSettings}, {2, hDeleteClaim}, {1, hRestartLate},
-		{3, hInterleave}, {1, hStale}}
+		{3, hInterleave}, {1, hStale}, {1, hDeleteRecorder}, {1, hDeleteAfterLook}}
 	switch focus {
 	case 1:
 		weights = append(weights, weighted{3, hFault}, weighted{2, hClock}, weighted{2, hMerge}, weighted{3, hDeleteClaim})
@@ -2400,7 +2894,7 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 		weights = append(weights, weighted{2, hLose}, weighted{2, hClock}, weighted{2, hFault})
 	case 3:
 		weights = append(weights, weighted{2, hCrash}, weighted{2, hDelete}, weighted{3, hClock}, weighted{2, hDeleteClaim},
-			weighted{1, hForce}, weighted{2, hRestartLate})
+			weighted{1, hForce}, weighted{2, hRestartLate}, weighted{2, hDeleteRecorder}, weighted{2, hDeleteAfterLook})
 	}
 	total := 0
 	for _, w := range weights {
@@ -2417,6 +2911,12 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 			}
 			n -= w.w
 		}
+		if k == hDeleteRecorder || k == hDeleteAfterLook {
+			// The shape of the step needs a merge of the predecessor's own head: a person puts it back and merges it,
+			// and the predecessor is deleted once it records that merge (record, delete, look; #870).
+			steps = append(steps, hmStep{Kind: hForce, Variant: forceDrop},
+				hmStep{Kind: hMerge, Commit: rng.IntN(4) > 0})
+		}
 		steps = append(steps, hmDrawStep(rng, k, focus))
 	}
 	// Most sequences reach a merge or a close: one without a step that ends the pull request gets one, nine times in
@@ -2429,6 +2929,14 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 		}
 		steps[hmSteps/2+rng.IntN(hmSteps-hmSteps/2)] = end
 	}
+	// One sequence in two gets the armed deletion and making again of the predecessor (hRemakePred, decision of
+	// 2026-11-21 on #870), drawn from a generator of its own so that the steps above stay what they were for each
+	// seed; it does nothing until the replacement's watch holds a claim on a merge of another head.
+	// #nosec G404 -- a seeded generator, as above.
+	remake := rand.New(rand.NewPCG(seed^0x9e3779b97f4a7c15, seed))
+	if remake.IntN(2) == 0 {
+		steps = slices.Insert(steps, remake.IntN(len(steps)+1), hmStep{Kind: hRemakePred})
+	}
 	return start, steps
 }
 
@@ -2436,8 +2944,13 @@ func hmGenerate(seed uint64) (string, []hmStep) {
 func hmDrawStep(rng *rand.Rand, k hmKind, focus uint64) hmStep {
 	objs := []string{hmPred, hmRepl}
 	s := hmStep{Kind: k}
-	if k == hDeleteClaim {
+	switch k {
+	case hDeleteClaim:
 		s = hmStep{Kind: hDelete, Variant: deleteClaimHolder}
+	case hDeleteRecorder:
+		s = hmStep{Kind: hDelete, Variant: deleteRecorder}
+	case hDeleteAfterLook:
+		s = hmStep{Kind: hDelete, Variant: deleteAfterLook}
 	}
 	switch k {
 	case hClock:
@@ -2510,6 +3023,7 @@ func hmSeeds(t *testing.T) []uint64 {
 	if testing.Short() || raceDetector {
 		to = 100
 	}
+	extra := hmFixedSeeds
 	if s := os.Getenv("SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE"); s != "" {
 		a, b, _ := strings.Cut(s, "-")
 		x, errA := strconv.ParseUint(a, 10, 64)
@@ -2517,14 +3031,30 @@ func hmSeeds(t *testing.T) []uint64 {
 		if errA != nil || errB != nil || y < x {
 			t.Fatalf("SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE=%q; want from-to", s)
 		}
-		from, to = x, y
+		from, to, extra = x, y, nil
 	}
-	seeds := make([]uint64, 0, to-from+1)
+	seeds := make([]uint64, 0, to-from+1+uint64(len(extra)))
 	for s := from; s <= to; s++ {
 		seeds = append(seeds, s)
 	}
+	for _, s := range extra {
+		if s > to {
+			seeds = append(seeds, s)
+		}
+	}
 	return seeds
 }
+
+// hmFixedSeeds run with the default set (CI's, under the race detector too): seeds past it that reach a shape the
+// default set does not. 45273 (#870): the watch after a refusal holds a claim on a merge of the predecessor's own head
+// (its MergeContent wait, the Git host reporting no merge commit ID) when the predecessor is gone; the claim stood
+// about a day past its end (P5) while the watch read nothing with the predecessor gone. The same seed then makes the
+// predecessor again under its name (hRemakePred), the claim still standing: the watch reads it on (decision of
+// 2026-11-21 on #870). 398 (#870, narrow decision of 2026-11-21): the claim starts after the end of the watch and the
+// predecessor is made again under its name (hRemakePred, armed for that shape too); P12 and P13 fail when the look at
+// stopped holders sends that claim to the generic look, which releases the lock with no record (seeds 911 and 2464
+// too, in the run of 1 to 6,000).
+var hmFixedSeeds = []uint64{45273, 398}
 
 func TestHandoffModel(t *testing.T) {
 	schema := requestStatusSchema(t)
@@ -2533,6 +3063,27 @@ func TestHandoffModel(t *testing.T) {
 	t.Cleanup(func() {
 		// The reach counts (and the failures per property) are in the log of every run, go test -v shows them.
 		t.Logf("handoff model summary: %v", counts)
+		if t.Failed() || os.Getenv("SHADEWRIGHT_HANDOFF_MODEL_SEED") != "" ||
+			os.Getenv("SHADEWRIGHT_HANDOFF_MODEL_SEED_RANGE") != "" {
+			return
+		}
+		// P12 proves nothing on a seed set that never reaches its shapes: the default set (the one CI runs, 1 to 100
+		// under the race detector) must reach each of them.
+		for _, k := range hmP12Reach {
+			if counts["reach "+k] == 0 {
+				t.Errorf("P12: no seed of the default set reached %q", k)
+			}
+		}
+		for _, k := range hmP5Reach {
+			if counts["reach "+k] == 0 {
+				t.Errorf("P5: no seed of the default set reached %q", k)
+			}
+		}
+		for _, k := range hmP13Reach {
+			if counts["reach "+k] == 0 {
+				t.Errorf("P13: no seed of the default set reached %q", k)
+			}
+		}
 	})
 	for _, seed := range hmSeeds(t) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -2575,6 +3126,20 @@ func TestHandoffModel(t *testing.T) {
 		})
 	}
 }
+
+// hmP12Reach are the shapes of P12 the default seed set must reach (TestHandoffModel): a merge of the predecessor's
+// own head it left to the replacement, and one it recorded and then was deleted (record, delete, look).
+var hmP12Reach = []string{"pred-head-merge-pred-left", "pred-head-recorded-then-deleted", "pred-head-looked-then-deleted"}
+
+// hmP13Reach are the shapes of P13 the default seed set must reach: a replacement before its takeover that lets go of
+// the lock on a merge (each such release is checked).
+var hmP13Reach = []string{"release-on-merge-before-takeover"}
+
+// hmP5Reach are the shapes of P5 the default seed set (with hmFixedSeeds) must reach: a claim on a merge of another
+// head held by the watch after a refusal once the predecessor is gone, and once it is made again under its name, and
+// such a claim held after the end of the watch with the predecessor made again (#870).
+var hmP5Reach = []string{"other-head-claim-pred-gone", "other-head-claim-pred-made-again",
+	"other-head-claim-after-watch-pred-made-again"}
 
 // hmDirected runs a scripted sequence and fails with the violations.
 func hmDirected(t *testing.T, start string, steps []hmStep) *hmWorld {
@@ -2790,5 +3355,57 @@ func TestHandoffModelRecoveryWaitEndsOnAMergeOnAnotherBase(t *testing.T) {
 		stRecRepl, stRecPred})
 	if !m.reach["recovery-wait-merged-elsewhere"] {
 		t.Fatal("the sequence did not reach a recovery wait with its pull request merged into another base")
+	}
+}
+
+// #870, seed 47788: the replacement holds a claim on a merge of another head (its content wait after a failed read),
+// its next read of what the merge brought works, and the status write of its record meets a conflict. The claim stays
+// until a write stores the record: the content read removes no wait of its own, so the lost write leaves the claim.
+func TestHandoffModelOtherHeadClaimSurvivesALostRecordWrite(t *testing.T) {
+	m := hmDirected(t, hmStartIntent, []hmStep{{Kind: hFault, Code: 404, Op: opCheckCommit}, {Kind: hPush},
+		{Kind: hMerge}, stRecRepl, stRecRepl, {Kind: hConflict, Obj: hmRepl}, stRecRepl})
+	if m.merge == nil || m.merge.firstRead != hmRepl || !m.merge.recorded[hmRepl] {
+		t.Fatalf("the merge is not read first and recorded by the replacement: %+v", m.merge)
+	}
+}
+
+// #870, seed 45273 (minimal sequence): the predecessor's own commit is put back and merged, the Git host reports no
+// merge commit ID, the replacement's handoff is aborted at a refused read, and the predecessor is deleted without a
+// record. The replacement's watch claims the merge (its MergeContent wait for the merge commit ID), and once the
+// predecessor is gone it reads that merge on through the chain's branch, so the claim ends at its own end
+// (MergeContentUnreadable) instead of about a day later at the end of the watch (P5).
+func TestHandoffModelOtherHeadClaimEndsWithThePredecessorGone(t *testing.T) {
+	m := hmDirected(t, hmStartPushed, []hmStep{{Kind: hForce, Variant: forceDrop}, stMergeNoID,
+		{Kind: hFault, Code: 403, Op: opBranchHead}, stRecRepl, {Kind: hDelete, Obj: hmPred}, stRecRepl})
+	if !m.reach["other-head-claim-pred-gone"] {
+		t.Fatal("the sequence did not reach a claim on a merge of another head with the predecessor gone")
+	}
+}
+
+// #870, seed 45273 with the step hRemakePred (decision of 2026-11-21 on #870, minimal sequence): as above, and once the
+// replacement's watch holds the claim with the predecessor gone, a request is made again under the predecessor's
+// name. The watch reads the claimed merge on whatever the predecessor is, so the claim ends at its own end (P5);
+// before, it went idle with the predecessor made again and the claim stood until the end of the watch.
+func TestHandoffModelOtherHeadClaimEndsWithThePredecessorMadeAgain(t *testing.T) {
+	m := hmDirected(t, hmStartPushed, []hmStep{{Kind: hForce, Variant: forceDrop}, stMergeNoID,
+		{Kind: hFault, Code: 403, Op: opBranchHead}, stRecRepl, {Kind: hDelete, Obj: hmPred}, stRecRepl, stRecPred,
+		{Kind: hRemakePred}, stRecRepl, stRecPred, stRecRepl})
+	if !m.reach["other-head-claim-pred-made-again"] {
+		t.Fatal("the sequence did not reach a claim on a merge of another head with the predecessor made again")
+	}
+}
+
+// #870, count 4 of 2026-11-21, case 1: after the end of the watch, the replacement claims a merge of the predecessor's
+// own head (no merge commit ID) through the predecessor, which still hands over. Once the claim passed its end, the
+// Git host answers 404 for the pull request by its number while the branch lists it. The answers disagree, so the
+// reconcile ends without an error and the claim ends there (P5). Before, heldRecovery handed that verdict to the error
+// backoff and the claim stood past its end. With that fix reverted, no drawn seed of 1 to 30,000 broke P5 this way, so
+// the shape is kept as this directed sequence.
+func TestHandoffModelClaimPastItsEndWithAnswersThatDisagree(t *testing.T) {
+	m := hmDirected(t, hmStartPushed, []hmStep{stSticky(403), stRecRepl, stAnswer, stClock(clockDay), stRecRepl,
+		{Kind: hPush}, stMergeNoID, stRecRepl, stClock(clockDay),
+		{Kind: hFault, Code: 404, Op: opGet}, stRecRepl, stRecRepl})
+	if !m.reach["other-head-claim-past-end-git-fault"] {
+		t.Fatal("the sequence did not reach a claim past its end with a Git fault armed")
 	}
 }

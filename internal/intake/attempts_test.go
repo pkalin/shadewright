@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -137,7 +138,7 @@ func TestExtraAttemptRaisesTheLimitForTheRecordItNames(t *testing.T) {
 	}
 }
 
-// barrierLedger holds the first reservation of every run until n runs reach it, once before the name is
+// barrierLedger holds the first reservation of every run until both runs reach it, once before the name is
 // created and once after: the interleaving in which every run passed the first count before any other
 // reserved, and listed again after every other reserved.
 type barrierLedger struct {
@@ -151,7 +152,8 @@ type barrier struct {
 	release chan struct{}
 }
 
-func newBarrier(n int) *barrier { return &barrier{n: n, release: make(chan struct{})} }
+// newBarrier holds two runs: the racing tests race two.
+func newBarrier() *barrier { return &barrier{n: 2, release: make(chan struct{})} }
 
 func (b *barrier) wait(ctx context.Context) error {
 	b.mu.Lock()
@@ -193,7 +195,7 @@ func TestRacingRunsCannotBothTakeTheLastAttempt(t *testing.T) {
 		t.Fatal("the failing judge call was not an error")
 	}
 	calls := f.modelCalls()
-	bl := &barrierLedger{Ledger: dir, before: newBarrier(2), after: newBarrier(2)}
+	bl := &barrierLedger{Ledger: dir, before: newBarrier(), after: newBarrier()}
 	errs := make([]error, 2)
 	var wg sync.WaitGroup
 	for i, run := range []string{runB, "run-c"} {
@@ -214,6 +216,50 @@ func TestRacingRunsCannotBothTakeTheLastAttempt(t *testing.T) {
 		if !errors.As(err, &ae) || !ae.Raced || ae.Attempts != 3 {
 			t.Fatalf("a racing run: %v", err)
 		}
+	}
+}
+
+// Two runs of two records, racing for the last room under the judge family's monthly cap, cannot both call the
+// judge. In the worst interleaving both list the month under the cap, both reserve, and both read the sum again
+// with both reservations: both stop with the budget status before the call, and their reservations stay.
+func TestRacingRunsCannotBothPassTheMonthlyCap(t *testing.T) {
+	recs := []analysis.Record{recordOf(t, rngOf(103, 104), claudeID), recordOf(t, rngOf(105, 106), claudeID)}
+	ta, tb := firstCallTokens(t, recs[0]), firstCallTokens(t, recs[1])
+	f := newFixture(t)
+	judge := &countingModel{}
+	f.scorer.Models[FamilyOpenAI] = Model{Provider: judge, Name: gptID}
+	// Room for either call alone, not for both.
+	f.scorer.Limits.MaxMonthTokens = ta + tb - 1
+	dir := DirLedger{Root: t.TempDir()}
+	bl := &barrierLedger{Ledger: dir, before: newBarrier(), after: newBarrier()}
+	now := time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)
+	scores, errs := make([]Score, 2), make([]error, 2)
+	var wg sync.WaitGroup
+	for i, run := range []string{runA, runB} {
+		s := *f.scorer
+		s.Ledger, s.Run, s.Now = bl, run, func() time.Time { return now }
+		wg.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			scores[i], errs[i] = s.Score(ctx, sourceOf(t, recs[i]))
+		})
+	}
+	wg.Wait()
+	rs, err := dir.List(context.Background(), now.Format("2006-01"), FamilyOpenAI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := judge.n.Load(); n != 0 {
+		t.Fatalf("racing runs made %d judge calls with %d tokens reserved under a cap of %d, want none: %v",
+			n, Spent(rs), f.scorer.Limits.MaxMonthTokens, errs)
+	}
+	for i := range scores {
+		if errs[i] != nil || scores[i].Status != StatusBudget || !strings.Contains(scores[i].Reason, "monthly token cap") {
+			t.Fatalf("racing run %d: %+v, %v", i, scores[i], errs[i])
+		}
+	}
+	if Spent(rs) != ta+tb {
+		t.Fatalf("the stopped runs' reservations sum to %d, want both kept (%d)", Spent(rs), ta+tb)
 	}
 }
 

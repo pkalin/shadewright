@@ -480,6 +480,40 @@ func TestLedgerFailureIsAnErrorWithoutACall(t *testing.T) {
 	}
 }
 
+// failAfterCallLedger fails every listing once a reservation of the call exists.
+type failAfterCallLedger struct {
+	*memLedger
+	call int
+}
+
+func (l failAfterCallLedger) List(ctx context.Context, month string, f Family) ([]Reservation, error) {
+	l.mu.Lock()
+	reserved := false
+	for _, r := range l.reserved {
+		reserved = reserved || r.Call == l.call
+	}
+	l.mu.Unlock()
+	if reserved {
+		return nil, errors.New("list failed")
+	}
+	return l.memLedger.List(ctx, month, f)
+}
+
+// A failed read of the month's sum after a call's reservation is an error for a retry: that call is not made
+// and the reservation stays. The cross-check's call is the one with no other listing after its reservation.
+func TestFailedSumAfterTheReservationIsAnErrorWithoutACall(t *testing.T) {
+	rec := recordOf(t, rngOf(35, 36), claudeID)
+	f := newFixture(t)
+	f.scorer.Ledger = failAfterCallLedger{memLedger: f.ledger, call: 2}
+	f.openai.replies = []providers.Completion{toolReply(askCall("a", "Why?")), answerReply(gptID)}
+	f.anthropic.replies = []providers.Completion{{Content: plainAnswer}}
+	_, err := f.scorer.Score(context.Background(), sourceOf(t, rec))
+	if err == nil || f.anthropic.calls() != 0 || len(f.ledger.reserved) != 2 {
+		t.Fatalf("err = %v, %d cross-check calls, %d reservations; want an error, no call, two reservations", err,
+			f.anthropic.calls(), len(f.ledger.reserved))
+	}
+}
+
 // The judge's answer must fit the schema; a note the redactor refuses is dropped.
 func TestJudgeAnswerSchema(t *testing.T) {
 	cases := map[string]struct {

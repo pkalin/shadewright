@@ -290,7 +290,9 @@ func (r *run) do(ctx context.Context, src Source) (Score, error) {
 const billedAttempts = 1
 
 // reserve counts a call at its maximum before it is made: it returns false, with the cap's name, when the call
-// would pass a cap, and an error when the month's sum cannot be read or the reservation cannot be created.
+// would pass a cap, and an error when the month's sum cannot be read or the reservation cannot be created. After
+// the reservation it reads the month's sum again and returns false when the sum, its own reservation included,
+// is over the monthly cap (a run that reserved at the same time); that reservation stays.
 func (r *run) reserve(ctx context.Context, fam Family, call int, cr checkedRequest) (bool, string, error) {
 	req := cr.req
 	out := int64(req.MaxOutputTokens)
@@ -316,6 +318,17 @@ func (r *run) reserve(ctx context.Context, fam Family, call int, cr checkedReque
 		return false, "", fmt.Errorf("reserving the spend of call %d: %w", call, err)
 	}
 	r.score.Reserved += tokens
+	// The sum again, with this reservation in it: two runs that both read the month under the cap and reserved
+	// at the same time cannot both call, because the later of their two listings sees both reservations. Both
+	// may stop; the reservation of a stopped run stays and counts, so the sum errs high, never low.
+	rs, err = r.Ledger.List(ctx, r.score.Month, fam)
+	if err != nil {
+		return false, "", fmt.Errorf("reading the month's spend reservations again: %w", err)
+	}
+	if Spent(rs) > r.Limits.MaxMonthTokens {
+		return false, "another run reserved at the same time and the calls would pass the monthly token cap of the " +
+			string(fam) + " family", nil
+	}
 	return true, "", nil
 }
 

@@ -199,10 +199,13 @@ type ownWindows struct {
 	m sync.Map
 }
 
-// ownWindow is one entry of ownWindows, for the request with uid.
+// ownWindow is one entry of ownWindows, for the request with uid. start is the last open window this process
+// left while no reset of its own was waiting for a write; pending is a later one opened while such a reset was
+// still kept in unwrittenResets (#970), which status holds only once that write is stored.
 type ownWindow struct {
 	uid     types.UID
 	start   *metav1.Time
+	pending *metav1.Time
 	restart *verification.Restart
 }
 
@@ -218,23 +221,37 @@ func (o *ownWindows) load(rr *remediationv1alpha1.RemediationRequest) ownWindow 
 	return ownWindow{uid: rr.UID}
 }
 
-// owns reports whether the open window w is the last one a check of this process left open. Only the start this process
-// stored in memory is compared with w's, a value it wrote itself: no time of another process is compared.
+// owns reports whether the open window w is one a check of this process left open: its start or, while a write
+// that would store it may still be lost, its pending one. Only starts this process stored in memory are compared
+// with w's, values it wrote itself: no time of another process is compared.
 func (o *ownWindows) owns(rr *remediationv1alpha1.RemediationRequest, w verification.Window) bool {
+	if !w.Open() {
+		return false
+	}
 	e := o.load(rr)
-	return w.Open() && e.start != nil && e.start.Equal(w.Start)
+	return (e.start != nil && e.start.Equal(w.Start)) || (e.pending != nil && e.pending.Equal(w.Start))
 }
 
 // note remembers the start of w when the check left it open, whether its write is stored or lost: a lost one
 // leaves another window in status, which is then not this process's. A check that closed w keeps the start: when
 // its write is lost, status still holds the window this process opened, which the next check must not take for
 // an earlier process's (the reset kept in unwrittenResets closes it again).
-func (o *ownWindows) note(rr *remediationv1alpha1.RemediationRequest, w verification.Window) {
+//
+// While kept still holds a reset of this process that no write stored, the start is not replaced (#970): status
+// may still hold the window that reset closes, and a second lost write in a row would otherwise make the next
+// check take it for an earlier process's and record a restart that did not happen. The new start is pending
+// instead, owned too, since that write may also be stored; the first check after a stored write makes it the
+// start.
+func (o *ownWindows) note(rr *remediationv1alpha1.RemediationRequest, w verification.Window, kept bool) {
 	if !w.Open() {
 		return
 	}
 	e := o.load(rr)
-	e.start = w.Start.DeepCopy()
+	if kept {
+		e.pending = w.Start.DeepCopy()
+	} else {
+		e.start, e.pending = w.Start.DeepCopy(), nil
+	}
 	o.m.Store(client.ObjectKeyFromObject(rr), e)
 }
 
@@ -304,7 +321,8 @@ func (r *RemediationRequestReconciler) checkWindow(rr *remediationv1alpha1.Remed
 // (unwrittenResets) and the open window that is this process's (ownWindows).
 func (r *RemediationRequestReconciler) noteWindow(rr *remediationv1alpha1.RemediationRequest, w verification.Window) {
 	r.unwrittenResets.note(rr, w)
-	r.ownWindows.note(rr, w)
+	_, kept := r.unwrittenResets.get(rr)
+	r.ownWindows.note(rr, w, kept)
 }
 
 // executorWindow returns the executor's own window from the request's status.

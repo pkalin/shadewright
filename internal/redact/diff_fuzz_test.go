@@ -387,9 +387,10 @@ func TestStringWorkAfterRepeatedTokens(t *testing.T) {
 // Strings of seed 4 in the grammar (TOKEN="a",b, repeated to the size limit), which reads the strings joined, cost
 // about 1,382 own steps per byte.
 func TestStringsWorkAfterRepeatedTokens(t *testing.T) {
+	skipUncounted(t)
 	fails, counted := diffStrings(seedTokenRepeatGrammar)
 	if !counted {
-		t.Skip("redaction work is counted only with the build tag redactwork")
+		t.Fatal("redaction work was not counted")
 	}
 	for _, f := range fails {
 		t.Error(f)
@@ -401,9 +402,10 @@ func TestStringsWorkAfterRepeatedTokens(t *testing.T) {
 // of the line before it cut it at the next key, so the own work grew with the square of the line (259, 435 and
 // 788 steps per byte at a quarter, a half and all of it).
 func TestStringTwiceWorkOnALineWithNoBlank(t *testing.T) {
+	skipUncounted(t)
 	fails, counted := diffStringTwice([]byte("10&00001Blr{"))
 	if !counted {
-		t.Skip("redaction work is counted only with the build tag redactwork")
+		t.Fatal("redaction work was not counted")
 	}
 	for _, f := range fails {
 		t.Error(f)
@@ -415,11 +417,9 @@ func TestStringTwiceWorkOnALineWithNoBlank(t *testing.T) {
 // own work grew with the square of the run (1,060 steps per byte here). The release's reading of it still grows
 // so (#962): the budget withholds it, the known P6 failure of knownDiffFailures, and any other property fails.
 func TestReplaceFromWorkOnGluedFlags(t *testing.T) {
+	skipUncounted(t)
 	data := []byte("10\x060\x052<12")
 	fails, counted := diffReplaceFrom(data)
-	if !counted {
-		t.Skip("redaction work is counted only with the build tag redactwork")
-	}
 	checkDiff(t, "FuzzDiffReplaceFrom", data, counted, fails)
 }
 
@@ -427,9 +427,10 @@ func TestReplaceFromWorkOnGluedFlags(t *testing.T) {
 // release's reading. It skips without the counter (the build tag redactwork).
 func checkOwnWork(t *testing.T, what, in string, f func()) {
 	t.Helper()
+	skipUncounted(t)
 	total, release, counted := measureWork(f)
 	if !counted {
-		t.Skip("redaction work is counted only with the build tag redactwork")
+		t.Fatal("redaction work was not counted")
 	}
 	t.Logf("%s on %d bytes: the rest %.1f steps per byte", what, len(in), perByte(total-release, len(in)))
 	for _, fail := range workFails(what, total, release, len(in)) {

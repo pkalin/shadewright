@@ -290,7 +290,9 @@ func budgetOverrun(size int) int64 { return 4*int64(size) + 64 }
 func TestBudgetBoundsTheFourShapes(t *testing.T) {
 	sizes := []int{16 << 10, 64 << 10}
 	if raceDetector {
-		sizes = sizes[:1]
+		// One size, 8 KiB: the race detector makes each redaction 10 to 20 times slower, and make test runs both
+		// sizes without it.
+		sizes = []int{8 << 10}
 	}
 	shapeNames := slices.Sorted(maps.Keys(budgetShapes(0)))
 	for ei, e := range budgetEntries {
@@ -392,14 +394,19 @@ func TestBudgetDecidesWholeOrWithholdsWhole(t *testing.T) {
 }
 
 // budgetSweep returns budgets from none to need steps: every step up to 64, then about 200 spread over the rest,
-// need-1 and need.
+// need-1 and need. Under -race it is every step up to 16 and about 40 spread over the rest, need-1 and need: each
+// budget is one redaction, 10 to 20 times slower there, and make test runs the whole sweep without -race.
 func budgetSweep(need int64) []int64 {
+	first, spread := int64(64), int64(200)
+	if raceDetector {
+		first, spread = 16, 40
+	}
 	var out []int64
-	for s := int64(0); s < min(need, 64); s++ {
+	for s := int64(0); s < min(need, first); s++ {
 		out = append(out, s)
 	}
-	for k := int64(1); k <= 200; k++ {
-		out = append(out, need*k/201)
+	for k := int64(1); k <= spread; k++ {
+		out = append(out, need*k/(spread+1))
 	}
 	return append(out, max(need-1, 0), need)
 }

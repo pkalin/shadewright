@@ -20,6 +20,13 @@ package redact
 
 import "testing"
 
+// skipUncounted skips a test that checks nothing but counted work, before it runs any redaction: without the tag
+// such a test would redact its input (seconds under -race) only to skip.
+func skipUncounted(t *testing.T) {
+	t.Helper()
+	t.Skip("work is counted only with -tags redactwork (make test runs it)")
+}
+
 // countWork skips the test: work is counted only in a build with the tag redactwork, which make test runs
 // for this package.
 func countWork(t *testing.T, _ func()) int64 {

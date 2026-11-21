@@ -150,14 +150,19 @@ test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
 	@# the heaviest tests by name (REDACT_SHARD_*), the last runs every other test with -skip, so a test renamed out
 	@# of a shard runs in the last binary and none drops out. They and the run of the other three packages go side by
 	@# side (hack/side-by-side.sh: one process each, each output printed whole when all are done, any failure fails
-	@# make test); one after the other they took about 1,800 s of the test job on a hosted runner.
-	MAKE="$(MAKE)" hack/side-by-side.sh $(REDACTWORK_TARGETS)
+	@# make test); one after the other they took about 1,800 s of the test job on a hosted runner, and side by side on
+	@# its four cores about 1,300 s, two of them past their 20 minutes (2026-11-21). CI therefore runs make test with
+	@# REDACTWORK_IN_TEST=no and each of REDACTWORK_TARGETS in a job of its own (.github/workflows/test.yml, the list
+	@# from make redactwork-list), so every input is still checked on every pull request.
+	$(if $(filter yes,$(REDACTWORK_IN_TEST)),MAKE="$(MAKE)" hack/side-by-side.sh $(REDACTWORK_TARGETS),@echo "make test: the runs with the tag redactwork are left out (REDACTWORK_IN_TEST=$(REDACTWORK_IN_TEST)): run make $(REDACTWORK_TARGETS)")
 	@# The time bound of the wide mapping refusal is checked only without -race (internal/gitops/patch/race_test.go).
 	go test -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
 
-# The runs with the tag redactwork of make test, which hack/side-by-side.sh starts side by side.
+# The runs with the tag redactwork of make test, which hack/side-by-side.sh starts side by side. CI sets
+# REDACTWORK_IN_TEST=no and runs each in a job of its own (make redactwork-list).
 REDACTWORK_TARGETS := test-redactwork-1 test-redactwork-2 test-redactwork-3 test-redactwork-4 test-redactwork-5 \
 	test-redactwork-rest test-redactwork-other
+REDACTWORK_IN_TEST ?= yes
 REDACTWORK_TEST := go test -timeout 20m -tags redactwork
 
 .PHONY: $(REDACTWORK_TARGETS)
@@ -167,6 +172,12 @@ test-redactwork-rest:
 	$(REDACTWORK_TEST) -skip '^($(REDACT_SHARD_1)|$(REDACT_SHARD_2)|$(REDACT_SHARD_3)|$(REDACT_SHARD_4)|$(REDACT_SHARD_5))$$' ./internal/redact
 test-redactwork-other:
 	$(REDACTWORK_TEST) ./internal/redact/released ./internal/providers/logs/kube ./internal/incidentcontext
+
+# One line of JSON for the matrix of the redactwork jobs of .github/workflows/test.yml: every entry of
+# REDACTWORK_TARGETS, so that a run added to make test is a job in CI as well.
+.PHONY: redactwork-list
+redactwork-list: ## Print REDACTWORK_TARGETS as a JSON array (the matrix of the redactwork jobs in CI).
+	@printf '[%s]\n' "$$(printf '"%s",' $(REDACTWORK_TARGETS) | sed 's/,$$//')"
 
 # The evaluation harness (test/eval, docs/evaluation.md). make test runs it too; these targets write the report.
 EVAL_REPORT_DIR ?= $(LOCALBIN)/eval

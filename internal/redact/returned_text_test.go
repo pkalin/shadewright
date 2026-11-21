@@ -331,8 +331,13 @@ func TestRenamingAlikeMapKeysIsLinear(t *testing.T) {
 		runtime.ReadMemStats(&after)
 		return float64(after.Mallocs - before.Mallocs)
 	}
-	small, large := allocs(512), allocs(2048)
-	t.Logf("allocations for 512 and 2,048 alike keys: %.0f and %.0f (%.1f times)", small, large, large/small)
+	n := 512
+	if redact.RaceDetector {
+		// The race detector makes each call 10 to 20 times slower; 128 and 512 keys show the same ratio.
+		n = 128
+	}
+	small, large := allocs(n), allocs(4*n)
+	t.Logf("allocations for %d and %d alike keys: %.0f and %.0f (%.1f times)", n, 4*n, small, large, large/small)
 	if large > 8*small {
 		t.Errorf("4 times the keys take %.1f times the allocations: the renaming is not linear", large/small)
 	}

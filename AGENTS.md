@@ -151,15 +151,15 @@ Every issue names the ADRs it is tied to:
 - **Tests.** Every bug fix gets a test that fails without it; every new API rule gets a refusal test.
   `make test` runs with the race detector (`-race`), then runs `internal/redact`, the log source and the context
   builder, and the kept reading of the release before (`internal/redact/released`), once more without it and with
-  the build tag `redactwork`: the timing tests skip under `-race`, the generated corpora (block values, connection
+  the build tag `redactwork` (CI runs `make test REDACTWORK_IN_TEST=no` and each of those runs in a job of its
+  own, the list from `make redactwork-list`): the timing tests skip under `-race`, the generated corpora (block values, connection
   strings, and those compared with main or with the release before) check a seeded sample there and every input
   without it, and the linearity tests count
   redaction work only with that tag (the product build spends each step on the meter of its call, the work budget,
   and holds no shared counter). Dynamic
   analysis is the race detector and the Go fuzz targets: a `Fuzz` function in a parser or matcher of untrusted
   input goes into `FUZZ_TARGETS` in the Makefile (`make fuzz` fails when one is missing or an entry names no
-  such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a few minutes weekly (today its job is
-  cancelled at 30 minutes after the first eight targets, before the differential ones, until #999 is fixed); a
+  such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a few minutes weekly, one job per target; a
   target in a package with a file built only with `redactwork` (the differential targets of `internal/redact` and
   of the context builder) runs with that tag. The budget stops the work of an entry where it would pass its bound and withholds
   the entry, so a fuzz target finds a reading whose work grows faster than the text by its withhold: every target

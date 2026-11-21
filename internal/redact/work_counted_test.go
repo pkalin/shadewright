@@ -20,6 +20,10 @@ package redact
 
 import "testing"
 
+// skipUncounted skips a test that checks nothing but counted work, before it does any: here work is counted, so
+// it does nothing.
+func skipUncounted(*testing.T) {}
+
 // countWork returns the work ([Work]) of f.
 func countWork(_ *testing.T, f func()) int64 { return Work(f) }
 

@@ -22,9 +22,9 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
 
+	"github.com/pkalin/shadewright/internal/redact/meter"
 	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
@@ -742,9 +742,18 @@ func workString(t *testing.T, name, in string) (int64, int) {
 	return w, len(in)
 }
 
-// Nested entries whose lines all belong to the first one: each match reads a bounded part of them.
+// Nested entries whose lines all belong to the first one: each match reads a bounded part of them, so the steps
+// String spends (its budget's count, in every build) grow with the text. The test compares the steps per byte at
+// two sizes instead of timing a call (decision of 2026-11-21 on #873): 64 KiB and 1 MiB without -race, where
+// the flag block scalars spend 735 steps per byte at 1 MiB against 244 at 64 KiB when the extent rule reads
+// without its bound (maxValueExtent), and 4 KiB and 16 KiB under -race, which take about two seconds there and
+// show a read of the rest of the text per entry, but not one cut at 4 KiB: only the run without -race sees that.
 func TestNestedBlocksStayLinear(t *testing.T) {
-	skipLarge(t)
+	parallelUnderRace(t)
+	small, large := 1<<16, 1<<20
+	if raceDetector {
+		small, large = 1<<12, 1<<14
+	}
 	for name, line := range map[string]func(indent string) string{
 		"env entries":   func(in string) string { return in + "- name: DB_PASSWORD\n" },
 		"empty headers": func(in string) string { return in + "password:\n" },
@@ -755,18 +764,32 @@ func TestNestedBlocksStayLinear(t *testing.T) {
 		// Issue #708: block scalars after a flag item, each below the one before.
 		"flag block scalars": func(in string) string { return in + "- --password\n" + in + "- |\n" },
 	} {
-		var b strings.Builder
-		for i := 0; b.Len() < 1<<20; i++ {
-			b.WriteString(line(strings.Repeat(" ", i)))
+		var perByte [2]float64
+		for i, size := range []int{small, large} {
+			var b strings.Builder
+			for i := 0; b.Len() < size; i++ {
+				b.WriteString(line(strings.Repeat(" ", i)))
+			}
+			in := b.String()
+			wm := meter.New(budgetOf(len(in)))
+			over := false
+			var out string
+			func() {
+				defer meter.Catch(&over)
+				out = render(wm, in, defaultRedactor.spans(wm, in))
+			}()
+			if over {
+				t.Errorf("%s: %d bytes used up the budget of %d steps", name, len(in), budgetOf(len(in)))
+				continue
+			}
+			if len(out) > len(in) {
+				t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+			}
+			perByte[i] = float64(wm.Spent()) / float64(len(in))
 		}
-		in := b.String()
-		start := time.Now()
-		out := String(in)
-		if d := time.Since(start); d > 10*time.Second {
-			t.Errorf("%s: %d bytes took %s", name, len(in), d)
-		}
-		if len(out) > len(in) {
-			t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+		if perByte[0] > 0 && perByte[1] > 1.5*perByte[0] {
+			t.Errorf("%s: %.0f steps per byte at %d bytes, %.0f at %d: the work grows faster than the text",
+				name, perByte[1], large, perByte[0], small)
 		}
 	}
 }

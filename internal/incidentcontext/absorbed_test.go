@@ -57,7 +57,7 @@ func tallyOf(t *testing.T, summary string) []string {
 
 func cause(tally ...remediationv1alpha1.AbsorbedTally) *remediationv1alpha1.Incident {
 	inc := incident(deploymentRef())
-	inc.Spec.Reason, inc.Spec.Symptom = "OOMKilled", "Container app terminated with exit code 137"
+	inc.Spec.Reason, inc.Spec.Symptom = reasonOOMKilled, "Container app terminated with exit code 137"
 	inc.Status.Cause, inc.Status.Absorbed = true, tally
 	return inc
 }
@@ -113,7 +113,7 @@ func TestSummaryOfANonZeroExitShowsNoTally(t *testing.T) {
 // show it, byte for byte: an OOM kill and each waiting reason the collector reads as a cause (causereason.Waiting,
 // the list behind collector.WaitingCauseReasons).
 func TestSummaryShowsTheTallyForEachReasonOfMain(t *testing.T) {
-	want := append([]string{"OOMKilled"}, causereason.Waiting...)
+	want := append([]string{reasonOOMKilled}, causereason.Waiting...)
 	b := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
 	before := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
 	anyReasonShowsTally(before)

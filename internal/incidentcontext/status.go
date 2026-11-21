@@ -536,7 +536,10 @@ func (b *Builder) state(l *lines, s corev1.ContainerState) string {
 // stays in its status and in kubectl output, and a non-zero exit joins this list once its own scenario is
 // recorded and run on the real models (#1080, ADR-0025 decision 3). New gives each builder this list
 // (Builder.showsTally); a builder without one shows no block.
-var tallyReasons = append([]string{"OOMKilled"}, causereason.Waiting...)
+var tallyReasons = append([]string{reasonOOMKilled}, causereason.Waiting...)
+
+// reasonOOMKilled is the reason of an Incident of an OOM kill read from pod status.
+const reasonOOMKilled = "OOMKilled"
 
 // absorbedReasons are the consequence reasons the summary shows from status.absorbed, in the order it shows
 // them: the values of the AbsorbedReason enum (ADR-0039 point 16), the fixed table of the rule. An entry with

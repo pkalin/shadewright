@@ -128,8 +128,12 @@ func TestAttemptIsTheReaderSearch(t *testing.T) {
 	}
 }
 
-// An attempt that finds nothing does not run the reader search, which allocates on every call.
+// An attempt that finds nothing does not run the reader search, which allocates on every call. Skipped under
+// -race, where sync.Pool drops some of what is put back, so regexp's pooled machines allocate at random.
 func TestAttemptWithoutAMatchSkipsTheReaderSearch(t *testing.T) {
+	if raceDetector {
+		t.Skip("sync.Pool drops items at random under -race")
+	}
 	e := NewExpr(regexp.MustCompile(`(?i)password\s*[:=]\s*\S+`))
 	s := strings.Repeat("level=info msg=\"request served\" path=/api/v1/items\n", 64)
 	spent := 0

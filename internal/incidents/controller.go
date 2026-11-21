@@ -1203,11 +1203,12 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 		// Incident with another fingerprint the records load remembered that its status still holds. That
 		// status is not ours: it is only swept against, never remembered, so neither its records nor its drop
 		// mark enter memory at runtime.
-		if refused.conflict {
+		switch {
+		case refused.conflict:
 			c.prune(fp, name, nil, &res.inc.Status, true)
-		} else if stored != nil {
+		case stored != nil:
 			c.settle(fp, name, nil, stored, true)
-		} else {
+		default:
 			c.prune(fp, name, nil, &remediationv1alpha1.IncidentStatus{}, true)
 		}
 		if !refused.exists {

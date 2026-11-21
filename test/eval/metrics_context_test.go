@@ -172,7 +172,8 @@ func TestKedaAtCeilingMetricsReachTheContext(t *testing.T) {
 		if !strings.HasPrefix(e.Quote, "hpa_metric_") {
 			continue
 		}
-		quoted = append(quoted, e.Quote[:strings.Index(e.Quote, "{")])
+		name, _, _ := strings.Cut(e.Quote, "{")
+		quoted = append(quoted, name)
 		if e.Source != id || !quotableIn(blk, e.Quote) {
 			t.Errorf("quote %q of %s is not quotable in the metrics block %s", e.Quote, e.Source, id)
 		}

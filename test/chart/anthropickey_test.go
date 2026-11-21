@@ -66,7 +66,7 @@ func deployment(t *testing.T, r rendered, k string) appsv1.Deployment {
 // "" when it renders.
 func helmTemplate(t *testing.T, files []string, set ...string) string {
 	t.Helper()
-	cmd := exec.Command(tool(t, "HELM", "helm"), helmArgsWith(t, files, set...)...)
+	cmd := exec.CommandContext(t.Context(), tool(t, "HELM", "helm"), helmArgsWith(t, files, set...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

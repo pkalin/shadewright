@@ -189,6 +189,7 @@ func (r *consequenceFirst) held(ctx context.Context, inc *incidents.Controller, 
 		select {
 		case <-tick.C:
 		case <-ctx.Done():
+			//nolint:errorlint // err may be nil here, which %w prints as %!w(<nil>)
 			r.fail(fmt.Errorf("the Incident controller did not consume consequence %s (total %d) in %s: %v",
 				o.Reason, o.Total, groupingWait, err))
 			return false

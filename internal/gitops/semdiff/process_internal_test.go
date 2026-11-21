@@ -342,7 +342,7 @@ func TestRenderProcessDataLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	cmd := exec.Command(exe, helperArg, "data")
+	cmd := exec.CommandContext(t.Context(), exe, helperArg, "data")
 	cmd.Stderr = &stderr
 	err = cmd.Run()
 	var exitErr *exec.ExitError

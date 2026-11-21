@@ -242,9 +242,9 @@ type RemediationRequestReconciler struct {
 	// unwrittenResets holds, per request in Verifying, a reset of the executor's window whose status write was lost
 	// (clearing.go), applied again by the next check. Memory only; dropped like reportCounters.
 	unwrittenResets unwrittenResets
-	// ownWindows holds, per request in Verifying, the open window of the executor this process's last check left
-	// and what it read of the report when it recorded its restart (clearing.go). Memory only; dropped like
-	// reportCounters.
+	// ownWindows holds, per request in Verifying, the starts of the executor's windows this process's checks opened
+	// (at most 16) and what it read of the report when it recorded its restart (clearing.go). Memory only; dropped
+	// like reportCounters.
 	ownWindows ownWindows
 	// mergeReadings holds, per request after the merge, the reading of its Incident's count at the merge that
 	// this process took (incidentcount.go), the only one to which it adds a reading at the applied time. Memory

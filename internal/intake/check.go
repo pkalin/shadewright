@@ -282,18 +282,18 @@ type checkedRequest struct {
 
 // checkRequest is the deciding redaction check (ADR-0047 section 3): the redactor's Clean over each text of req
 // whole, as the adapter gets it: every message's content after formatting, its tool calls (ID, name and
-// arguments) and tool call ID, the tool definitions and the answer schema. keep holds only the record ID. It
-// returns the rule kinds that matched and false when any text fails. The checks of the raw document and of each
+// arguments) and tool call ID, the tool definitions and the answer schema, with nothing kept: the record's
+// names were replaced by fixed words when the texts were built (nameWords). It returns the rule kinds that matched and false when any text fails. The checks of the raw document and of each
 // value run earlier and do not replace this one. ProviderBlocks are opaque to the intake and not read: they are
 // the judge's own reply, handed back to the adapter that made them.
-func checkRequest(r *redact.Redactor, req providers.CompletionRequest, keep []string) (checkedRequest, []string, bool) {
+func checkRequest(r *redact.Redactor, req providers.CompletionRequest) (checkedRequest, []string, bool) {
 	kinds := map[string]bool{}
 	clean := true
 	check := func(s string) {
 		if s == "" {
 			return
 		}
-		if ok, k := redactorClean(r, s, keep); !ok {
+		if ok, k := redactorClean(r, s, nil); !ok {
 			clean = false
 			for _, kind := range k {
 				kinds[kind] = true
@@ -326,8 +326,36 @@ func checkRequest(r *redact.Redactor, req providers.CompletionRequest, keep []st
 	return checkedRequest{req: req}, nil, true
 }
 
-// sentKeep is the keep list of the check of what is sent: the record ID only, whose shape the name check fixed.
-func (r *run) sentKeep() []string { return []string{r.score.RecordID} }
+// Fixed words that stand for the record's names in every text built from the record for a model. The judge's
+// prompt says what each stands for.
+const (
+	wordRecord      = "<record>"
+	wordIncident    = "<incident>"
+	wordRequest     = "<request>"
+	wordFingerprint = "<fingerprint>"
+)
+
+// nameWords maps each value of keep, as keptValues returned it for rec (so each passed its shape check), to the
+// fixed word that replaces it, and the fingerprint's bare digits to the fingerprint's word. A bare run of the
+// digits is not a kept value, so the earlier check refuses a record that holds one; replacing it too only
+// sends less.
+func nameWords(rec analysis.Record, keep []string) map[string]string {
+	words := map[string]string{}
+	for _, k := range keep {
+		switch k {
+		case rec.ID:
+			words[k] = wordRecord
+		case rec.Incident.Name:
+			words[k] = wordIncident
+		case rec.Incident.Fingerprint:
+			words[k] = wordFingerprint
+			words[strings.TrimPrefix(k, "sha256:")] = wordFingerprint
+		case rec.Request:
+			words[k] = wordRequest
+		}
+	}
+	return words
+}
 
 // walk calls f with each string of v, each key, and "key: value" for each member with a scalar value.
 func walk(v any, f func(string)) {

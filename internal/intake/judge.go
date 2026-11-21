@@ -122,10 +122,26 @@ func judgeInputOf(rec analysis.Record) judgeInput {
 	}
 }
 
-// judgeMessages returns the judge's first two messages. The record's fields are JSON in a delimited block:
-// json.Marshal escapes "<" and ">", so no text of the record can close the block.
-func judgeMessages(rec analysis.Record) ([]providers.Message, error) {
-	data, err := json.Marshal(judgeInputOf(rec))
+// namedJudgeInput returns judgeInputOf(rec) with each whole occurrence of a key of words, in every string,
+// replaced by its word (redact.ReplaceWhole, the occurrences the redactor's keep list takes as whole).
+func namedJudgeInput(rec analysis.Record, words map[string]string) judgeInput {
+	in := judgeInputOf(rec)
+	in.IncidentReason = redact.ReplaceWhole(in.IncidentReason, words)
+	in.SubjectKind = redact.ReplaceWhole(in.SubjectKind, words)
+	in.Summary = redact.ReplaceWhole(in.Summary, words)
+	missing := make([]string, len(in.MissingData))
+	for i, m := range in.MissingData {
+		missing[i] = redact.ReplaceWhole(m, words)
+	}
+	in.MissingData = missing
+	return in
+}
+
+// judgeMessages returns the judge's first two messages, with the record's names replaced by the fixed words of
+// words (nameWords). The record's fields are JSON in a delimited block: json.Marshal escapes "<" and ">", so no
+// text of the record, and no fixed word, can close the block.
+func judgeMessages(rec analysis.Record, words map[string]string) ([]providers.Message, error) {
+	data, err := json.Marshal(namedJudgeInput(rec, words))
 	if err != nil {
 		return nil, err
 	}

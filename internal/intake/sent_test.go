@@ -43,14 +43,24 @@ func plainRecordOf(t *testing.T, rng *rand.Rand, models ...string) analysis.Reco
 	return recordOf(t, rng, models...)
 }
 
-// assertNothingDirtySent checks that every request a model got is clean as sent, keeping only the record ID.
-func assertNothingDirtySent(t *testing.T, f *fixture, id string) {
+// assertNothingDirtySent checks that every request a model got is clean as sent, with nothing kept, and holds
+// none of the record's names, its fingerprint or the fingerprint's hexadecimal digits.
+func assertNothingDirtySent(t *testing.T, f *fixture, rec analysis.Record) {
 	t.Helper()
+	names := []string{rec.ID, rec.Incident.Name, strings.TrimPrefix(rec.Incident.Fingerprint, "sha256:")}
+	if rec.Request != "" {
+		names = append(names, rec.Request)
+	}
 	for _, m := range []*fakeModel{f.anthropic, f.openai} {
 		for i, req := range m.reqs {
 			for _, msg := range req.Messages {
-				if !f.scorer.Redactor.Clean(msg.Content, id) {
+				if !f.scorer.Redactor.Clean(msg.Content) {
 					t.Fatalf("request %d holds text the redactor would change: %q", i, f.scorer.Redactor.String(msg.Content))
+				}
+				for _, n := range names {
+					if strings.Contains(msg.Content, n) {
+						t.Fatalf("request %d holds the record's value %q: %q", i, n, msg.Content)
+					}
 				}
 			}
 		}
@@ -93,7 +103,7 @@ func TestValuesSplitAcrossFieldsNeverReachAModel(t *testing.T) {
 
 // Finding 2 of 2026-11-21: the fingerprint was a kept value of the check on what the judge gets, so 64 hex
 // digits the record chooses passed after a secret-named flag. The judge is never given the fingerprint, and the
-// check of what is sent keeps only the record ID.
+// check of what is sent keeps nothing: the fingerprint is replaced by a fixed word, and the flag then refuses it.
 func TestFingerprintIsNotKeptInWhatIsSent(t *testing.T) {
 	f := newFixture(t)
 	rec := plainRecordOf(t, rngOf(93, 94), claudeID)
@@ -123,7 +133,7 @@ func TestCrossCheckIsCheckedAsSent(t *testing.T) {
 		if f.openai.calls() != 0 {
 			t.Fatalf("score %+v: the cross-check model was called", s)
 		}
-		assertNothingDirtySent(t, f, rec.ID)
+		assertNothingDirtySent(t, f, rec)
 	})
 	t.Run("an answer that ends in a flag does not reach the judge", func(t *testing.T) {
 		f := newFixture(t)
@@ -138,7 +148,7 @@ func TestCrossCheckIsCheckedAsSent(t *testing.T) {
 		if f.anthropic.calls() != 1 || s.Status != StatusQuarantined || s.Check != CheckRedactor {
 			t.Fatalf("score %+v after %d judge calls, want quarantined after the first", s, f.anthropic.calls())
 		}
-		assertNothingDirtySent(t, f, rec.ID)
+		assertNothingDirtySent(t, f, rec)
 	})
 }
 
@@ -262,7 +272,7 @@ func TestFlagAndValueAcrossFieldsCorpus(t *testing.T) {
 						t.Fatalf("%s %q: the per-value check refused (%v); the case is not across fields", pair.name, form(w), kinds)
 					}
 					want := renderJudgeUser(t, rec)
-					dirty := !r.Clean(want, rec.ID)
+					dirty := !r.Clean(want)
 					f := newFixture(t)
 					f.openai.replies = []providers.Completion{answerReply(gptID)}
 					s, err := f.scorer.Score(context.Background(), sourceOf(t, rec))
@@ -328,9 +338,9 @@ func renderJudgeUser(t *testing.T, rec analysis.Record) string {
 }
 
 // TestOrdinaryCorpusUnderTheSentCheck runs the existing clean corpus through the whole check. Its summaries name
-// the Incident and the request, as an analysis may; those names are not kept in the check of what is sent, so
-// such a record is quarantined. The count is logged; the same records with a summary that names neither are
-// all scored.
+// the Incident and the request, as an analysis may. The names are replaced by fixed words before anything is
+// sent, so none of these records may be quarantined: a check of what is sent that refuses ordinary records is
+// useless, and this test keeps that visible. The same records with a summary that names neither are scored too.
 func TestOrdinaryCorpusUnderTheSentCheck(t *testing.T) {
 	rng := rngOf(7, 7)
 	n := corpusSize / 4
@@ -346,15 +356,18 @@ func TestOrdinaryCorpusUnderTheSentCheck(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch {
-			case summary == plainSummary && s.Status != StatusScored:
-				t.Fatalf("record %d with a plain summary: score %+v", i, s)
-			case summary != plainSummary && s.Status == StatusQuarantined:
+			case s.Status == StatusQuarantined:
 				quarantined++
+				t.Errorf("record %d: quarantined (%s, %v)", i, s.Reason, s.Kinds)
+			case s.Status != StatusScored:
+				t.Errorf("record %d: score %+v", i, s)
 			}
-			assertNothingDirtySent(t, f, rec.ID)
+			assertNothingDirtySent(t, f, rec)
 		}
 	}
-	t.Logf("ordinary corpus: %d of %d quarantined by the check of what is sent", quarantined, n)
+	if quarantined != 0 {
+		t.Fatalf("ordinary corpus: %d of %d records quarantined by the check of what is sent, want 0", quarantined, 2*n)
+	}
 }
 
 // The request a model gets is checked in one place: only send calls a model, and it takes a checkedRequest,

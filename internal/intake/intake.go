@@ -158,6 +158,8 @@ func (s *Scorer) Validate() error {
 type run struct {
 	*Scorer
 	score Score
+	// words are the fixed words that replace the record's names in every text built for a model (nameWords).
+	words map[string]string
 }
 
 // Score scores the record of src. A returned error is a failed step for a retry (a read, a reservation, a
@@ -228,6 +230,7 @@ func (r *run) do(ctx context.Context, src Source) (Score, error) {
 	if kinds, clean := checkJudgeInput(r.Redactor, rec, keep); !clean {
 		return r.quarantine(CheckRedactor, reasonUnsent, kinds)
 	}
+	r.words = nameWords(rec, keep)
 
 	// The judge is of the other family than the record's model.
 	fam, why := recordFamily(rec)
@@ -277,13 +280,13 @@ func (r *run) reserve(ctx context.Context, fam Family, call int, cr checkedReque
 func (r *run) judge(ctx context.Context, rec analysis.Record, judgeFam Family) (Score, error) {
 	judge := r.Models[judgeFam]
 	r.score.Judge = &ModelRef{Family: judgeFam, Model: judge.Name}
-	msgs, err := judgeMessages(rec)
+	msgs, err := judgeMessages(rec, r.words)
 	if err != nil {
 		return Score{}, fmt.Errorf("building the judge's request: %w", err)
 	}
 	req := providers.CompletionRequest{Messages: msgs, Tools: []providers.ToolDefinition{crossCheckDefinition},
 		ResponseSchema: answerSchema, MaxOutputTokens: judgeOutputTokens, MaxBilledAttempts: billedAttempts}
-	first, kinds, ok := checkRequest(r.Redactor, req, r.sentKeep())
+	first, kinds, ok := checkRequest(r.Redactor, req)
 	if !ok {
 		return r.quarantine(CheckRedactor, reasonUnsent, kinds)
 	}
@@ -318,7 +321,7 @@ func (r *run) judge(ctx context.Context, rec analysis.Record, judgeFam Family) (
 	}
 	req.Messages = append(append(req.Messages, providers.Message{Role: providers.RoleAssistant, Content: c.Content,
 		ToolCalls: c.ToolCalls, ProviderBlocks: c.ProviderBlocks}), results...)
-	second, kinds, ok := checkRequest(r.Redactor, req, r.sentKeep())
+	second, kinds, ok := checkRequest(r.Redactor, req)
 	if !ok {
 		return r.quarantine(CheckRedactor, reasonSecondUnsent, kinds)
 	}
@@ -343,8 +346,9 @@ func (r *run) crossCheck(ctx context.Context, fam Family, args []byte) (string, 
 		r.score.CrossCheck = CrossCheckNotSent
 		return refusalQuestion, nil
 	}
-	req, _, ok := checkRequest(r.Redactor, providers.CompletionRequest{Messages: crossCheckMessages(q),
-		MaxOutputTokens: crossOutputTokens, MaxBilledAttempts: billedAttempts}, r.sentKeep())
+	req, _, ok := checkRequest(r.Redactor, providers.CompletionRequest{
+		Messages:        crossCheckMessages(redact.ReplaceWhole(q, r.words)),
+		MaxOutputTokens: crossOutputTokens, MaxBilledAttempts: billedAttempts})
 	if !ok {
 		r.score.CrossCheck = CrossCheckNotSent
 		return refusalQuestion, nil

@@ -428,7 +428,11 @@ func TestSpendOverTheCapStopsBeforeTheCall(t *testing.T) {
 // firstCallTokens is what the judge's first call reserves for rec.
 func firstCallTokens(t *testing.T, rec analysis.Record) int64 {
 	t.Helper()
-	msgs, err := judgeMessages(rec)
+	keep, refused := keptValues(rec, rec.ID)
+	if refused != nil {
+		t.Fatal(refused.reason)
+	}
+	msgs, err := judgeMessages(rec, nameWords(rec, keep))
 	if err != nil {
 		t.Fatal(err)
 	}

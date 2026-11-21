@@ -112,7 +112,7 @@ func connStringCorpus(n int) []connCase {
 			host += connSpecials[rng.IntN(len(connSpecials))] + "x"
 		}
 		userinfo := user + ":" + pass
-		secrets := append(us, ps...)
+		secrets := append(us, ps...) //nolint:gocritic // a new slice; us keeps its length, all case 1 reads of it
 		switch rng.IntN(4) {
 		case 0: // a user name alone may be a token
 			userinfo, secrets = pass, ps

@@ -794,7 +794,7 @@ func validDNSLabel(s string) bool {
 	if len(s) == 0 || len(s) > dnsLabelMaxLength || s[0] == '-' || s[len(s)-1] == '-' {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
 			return false

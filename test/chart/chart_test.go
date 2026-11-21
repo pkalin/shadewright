@@ -107,7 +107,8 @@ func tool(t *testing.T, envVar, name string) string {
 
 func run(t *testing.T, dir string, name string, args ...string) []byte {
 	t.Helper()
-	cmd := exec.Command(name, args...) // #nosec G702 -- test caller selects the local Helm or Kustomize tool
+	cmd := exec.CommandContext(t.Context(), // #nosec G702 -- test caller selects the local Helm or Kustomize tool
+		name, args...)
 	cmd.Dir = dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -303,7 +304,7 @@ func isTestHook(u *unstructured.Unstructured) bool {
 // render succeeds.
 func helmFails(t *testing.T, extraSet ...string) string {
 	t.Helper()
-	cmd := exec.Command(tool(t, "HELM", "helm"), helmArgs(t, false, extraSet...)...)
+	cmd := exec.CommandContext(t.Context(), tool(t, "HELM", "helm"), helmArgs(t, false, extraSet...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err == nil {

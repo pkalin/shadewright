@@ -116,7 +116,7 @@ import (
 //	P7 no reconcile that returns without an error asks to run again within a second (the floor of every time to run
 //	   again): a wait whose end passed is looked at again at a sane pace, never hot;
 //	P8 once a person moved the pull request to another base (hMoveBase, ADR-0043), neither request writes to it or
-//	   to its branch; the move is a step of directed sequences only, the generator does not draw it;
+//	   to its branch but a failed review check on its head (ADR-0045, #925); the move is a step of directed sequences only, the generator does not draw it;
 //	P10 a replacement in its recovery wait (aborted at a refusal) whose predecessor's pull request a person merged into
 //	   another base ends at the first reconcile that reads it with every read answering (decision of 2026-11-19 on
 //	   #786): NeedsIntervention with ChangeRequestOnOtherBase naming that base, its handoff Aborted, no lock; like
@@ -368,7 +368,7 @@ var hmReads = []string{"open", opGet, "FindChangeRequest", opList, opBranchHead,
 
 // hmWrites are the calls that write the branch or the pull request.
 var hmWrites = map[string]bool{opCommit: true, "AppendCommit": true, opCreateBranch: true, opOpen: true,
-	"UpdateChangeRequest": true, opClose: true, opComment: true, hmOpAutoMerge: true, "CreateCheckRun": true}
+	"UpdateChangeRequest": true, opClose: true, opComment: true, hmOpAutoMerge: true, opCreateCheckRun: true}
 
 const (
 	hmOpListComments = "ListComments"
@@ -415,14 +415,16 @@ type hmWorld struct {
 	start  string
 	r      *RemediationRequestReconciler
 	g      *fakegit.Git
-	base   client.WithWatch
-	cl     client.Client
-	now    time.Time
-	t0     time.Time
-	dl     time.Time
-	keys   map[string]client.ObjectKey
-	number int64
-	branch string
+	// checkSeen is the number of check runs per head that lastCheckFailed has seen (P8).
+	checkSeen map[string]int
+	base      client.WithWatch
+	cl        client.Client
+	now       time.Time
+	t0        time.Time
+	dl        time.Time
+	keys      map[string]client.ObjectKey
+	number    int64
+	branch    string
 	// commits: the predecessor's, the replacement's (empty until pushed; replCommits holds every commit the
 	// replacement pushed, replCommit the last), and the ones a person pushed.
 	predCommit, replCommit string
@@ -1152,6 +1154,40 @@ func (m *hmWorld) otherClaims(who string) bool {
 	return holdsMergeClaim(x, m.number, m.merge.head)
 }
 
+// lastCheckFailed reports whether the check runs written since the last call, on the head of the handoff's pull
+// request or the head either request recorded, end with a failed review check: the write P8 allows on another base
+// (ADR-0045). checkSeen keeps the number of runs per head it has seen.
+func (m *hmWorld) lastCheckFailed() bool {
+	heads := map[string]bool{}
+	for _, cr := range m.g.ChangeRequests() {
+		if cr.Number == m.number {
+			heads[cr.HeadSHA] = true
+		}
+	}
+	for _, key := range m.keys {
+		x := &api.RemediationRequest{}
+		if err := m.base.Get(context.Background(), key, x); err == nil && x.Status.PullRequest != nil {
+			heads[x.Status.PullRequest.HeadSHA] = true
+		}
+	}
+	if m.checkSeen == nil {
+		m.checkSeen = map[string]int{}
+	}
+	written, failed := false, true
+	for head := range heads {
+		runs := m.g.CheckRuns(head)
+		if len(runs) == m.checkSeen[head] {
+			continue
+		}
+		m.checkSeen[head] = len(runs)
+		written = true
+		if last := lastReviewCheck(runs); last == nil || last.Status != providers.CheckRunFailure {
+			failed = false
+		}
+	}
+	return written && failed
+}
+
 func (m *hmWorld) gitAfter(op string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1172,9 +1208,11 @@ func (m *hmWorld) gitAfter(op string) error {
 			m.mu.Lock()
 		}
 	}
-	if m.movedBase {
+	if m.movedBase && (op != opCreateCheckRun || !m.lastCheckFailed()) {
 		// P8 (ADR-0043): nothing writes to a pull request a person moved to another base, nor to its branch; only the
-		// finalizer closes it there (CloseChangeRequestAnyBase, not a write of hmWrites).
+		// finalizer closes it there (CloseChangeRequestAnyBase, not a write of hmWrites). The one write allowed there
+		// is a failed review check on the head (ADR-0045, #925): moved back, the pull request cannot merge on a check
+		// written before the request stopped.
 		m.mu.Unlock()
 		m.fail("P8", "the %s wrote %s after a person moved the pull request to %s", who, op, hmMovedBase)
 		m.mu.Lock()
@@ -2305,6 +2343,11 @@ func (m *hmWorld) moveBase() {
 		m.t.Fatal(err)
 	}
 	m.movedBase = true
+	m.mu.Lock()
+	// The check runs written before the move are not writes on another base (P8).
+	m.checkSeen = nil
+	m.lastCheckFailed()
+	m.mu.Unlock()
 	m.reach["moved-base"] = true
 }
 

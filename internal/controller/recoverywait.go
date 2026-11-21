@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -426,14 +425,14 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 		return reconcile.Result{}, true, err
 	}
 	v := r.changeOf(ctx, git, pred, changeQuery{})
-	switch v.state {
-	case changeUnknown:
+	switch v.rule().recovery {
+	case recoveryRetry:
 		return reconcile.Result{}, true, v.err
-	case changeMergedElsewhere:
+	case recoveryMergedElsewhere:
 		// Nothing left to recover, and the target branch did not get the change: the wait ends at once (decision of
 		// 2026-11-19 on #786).
 		return reconcile.Result{}, true, clusterSideErr(r.endMergedElsewhere(ctx, rr, v.pr))
-	case changeOpen, changeMerged, changeClosed, changeGone, changeElsewhere:
+	default:
 		// Only a merge of this request's commit is recorded; anything else waits for the end of the wait. Closed, here
 		// or on another base, may be reopened, and open on another base may still be moved back.
 	}
@@ -477,7 +476,7 @@ func (r *RemediationRequestReconciler) readClaimedMerge(ctx context.Context, rr 
 // v, recorded nothing (readClaimedMerge, heldRecoveryAlone).
 func keptClaimLog(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, v changeVerdict) {
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr), "verdict",
-		v.state.String())
+		v.rule().name)
 	if claim := gitWait(rr, waitMergeContent); claim != nil && claim.PullRequest != nil {
 		log = log.WithValues("pullRequest", claim.PullRequest.Number)
 		if claim.Ends != nil {
@@ -588,7 +587,7 @@ func (r *RemediationRequestReconciler) noteNothingToRead(ctx context.Context,
 func (r *RemediationRequestReconciler) recordWatchedMerge(ctx context.Context, git providers.GitProvider,
 	rr, pred *remediationv1alpha1.RemediationRequest, to *remediationv1alpha1.OutgoingHandoff, v changeVerdict) (
 	bool, error) {
-	if v.state != changeMerged {
+	if v.rule().recovery != recoveryMerged {
 		return false, nil
 	}
 	owner, ours, err := r.mergedHeadOwnerOf(ctx, git, pred, rr, to, v.pr.HeadSHA, true)
@@ -995,7 +994,7 @@ func (r *RemediationRequestReconciler) heldRecoveryAlone(ctx context.Context, rr
 	case recorded:
 		return reconcile.Result{RequeueAfter: stepDelay}, true, nil
 	}
-	if v.state != changeOpen {
+	if v.rule().recovery != recoveryOpen {
 		if !otherHeadClaim(rr) {
 			return reconcile.Result{}, false, nil
 		}
@@ -1038,7 +1037,7 @@ func (r *RemediationRequestReconciler) recordMergeAlone(ctx context.Context, git
 	v := r.changeOf(ctx, git, inheriting, changeQuery{})
 	// changeOf may record PullRequestUnreadable through the copy: rr takes that write, never the copy's handoff.
 	rr.ResourceVersion, rr.Status.Conditions = inheriting.ResourceVersion, inheriting.Status.Conditions
-	if v.state == changeUnknown {
+	if v.rule().recovery == recoveryRetry {
 		return v, false, v.err
 	}
 	var other *providers.ChangeRequest
@@ -1060,7 +1059,7 @@ func (r *RemediationRequestReconciler) recordMergeAlone(ctx context.Context, git
 			other = &v.own[i]
 		}
 	}
-	if other != nil && (v.state == changeMerged || claimed != 0) {
+	if other != nil && (v.rule().recovery == recoveryMerged || claimed != 0) {
 		// Merged with any other head while this request holds the lock, the predecessor gone: this request records it
 		// as a foreign change (decisions of 2026-11-20 on #870), the predecessor's own head included, since nobody
 		// else can. One writer of the merge record, the one that holds the lock.
@@ -1086,7 +1085,7 @@ func (r *RemediationRequestReconciler) endOnOtherMerge(ctx context.Context, rr, 
 	rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
 	s, released := settleHandoffAborted(rr)
 	if released {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return err
 		}
 	}
@@ -1133,7 +1132,7 @@ func (r *RemediationRequestReconciler) endMergedElsewhere(ctx context.Context, r
 	rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
 	s, released := settleHandoffAborted(rr)
 	if released {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return err
 		}
 	}
@@ -1165,7 +1164,7 @@ func (r *RemediationRequestReconciler) endWithoutCommit(ctx context.Context, rr 
 	cr providers.ChangeRequest) error {
 	rr.Status.Handoff.From.Phase = remediationv1alpha1.HandoffAborted
 	if s, ok := settleHandoffAborted(rr); ok {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return err
 		}
 	}
@@ -1229,10 +1228,10 @@ func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr,
 		return reconcile.Result{}, true, err
 	}
 	v := r.changeOf(ctx, git, pred, changeQuery{})
-	switch v.state {
-	case changeUnknown:
+	switch v.rule().recovery {
+	case recoveryRetry:
 		return reconcile.Result{}, true, v.err
-	case changeMerged:
+	case recoveryMerged:
 		switch recorded, err := r.recordWatchedMerge(ctx, git, rr, pred, to, v); {
 		case err != nil:
 			return reconcile.Result{}, true, err
@@ -1244,7 +1243,7 @@ func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr,
 			return r.awaitPredecessorRecord(ctx, rr, pred, v.pr)
 		}
 		return reconcile.Result{}, true, r.endOnOtherMerge(ctx, rr, pred, v.pr)
-	case changeOpen:
+	case recoveryOpen:
 		if v.pr.HeadSHA == pred.Status.PullRequest.HeadSHA || v.pr.HeadSHA == to.ExpectedHead {
 			// The head is the predecessor's own: rr never pushed its commit, and as an ended request it never will
 			// (only its own takeOver pushes it), so nothing on this pull request is rr's to hold.
@@ -1264,7 +1263,7 @@ func (r *RemediationRequestReconciler) heldRecoveryRead(ctx context.Context, rr,
 			"commit is open", "remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", v.pr.Number)
 		res, err := r.recoveryPace(ctx, rr, heldRecheckInterval)
 		return res, true, err
-	case changeClosed, changeGone, changeElsewhere, changeMergedElsewhere:
+	default:
 		// Settled by the verdict of the look (settleTargetLock): closed or gone release; open on a base a person
 		// moved it to holds the target through the predecessor, whose own pull request it is (stopOpenElsewhere),
 		// not through this request; merged there keeps none (ADR-0043). Nothing here records a merge into another

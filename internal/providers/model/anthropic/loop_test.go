@@ -37,7 +37,7 @@ import (
 
 type loopContext struct{}
 
-func (loopContext) Build(context.Context, *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
+func (loopContext) BuildWithin(context.Context, *remediationv1alpha1.Incident, int) (*incidentcontext.Context, error) {
 	// Truncated is an escalation signal: the loop goes straight to the escalation model, with tools.
 	return &incidentcontext.Context{Truncated: true, Pods: []string{"web-1"}, Blocks: []incidentcontext.Block{{
 		Section: incidentcontext.SectionStatus, Provenance: incidentcontext.ProvenanceObjectStatus,

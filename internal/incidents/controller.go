@@ -274,6 +274,9 @@ type Controller struct {
 	// an Incident deleted and created again under the same name starts with nothing. Only the trigger
 	// goroutine uses it.
 	memory map[types.UID]*trace
+	// triggerStart is when the trigger loop began, truncated to the second: a NotRecent condition written
+	// before it is not reported again ([Controller.reportSkips]). Only the trigger goroutine uses it.
+	triggerStart time.Time
 	// hintRequests are the RemediationRequests the cache held when the current trigger pass began, for the
 	// reviewer hints of the Incidents it decides ([PendingHint]); nil when that listing failed. Only the
 	// trigger goroutine uses it.

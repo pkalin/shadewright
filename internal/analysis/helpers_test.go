@@ -102,9 +102,13 @@ func toolCall(id, name, args string) providers.ToolCall {
 type fakeBuilder struct {
 	c   incidentcontext.Context
 	err error
+	// totals are the bounds the analysis passed, one per build.
+	totals []int
 }
 
-func (b *fakeBuilder) Build(ctx context.Context, _ *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
+func (b *fakeBuilder) BuildWithin(ctx context.Context, _ *remediationv1alpha1.Incident,
+	total int) (*incidentcontext.Context, error) {
+	b.totals = append(b.totals, total)
 	if b.err != nil {
 		return nil, b.err
 	}

@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 )
@@ -796,7 +795,7 @@ const ReasonMergedForPredecessor = "MergedForPredecessor"
 func (r *RemediationRequestReconciler) leavePredecessorMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	v changeVerdict) error {
 	if s, ok := settlePredecessorMerge(v, ownerPredecessorRecords); ok && ptr.Deref(rr.Status.HoldsTarget, false) {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return err
 		}
 	}
@@ -833,8 +832,7 @@ func (r *RemediationRequestReconciler) supersedeReplacementAfterMerge(ctx contex
 	if repl.UID != types.UID(ho.To.UID) || !repl.DeletionTimestamp.IsZero() {
 		return nil
 	}
-	v := changeVerdict{state: changeMerged, pr: providers.ChangeRequest{Number: pr.Number,
-		HeadSHA: pr.HeadSHA, State: providers.ChangeRequestMerged}}
+	v := mergedVerdict(pr.Number, pr.HeadSHA)
 	if recordsEveryMerge(repl) {
 		if err := r.writeAllowed(ctx); err != nil {
 			return err
@@ -1028,7 +1026,7 @@ func (r *RemediationRequestReconciler) leaveReplacementMerge(ctx context.Context
 		name = string(rr.Status.Handoff.To.Name)
 	}
 	if s, ok := settleReplacementMerge(v, owner); ok && ptr.Deref(rr.Status.HoldsTarget, false) {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return err
 		}
 	}
@@ -1257,15 +1255,15 @@ func (r *RemediationRequestReconciler) findHanded(ctx context.Context, git provi
 		return providers.ChangeRequest{}, "", errors.New("no pull request recorded")
 	}
 	v := r.changeOf(ctx, git, pred, changeQuery{})
-	switch v.state {
-	case changeUnknown:
+	switch v.rule().handed {
+	case handedRetry:
 		return providers.ChangeRequest{}, "", v.err
-	case changeGone, changeMergedElsewhere:
+	case handedGone:
 		return providers.ChangeRequest{}, v.gone, nil
-	case changeElsewhere:
+	case handedMoved:
 		// Open on a base a person moved it to (#892): it is not taken over, and nothing is written to it there.
 		return providers.ChangeRequest{}, openElsewhereText(v.pr), nil
-	case changeOpen, changeMerged, changeClosed:
+	case handedIt:
 	}
 	return v.pr, "", nil
 }
@@ -1403,7 +1401,7 @@ func (r *RemediationRequestReconciler) endHandoff(ctx context.Context, rr *remed
 			from.Phase = remediationv1alpha1.HandoffAborted
 		}
 		if s, ok := settleHandoffAborted(rr); ok {
-			if err := lockverdict.Release(&rr.Status, s); err != nil {
+			if err := releaseLock(ctx, rr, s); err != nil {
 				return err
 			}
 		}
@@ -1462,11 +1460,11 @@ func (r *RemediationRequestReconciler) followHandoff(ctx context.Context, rr *re
 		}
 		// Read by its number first: a pull request a person moved to another base, or one closed or merged meanwhile,
 		// is left to the watch, which writes nothing to it there (ADR-0043). Unknown is retried.
-		switch v := r.changeOf(stepCtx, git, rr, changeQuery{}); v.state {
-		case changeUnknown:
+		switch v := r.changeOf(stepCtx, git, rr, changeQuery{}); v.rule().recovery {
+		case recoveryRetry:
 			return v.err
-		case changeOpen:
-		case changeMerged, changeClosed, changeGone, changeElsewhere, changeMergedElsewhere:
+		case recoveryOpen:
+		default:
 			return nil
 		}
 		err = git.UpdateChangeRequest(stepCtx, pr.Number, title, body)
@@ -1658,7 +1656,7 @@ func (r *RemediationRequestReconciler) supersedePredecessor(ctx context.Context,
 		h.State = remediationv1alpha1.HintConsumed
 	}
 	if s, ok := settleHandedOver(to, rr); ok {
-		if err := lockverdict.Release(&pred.Status, s); err != nil {
+		if err := releaseLock(ctx, pred, s); err != nil {
 			return err
 		}
 	}
@@ -1695,8 +1693,7 @@ func (r *RemediationRequestReconciler) supersedeAfterAbort(ctx context.Context, 
 		return err
 	}
 	// The verdict is the replacement's record of the merge of its own commit on this pull request.
-	v := changeVerdict{state: changeMerged, pr: providers.ChangeRequest{Number: rr.Status.PullRequest.Number,
-		HeadSHA: rr.Status.PullRequest.HeadSHA, State: providers.ChangeRequestMerged}}
+	v := mergedVerdict(rr.Status.PullRequest.Number, rr.Status.PullRequest.HeadSHA)
 	if err := r.leaveReplacementMerge(ctx, pred, v, ownerReplacement); err != nil && !errors.Is(err, errStopped) {
 		return err
 	}
@@ -1887,7 +1884,7 @@ func (r *RemediationRequestReconciler) recoverStep(ctx context.Context, rr *reme
 		// decides (changeOf). Merged or closed, its head is the branch's last head, and is judged as the branch
 		// head would be; gone, nothing was taken over; open, or unknown, the 404 is a passing fault, retried.
 		v := r.changeOf(ctx, git, pred, changeQuery{})
-		switch recoverRule[v.state] {
+		switch v.rule().recover {
 		case recoverRetry:
 			if v.err == nil {
 				v.err = fmt.Errorf("the branch of the handoff answered 404 while its pull request #%d is open; it "+
@@ -1925,15 +1922,9 @@ const (
 	recoverFromPullRequest
 )
 
-// recoverRule is recoverStep's rule per verdict after a 404 for the branch: open and unknown are retried (the
-// branch of an open pull request exists), gone has nothing to recover, merged and closed are judged by the pull
-// request's head. Open on a base a person moved it to (changeElsewhere, #892) is retried like open: its branch
-// exists.
-var recoverRule = map[changeState]recoverOutcome{
-	changeOpen: recoverRetry, changeMerged: recoverFromPullRequest, changeClosed: recoverFromPullRequest,
-	changeGone: recoverNothing, changeElsewhere: recoverRetry, changeMergedElsewhere: recoverNothing,
-	changeUnknown: recoverRetry,
-}
+// recoverStep's rule per verdict after a 404 for the branch is the column recover of verdictTable: open and unknown
+// are retried (the branch of an open pull request exists), gone has nothing to recover, merged and closed are judged
+// by the pull request's head. Open on a base a person moved it to (#892) is retried like open: its branch exists.
 
 // handoffHolds is the finalizer's look at a request with an outgoing handoff (ADR-0028 section 4 item 8): keep
 // is true when its pull request is its replacement's (handed over, or the replacement took it over and has not

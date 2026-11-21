@@ -843,3 +843,17 @@ overlaps a form embedding IPv4 addresses (::ffff:0:0/96, ::/96, 64:ff9b::/96, 20
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Egress selector labels: the keys of .set with a value (a null key is ignored, so a user can drop a key another
+values file set), or .default when none is left. Never an empty selector (#985).
+*/}}
+{{- define "shadewright.egressPodLabels" -}}
+{{- $out := dict -}}
+{{- range $k, $v := (.set | default dict) -}}
+{{- if not (kindIs "invalid" $v) -}}
+{{- $_ := set $out $k $v -}}
+{{- end -}}
+{{- end -}}
+{{- toYaml (ternary .default $out (empty $out)) -}}
+{{- end -}}

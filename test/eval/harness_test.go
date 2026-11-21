@@ -164,9 +164,9 @@ type forcedEscalation struct {
 	inner analysis.ContextBuilder
 }
 
-func (f forcedEscalation) Build(ctx context.Context,
-	inc *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
-	c, err := f.inner.Build(ctx, inc)
+func (f forcedEscalation) BuildWithin(ctx context.Context,
+	inc *remediationv1alpha1.Incident, total int) (*incidentcontext.Context, error) {
+	c, err := f.inner.BuildWithin(ctx, inc, total)
 	if err != nil || c == nil {
 		return c, err
 	}
@@ -184,9 +184,9 @@ type signalRecorder struct {
 	t     *tally
 }
 
-func (r signalRecorder) Build(ctx context.Context,
-	inc *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
-	c, err := r.inner.Build(ctx, inc)
+func (r signalRecorder) BuildWithin(ctx context.Context,
+	inc *remediationv1alpha1.Incident, total int) (*incidentcontext.Context, error) {
+	c, err := r.inner.BuildWithin(ctx, inc, total)
 	if err != nil || c == nil {
 		return c, err
 	}

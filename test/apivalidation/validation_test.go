@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/modules"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
@@ -1900,7 +1901,7 @@ var _ = Describe("RemediationSettings", func() {
 			expectAccepted(s)
 			a := s.Spec.Analysis
 			Expect(a).NotTo(BeNil())
-			Expect(*a.MaxContextBytes).To(BeEquivalentTo(32768))
+			Expect(*a.MaxContextBytes).To(BeEquivalentTo(49152))
 			Expect(*a.MaxToolSteps).To(BeEquivalentTo(4))
 			Expect(*a.MaxOutputTokens).To(BeEquivalentTo(2048))
 			Expect(*a.MaxConcurrentAnalyses).To(BeEquivalentTo(1))
@@ -1945,11 +1946,27 @@ var _ = Describe("RemediationSettings", func() {
 
 		It("accepts every limit at its upper bound", func() {
 			expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
-				a.MaxContextBytes, a.MaxToolSteps = ptr.To[int32](262144), ptr.To[int32](16)
+				a.MaxContextBytes, a.MaxToolSteps = ptr.To[int32](49152), ptr.To[int32](16)
 				a.MaxOutputTokens, a.MaxConcurrentAnalyses = ptr.To[int32](16384), ptr.To[int32](8)
 				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
 				a.Models.Triage.MaxTokensPerDay = ptr.To[int64](1000000000)
 			}))
+		})
+
+		// The analyzer holds maxContextBytes to the builder's default total (LimitsOf, #981), and the default
+		// section bounds add up to it: the CRD's default and maximum and the code's constant must not drift.
+		It("keeps the default and maximum of maxContextBytes at the context builder's default total", func() {
+			Expect(incidentcontext.DefaultTotalBytes).To(Equal(49152))
+			crd := &apiextensionsv1.CustomResourceDefinition{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "remediationsettings.remediation.shadewright.io"},
+				crd)).To(Succeed())
+			field := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["analysis"].
+				Properties["maxContextBytes"]
+			Expect(field.Maximum).NotTo(BeNil())
+			Expect(*field.Maximum).To(BeEquivalentTo(incidentcontext.DefaultTotalBytes))
+			Expect(field.Default).NotTo(BeNil())
+			Expect(string(field.Default.Raw)).To(Equal(fmt.Sprint(incidentcontext.DefaultTotalBytes)))
+			Expect(*field.Minimum).To(BeEquivalentTo(incidentcontext.MinTotalBytes))
 		})
 
 		DescribeTable("refuses limits out of their bounds",
@@ -1960,7 +1977,7 @@ var _ = Describe("RemediationSettings", func() {
 				"spec.analysis.maxContextBytes"),
 			Entry("a context below 4096 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = ptr.To[int32](4095) },
 				"spec.analysis.maxContextBytes"),
-			Entry("a context above 262144 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = ptr.To[int32](262145) },
+			Entry("a context above 49152 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = ptr.To[int32](49153) },
 				"spec.analysis.maxContextBytes"),
 			Entry("negative tool steps", func(a *v1alpha1.AnalysisSettings) { a.MaxToolSteps = ptr.To[int32](-1) },
 				"spec.analysis.maxToolSteps"),

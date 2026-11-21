@@ -315,13 +315,15 @@ func crossCheckRefusedQuestion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.openai.calls() != 0 || s.CrossCheck != CrossCheckNotSent || s.Status != StatusScored {
-		t.Fatalf("score = %+v with %d cross-check calls, want not sent", s, f.openai.calls())
+	// The question is not sent; the judge's second request would hand its own call, with the token, back to
+	// it, so that request is not sent either and the record is quarantined after one judge call.
+	if f.openai.calls() != 0 || s.CrossCheck != CrossCheckNotSent || f.anthropic.calls() != 1 ||
+		s.Status != StatusQuarantined || s.Check != CheckRedactor || s.Reason != reasonSecondUnsent {
+		t.Fatalf("score = %+v with %d cross-check and %d judge calls, want not sent and quarantined", s,
+			f.openai.calls(), f.anthropic.calls())
 	}
-	for _, m := range f.anthropic.reqs[1].Messages {
-		if m.Role == providers.RoleTool && strings.Contains(m.Content, fakeToken) {
-			t.Fatal("the refused question came back to the judge")
-		}
+	if len(f.ledger.reserved) != 1 {
+		t.Fatalf("reservations = %+v, want only the first judge call", f.ledger.reserved)
 	}
 }
 

@@ -148,3 +148,32 @@ func TestAdaptersMakeOneAttempt(t *testing.T) {
 		t.Fatalf("the adapters refuse the configuration: %v", err)
 	}
 }
+
+// A budget outcome logs a warning with the family and the month on every run that meets the cap.
+func TestBudgetOutcomeLogsAWarning(t *testing.T) {
+	dir := t.TempDir()
+	rec := writeRecord(t, dir, "The probe path /healthz returns 404 since the last rollout.")
+	var stdout, stderr bytes.Buffer
+	args := []string{recordFlag, rec, spendFlag, filepath.Join(dir, "spend"), "--max-month-tokens", "10", dryRun}
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	var s intake.Score
+	if err := json.Unmarshal(stdout.Bytes(), &s); err != nil || s.Status != intake.StatusBudget || s.Month == "" {
+		t.Fatalf("stdout = %s (%v)", stdout.String(), err)
+	}
+	var warned bool
+	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if entry["level"] == "WARN" && entry["family"] == string(intake.FamilyOpenAI) &&
+			entry["month"] == s.Month {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("no warning with the family and the month: %s", stderr.String())
+	}
+}

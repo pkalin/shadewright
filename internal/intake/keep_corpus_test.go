@@ -51,6 +51,7 @@ func TestKeptNamesCorpus(t *testing.T) {
 	tripped := 0
 	for i := range corpusSize {
 		rec := recordOf(t, rng, claudeID)
+		rec.Summary = namedSummary(rec)
 		data, err := json.Marshal(rec)
 		if err != nil {
 			t.Fatal(err)

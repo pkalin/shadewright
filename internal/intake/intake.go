@@ -223,10 +223,10 @@ func (r *run) do(ctx context.Context, src Source) (Score, error) {
 		return r.quarantine(refused.check, refused.reason, nil)
 	}
 	if kinds, clean := checkRedaction(r.Redactor, data, keep); !clean {
-		return r.quarantine(CheckRedactor, "the redactor found text it would remove; nothing was sent to a model", kinds)
+		return r.quarantine(CheckRedactor, reasonUnsent, kinds)
 	}
 	if kinds, clean := checkJudgeInput(r.Redactor, rec, keep); !clean {
-		return r.quarantine(CheckRedactor, "the redactor found text it would remove; nothing was sent to a model", kinds)
+		return r.quarantine(CheckRedactor, reasonUnsent, kinds)
 	}
 
 	// The judge is of the other family than the record's model.
@@ -245,7 +245,8 @@ const billedAttempts = 1
 
 // reserve counts a call at its maximum before it is made: it returns false, with the cap's name, when the call
 // would pass a cap, and an error when the month's sum cannot be read or the reservation cannot be created.
-func (r *run) reserve(ctx context.Context, fam Family, call int, req providers.CompletionRequest) (bool, string, error) {
+func (r *run) reserve(ctx context.Context, fam Family, call int, cr checkedRequest) (bool, string, error) {
+	req := cr.req
 	out := int64(req.MaxOutputTokens)
 	if b, ok := r.Models[fam].Provider.(providers.OutputBounder); ok {
 		out = int64(b.OutputSpend(req.MaxOutputTokens))
@@ -282,14 +283,18 @@ func (r *run) judge(ctx context.Context, rec analysis.Record, judgeFam Family) (
 	}
 	req := providers.CompletionRequest{Messages: msgs, Tools: []providers.ToolDefinition{crossCheckDefinition},
 		ResponseSchema: answerSchema, MaxOutputTokens: judgeOutputTokens, MaxBilledAttempts: billedAttempts}
-	if ok, why, err := r.reserve(ctx, judgeFam, 1, req); err != nil || !ok {
+	first, kinds, ok := checkRequest(r.Redactor, req, r.sentKeep())
+	if !ok {
+		return r.quarantine(CheckRedactor, reasonUnsent, kinds)
+	}
+	if ok, why, err := r.reserve(ctx, judgeFam, 1, first); err != nil || !ok {
 		if err != nil {
 			return Score{}, err
 		}
 		return r.end(StatusBudget, why)
 	}
 	r.score.PromptVersion = PromptVersion
-	c, err := r.complete(ctx, judge, req, true)
+	c, err := r.send(ctx, judge, first, true)
 	if err != nil || len(c.ToolCalls) == 0 {
 		return r.answer(c, err)
 	}
@@ -313,13 +318,17 @@ func (r *run) judge(ctx context.Context, rec analysis.Record, judgeFam Family) (
 	}
 	req.Messages = append(append(req.Messages, providers.Message{Role: providers.RoleAssistant, Content: c.Content,
 		ToolCalls: c.ToolCalls, ProviderBlocks: c.ProviderBlocks}), results...)
-	if ok, why, err := r.reserve(ctx, judgeFam, 3, req); err != nil || !ok {
+	second, kinds, ok := checkRequest(r.Redactor, req, r.sentKeep())
+	if !ok {
+		return r.quarantine(CheckRedactor, reasonSecondUnsent, kinds)
+	}
+	if ok, why, err := r.reserve(ctx, judgeFam, 3, second); err != nil || !ok {
 		if err != nil {
 			return Score{}, err
 		}
 		return r.end(StatusBudget, why)
 	}
-	c, err = r.complete(ctx, judge, req, true)
+	c, err = r.send(ctx, judge, second, true)
 	if err == nil && len(c.ToolCalls) > 0 {
 		return r.end(StatusInvalid, "the judge asked for a tool again after its one turn of tool results")
 	}
@@ -334,8 +343,12 @@ func (r *run) crossCheck(ctx context.Context, fam Family, args []byte) (string, 
 		r.score.CrossCheck = CrossCheckNotSent
 		return refusalQuestion, nil
 	}
-	req := providers.CompletionRequest{Messages: crossCheckMessages(q), MaxOutputTokens: crossOutputTokens,
-		MaxBilledAttempts: billedAttempts}
+	req, _, ok := checkRequest(r.Redactor, providers.CompletionRequest{Messages: crossCheckMessages(q),
+		MaxOutputTokens: crossOutputTokens, MaxBilledAttempts: billedAttempts}, r.sentKeep())
+	if !ok {
+		r.score.CrossCheck = CrossCheckNotSent
+		return refusalQuestion, nil
+	}
 	ok, _, err := r.reserve(ctx, fam, 2, req)
 	if err != nil {
 		return "", err
@@ -344,7 +357,7 @@ func (r *run) crossCheck(ctx context.Context, fam Family, args []byte) (string, 
 		r.score.CrossCheck = CrossCheckBudget
 		return refusalBudget, nil
 	}
-	c, err := r.complete(ctx, r.Models[fam], req, false)
+	c, err := r.send(ctx, r.Models[fam], req, false)
 	if err != nil {
 		return "", fmt.Errorf("the cross-check call failed: %w", err)
 	}
@@ -352,9 +365,10 @@ func (r *run) crossCheck(ctx context.Context, fam Family, args []byte) (string, 
 	return crossCheckResult(r.Redactor, c.Content), nil
 }
 
-// complete makes one call and counts the usage it reports.
-func (r *run) complete(ctx context.Context, m Model, req providers.CompletionRequest, judge bool) (providers.Completion, error) {
-	c, err := m.Provider.Complete(ctx, req)
+// send is the only call of a model: it takes a request whose every message passed checkRequest as it is sent,
+// makes the call and counts the usage it reports.
+func (r *run) send(ctx context.Context, m Model, cr checkedRequest, judge bool) (providers.Completion, error) {
+	c, err := m.Provider.Complete(ctx, cr.req)
 	if judge {
 		r.score.Usage.JudgeInput += c.Usage.InputTokens
 		r.score.Usage.JudgeOutput += c.Usage.OutputTokens

@@ -211,7 +211,8 @@ func uidOf(rng *rand.Rand) string {
 }
 
 // recordOf builds a record as the analyzer builds one (internal/analysis buildRecord): the names come from the
-// real name functions. models are the reply's model IDs.
+// real name functions. models are the reply's model IDs. The summary names nothing the redactor matches;
+// namedSummary is one that names the Incident and the request.
 func recordOf(t *testing.T, rng *rand.Rand, models ...string) analysis.Record {
 	t.Helper()
 	fp := "sha256:" + hexOf(rng, 32)
@@ -234,8 +235,7 @@ func recordOf(t *testing.T, rng *rand.Rand, models ...string) analysis.Record {
 		StartedAt: started, FinishedAt: started.Add(40 * time.Second), Reason: "Proposed", Calls: 3, ToolCalls: 5,
 		Tokens: 41234, Deployments: analysis.RecordDeployments{Triage: "triage-small"}, Providers: providersOf,
 		Models: models, PromptVersion: "analysis-12",
-		Summary: "The container of " + name + " was killed for memory at 512Mi; " + string(req) +
-			" raises the limit to 768Mi.",
+		Summary:     plainSummary,
 		MissingData: []string{"the heap profile of the checkout pod"},
 		Request:     string(req),
 	}
@@ -249,4 +249,10 @@ func sourceOf(t *testing.T, rec analysis.Record) *memSource {
 		t.Fatal(err)
 	}
 	return &memSource{name: rec.ID + ".json", data: data}
+}
+
+// namedSummary returns a summary that names the record's Incident and request, as an analysis may.
+func namedSummary(rec analysis.Record) string {
+	return "The container of " + rec.Incident.Name + " was killed for memory at 512Mi; " + rec.Request +
+		" raises the limit to 768Mi."
 }

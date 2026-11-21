@@ -30,6 +30,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
+	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
 )
 
@@ -264,6 +265,69 @@ func checkJudgeInput(r *redact.Redactor, rec analysis.Record, keep []string) ([]
 	}
 	return checkRedaction(r, data, keep)
 }
+
+// Reasons of a request that failed the check of what is sent.
+const (
+	reasonUnsent       = "the redactor found text it would remove; nothing was sent to a model"
+	reasonSecondUnsent = "the redactor found text it would remove in the judge's second request; it was not sent " +
+		"and the run ended without an answer"
+)
+
+// checkedRequest is a model request every text of which passed checkRequest exactly as it is sent. Only
+// checkRequest makes one, and send, the only function that calls a model, takes nothing else, so no call can be
+// made around the check (a test holds both).
+type checkedRequest struct {
+	req providers.CompletionRequest
+}
+
+// checkRequest is the deciding redaction check (ADR-0047 section 3): the redactor's Clean over each text of req
+// whole, as the adapter gets it: every message's content after formatting, its tool calls (ID, name and
+// arguments) and tool call ID, the tool definitions and the answer schema. keep holds only the record ID. It
+// returns the rule kinds that matched and false when any text fails. The checks of the raw document and of each
+// value run earlier and do not replace this one. ProviderBlocks are opaque to the intake and not read: they are
+// the judge's own reply, handed back to the adapter that made them.
+func checkRequest(r *redact.Redactor, req providers.CompletionRequest, keep []string) (checkedRequest, []string, bool) {
+	kinds := map[string]bool{}
+	clean := true
+	check := func(s string) {
+		if s == "" {
+			return
+		}
+		if ok, k := redactorClean(r, s, keep); !ok {
+			clean = false
+			for _, kind := range k {
+				kinds[kind] = true
+			}
+		}
+	}
+	for _, m := range req.Messages {
+		check(m.Content)
+		check(m.ToolCallID)
+		for _, tc := range m.ToolCalls {
+			check(tc.ID)
+			check(tc.Name)
+			check(string(tc.Arguments))
+		}
+	}
+	for _, td := range req.Tools {
+		check(td.Name)
+		check(td.Description)
+		check(string(td.Parameters))
+	}
+	check(string(req.ResponseSchema))
+	if !clean {
+		out := make([]string, 0, len(kinds))
+		for k := range kinds {
+			out = append(out, k)
+		}
+		slices.Sort(out)
+		return checkedRequest{}, out, false
+	}
+	return checkedRequest{req: req}, nil, true
+}
+
+// sentKeep is the keep list of the check of what is sent: the record ID only, whose shape the name check fixed.
+func (r *run) sentKeep() []string { return []string{r.score.RecordID} }
 
 // walk calls f with each string of v, each key, and "key: value" for each member with a scalar value.
 func walk(v any, f func(string)) {

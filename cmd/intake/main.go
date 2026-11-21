@@ -88,10 +88,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fl.StringVar(&o.anthropicModel, "anthropic-model", "", "Model ID of the Anthropic family (judge of OpenAI records, "+
 		"cross-check of Anthropic ones).")
 	fl.StringVar(&o.anthropicKF, "anthropic-key-file", "",
-		"File holding the intake's own Anthropic API key, read at each call.")
+		"File holding the Anthropic API key of whoever runs the command, read at each call.")
 	fl.StringVar(&o.openaiModel, "openai-model", "", "Model ID of the OpenAI family (judge of Anthropic records, "+
 		"cross-check of OpenAI ones).")
-	fl.StringVar(&o.openaiKF, "openai-key-file", "", "File holding the intake's own OpenAI API key, read at each call.")
+	fl.StringVar(&o.openaiKF, "openai-key-file", "", "File holding the OpenAI API key of whoever runs the "+
+		"command, read at each call.")
 	fl.StringVar(&o.openaiEndpoint, "openai-endpoint", "https://api.openai.com/v1", "HTTPS API base of the OpenAI family.")
 	fl.Int64Var(&o.maxCall, "max-call-tokens", defaultMaxCallTokens,
 		"Token cap of one call: estimated input and output limit.")
@@ -156,6 +157,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err := writeOut(o.out, data, stdout); err != nil {
 		log.Error("Failed to write the score", "error", red.String(err.Error()))
 		return exitRetry
+	}
+	if score.Status == intake.StatusBudget {
+		// ADR-0047 section 6: a cap reached is visible on every run that meets it, with the family and the month.
+		fam := ""
+		if score.Judge != nil {
+			fam = string(score.Judge.Family)
+		}
+		log.Warn("Reached a token cap; the record was not scored", "run", runID, "record", score.RecordID,
+			"family", fam, "month", score.Month, "reason", score.Reason)
 	}
 	log.Info("Scored the record", "run", runID, "record", score.RecordID, "status", string(score.Status),
 		"check", score.Check, "reserved", score.Reserved)

@@ -156,12 +156,12 @@ var gitReadSites = map[string]gitReadSite{
 			res, err := r.cancelFailed(context.Background(), rr, failedRead(), "read the pull request")
 			return mustWait(t, res, err), false
 		}},
-	helperSite:                                 {},
-	"handoff.go:retryRecovery:1":               {bound: handoffGraceBound, check: checkRecoveryBound},
-	"recoverywait.go:observeFailed:1":          {bound: handoffRecoveryBound, check: checkRecoveryWaitBound},
-	"recoverywait.go:heldRecovery:1":           {bound: heldLockBound},
+	helperSite:                        {},
+	"handoff.go:retryRecovery:1":      {bound: handoffGraceBound, check: checkRecoveryBound},
+	"recoverywait.go:observeFailed:1": {bound: handoffRecoveryBound, check: checkRecoveryWaitBound},
+	"recoverywait.go:heldRecovery:1":  {bound: heldLockBound},
 	// The bound of the path that reaches the claim (claimDuringWatch, claimAfterWatch); the claim's entry ends it.
-	"claim.go:claimReadFailed:1": {bound: callerBound},
+	"claim.go:claimReadFailed:1":               {bound: callerBound},
 	"incidentcancel.go:followCancelledMerge:1": {bound: heldLockBound},
 	"incidentcancel.go:closeCancelled:1":       {bound: heldLockBound},
 	"merge.go:mergeCheckFailed:1": {bound: mergeCheckBound,

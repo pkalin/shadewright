@@ -339,8 +339,8 @@ var unboundedReads = map[string]noBoundReason{
 	"heldRecovery": noBoundHeldLock,
 	// A claim held after the end of the watch is retried within its own entry, which ends it (settleClaim, #1058).
 	"claimAfterWatch": noBoundHeldLock,
-	"requestBound": "", // noBoundStaleCleanup and noBoundAfterStop, by the request's state.
-	"refuseOrWait": noBoundRefusedWatch,
+	"requestBound":    "", // noBoundStaleCleanup and noBoundAfterStop, by the request's state.
+	"refuseOrWait":    noBoundRefusedWatch,
 	// A request cancelled for its Incident keeps the lock until a read settles its pull request.
 	"followCancelledMerge": noBoundHeldLock,
 	"closeCancelled":       noBoundHeldLock,

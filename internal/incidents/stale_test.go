@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -64,19 +65,30 @@ func TestFoldOnlyOpensNoIncident(t *testing.T) {
 		t.Fatal("the observation does not recur on its own, so the test proves nothing")
 	}
 	stale.FoldOnly = true
+	dropped := testutil.ToFloat64(droppedBatches.WithLabelValues(dropStaleOnStart))
 	r.obs <- stale
 	// A later observation that opens its Incident: once it is written, the first one was consumed.
 	r.obs <- immediate(observation(2, 2, 1, 1, now))
 	eventually(t, ns, 2, countIs(1))
 	noIncident(t, ns, 1)
-	if len(r.logs.with("Dropped an observation of an event from before the start")) != 1 {
-		t.Fatal("the dropped observation was not logged")
+	// Logged with what traces it back to its event: occurrence, fingerprint, namespace and subject.
+	s := stale.Subject
+	if got := r.logs.with("Dropped an observation of an event from before the start",
+		`"occurrence"="`+stale.Occurrence+`"`, `"fingerprint"="`+fp(1)+`"`, `"namespace"="`+s.Namespace+`"`,
+		`"kind"="Pod"`, `"name"="`+s.Name+`"`); len(got) != 1 {
+		t.Fatalf("the dropped observation was not logged with its occurrence and subject; lines %q", r.logs.with())
+	}
+	if n := testutil.ToFloat64(droppedBatches.WithLabelValues(dropStaleOnStart)) - dropped; n != 1 {
+		t.Fatalf("batches_dropped_total{reason=stale_on_start} rose by %v, want 1", n)
 	}
 	// The same kind of observation folds into the Incident of its fingerprint, which exists now.
 	fold := failedMountOf(2, 4, 14, now)
 	fold.FoldOnly = true
 	r.obs <- fold
 	eventually(t, ns, 2, countIs(15))
+	if n := testutil.ToFloat64(droppedBatches.WithLabelValues(dropStaleOnStart)) - dropped; n != 1 {
+		t.Fatalf("batches_dropped_total{reason=stale_on_start} rose by %v with the fold, want 1", n)
+	}
 }
 
 // An event's occurrence that an Incident counted stays on that Incident after a restart, when the collector
@@ -134,4 +146,44 @@ func TestOccurrenceOfACauseIncidentIsNotMoved(t *testing.T) {
 	if _, ok := c.occurrenceIncident(o); ok {
 		t.Fatal("an occurrence was moved to an Incident this process is still opening")
 	}
+}
+
+// Two guards of occurrenceIncident: a consequence is never moved (it is counted on its cause's Incident as
+// evidence, or goes through the gate), and an occurrence is not moved to an Incident it would roll over from (a
+// Resolved one past RecurrenceWindow): the gate of a new occurrence decides that, not the move.
+func TestOccurrenceIncidentGuards(t *testing.T) {
+	now := time.Now()
+	setup := func(t *testing.T) (*Controller, collector.Observation) {
+		t.Helper()
+		c, err := New(Config{Namespace: "x", Now: func() time.Time { return now }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := Name(fp(1))
+		c.names[name] = struct{}{}
+		c.setRecord(eventID(1), record{counted: counted{total: 5}, incident: name})
+		o := failedMountOf(2, 1, 9, now)
+		if got, ok := c.occurrenceIncident(o); !ok || got != fp(1) {
+			t.Fatalf("occurrence counted by an Incident: moved to %q, %v; want %q", got, ok, fp(1))
+		}
+		return c, o
+	}
+	t.Run("consequence", func(t *testing.T) {
+		c, o := setup(t)
+		o.Class = collector.ClassConsequence
+		if _, ok := c.occurrenceIncident(o); ok {
+			t.Fatal("a consequence was moved to the Incident that counted its occurrence")
+		}
+	})
+	t.Run("rolls over", func(t *testing.T) {
+		c, o := setup(t)
+		c.resolvedAt[Name(fp(1))] = o.ObservedAt.Add(-RecurrenceWindow - time.Hour)
+		if _, ok := c.occurrenceIncident(o); ok {
+			t.Fatal("an occurrence was moved to a Resolved Incident past the recurrence window")
+		}
+		c.resolvedAt[Name(fp(1))] = o.ObservedAt.Add(-time.Hour)
+		if _, ok := c.occurrenceIncident(o); !ok {
+			t.Fatal("an occurrence was not moved to an Incident Resolved within the recurrence window")
+		}
+	})
 }

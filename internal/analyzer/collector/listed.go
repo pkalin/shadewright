@@ -30,15 +30,17 @@ import (
 )
 
 // StaleOnStart is how long before the collector's start an event listed at start must have last occurred to
-// only fold (#996, ADR-0039 amendment of 2026-11-21). It is longer than a leader lease handover and a
-// rollout of the analyzer, so an event that changed while no collector ran (its occurrences handled by none)
-// is within it and counts as before.
+// only fold (#996, ADR-0039 amendment of 2026-11-21). An event that changed while no collector ran (its
+// occurrences handled by none) is within it and counts as before, as long as no collector ran for less than
+// StaleOnStart (a leader lease handover, 15 seconds by controller-runtime's default, or a quick restart). An
+// outage of the analyzer longer than that, with the pod deleted during it, lets such occurrences fold or be
+// dropped (counted in shadewright_incident_batches_dropped_total, reason stale_on_start): accepted on #996.
 const StaleOnStart = 5 * time.Minute
 
-// staleOnStartFolded counts the event observations marked FoldOnly by goneOnStart.
+// staleOnStartFolded counts the observations marked FoldOnly by goneOnStart that deliver handed to the consumer.
 var staleOnStartFolded = prometheus.NewCounter(prometheus.CounterOpts{
 	Name: "shadewright_analyzer_stale_on_start_folded_total",
-	Help: "Events listed at start, unchanged since, about a gone pod and last seen more than 5 minutes before the start, sent as fold only.",
+	Help: "Observations handed to the Incident controller as fold only: of an event listed at start, unchanged since, about a gone pod and last seen more than 5 minutes before the start.",
 })
 
 func init() {
@@ -124,7 +126,8 @@ func (c *Collector) eventPredicate() predicate.Funcs {
 // about a pod that no longer exists (#996): the start listed it, it has not changed since, its regarding
 // object is a Pod that the one read of it found gone or replaced by another of the same name (pod is nil),
 // and its last occurrence (lastListedOccurrence) is more than StaleOnStart before start. Such an event opens
-// no Incident: its observation is marked FoldOnly, and staleOnStartFolded counts it. An event last seen
+// no Incident: its observation is marked FoldOnly, and staleOnStartFolded counts it once deliver hands it over
+// (not at the mark: a retry, a hold that drops it or a Handled answer with nothing new sends nothing). An event last seen
 // within StaleOnStart, or with no usable time, counts as before: it may have changed while no collector ran
 // (a restart or a leader handover), and folding it would drop occurrences no collector handled. An event
 // about any other kind is not decided here.
@@ -139,7 +142,6 @@ func (c *Collector) goneOnStart(ev *eventsv1.Event, pod *corev1.Pod, start time.
 	if last, ok := lastListedOccurrence(ev); !ok || !last.Before(start.Add(-StaleOnStart)) {
 		return false
 	}
-	staleOnStartFolded.Inc()
 	return true
 }
 

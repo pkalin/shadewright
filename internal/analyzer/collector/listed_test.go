@@ -198,3 +198,69 @@ func TestListedEventOfAGonePodWithNoTimeIsNotFoldOnly(t *testing.T) {
 		t.Fatalf("event with no usable time: %+v, want not FoldOnly", got)
 	}
 }
+
+// stale_on_start_folded_total counts a FoldOnly observation once it is handed over, not at its mark: a
+// delivery retry, a Handled answer that leaves nothing to send and a hold that drops the event leave it as it
+// was (decision of 2026-11-21 on #996).
+func TestStaleOnStartFoldedCountsOnlyDelivered(t *testing.T) {
+	t.Run("retry", func(t *testing.T) {
+		h := newHarness(t, Config{Buffer: 1})
+		ev := failedMount(h)
+		listAtStart(h, ev)
+		h.c.out <- Observation{}
+		before := testutil.ToFloat64(staleOnStartFolded)
+		if res := h.reconcileEvent(ev.Name); res.RequeueAfter != retryAfter {
+			t.Fatalf("full channel: %+v, want a retry after %v", res, retryAfter)
+		}
+		if n := testutil.ToFloat64(staleOnStartFolded) - before; n != 0 {
+			t.Fatalf("stale_on_start_folded_total rose by %v on a retry, want 0", n)
+		}
+		h.drain()
+		h.reconcileEvent(ev.Name)
+		if got := h.one(); !got.FoldOnly {
+			t.Fatalf("retried delivery: %+v, want FoldOnly", got)
+		}
+		if n := testutil.ToFloat64(staleOnStartFolded) - before; n != 1 {
+			t.Fatalf("stale_on_start_folded_total rose by %v after the delivery, want 1", n)
+		}
+	})
+	t.Run("handled sends nothing", func(t *testing.T) {
+		counted := map[string]int64{}
+		h := newHarness(t, Config{Handled: handledBy(counted)})
+		ev := failedMount(h)
+		counted["event:"+string(ev.UID)] = 14
+		listAtStart(h, ev)
+		before := testutil.ToFloat64(staleOnStartFolded)
+		h.reconcileEvent(ev.Name)
+		h.none()
+		if n := testutil.ToFloat64(staleOnStartFolded) - before; n != 0 {
+			t.Fatalf("stale_on_start_folded_total rose by %v with nothing sent, want 0", n)
+		}
+	})
+	t.Run("hold drops", func(t *testing.T) {
+		d, rs, _ := workload()
+		h := newHarness(t, Config{}, d, rs, holdPod(reasonBackOff, sampleFailing, 0))
+		ev := consequence("ev-hold", reasonBackOff, appPath, t0.Add(-20*time.Minute))
+		h.create(ev)
+		stored := &eventsv1.Event{}
+		if err := h.cl.Get(t.Context(), client.ObjectKeyFromObject(ev), stored); err != nil {
+			t.Fatal(err)
+		}
+		listAtStart(h, stored)
+		before := testutil.ToFloat64(staleOnStartFolded)
+		if res := h.reconcileEvent(ev.Name); res.RequeueAfter == 0 {
+			t.Fatalf("consequence of a failing pod: %+v, want held", res)
+		}
+		if err := h.cl.Delete(t.Context(), readPod(t, h, webPod)); err != nil {
+			t.Fatal(err)
+		}
+		h.reconcileEvent(ev.Name)
+		h.none()
+		if h.c.holds.len() != 0 {
+			t.Fatalf("%d held, want the hold dropped", h.c.holds.len())
+		}
+		if n := testutil.ToFloat64(staleOnStartFolded) - before; n != 0 {
+			t.Fatalf("stale_on_start_folded_total rose by %v for a dropped hold, want 0", n)
+		}
+	})
+}

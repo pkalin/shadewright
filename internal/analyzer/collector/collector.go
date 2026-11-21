@@ -128,8 +128,9 @@ type Observation struct {
 	MayRepeat bool
 	// FoldOnly is set on the observation of an event from before the collector's start about a pod that is
 	// gone (#996, decided 2026-11-21): the start listed the event and it has not changed since, its last
-	// occurrence is more than StaleOnStart before the start, and its pod was not found. Such an observation opens no Incident. The consumer counts it only on an Incident that
-	// exists: the one that counted its occurrence, or the one of its fingerprint; with neither it is dropped.
+	// occurrence is more than StaleOnStart before the start, and its pod was not found. Such an observation
+	// opens no Incident. The consumer counts it only on an Incident that exists: the one that counted its
+	// occurrence, or the one of its fingerprint; with neither it is dropped.
 	// A restart thus opens no Incident that the running collector would not have opened.
 	FoldOnly bool
 	// Immediate is set when the symptom opens an Incident at its first sighting instead of waiting to be
@@ -440,7 +441,13 @@ func (c *Collector) deliver(ctx context.Context, o Observation) (bool, error) {
 			return true, nil
 		}
 	}
-	return c.emit(ctx, o), nil
+	sent := c.emit(ctx, o)
+	if sent && o.FoldOnly {
+		// Counted once handed over: not at the mark, a retry, a hold that ends without it, or a Handled answer
+		// that leaves nothing to send.
+		staleOnStartFolded.Inc()
+	}
+	return sent, nil
 }
 
 // emit hands o to the consumer. It returns false when the channel stayed full for the send timeout or the

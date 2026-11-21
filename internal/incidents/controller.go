@@ -825,9 +825,12 @@ func (c *Controller) consumeLocked(ctx context.Context, o collector.Observation)
 	}
 	if o.FoldOnly {
 		// An event from before the collector's start about a pod that is gone: it folds into an Incident that
-		// exists, and opens none (#996).
+		// exists, and opens none (#996). Counted and logged with what traces it back to its event.
+		droppedBatches.WithLabelValues(dropStaleOnStart).Inc()
+		s := o.Subject
 		logf.FromContext(ctx).Info("Dropped an observation of an event from before the start about a pod that is gone",
-			"incident", c.nameOf(o.Fingerprint), "reason", o.Reason, "count", o.Count)
+			"occurrence", o.Occurrence, "fingerprint", o.Fingerprint, "kind", s.Kind, "namespace", s.Namespace,
+			"name", s.Name, "reason", o.Reason, "count", o.Count)
 		return heldDue
 	}
 	if c.deletedOccurrences.has(o.Occurrence) {

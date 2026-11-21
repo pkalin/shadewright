@@ -22,38 +22,45 @@ import (
 	"testing"
 )
 
-// flagged is an entry point that says with a flag whether it withheld its entry, its output joined.
+// flagged is an entry point that says with a flag whether it withheld its entry, its output joined. parts is
+// the number of strings it returns for in, withheld or not: one for a text, one per line for Strings, one per
+// piece for the pieces.
 type flagged struct {
-	name string
-	run  func(in string) (out []string, ok bool)
+	name  string
+	run   func(in string) (out []string, ok bool)
+	parts func(in string) int
 }
 
+// onePart is parts of an entry point that returns one text.
+func onePart(string) int { return 1 }
+
 var flaggedEntries = []flagged{
-	{"StringChecked", func(in string) ([]string, bool) { out, ok := StringChecked(in); return []string{out}, ok }},
+	{"StringChecked", func(in string) ([]string, bool) { out, ok := StringChecked(in); return []string{out}, ok }, onePart},
 	{"StringKeepingChecked", func(in string) ([]string, bool) {
 		out, ok := StringKeepingChecked(in, "api")
 		return []string{out}, ok
-	}},
+	}, onePart},
 	{"StringTwiceChecked", func(in string) ([]string, bool) {
 		out, ok := StringTwiceChecked(in, nil)
 		return []string{out}, ok
-	}},
+	}, onePart},
 	{"ReplaceChecked", func(in string) ([]string, bool) {
 		out, ok := ReplaceChecked(in, budgetRepl, func(s string) string { return s })
 		return []string{out}, ok
-	}},
+	}, onePart},
 	{"(*Redactor).ReplaceFrom", func(in string) ([]string, bool) {
 		out, ok := defaultRedactor.ReplaceFrom(in, budgetFrom(in), nil, budgetRepl, func(s string) string { return s })
 		return []string{out}, ok
-	}},
-	{"StringsChecked", func(in string) ([]string, bool) { return StringsChecked(strings.Split(in, "\n")) }},
+	}, onePart},
+	{"StringsChecked", func(in string) ([]string, bool) { return StringsChecked(strings.Split(in, "\n")) },
+		func(in string) int { return strings.Count(in, "\n") + 1 }},
 	{"PiecesWithin", func(in string) ([]string, bool) {
 		return defaultRedactor.PiecesWithin([]Piece{{Text: "v: "}, {Text: in, Data: true, Form: Line, Key: "v"}}, -1)
-	}},
+	}, func(string) int { return 2 }},
 	{"PiecesFitting", func(in string) ([]string, bool) {
 		return defaultRedactor.PiecesFitting([]Piece{{Text: in, Data: true, Form: Line, Key: "v"}, {Text: "\n"}},
 			func([]string) bool { return true })
-	}},
+	}, func(string) int { return 2 }},
 }
 
 // Withheld is told by a flag, never by the text (#873, decision of 2026-11-20): an entry that spells the marker,
@@ -65,14 +72,14 @@ func TestWithheldIsAFlagNotAText(t *testing.T) {
 	for _, e := range flaggedEntries {
 		for _, in := range []string{Withheld, Withheld + "\n"} {
 			out, ok := e.run(in)
-			if !ok || !strings.Contains(strings.Join(out, ""), Withheld) {
-				t.Errorf("%s(%q) = %q, ok %v; want the marker as text, ok", e.name, in, out, ok)
+			if !ok || len(out) != e.parts(in) || !strings.Contains(strings.Join(out, ""), Withheld) {
+				t.Errorf("%s(%q) = %q, ok %v; want the marker as text in %d strings, ok", e.name, in, out, ok, e.parts(in))
 			}
 		}
 		out, ok := e.run(over)
-		if ok || !slices.Equal(out, withheldStrings(len(out))) {
-			t.Errorf("%s on %d bytes over the budget: ok %v, %d strings, first %q", e.name, len(over), ok, len(out),
-				out[0][:min(len(out[0]), 40)])
+		if want := withheldStrings(e.parts(over)); ok || !slices.Equal(out, want) {
+			t.Errorf("%s on %d bytes over the budget: ok %v, %d strings %.80q; want ok false and %q", e.name, len(over),
+				ok, len(out), out, want)
 		}
 	}
 }

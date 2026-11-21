@@ -54,7 +54,11 @@ func readConfusablesColon(t *testing.T) (version string, runes []rune) {
 		if len(fields) < 3 {
 			t.Fatalf("%s: malformed line %q", confusablesColon, line)
 		}
-		for target := range strings.FieldsSeq(fields[1]) {
+		targets := strings.Fields(fields[1])
+		if len(targets) == 0 {
+			t.Fatalf("%s: line %q has no target", confusablesColon, line)
+		}
+		for _, target := range targets {
 			if target != "003A" {
 				t.Fatalf("%s: line %q maps to more than colons", confusablesColon, line)
 			}
@@ -135,6 +139,8 @@ func TestFoldMarksAreTheConfusablesOfEqualsAndArrows(t *testing.T) {
 			t.Fatalf("line %q: %v", line, err)
 		}
 		switch targets := strings.Fields(fields[1]); {
+		case len(targets) == 0:
+			t.Fatalf("line %q has no target", line)
 		case len(targets) == 1 && (targets[0] == "2192" || targets[0] == "21D2"):
 			arrows[rune(r)] = map[string]string{"2192": "->", "21D2": "=>"}[targets[0]]
 		default:

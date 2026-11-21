@@ -44,15 +44,16 @@ func (withheldLogs) Logs(context.Context, providers.LogQuery) (providers.LogExce
 }
 
 // checkWithheld checks that r is the result of an answer redaction withheld: could not fetch, labelled, the fixed
-// text, no values, and nothing of the value in it.
+// text and nothing else, no values.
 func checkWithheld(t *testing.T, what string, r Result) {
 	t.Helper()
 	if r.Status != StatusCouldNotFetch || !slices.Contains(r.Labels, LabelWithheld) || len(r.Values) != 0 {
 		t.Errorf("%s: status %q, labels %v, %d values; want could not fetch, withheld, none", what, r.Status, r.Labels,
 			len(r.Values))
 	}
-	if strings.Contains(r.Text, "--token") {
-		t.Errorf("%s shows the value it withheld: %q", what, r.Text[:min(len(r.Text), 80)])
+	if r.Text != withheldText {
+		t.Errorf("%s answered %q, want only %q: nothing of the value or of the names around it", what,
+			r.Text[:min(len(r.Text), 120)], withheldText)
 	}
 }
 

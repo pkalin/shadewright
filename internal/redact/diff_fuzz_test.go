@@ -25,6 +25,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact/redacttest"
 	"github.com/pkalin/shadewright/internal/redact/released"
 )
@@ -112,6 +113,17 @@ func withheldFails(what, in string, out []string, ok bool) []string {
 	return nil
 }
 
+// decidedFails returns the P5 failure when out, an entry point's output decided inside its budget, is not want,
+// the same decision taken with no budget: a decided entry is the whole decision, never a part of it (a value
+// lost, a note dropped) that no leak, marker or UTF-8 check would see.
+func decidedFails(what string, out, want []string) []string {
+	if !slices.Equal(out, want) {
+		return []string{fmt.Sprintf("P5: %s decided the entry as %q, without a budget %q", what,
+			redacttest.Clip(strings.Join(out, "|")), redacttest.Clip(strings.Join(want, "|")))}
+	}
+	return nil
+}
+
 // utf8Fails returns the P4 failure when out is not valid UTF-8 and in is.
 func utf8Fails(what, in, out string) []string {
 	if utf8.ValidString(in) && !utf8.ValidString(out) {
@@ -181,6 +193,7 @@ func diffString(data []byte) ([]string, bool) {
 	if fails = append(fails, withheldFails("String", in, []string{out}, ok)...); !ok {
 		return fails, counted
 	}
+	fails = append(fails, decidedFails("String", []string{out}, []string{render(nil, in, defaultRedactor.spans(nil, in))})...)
 	rec := redacttest.NewRecorder()
 	rec.Wrap(released.String)(in)
 	fails = append(fails, leaks(rec, "String", out)...)
@@ -201,6 +214,7 @@ func diffStringTwice(data []byte) ([]string, bool) {
 	if fails = append(fails, withheldFails("StringTwice", in, []string{out}, ok)...); !ok {
 		return fails, counted
 	}
+	fails = append(fails, decidedFails("StringTwice", []string{out}, []string{defaultRedactor.stringTwice(nil, in, nil)})...)
 	rec := redacttest.NewRecorder()
 	releasedTwice(rec)(in)
 	fails = append(fails, leaks(rec, "StringTwice", out)...)
@@ -228,6 +242,7 @@ func diffStrings(data []byte) ([]string, bool) {
 	if fails = append(fails, withheldFails("Strings", joined, out, ok)...); !ok {
 		return fails, counted
 	}
+	fails = append(fails, decidedFails("Strings", out, defaultRedactor.strings(nil, items))...)
 	rec := redacttest.NewRecorder()
 	twice := releasedTwice(rec)
 	each := make([]string, len(items))
@@ -245,9 +260,11 @@ func diffStrings(data []byte) ([]string, bool) {
 }
 
 // FuzzDiffReplaceFrom checks the excerpt of a log (ReplaceFrom, as the log source calls it in
-// internal/providers/logs/kube Excerpt) against the excerpt origin/main made (P1, P3, P4): the release's Replace
-// over the whole text with the part before the cut dropped, then the release's String over the excerpt. The knob
-// gives the bytes kept: 64 times one more than it.
+// internal/providers/logs/kube Excerpt, with providers.LeadingContinuation) against the excerpt origin/main made
+// (P1, P3, P4): the release's Replace over the whole text with the part before the cut dropped, then the release's
+// String over the excerpt, and what its reader of the excerpt (incidentcontext.RenderLog) hid after dropping the
+// leading continuation lines and redacting the rest twice. The knob gives the bytes kept: 64 times one more than
+// it.
 func FuzzDiffReplaceFrom(f *testing.F) { fuzzDiff(f, "FuzzDiffReplaceFrom") }
 
 func diffReplaceFrom(data []byte) ([]string, bool) {
@@ -257,16 +274,20 @@ func diffReplaceFrom(data []byte) ([]string, bool) {
 	var out string
 	ok := true
 	total, release, counted := measureWork(func() {
-		out = strings.ToValidUTF8(excerptOf(in, from, defaultRedactor.replaceFromFunc(from, &ok), Marker), "?")
+		out = strings.ToValidUTF8(excerptOf(in, from, defaultRedactor.replaceFromFunc(from, providers.LeadingContinuation, &ok), Marker), "?")
 	})
 	fails := workFails("ReplaceFrom", total, release, len(in))
 	if fails = append(fails, withheldFails("the excerpt", in, []string{out}, ok)...); !ok {
 		return fails, counted
 	}
+	want := strings.ToValidUTF8(excerptOf(in, from, defaultRedactor.replaceFromUnbudgeted(from, providers.LeadingContinuation), Marker), "?")
+	fails = append(fails, decidedFails("the excerpt", []string{out}, []string{want})...)
 	rec := redacttest.NewRecorder()
 	mainOut := released.String(strings.ToValidUTF8(excerptOf(in, from, released.Replace, released.Marker), "?"))
 	// What the release hid is what its excerpt does not show of the part it kept.
 	rec.Saw(in[from:], mainOut)
+	// What its reader hid in the part of the excerpt it kept.
+	releasedTwice(rec)(mainOut[providers.LeadingContinuation(mainOut):])
 	fails = append(fails, leaks(rec, "the excerpt", out)...)
 	fails = append(fails, utf8Fails("the excerpt", strings.ToValidUTF8(in, "?"), out)...)
 	return fails, counted
@@ -279,12 +300,22 @@ func TestMinimizeCollected(t *testing.T) {
 	redacttest.MinimizeCollected(t, diffBodies, knownDiffFailures)
 }
 
-// replaceFromFunc is ReplaceFrom with from fixed, in the shape of Replace; it sets *ok to ReplaceFrom's flag.
-func (r *Redactor) replaceFromFunc(from int, ok *bool) func(string, func(kind, text string) string, func(string) string) string {
+// replaceFromFunc is ReplaceFrom with from and drop fixed, in the shape of Replace; it sets *ok to ReplaceFrom's
+// flag.
+func (r *Redactor) replaceFromFunc(from int, drop func(string) int, ok *bool) func(string, func(kind, text string) string, func(string) string) string {
 	return func(s string, repl func(kind, text string) string, between func(string) string) string {
-		out, decided := r.ReplaceFrom(s, from, nil, repl, between)
+		out, decided := r.ReplaceFrom(s, from, drop, repl, between)
 		*ok = decided
 		return out
+	}
+}
+
+// replaceFromUnbudgeted is replaceFromFunc with the decision taken on no budget, the answer a decided ReplaceFrom
+// must give (P5).
+func (r *Redactor) replaceFromUnbudgeted(from int, drop func(string) int) func(string, func(kind, text string) string, func(string) string) string {
+	return func(s string, repl func(kind, text string) string, between func(string) string) string {
+		spans := settle(nil, s, append(r.ruleMatches(nil, s), r.releasedExcerpt(nil, s, from, drop)...))
+		return r.replaceSpans(nil, s, spans, repl, between)
 	}
 }
 
@@ -389,18 +420,27 @@ func TestReplaceFromWorkOnGluedFlags(t *testing.T) {
 	checkDiff(t, "FuzzDiffReplaceFrom", data, counted, fails)
 }
 
-// checkOwnWork fails when f, the redaction of in by what, adds more than ownWorkPerByte per byte of in to the
-// release's reading. It skips without the counter (the build tag redactwork).
+// checkOwnWork fails when the decision String takes on in with no budget adds more than ownWorkPerByte per byte
+// of in to the release's reading, and, apart, when f, the redaction of in by what, takes more than the budget of
+// in. The own work is measured on the decision with no budget, which always ends: an entry point whose budget runs
+// out stops early and is withheld, and the work it counted then says nothing about what the decision costs. It
+// skips without the counter (the build tag redactwork).
 //
 //nolint:unparam // what is used after the skip, which returns only in a build with the tag redactwork
 func checkOwnWork(t *testing.T, what, in string, f func()) {
 	t.Helper()
 	skipUncounted(t)
-	total, release, counted := measureWork(f)
+	total, release, counted := measureWork(func() { render(nil, in, defaultRedactor.spans(nil, in)) })
 	if !counted {
 		t.Fatal("redaction work was not counted")
 	}
-	t.Logf("%s on %d bytes: the rest %.1f steps per byte", what, len(in), perByte(total-release, len(in)))
+	own := total - release
+	t.Logf("the decision on %d bytes: the rest %.1f steps per byte", len(in), perByte(own, len(in)))
+	if own <= 0 || own > int64(ownWorkPerByte*len(in)) {
+		t.Errorf("the decision on %d bytes adds %d steps to the release's reading, not in (0, %d per byte]",
+			len(in), own, ownWorkPerByte)
+	}
+	total, release, _ = measureWork(f)
 	for _, fail := range workFails(what, total, release, len(in)) {
 		t.Error(fail)
 	}

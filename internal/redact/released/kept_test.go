@@ -270,7 +270,8 @@ func TestFuzzLabelMatchesKeptCopy(t *testing.T) {
 // Answers known by construction, on both the reading and the kept copy: a block scalar under a bare short key
 // whose lines hold a secret deep in a staircase is redacted from its first line to its last, the secret with it,
 // and the line after the block stays; a field after a comma glued to a quoted value ends the value, so the
-// value is redacted and the field after it stays.
+// value is redacted and the field after it stays, its own value redacted only when its key names a secret.
+// Each output is compared whole.
 func TestKnownAnswers(t *testing.T) {
 	r := rand.New(rand.NewPCG(873, 3)) // #nosec G404 -- reproducible generated texts
 	for i := range sampled(200) {
@@ -283,18 +284,28 @@ func TestKnownAnswers(t *testing.T) {
 		b.WriteString(strings.Repeat(" ", depth+r.IntN(3)) + secret + "\n")
 		b.WriteString("tail: visible\n")
 		text := b.String()
+		// The block's value starts at the first character of its second line, and ends with the secret.
+		first, rest, _ := strings.Cut(text, "\n")
+		start := len(first) + 1 + len(rest) - len(strings.TrimLeft(rest, " "))
+		end := len(text) - len("\ntail: visible\n")
+		want := text[:start] + marker(nil, KindCredential, end-start) + text[end:]
 		for name, out := range map[string]string{"reading": String(text), "kept": render(nil, text, toSpans(v052.Spans(text)))} {
-			if strings.Contains(out, secret) || !strings.HasSuffix(out, "\ntail: visible\n") {
-				t.Fatalf("%s, staircase %d of depth %d: %q", name, i, depth, out)
+			if out != want {
+				t.Fatalf("%s, staircase %d of depth %d:\n got %q\nwant %q", name, i, depth, out, want)
 			}
 		}
-		field := pick(r, []string{"user=bob", "api_\u212aey=" + secret, "\u017fecret: " + secret, "next: x"})
-		text = "password=\"" + secret + "\"," + field
-		head, _, _ := strings.Cut(field, "=")
-		head, _, _ = strings.Cut(head, ":")
+		fields := []struct{ in, want string }{
+			{"user=bob", "user=bob"},
+			{"api_\u212aey=" + secret, "api_\u212aey=" + marker(nil, KindCredential, len(secret))},
+			{"\u017fecret: " + secret, "\u017fecret: " + marker(nil, KindCredential, len(secret))},
+			{"next: x", "next: x"},
+		}
+		field := fields[r.IntN(len(fields))]
+		text = "password=\"" + secret + "\"," + field.in
+		want = "password=\"" + marker(nil, KindConnectionString, len(secret)) + "\"," + field.want
 		for name, out := range map[string]string{"reading": String(text), "kept": render(nil, text, toSpans(v052.Spans(text)))} {
-			if strings.Contains(out, secret) || !strings.Contains(out, ","+head) {
-				t.Fatalf("%s, fields %q: %q", name, text, out)
+			if out != want {
+				t.Fatalf("%s, fields %q:\n got %q\nwant %q", name, text, out, want)
 			}
 		}
 	}

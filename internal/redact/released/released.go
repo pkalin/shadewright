@@ -35,6 +35,14 @@ import (
 // on each comparison of their sorts (sortFunc);
 // TestReleasedIsTheReleaseBefore pins the kept files with it taken out. The package is retired, with its reading, by its own issue (pkalin/shadewright#922)
 // once a release has run with both readings.
+//
+// The package comment of the kept redact.go says that matching takes time linear in the input. That holds of one
+// pass of the engine, not of a text: a rule is tried again after each match and an attempt may read the rest of
+// the text (rule.findAll), so the work on some shapes grows with the square of the text ("--token,}" and
+// "-password," repeated, #962). Only the entry points that take a meter stop at a work budget:
+// [Redactor.SpansWithin] and [Redactor.StringWithin], which package redact calls with the budget of its own
+// entry. [String], [Spans], [Replace], [StringKeeping], [Clean] and their methods on [Redactor] pass no meter
+// and run with no budget.
 
 // Span is a byte range of a text that the redactor of the release before hides, with the kind its marker names.
 type Span struct {

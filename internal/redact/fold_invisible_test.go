@@ -55,8 +55,8 @@ func readInvisible(t *testing.T) (version string, ranges [][2]rune) {
 		if p := strings.Fields(fields[1]); len(p) == 0 || p[0] != "Default_Ignorable_Code_Point" && p[0] != "Cf" {
 			t.Fatalf("%s: line %q is of neither property", invisibleData, line)
 		}
-		lo, hi, _ := strings.Cut(strings.TrimSpace(fields[0]), "..")
-		if hi == "" {
+		lo, hi, isRange := strings.Cut(strings.TrimSpace(fields[0]), "..")
+		if !isRange {
 			hi = lo
 		}
 		a, err1 := strconv.ParseInt(lo, 16, 32)

@@ -104,11 +104,13 @@ func decisionWork(t *testing.T, in string) (total, release int64) {
 }
 
 // doublingOver returns the first doubling of work, measured at the sizes of size, that costs more than the
-// linear bound, as the count of units before it and the work on either side, and false when none does.
-func doublingOver(work, size [4]int64) (units int, before, after int64, over bool) {
+// linear bound, as the count of units before it and the work on either side, and false when none does. windowed
+// says whether the work is read by windows (this package's own work), the only work the doubling across
+// windowMinText may cost complexityWindowStep more on: the reading of the release before reads no window.
+func doublingOver(work, size [4]int64, windowed bool) (units int, before, after int64, over bool) {
 	for i := 1; i < len(work); i++ {
 		bound := 2 * complexitySlack
-		if (size[i-1] < windowMinText) != (size[i] < windowMinText) {
+		if windowed && (size[i-1] < windowMinText) != (size[i] < windowMinText) {
 			bound *= complexityWindowStep
 		}
 		if float64(work[i]) > bound*float64(work[i-1]) {
@@ -139,11 +141,11 @@ func TestTokenShapesWorkIsLinearExceptTwo(t *testing.T) {
 				total, release := decisionWork(t, in)
 				own[i], rel[i], size[i] = total-release, release, int64(len(in))
 			}
-			if n, before, after, over := doublingOver(own, size); over {
+			if n, before, after, over := doublingOver(own, size, true); over {
 				fail("%q + %q x %d: own work %d, at twice as many units %d (own work %v)", open, unit, n, before,
 					after, own)
 			}
-			_, _, _, releaseOver := doublingOver(rel, size)
+			_, _, _, releaseOver := doublingOver(rel, size, false)
 			if reason, known := complexityKnownSuperlinear[unit]; known {
 				_, decided := StringChecked(in)
 				if withheld := !decided; !releaseOver || !withheld {

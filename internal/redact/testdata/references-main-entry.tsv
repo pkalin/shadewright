@@ -1,4 +1,6 @@
 # Whether get_resource showed each identifier of a reference to a Secret or a ConfigMap, at main c84029ce (#845).
+# An identifier placed in two fields (a key named DB_PASSWORD) has a row per field, "(before)" and "(key)",
+# read by its path at the same commit.
 # place	name	key	identifier	shown or hidden
 env.valueFrom.secretKeyRef	db-credentials	password	AUTH_ISSUER	shown
 env.valueFrom.secretKeyRef	db-credentials	password	DB_PASSWORD	shown
@@ -21,7 +23,8 @@ env.valueFrom.secretKeyRef	db-credentials	tls.key	REF_VAR	shown
 env.valueFrom.secretKeyRef	db-credentials	tls.key	db-credentials	shown
 env.valueFrom.secretKeyRef	db-credentials	tls.key	tls.key	shown
 env.valueFrom.secretKeyRef	db-credentials	DB_PASSWORD	AUTH_ISSUER	shown
-env.valueFrom.secretKeyRef	db-credentials	DB_PASSWORD	DB_PASSWORD	shown
+env.valueFrom.secretKeyRef	db-credentials	DB_PASSWORD	DB_PASSWORD (before)	shown
+env.valueFrom.secretKeyRef	db-credentials	DB_PASSWORD	DB_PASSWORD (key)	shown
 env.valueFrom.secretKeyRef	db-credentials	DB_PASSWORD	REF_VAR	shown
 env.valueFrom.secretKeyRef	db-credentials	DB_PASSWORD	db-credentials	shown
 env.valueFrom.secretKeyRef	db-credentials	username	AUTH_ISSUER	shown
@@ -55,7 +58,8 @@ env.valueFrom.secretKeyRef	app-secrets	tls.key	REF_VAR	shown
 env.valueFrom.secretKeyRef	app-secrets	tls.key	app-secrets	shown
 env.valueFrom.secretKeyRef	app-secrets	tls.key	tls.key	shown
 env.valueFrom.secretKeyRef	app-secrets	DB_PASSWORD	AUTH_ISSUER	shown
-env.valueFrom.secretKeyRef	app-secrets	DB_PASSWORD	DB_PASSWORD	shown
+env.valueFrom.secretKeyRef	app-secrets	DB_PASSWORD	DB_PASSWORD (before)	shown
+env.valueFrom.secretKeyRef	app-secrets	DB_PASSWORD	DB_PASSWORD (key)	shown
 env.valueFrom.secretKeyRef	app-secrets	DB_PASSWORD	REF_VAR	shown
 env.valueFrom.secretKeyRef	app-secrets	DB_PASSWORD	app-secrets	shown
 env.valueFrom.secretKeyRef	app-secrets	username	AUTH_ISSUER	shown
@@ -89,7 +93,8 @@ env.valueFrom.secretKeyRef	regcred	tls.key	REF_VAR	shown
 env.valueFrom.secretKeyRef	regcred	tls.key	regcred	shown
 env.valueFrom.secretKeyRef	regcred	tls.key	tls.key	shown
 env.valueFrom.secretKeyRef	regcred	DB_PASSWORD	AUTH_ISSUER	shown
-env.valueFrom.secretKeyRef	regcred	DB_PASSWORD	DB_PASSWORD	shown
+env.valueFrom.secretKeyRef	regcred	DB_PASSWORD	DB_PASSWORD (before)	shown
+env.valueFrom.secretKeyRef	regcred	DB_PASSWORD	DB_PASSWORD (key)	shown
 env.valueFrom.secretKeyRef	regcred	DB_PASSWORD	REF_VAR	shown
 env.valueFrom.secretKeyRef	regcred	DB_PASSWORD	regcred	shown
 env.valueFrom.secretKeyRef	regcred	username	AUTH_ISSUER	shown
@@ -123,7 +128,8 @@ env.valueFrom.secretKeyRef	api-token	tls.key	REF_VAR	shown
 env.valueFrom.secretKeyRef	api-token	tls.key	api-token	shown
 env.valueFrom.secretKeyRef	api-token	tls.key	tls.key	shown
 env.valueFrom.secretKeyRef	api-token	DB_PASSWORD	AUTH_ISSUER	shown
-env.valueFrom.secretKeyRef	api-token	DB_PASSWORD	DB_PASSWORD	shown
+env.valueFrom.secretKeyRef	api-token	DB_PASSWORD	DB_PASSWORD (before)	shown
+env.valueFrom.secretKeyRef	api-token	DB_PASSWORD	DB_PASSWORD (key)	shown
 env.valueFrom.secretKeyRef	api-token	DB_PASSWORD	REF_VAR	shown
 env.valueFrom.secretKeyRef	api-token	DB_PASSWORD	api-token	shown
 env.valueFrom.secretKeyRef	api-token	username	AUTH_ISSUER	shown
@@ -157,7 +163,8 @@ env.valueFrom.secretKeyRef	settings	tls.key	REF_VAR	shown
 env.valueFrom.secretKeyRef	settings	tls.key	settings	shown
 env.valueFrom.secretKeyRef	settings	tls.key	tls.key	shown
 env.valueFrom.secretKeyRef	settings	DB_PASSWORD	AUTH_ISSUER	shown
-env.valueFrom.secretKeyRef	settings	DB_PASSWORD	DB_PASSWORD	shown
+env.valueFrom.secretKeyRef	settings	DB_PASSWORD	DB_PASSWORD (before)	shown
+env.valueFrom.secretKeyRef	settings	DB_PASSWORD	DB_PASSWORD (key)	shown
 env.valueFrom.secretKeyRef	settings	DB_PASSWORD	REF_VAR	shown
 env.valueFrom.secretKeyRef	settings	DB_PASSWORD	settings	shown
 env.valueFrom.secretKeyRef	settings	username	AUTH_ISSUER	shown
@@ -191,7 +198,8 @@ env.valueFrom.configMapKeyRef	db-credentials	tls.key	REF_VAR	shown
 env.valueFrom.configMapKeyRef	db-credentials	tls.key	db-credentials	shown
 env.valueFrom.configMapKeyRef	db-credentials	tls.key	tls.key	shown
 env.valueFrom.configMapKeyRef	db-credentials	DB_PASSWORD	AUTH_ISSUER	shown
-env.valueFrom.configMapKeyRef	db-credentials	DB_PASSWORD	DB_PASSWORD	shown
+env.valueFrom.configMapKeyRef	db-credentials	DB_PASSWORD	DB_PASSWORD (before)	shown
+env.valueFrom.configMapKeyRef	db-credentials	DB_PASSWORD	DB_PASSWORD (key)	shown
 env.valueFrom.configMapKeyRef	db-credentials	DB_PASSWORD	REF_VAR	shown
 env.valueFrom.configMapKeyRef	db-credentials	DB_PASSWORD	db-credentials	shown
 env.valueFrom.configMapKeyRef	db-credentials	username	AUTH_ISSUER	shown
@@ -225,7 +233,8 @@ env.valueFrom.configMapKeyRef	app-secrets	tls.key	REF_VAR	shown
 env.valueFrom.configMapKeyRef	app-secrets	tls.key	app-secrets	shown
 env.valueFrom.configMapKeyRef	app-secrets	tls.key	tls.key	shown
 env.valueFrom.configMapKeyRef	app-secrets	DB_PASSWORD	AUTH_ISSUER	shown
-env.valueFrom.configMapKeyRef	app-secrets	DB_PASSWORD	DB_PASSWORD	shown
+env.valueFrom.configMapKeyRef	app-secrets	DB_PASSWORD	DB_PASSWORD (before)	shown
+env.valueFrom.configMapKeyRef	app-secrets	DB_PASSWORD	DB_PASSWORD (key)	shown
 env.valueFrom.configMapKeyRef	app-secrets	DB_PASSWORD	REF_VAR	shown
 env.valueFrom.configMapKeyRef	app-secrets	DB_PASSWORD	app-secrets	shown
 env.valueFrom.configMapKeyRef	app-secrets	username	AUTH_ISSUER	shown
@@ -259,7 +268,8 @@ env.valueFrom.configMapKeyRef	regcred	tls.key	REF_VAR	shown
 env.valueFrom.configMapKeyRef	regcred	tls.key	regcred	shown
 env.valueFrom.configMapKeyRef	regcred	tls.key	tls.key	shown
 env.valueFrom.configMapKeyRef	regcred	DB_PASSWORD	AUTH_ISSUER	shown
-env.valueFrom.configMapKeyRef	regcred	DB_PASSWORD	DB_PASSWORD	shown
+env.valueFrom.configMapKeyRef	regcred	DB_PASSWORD	DB_PASSWORD (before)	shown
+env.valueFrom.configMapKeyRef	regcred	DB_PASSWORD	DB_PASSWORD (key)	shown
 env.valueFrom.configMapKeyRef	regcred	DB_PASSWORD	REF_VAR	shown
 env.valueFrom.configMapKeyRef	regcred	DB_PASSWORD	regcred	shown
 env.valueFrom.configMapKeyRef	regcred	username	AUTH_ISSUER	shown
@@ -293,7 +303,8 @@ env.valueFrom.configMapKeyRef	api-token	tls.key	REF_VAR	shown
 env.valueFrom.configMapKeyRef	api-token	tls.key	api-token	shown
 env.valueFrom.configMapKeyRef	api-token	tls.key	tls.key	shown
 env.valueFrom.configMapKeyRef	api-token	DB_PASSWORD	AUTH_ISSUER	shown
-env.valueFrom.configMapKeyRef	api-token	DB_PASSWORD	DB_PASSWORD	shown
+env.valueFrom.configMapKeyRef	api-token	DB_PASSWORD	DB_PASSWORD (before)	shown
+env.valueFrom.configMapKeyRef	api-token	DB_PASSWORD	DB_PASSWORD (key)	shown
 env.valueFrom.configMapKeyRef	api-token	DB_PASSWORD	REF_VAR	shown
 env.valueFrom.configMapKeyRef	api-token	DB_PASSWORD	api-token	shown
 env.valueFrom.configMapKeyRef	api-token	username	AUTH_ISSUER	shown
@@ -327,7 +338,8 @@ env.valueFrom.configMapKeyRef	settings	tls.key	REF_VAR	shown
 env.valueFrom.configMapKeyRef	settings	tls.key	settings	shown
 env.valueFrom.configMapKeyRef	settings	tls.key	tls.key	shown
 env.valueFrom.configMapKeyRef	settings	DB_PASSWORD	AUTH_ISSUER	shown
-env.valueFrom.configMapKeyRef	settings	DB_PASSWORD	DB_PASSWORD	shown
+env.valueFrom.configMapKeyRef	settings	DB_PASSWORD	DB_PASSWORD (before)	shown
+env.valueFrom.configMapKeyRef	settings	DB_PASSWORD	DB_PASSWORD (key)	shown
 env.valueFrom.configMapKeyRef	settings	DB_PASSWORD	REF_VAR	shown
 env.valueFrom.configMapKeyRef	settings	DB_PASSWORD	settings	shown
 env.valueFrom.configMapKeyRef	settings	username	AUTH_ISSUER	shown
@@ -357,7 +369,8 @@ envFrom.secretRef	db-credentials	tls.key	DB_PASSWORD	shown
 envFrom.secretRef	db-credentials	tls.key	db-credentials	shown
 envFrom.secretRef	db-credentials	tls.key	tls.key	shown
 envFrom.secretRef	db-credentials	DB_PASSWORD	AUTH_ISSUER	shown
-envFrom.secretRef	db-credentials	DB_PASSWORD	DB_PASSWORD	shown
+envFrom.secretRef	db-credentials	DB_PASSWORD	DB_PASSWORD (before)	shown
+envFrom.secretRef	db-credentials	DB_PASSWORD	DB_PASSWORD (key)	shown
 envFrom.secretRef	db-credentials	DB_PASSWORD	db-credentials	shown
 envFrom.secretRef	db-credentials	username	AUTH_ISSUER	shown
 envFrom.secretRef	db-credentials	username	DB_PASSWORD	shown
@@ -384,7 +397,8 @@ envFrom.secretRef	app-secrets	tls.key	DB_PASSWORD	shown
 envFrom.secretRef	app-secrets	tls.key	app-secrets	shown
 envFrom.secretRef	app-secrets	tls.key	tls.key	shown
 envFrom.secretRef	app-secrets	DB_PASSWORD	AUTH_ISSUER	shown
-envFrom.secretRef	app-secrets	DB_PASSWORD	DB_PASSWORD	shown
+envFrom.secretRef	app-secrets	DB_PASSWORD	DB_PASSWORD (before)	shown
+envFrom.secretRef	app-secrets	DB_PASSWORD	DB_PASSWORD (key)	shown
 envFrom.secretRef	app-secrets	DB_PASSWORD	app-secrets	shown
 envFrom.secretRef	app-secrets	username	AUTH_ISSUER	shown
 envFrom.secretRef	app-secrets	username	DB_PASSWORD	shown
@@ -411,7 +425,8 @@ envFrom.secretRef	regcred	tls.key	DB_PASSWORD	shown
 envFrom.secretRef	regcred	tls.key	regcred	shown
 envFrom.secretRef	regcred	tls.key	tls.key	shown
 envFrom.secretRef	regcred	DB_PASSWORD	AUTH_ISSUER	shown
-envFrom.secretRef	regcred	DB_PASSWORD	DB_PASSWORD	shown
+envFrom.secretRef	regcred	DB_PASSWORD	DB_PASSWORD (before)	shown
+envFrom.secretRef	regcred	DB_PASSWORD	DB_PASSWORD (key)	shown
 envFrom.secretRef	regcred	DB_PASSWORD	regcred	shown
 envFrom.secretRef	regcred	username	AUTH_ISSUER	shown
 envFrom.secretRef	regcred	username	DB_PASSWORD	shown
@@ -438,7 +453,8 @@ envFrom.secretRef	api-token	tls.key	DB_PASSWORD	shown
 envFrom.secretRef	api-token	tls.key	api-token	shown
 envFrom.secretRef	api-token	tls.key	tls.key	shown
 envFrom.secretRef	api-token	DB_PASSWORD	AUTH_ISSUER	shown
-envFrom.secretRef	api-token	DB_PASSWORD	DB_PASSWORD	shown
+envFrom.secretRef	api-token	DB_PASSWORD	DB_PASSWORD (before)	shown
+envFrom.secretRef	api-token	DB_PASSWORD	DB_PASSWORD (key)	shown
 envFrom.secretRef	api-token	DB_PASSWORD	api-token	shown
 envFrom.secretRef	api-token	username	AUTH_ISSUER	shown
 envFrom.secretRef	api-token	username	DB_PASSWORD	shown
@@ -465,7 +481,8 @@ envFrom.secretRef	settings	tls.key	DB_PASSWORD	shown
 envFrom.secretRef	settings	tls.key	settings	shown
 envFrom.secretRef	settings	tls.key	tls.key	shown
 envFrom.secretRef	settings	DB_PASSWORD	AUTH_ISSUER	shown
-envFrom.secretRef	settings	DB_PASSWORD	DB_PASSWORD	shown
+envFrom.secretRef	settings	DB_PASSWORD	DB_PASSWORD (before)	shown
+envFrom.secretRef	settings	DB_PASSWORD	DB_PASSWORD (key)	shown
 envFrom.secretRef	settings	DB_PASSWORD	settings	shown
 envFrom.secretRef	settings	username	AUTH_ISSUER	shown
 envFrom.secretRef	settings	username	DB_PASSWORD	shown
@@ -492,7 +509,8 @@ envFrom.configMapRef	db-credentials	tls.key	DB_PASSWORD	shown
 envFrom.configMapRef	db-credentials	tls.key	db-credentials	shown
 envFrom.configMapRef	db-credentials	tls.key	tls.key	shown
 envFrom.configMapRef	db-credentials	DB_PASSWORD	AUTH_ISSUER	shown
-envFrom.configMapRef	db-credentials	DB_PASSWORD	DB_PASSWORD	shown
+envFrom.configMapRef	db-credentials	DB_PASSWORD	DB_PASSWORD (before)	shown
+envFrom.configMapRef	db-credentials	DB_PASSWORD	DB_PASSWORD (key)	shown
 envFrom.configMapRef	db-credentials	DB_PASSWORD	db-credentials	shown
 envFrom.configMapRef	db-credentials	username	AUTH_ISSUER	shown
 envFrom.configMapRef	db-credentials	username	DB_PASSWORD	shown
@@ -519,7 +537,8 @@ envFrom.configMapRef	app-secrets	tls.key	DB_PASSWORD	shown
 envFrom.configMapRef	app-secrets	tls.key	app-secrets	shown
 envFrom.configMapRef	app-secrets	tls.key	tls.key	shown
 envFrom.configMapRef	app-secrets	DB_PASSWORD	AUTH_ISSUER	shown
-envFrom.configMapRef	app-secrets	DB_PASSWORD	DB_PASSWORD	shown
+envFrom.configMapRef	app-secrets	DB_PASSWORD	DB_PASSWORD (before)	shown
+envFrom.configMapRef	app-secrets	DB_PASSWORD	DB_PASSWORD (key)	shown
 envFrom.configMapRef	app-secrets	DB_PASSWORD	app-secrets	shown
 envFrom.configMapRef	app-secrets	username	AUTH_ISSUER	shown
 envFrom.configMapRef	app-secrets	username	DB_PASSWORD	shown
@@ -546,7 +565,8 @@ envFrom.configMapRef	regcred	tls.key	DB_PASSWORD	shown
 envFrom.configMapRef	regcred	tls.key	regcred	shown
 envFrom.configMapRef	regcred	tls.key	tls.key	shown
 envFrom.configMapRef	regcred	DB_PASSWORD	AUTH_ISSUER	shown
-envFrom.configMapRef	regcred	DB_PASSWORD	DB_PASSWORD	shown
+envFrom.configMapRef	regcred	DB_PASSWORD	DB_PASSWORD (before)	shown
+envFrom.configMapRef	regcred	DB_PASSWORD	DB_PASSWORD (key)	shown
 envFrom.configMapRef	regcred	DB_PASSWORD	regcred	shown
 envFrom.configMapRef	regcred	username	AUTH_ISSUER	shown
 envFrom.configMapRef	regcred	username	DB_PASSWORD	shown
@@ -573,7 +593,8 @@ envFrom.configMapRef	api-token	tls.key	DB_PASSWORD	shown
 envFrom.configMapRef	api-token	tls.key	api-token	shown
 envFrom.configMapRef	api-token	tls.key	tls.key	shown
 envFrom.configMapRef	api-token	DB_PASSWORD	AUTH_ISSUER	shown
-envFrom.configMapRef	api-token	DB_PASSWORD	DB_PASSWORD	shown
+envFrom.configMapRef	api-token	DB_PASSWORD	DB_PASSWORD (before)	shown
+envFrom.configMapRef	api-token	DB_PASSWORD	DB_PASSWORD (key)	shown
 envFrom.configMapRef	api-token	DB_PASSWORD	api-token	shown
 envFrom.configMapRef	api-token	username	AUTH_ISSUER	shown
 envFrom.configMapRef	api-token	username	DB_PASSWORD	shown
@@ -600,7 +621,8 @@ envFrom.configMapRef	settings	tls.key	DB_PASSWORD	shown
 envFrom.configMapRef	settings	tls.key	settings	shown
 envFrom.configMapRef	settings	tls.key	tls.key	shown
 envFrom.configMapRef	settings	DB_PASSWORD	AUTH_ISSUER	shown
-envFrom.configMapRef	settings	DB_PASSWORD	DB_PASSWORD	shown
+envFrom.configMapRef	settings	DB_PASSWORD	DB_PASSWORD (before)	shown
+envFrom.configMapRef	settings	DB_PASSWORD	DB_PASSWORD (key)	shown
 envFrom.configMapRef	settings	DB_PASSWORD	settings	shown
 envFrom.configMapRef	settings	username	AUTH_ISSUER	shown
 envFrom.configMapRef	settings	username	DB_PASSWORD	shown
@@ -635,7 +657,8 @@ volumes.secret	db-credentials	tls.key	ref-path	hidden
 volumes.secret	db-credentials	tls.key	ref-volume	shown
 volumes.secret	db-credentials	tls.key	tls.key	hidden
 volumes.secret	db-credentials	DB_PASSWORD	AUTH_ISSUER	shown
-volumes.secret	db-credentials	DB_PASSWORD	DB_PASSWORD	shown
+volumes.secret	db-credentials	DB_PASSWORD	DB_PASSWORD (before)	shown
+volumes.secret	db-credentials	DB_PASSWORD	DB_PASSWORD (key)	hidden
 volumes.secret	db-credentials	DB_PASSWORD	db-credentials	hidden
 volumes.secret	db-credentials	DB_PASSWORD	ref-path	hidden
 volumes.secret	db-credentials	DB_PASSWORD	ref-volume	shown
@@ -676,7 +699,8 @@ volumes.secret	app-secrets	tls.key	ref-path	hidden
 volumes.secret	app-secrets	tls.key	ref-volume	shown
 volumes.secret	app-secrets	tls.key	tls.key	hidden
 volumes.secret	app-secrets	DB_PASSWORD	AUTH_ISSUER	shown
-volumes.secret	app-secrets	DB_PASSWORD	DB_PASSWORD	shown
+volumes.secret	app-secrets	DB_PASSWORD	DB_PASSWORD (before)	shown
+volumes.secret	app-secrets	DB_PASSWORD	DB_PASSWORD (key)	hidden
 volumes.secret	app-secrets	DB_PASSWORD	app-secrets	hidden
 volumes.secret	app-secrets	DB_PASSWORD	ref-path	hidden
 volumes.secret	app-secrets	DB_PASSWORD	ref-volume	shown
@@ -717,7 +741,8 @@ volumes.secret	regcred	tls.key	ref-volume	shown
 volumes.secret	regcred	tls.key	regcred	hidden
 volumes.secret	regcred	tls.key	tls.key	hidden
 volumes.secret	regcred	DB_PASSWORD	AUTH_ISSUER	shown
-volumes.secret	regcred	DB_PASSWORD	DB_PASSWORD	shown
+volumes.secret	regcred	DB_PASSWORD	DB_PASSWORD (before)	shown
+volumes.secret	regcred	DB_PASSWORD	DB_PASSWORD (key)	hidden
 volumes.secret	regcred	DB_PASSWORD	ref-path	hidden
 volumes.secret	regcred	DB_PASSWORD	ref-volume	shown
 volumes.secret	regcred	DB_PASSWORD	regcred	hidden
@@ -758,7 +783,8 @@ volumes.secret	api-token	tls.key	ref-path	hidden
 volumes.secret	api-token	tls.key	ref-volume	shown
 volumes.secret	api-token	tls.key	tls.key	hidden
 volumes.secret	api-token	DB_PASSWORD	AUTH_ISSUER	shown
-volumes.secret	api-token	DB_PASSWORD	DB_PASSWORD	shown
+volumes.secret	api-token	DB_PASSWORD	DB_PASSWORD (before)	shown
+volumes.secret	api-token	DB_PASSWORD	DB_PASSWORD (key)	hidden
 volumes.secret	api-token	DB_PASSWORD	api-token	hidden
 volumes.secret	api-token	DB_PASSWORD	ref-path	hidden
 volumes.secret	api-token	DB_PASSWORD	ref-volume	shown
@@ -799,7 +825,8 @@ volumes.secret	settings	tls.key	ref-volume	shown
 volumes.secret	settings	tls.key	settings	hidden
 volumes.secret	settings	tls.key	tls.key	hidden
 volumes.secret	settings	DB_PASSWORD	AUTH_ISSUER	shown
-volumes.secret	settings	DB_PASSWORD	DB_PASSWORD	shown
+volumes.secret	settings	DB_PASSWORD	DB_PASSWORD (before)	shown
+volumes.secret	settings	DB_PASSWORD	DB_PASSWORD (key)	hidden
 volumes.secret	settings	DB_PASSWORD	ref-path	hidden
 volumes.secret	settings	DB_PASSWORD	ref-volume	shown
 volumes.secret	settings	DB_PASSWORD	settings	hidden
@@ -840,7 +867,8 @@ volumes.configMap	db-credentials	tls.key	ref-path	shown
 volumes.configMap	db-credentials	tls.key	ref-volume	shown
 volumes.configMap	db-credentials	tls.key	tls.key	shown
 volumes.configMap	db-credentials	DB_PASSWORD	AUTH_ISSUER	shown
-volumes.configMap	db-credentials	DB_PASSWORD	DB_PASSWORD	shown
+volumes.configMap	db-credentials	DB_PASSWORD	DB_PASSWORD (before)	shown
+volumes.configMap	db-credentials	DB_PASSWORD	DB_PASSWORD (key)	shown
 volumes.configMap	db-credentials	DB_PASSWORD	db-credentials	shown
 volumes.configMap	db-credentials	DB_PASSWORD	ref-path	shown
 volumes.configMap	db-credentials	DB_PASSWORD	ref-volume	shown
@@ -881,7 +909,8 @@ volumes.configMap	app-secrets	tls.key	ref-path	shown
 volumes.configMap	app-secrets	tls.key	ref-volume	shown
 volumes.configMap	app-secrets	tls.key	tls.key	shown
 volumes.configMap	app-secrets	DB_PASSWORD	AUTH_ISSUER	shown
-volumes.configMap	app-secrets	DB_PASSWORD	DB_PASSWORD	shown
+volumes.configMap	app-secrets	DB_PASSWORD	DB_PASSWORD (before)	shown
+volumes.configMap	app-secrets	DB_PASSWORD	DB_PASSWORD (key)	shown
 volumes.configMap	app-secrets	DB_PASSWORD	app-secrets	shown
 volumes.configMap	app-secrets	DB_PASSWORD	ref-path	shown
 volumes.configMap	app-secrets	DB_PASSWORD	ref-volume	shown
@@ -922,7 +951,8 @@ volumes.configMap	regcred	tls.key	ref-volume	shown
 volumes.configMap	regcred	tls.key	regcred	shown
 volumes.configMap	regcred	tls.key	tls.key	shown
 volumes.configMap	regcred	DB_PASSWORD	AUTH_ISSUER	shown
-volumes.configMap	regcred	DB_PASSWORD	DB_PASSWORD	shown
+volumes.configMap	regcred	DB_PASSWORD	DB_PASSWORD (before)	shown
+volumes.configMap	regcred	DB_PASSWORD	DB_PASSWORD (key)	shown
 volumes.configMap	regcred	DB_PASSWORD	ref-path	shown
 volumes.configMap	regcred	DB_PASSWORD	ref-volume	shown
 volumes.configMap	regcred	DB_PASSWORD	regcred	shown
@@ -963,7 +993,8 @@ volumes.configMap	api-token	tls.key	ref-path	shown
 volumes.configMap	api-token	tls.key	ref-volume	shown
 volumes.configMap	api-token	tls.key	tls.key	shown
 volumes.configMap	api-token	DB_PASSWORD	AUTH_ISSUER	shown
-volumes.configMap	api-token	DB_PASSWORD	DB_PASSWORD	shown
+volumes.configMap	api-token	DB_PASSWORD	DB_PASSWORD (before)	shown
+volumes.configMap	api-token	DB_PASSWORD	DB_PASSWORD (key)	shown
 volumes.configMap	api-token	DB_PASSWORD	api-token	shown
 volumes.configMap	api-token	DB_PASSWORD	ref-path	shown
 volumes.configMap	api-token	DB_PASSWORD	ref-volume	shown
@@ -1004,7 +1035,8 @@ volumes.configMap	settings	tls.key	ref-volume	shown
 volumes.configMap	settings	tls.key	settings	shown
 volumes.configMap	settings	tls.key	tls.key	shown
 volumes.configMap	settings	DB_PASSWORD	AUTH_ISSUER	shown
-volumes.configMap	settings	DB_PASSWORD	DB_PASSWORD	shown
+volumes.configMap	settings	DB_PASSWORD	DB_PASSWORD (before)	shown
+volumes.configMap	settings	DB_PASSWORD	DB_PASSWORD (key)	shown
 volumes.configMap	settings	DB_PASSWORD	ref-path	shown
 volumes.configMap	settings	DB_PASSWORD	ref-volume	shown
 volumes.configMap	settings	DB_PASSWORD	settings	shown

@@ -19,6 +19,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -63,6 +64,7 @@ type diffScene struct {
 	events     []eventsv1.Event
 	series     []providers.Series
 	excerpt    providers.LogExcerpt
+	excerptErr error // what the log source returns with excerpt (providers.ErrWithheld when it withheld it)
 	delivery   providers.DeliveryStatus
 }
 
@@ -106,7 +108,7 @@ func (s *sceneSources) List(_ context.Context, list client.ObjectList, _ ...clie
 }
 
 func (s *sceneSources) Logs(context.Context, providers.LogQuery) (providers.LogExcerpt, error) {
-	return s.scene.excerpt, nil
+	return s.scene.excerpt, s.scene.excerptErr
 }
 
 func (s *sceneSources) Query(context.Context, providers.MetricsQuery) (providers.MetricsResult, error) {
@@ -151,8 +153,19 @@ func (s *sceneSources) run(set *Set, scene diffScene, name string, args map[stri
 	return r
 }
 
-// withheldResult reports whether redaction withheld r whole (#873): it shows a fixed text and no values.
-func withheldResult(r Result) bool { return slices.Contains(r.Labels, LabelWithheld) }
+// withheldResult reports whether redaction withheld r whole (#873), by its label, and the failures of such a
+// result: it must have failed (StatusCouldNotFetch) and show the fixed text (withheldText) and no values, so that
+// the label alone never lets a target skip the release's oracle on an answer that shows text.
+func withheldResult(name string, r Result) (fails []string, withheld bool) {
+	if !slices.Contains(r.Labels, LabelWithheld) {
+		return nil, false
+	}
+	if r.Status != StatusCouldNotFetch || r.Text != withheldText || len(r.Values) > 0 {
+		fails = append(fails, fmt.Sprintf("P1: %s is labelled withheld but answered %s, %d values: %q", name, r.Status,
+			len(r.Values), redacttest.Clip(r.Text)))
+	}
+	return fails, true
+}
 
 // answerFails returns the P1 and P4 failures of a tool's answer against the text origin/main gave (mainText,
 // with what it hid in rec).
@@ -211,6 +224,11 @@ var diffToolSeeds = [][]byte{
 	redacttest.RawSeed(2, "192.168.1.1--password\n\x01\n"),
 	redacttest.RawSeed(3, "--password", "\x01", "token", "\x01"),
 	{0xf1, 0, 242, 0, 7, 0}, // a run of one invalid byte and an "x", 3,150 times (the first argument with knob 0)
+	// "--token,}" repeated to 36 KiB in every field, which redaction withholds (#873): each target that shows a
+	// field checks the withheld result (withheldResult) before it skips the release's oracle.
+	redacttest.RawSeed(0, slices.Repeat([]string{strings.Repeat("--token,}", 4096)}, 6)...),
+	// The same with the knob 0x10, so that get_pod_logs reads it through the log source, which withholds it.
+	redacttest.RawSeed(0x10, slices.Repeat([]string{strings.Repeat("--token,}", 4096)}, 6)...),
 }
 
 // toolBodies are the checks of the fuzz targets of this file over one tool set, by target: the failures of one
@@ -321,8 +339,8 @@ func diffGetResource(set *Set, src *sceneSources) func([]byte) ([]string, bool) 
 		in := redacttest.Decode(data, 6)
 		scene, obj, kind := getResourceScene(in)
 		r := src.run(set, scene, NameGetResource, map[string]any{argKind: kind, argNamespace: testNS, argName: obj.GetName()})
-		if withheldResult(r) {
-			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		if wfails, withheld := withheldResult(NameGetResource, r); withheld {
+			return wfails, false // nothing of the answer is shown: P1 holds, and the oracle is not run
 		}
 		m := mainTools{rec: redacttest.NewRecorder()}
 		mainText, err := m.getResource(obj.DeepCopyObject().(client.Object))
@@ -352,18 +370,26 @@ func diffGetPodLogs(set *Set, src *sceneSources) func([]byte) ([]string, bool) {
 		m := mainTools{rec: redacttest.NewRecorder()}
 		ours := providers.LogExcerpt{Text: text, EndMissing: endMissing}
 		theirs := ours
+		var sourceErr error
 		if in.Knob&0x10 != 0 {
-			var err error
-			if ours.Text, ours.Truncated, err = kube.Excerpt(red, []byte(text), endMissing, maxBytes); err != nil {
-				return nil, false // the log source withholds the excerpt (providers.ErrWithheld): nothing is shown
+			ours.Text, ours.Truncated, sourceErr = kube.Excerpt(red, []byte(text), endMissing, maxBytes)
+			if sourceErr != nil && !errors.Is(sourceErr, providers.ErrWithheld) {
+				return []string{fmt.Sprintf("P4: the log source failed: %v", sourceErr)}, false
 			}
 			theirs.Text, theirs.Truncated = m.excerpt([]byte(text), endMissing, maxBytes)
 		}
-		r := src.run(set, diffScene{excerpt: ours}, NameGetPodLogs, map[string]any{
+		// A log source that withholds the excerpt returns providers.ErrWithheld, and the tool must withhold its
+		// answer whole.
+		r := src.run(set, diffScene{excerpt: ours, excerptErr: sourceErr}, NameGetPodLogs, map[string]any{
 			argNamespace: testNS, argPod: podName, argContainer: container, argPrevious: previous, argMaxBytes: maxBytes,
 		})
-		if withheldResult(r) {
-			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		wfails, withheld := withheldResult(NameGetPodLogs, r)
+		if sourceErr != nil && !withheld {
+			return []string{fmt.Sprintf("P1: the log source withheld the excerpt and get_pod_logs answered %s: %q", r.Status,
+				redacttest.Clip(r.Text))}, false
+		}
+		if withheld {
+			return wfails, false // nothing of the answer is shown: P1 holds, and the oracle is not run
 		}
 		mainText := m.podLogs(podName, container, previous, theirs, maxBytes)
 		return answerFails(NameGetPodLogs, r, m.rec, mainText), false
@@ -406,8 +432,8 @@ func diffListEvents(set *Set, src *sceneSources) func([]byte) ([]string, bool) {
 		in := redacttest.Decode(data, 6)
 		evs := eventsScene(in)
 		r := src.run(set, diffScene{events: evs}, NameListEvents, map[string]any{argNamespace: testNS})
-		if withheldResult(r) {
-			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		if wfails, withheld := withheldResult(NameListEvents, r); withheld {
+			return wfails, false // nothing of the answer is shown: P1 holds, and the oracle is not run
 		}
 		m := mainTools{rec: redacttest.NewRecorder()}
 		mainText := m.listEvents(evs, defaultEvents)
@@ -439,8 +465,8 @@ func diffQueryMetrics(set *Set, src *sceneSources) func([]byte) ([]string, bool)
 		}
 		scene := diffScene{pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: testNS}}, series: series}
 		r := src.run(set, scene, NameQueryMetrics, map[string]any{argTemplate: tmpl.name, argNamespace: testNS, argPod: podName})
-		if withheldResult(r) {
-			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		if wfails, withheld := withheldResult(NameQueryMetrics, r); withheld {
+			return wfails, false // nothing of the answer is shown: P1 holds, and the oracle is not run
 		}
 		m := mainTools{rec: redacttest.NewRecorder()}
 		mainText := m.queryMetrics(tmpl, series)
@@ -459,8 +485,8 @@ func diffDeliveryStatus(set *Set, src *sceneSources) func([]byte) ([]string, boo
 		r := src.run(set, diffScene{delivery: st}, NameGetDeliveryStatus, map[string]any{
 			argKind: kustomization, argNamespace: fluxNS, argName: unitName,
 		})
-		if withheldResult(r) {
-			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		if wfails, withheld := withheldResult(NameGetDeliveryStatus, r); withheld {
+			return wfails, false // nothing of the answer is shown: P1 holds, and the oracle is not run
 		}
 		m := mainTools{rec: redacttest.NewRecorder()}
 		mainText := m.deliveryStatus(st)
@@ -504,8 +530,8 @@ func diffCheckMissingReference(set *Set, src *sceneSources) func([]byte) ([]stri
 		r := src.run(set, diffScene{pod: p, events: evs}, NameCheckMissingReference, map[string]any{
 			argNamespace: testNS, argPod: podName, argKind: secretKind, argName: "db",
 		})
-		if withheldResult(r) {
-			return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		if wfails, withheld := withheldResult(NameCheckMissingReference, r); withheld {
+			return wfails, false // nothing of the answer is shown: P1 holds, and the oracle is not run
 		}
 		m := mainTools{rec: redacttest.NewRecorder()}
 		mainText := m.checkReference(refcheck.Check(p.DeepCopy(), evs, refcheck.KindSecret, "db", testNow))
@@ -527,8 +553,8 @@ func diffGitTools(set *Set, src *sceneSources) func([]byte) ([]string, bool) {
 		var fails []string
 		for _, name := range []string{NameReadGitFile, NameGetRecentChanges} {
 			r := src.run(set, diffScene{}, name, map[string]any{argPath: in.Fields[0], argRef: in.Fields[1]})
-			if withheldResult(r) {
-				return nil, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+			if wfails, withheld := withheldResult(name, r); withheld {
+				return append(fails, wfails...), false // nothing of the answer is shown: P1 holds, and the oracle is not run
 			}
 			if r.Status != StatusNotAvailable && r.Status != StatusRefused {
 				fails = append(fails, fmt.Sprintf("P4: %s answered %s: it shows text from a source now, give it a target of its own", name, r.Status))
@@ -573,6 +599,9 @@ func TestGetResourceLabelsDecidedAlikeAtTheLimit(t *testing.T) {
 	}
 	if fails := answerFails(NameGetResource, r, m.rec, mainText); len(fails) > 0 {
 		t.Error(strings.Join(fails, "\n"))
+	}
+	if r.Status != StatusOK || len(r.Text) > resourceBytes || !json.Valid([]byte(r.Text)) {
+		t.Errorf("get_resource answered %s, %d bytes, valid JSON %v", r.Status, len(r.Text), json.Valid([]byte(r.Text)))
 	}
 }
 

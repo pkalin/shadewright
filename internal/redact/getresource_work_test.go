@@ -58,8 +58,11 @@ func largePod(n int) *corev1.Pod {
 }
 
 // getResourceMainWork holds main's work on the same pods, "containers<TAB>steps<TAB>bytes", written by
-// TestWriteGetResourceMainWork in a checkout of main with the tag redactwork; this file and fields_entry_test.go
-// use only the read tools' API, so they run unchanged there.
+// TestWriteGetResourceMainWork in a checkout of main with the tag redactwork (the commit its header names). This
+// file no longer runs unchanged there: it needs getresource_alloc_test.go (layoutPod, getResourceOf) and
+// fields_entry_test.go (newFieldEnv, callFieldTool), and fields_entry_test.go needs the exports of
+// export_keys_test.go and export_test.go, which name code main does not have. Writing the table again means
+// copying this file with only the helpers TestWriteGetResourceMainWork calls.
 const getResourceMainWork = "testdata/getresource-main-work.tsv"
 
 // getResourceWork returns the work of get_resource on a pod of n containers and the size of the pod as JSON.
@@ -89,6 +92,9 @@ func TestGetResourceWorkIsLinear(t *testing.T) {
 	var perByte []float64
 	for _, n := range getResourceSizes {
 		work, size := getResourceWork(t, n)
+		if work <= 0 {
+			t.Fatalf("get_resource on a pod of %d containers counted %d steps", n, work)
+		}
 		perByte = append(perByte, float64(work)/float64(size))
 		t.Logf("get_resource on a pod of %d containers: %d steps for %d bytes of JSON, %.1f per byte; main %.1f per byte",
 			n, work, size, perByte[len(perByte)-1], main[n])
@@ -158,8 +164,11 @@ func TestGetResourceLayoutWorkIsLinear(t *testing.T) {
 	var perByte []float64
 	for _, n := range layoutPodSizes {
 		pod := layoutPod(n)
-		var size int
-		work := redact.Work(func() { size, _ = getResourceOf(t, e, pod) })
+		size := podJSONSize(t, pod)
+		work := redact.Work(func() { getResourceOf(t, e, pod) })
+		if work <= 0 {
+			t.Fatalf("get_resource on a pod of %d bytes (n %d) counted %d steps", size, n, work)
+		}
 		perByte = append(perByte, float64(work)/float64(size))
 		t.Logf("get_resource on a pod of %d bytes (n %d): %d steps, %.1f per byte", size, n, work, perByte[len(perByte)-1])
 	}

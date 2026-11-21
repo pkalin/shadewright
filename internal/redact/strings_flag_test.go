@@ -18,7 +18,6 @@ package redact
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 )
 
@@ -63,7 +62,7 @@ func TestStringsTakesAFlagAfterAFlagAsItsValue(t *testing.T) {
 			continue // a seeded sample under -race; all of them without it
 		}
 		got := Strings(items)
-		if got[0] != items[0] || strings.Contains(got[1], flags[i]) || strings.ContainsAny(got[1], "=-") {
+		if want := Marker(KindCredential, len(flags[i])); len(got) != 2 || got[0] != items[0] || got[1] != want {
 			if failed++; failed <= 10 {
 				t.Errorf("Strings(%q) = %q: the flag after the secret flag is not hidden whole", items, got)
 			}
@@ -72,9 +71,9 @@ func TestStringsTakesAFlagAfterAFlagAsItsValue(t *testing.T) {
 		v := fmt.Sprintf("Qz%05dxK9w", 50000+i)
 		for _, seq := range [][]string{{items[0], items[1], canonFlagKeys[i%len(canonFlagKeys)], v}, {items[0], v}} {
 			out := Strings(seq)
-			if strings.Contains(out[len(out)-1], v) {
+			if out[len(out)-1] != Marker(KindCredential, len(v)) {
 				failed++
-				t.Errorf("Strings(%q) = %q shows the secret", seq, out)
+				t.Errorf("Strings(%q) = %q does not hide the secret whole", seq, out)
 			}
 		}
 	}

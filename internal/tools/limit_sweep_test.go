@@ -111,13 +111,7 @@ func TestGetResourceFitsWhereTheReleaseBeforeFit(t *testing.T) {
 	}
 	want := readLimitSweepTable(t)
 	// Under -race only the largest valid row of each secret and the row after it are called.
-	last := map[string]int{}
-	for key, ok := range want {
-		name, size, _ := strings.Cut(key, "\t")
-		if n, err := strconv.Atoi(size); err == nil && (ok || last[name] == 0) {
-			last[name] = max(last[name], n)
-		}
-	}
+	last := limitSweepBoundaries(want)
 	valid, cut := 0, 0
 	for _, key := range slices.Sorted(maps.Keys(want)) {
 		name, size, _ := strings.Cut(key, "\t")
@@ -143,6 +137,53 @@ func TestGetResourceFitsWhereTheReleaseBeforeFit(t *testing.T) {
 	}
 	if valid == 0 || cut == 0 {
 		t.Errorf("the sweep does not cross the limit: %d rows valid, %d cut on the release before", valid, cut)
+	}
+}
+
+// limitSweepBoundaries returns, for each secret of the rows of want, the largest size of filler at which the
+// release before answered valid JSON, or the middle size of its rows when it never did (the size that makes the
+// pod's JSON as long as the limit, around which the rows were written). It reads the rows in no order that
+// matters: a cut row never stands for a valid one.
+func limitSweepBoundaries(want map[string]bool) map[string]int {
+	sizes, valid := map[string][]int{}, map[string]int{}
+	for key, ok := range want {
+		name, size, _ := strings.Cut(key, "\t")
+		n, err := strconv.Atoi(size)
+		if err != nil {
+			continue
+		}
+		sizes[name] = append(sizes[name], n)
+		if ok {
+			valid[name] = max(valid[name], n)
+		}
+	}
+	out := map[string]int{}
+	for name, ns := range sizes {
+		if n, ok := valid[name]; ok {
+			out[name] = n
+			continue
+		}
+		slices.Sort(ns)
+		out[name] = ns[len(ns)/2]
+	}
+	return out
+}
+
+// The rows a run under -race calls are the largest valid size of each secret and the size after it, whatever the
+// order the rows are read in: a cut row of a larger size never takes the place of the valid one, and a secret
+// with no valid row takes its middle row.
+func TestLimitSweepBoundaries(t *testing.T) {
+	want := map[string]bool{"a\t98": true, "a\t99": true, "a\t100": true}
+	for n := 101; n <= 112; n++ {
+		want[fmt.Sprintf("a\t%d", n)] = false
+	}
+	for n := 200; n <= 224; n++ {
+		want[fmt.Sprintf("b\t%d", n)] = false
+	}
+	for range 50 { // map order differs from run to run
+		if got := limitSweepBoundaries(want); got["a"] != 100 || got["b"] != 212 {
+			t.Fatalf("boundaries %v, want a 100 (its largest valid row) and b 212 (its middle row)", got)
+		}
 	}
 }
 

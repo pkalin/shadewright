@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -236,15 +237,16 @@ func TestQuotedValueAfterAKeyName(t *testing.T) {
 		`"b":"{\"a\":\"{\\\"args\\\":\\\"[\\\\\\\"--password \\\\\\\",\\\\\\\"--region\\\\\\\"]\\\"}\"}"`,
 	} {
 		flag, next := spacedPasswordFlag, regionFlag
-		out := String(in)
-		if !strings.Contains(out, flag) || strings.Contains(out, next) {
-			t.Errorf("flag or its value in the next argument wrong:\n in: %q\nout: %q", in, out)
+		// The value is the whole next string, replaced by the marker that is not longer than it.
+		if out, want := String(in), strings.Replace(in, next, Marker(KindCredential, len(next)), 1); out != want {
+			t.Errorf("flag or its value in the next argument wrong:\n in: %q\nout: %q\nwant %q", in, out, want)
 		}
-		if got := Strings([]string{flag, next, "x"}); got[0] != flag || strings.Contains(got[1], next) || got[2] != "x" {
-			t.Errorf("Strings = %q, want the flag and the last string whole and the flag after it redacted", got)
+		if got, want := Strings([]string{flag, next, "x"}), []string{flag, Marker(KindCredential, len(next)), "x"}; !slices.Equal(got, want) {
+			t.Errorf("Strings = %q, want %q: the flag and the last string whole and the flag after it redacted whole", got, want)
 		}
-		if got := Strings([]string{flag, "Qz55555xK9w", next}); got[0] != flag || got[1] == "Qz55555xK9w" || got[2] != next {
-			t.Errorf("Strings = %q, want the flags whole and the value between them redacted", got)
+		value := "Qz55555xK9w"
+		if got, want := Strings([]string{flag, value, next}), []string{flag, Marker(KindCredential, len(value)), next}; !slices.Equal(got, want) {
+			t.Errorf("Strings = %q, want %q: the flags whole and the value between them redacted whole", got, want)
 		}
 	}
 }

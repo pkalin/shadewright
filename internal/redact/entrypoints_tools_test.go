@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -48,10 +49,13 @@ const (
 )
 
 // textReader answers every read of the tool set with objects that carry one text: a pod whose container
-// argument it is, and one Event whose note it is.
+// argument it is, and one Event whose note it is. With missingKey set the pod also names the text as the key of
+// toolSecret in its env, and its container waits on the kubelet's error that the key is not there, so that
+// check_missing_reference answers "missing" and shows the text as the key.
 type textReader struct {
 	client.Reader
-	text string
+	text       string
+	missingKey bool
 }
 
 func (r *textReader) Get(_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
@@ -62,6 +66,16 @@ func (r *textReader) Get(_ context.Context, key client.ObjectKey, obj client.Obj
 	*p = corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
 		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: toolContainer, Args: []string{r.text}}}},
+	}
+	if r.missingKey {
+		p.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "DB_PASSWORD", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: toolSecret}, Key: r.text},
+		}}}
+		// The kubelet's error (pkg/kubelet/kubelet_pods.go makeEnvironmentVariables), as refcheck compares it.
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: toolContainer, State: corev1.ContainerState{
+			Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError",
+				Message: fmt.Sprintf("couldn't find key %v in Secret %v/%v", r.text, key.Namespace, toolSecret)},
+		}}}
 	}
 	return nil
 }
@@ -95,6 +109,7 @@ const (
 	toolTemplate   = "container_restarts_total"
 	toolDelivery   = "apps"
 	toolMetricText = "message"
+	toolSecret     = "db-creds"
 )
 
 func newReadTools() *readTools {
@@ -130,6 +145,29 @@ func toolText(name string, args map[string]any) func(in string) []string {
 		rt.delivery.Set(providers.DeliveryUnit{Kind: "Kustomization", Namespace: toolNS, Name: toolDelivery},
 			providers.DeliveryStatus{AppliedRevision: "main@sha1:0123456789abcdef0123456789abcdef01234567", Message: in})
 		return []string{callTool(rt.set, name, args)}
+	}
+}
+
+// missingKeyText calls check_missing_reference with in as the key the pod's env names in toolSecret and the
+// kubelet reports missing, and returns its answer, which must be "missing" with that key as its evidence: an entry
+// point whose answer does not show the text checks nothing.
+func missingKeyText() func(in string) []string {
+	readTools := sync.OnceValue(func() *readTools {
+		rt := newReadTools()
+		rt.reader.missingKey = true
+		return rt
+	})
+	return func(in string) []string {
+		rt := readTools()
+		rt.Lock()
+		defer rt.Unlock()
+		rt.reader.text = in
+		text := callTool(rt.set, tools.NameCheckMissingReference,
+			map[string]any{argNamespace: toolNS, argPod: toolPod, argKind: "Secret", argName: toolSecret})
+		if !strings.HasPrefix(text, "answer: missing\n") || !strings.Contains(text, "\nkey: ") {
+			panic(fmt.Sprintf("check_missing_reference did not show the key as missing: %q", text))
+		}
+		return []string{text}
 	}
 }
 

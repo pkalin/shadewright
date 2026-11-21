@@ -57,19 +57,26 @@ func layoutPod(n int) *corev1.Pod {
 // layoutPodSizes are the n of layoutPod the cost is measured at.
 var layoutPodSizes = []int{128, 256, 512, 1024}
 
-// getResourceOf calls get_resource on pod and returns the size of the pod as JSON and the answer.
-func getResourceOf(t *testing.T, e *fieldEnv, pod *corev1.Pod) (int, string) {
+// podJSONSize returns the size of pod as JSON, the bytes a cost is measured per. It runs before the cost is
+// measured, so that the fixture's own encoding is not counted as the tool's.
+func podJSONSize(t *testing.T, pod *corev1.Pod) int {
 	t.Helper()
-	e.reader.obj = pod
 	raw, err := json.MarshalIndent(pod, "", " ")
 	if err != nil {
 		t.Fatal(err)
 	}
+	return len(raw)
+}
+
+// getResourceOf calls get_resource on pod and returns the answer.
+func getResourceOf(t *testing.T, e *fieldEnv, pod *corev1.Pod) string {
+	t.Helper()
+	e.reader.obj = pod
 	text := callFieldTool(t, e.set, tools.NameGetResource, map[string]any{fieldsArgKind: "Pod", fieldsArgNS: fieldsNS, fieldsArgName: fieldsPod})
 	if strings.Contains(text, "not available") {
 		t.Fatalf("no answer: %.200s", text)
 	}
-	return len(raw), text
+	return text
 }
 
 func TestGetResourceMemoryIsLinear(t *testing.T) {
@@ -77,10 +84,11 @@ func TestGetResourceMemoryIsLinear(t *testing.T) {
 	perByte := make([]float64, 0, len(layoutPodSizes))
 	for _, n := range layoutPodSizes {
 		pod := layoutPod(n)
+		size := podJSONSize(t, pod)
 		var before, after runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&before)
-		size, _ := getResourceOf(t, e, pod)
+		getResourceOf(t, e, pod)
 		runtime.ReadMemStats(&after)
 		alloc := after.TotalAlloc - before.TotalAlloc
 		perByte = append(perByte, float64(alloc)/float64(size))

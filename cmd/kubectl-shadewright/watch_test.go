@@ -421,18 +421,19 @@ func TestSignalHelper(t *testing.T) {
 		t.Skip("helper process only")
 	}
 	ctx, stop := interruptContext(context.Background())
-	defer stop()
 	_, _ = os.Stdout.WriteString("ready\n")
 	<-ctx.Done()
 	_, _ = os.Stdout.WriteString("cancelled\n")
 	time.Sleep(time.Minute)
+	stop()
 	os.Exit(3)
 }
 
 // TestSecondInterruptForceQuits: the first Ctrl-C cancels the watch; a second one ends the process even when
 // a call does not return, because the first restores the default handling.
 func TestSecondInterruptForceQuits(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=^TestSignalHelper$") // #nosec G702 -- reruns this test binary
+	cmd := exec.CommandContext(t.Context(), os.Args[0], // #nosec G702 -- reruns this test binary
+		"-test.run=^TestSignalHelper$")
 	cmd.Env = append(os.Environ(), envSignalHelper+"=1")
 	out, err := cmd.StdoutPipe()
 	if err != nil {

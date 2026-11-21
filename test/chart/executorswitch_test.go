@@ -173,7 +173,7 @@ func TestExecutorDefaultIsOn(t *testing.T) {
 func helmFailsCI(t *testing.T, set ...string) string {
 	t.Helper()
 	args := helmArgsWith(t, ciValues(t), append([]string{testCluster}, set...)...)
-	cmd := exec.Command(tool(t, "HELM", "helm"), args...)
+	cmd := exec.CommandContext(t.Context(), tool(t, "HELM", "helm"), args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err == nil {

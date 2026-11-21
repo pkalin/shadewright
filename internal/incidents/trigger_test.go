@@ -1747,7 +1747,7 @@ func TestHeldObservationKeepsTheSettleLimitCounting(t *testing.T) {
 	c.watch([]remediationv1alpha1.Incident{inc}, triggerNow, s)
 	start := triggerNow
 	used := 0
-	for i := 0; i <= 31; i++ { // every 10 s for a little over the settle limit, observed every pass
+	for i := range 32 { // every 10 s for a little over the settle limit, observed every pass
 		now := start.Add(time.Duration(i) * 10 * time.Second)
 		c.failed[inc.Spec.Fingerprint] = &batch{first: start, last: now}
 		c.watch([]remediationv1alpha1.Incident{inc}, now, s)

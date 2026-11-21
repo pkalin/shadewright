@@ -187,6 +187,13 @@ func TestRefusals(t *testing.T) {
 		}
 		return strings.Replace(dep, old, new, 1)
 	}
+	from := func(marker string) string {
+		_, after, ok := strings.Cut(dep, marker)
+		if !ok {
+			t.Fatalf("test input lacks %q", marker)
+		}
+		return marker + after
+	}
 	twoWeb := sub("      - name: sidecar", "      - name: web\n        image: other\n      - name: sidecar")
 	cases := []struct {
 		name string
@@ -204,7 +211,7 @@ func TestRefusals(t *testing.T) {
 		{"other namespace", sub("namespace: orders\n  labels", "namespace: staging\n  labels"), ErrTargetNotFound},
 		{"no namespace could match", sub("namespace: orders\n  labels", "labels"), ErrAmbiguousTarget},
 		{"another version could match", sub("apps/v1\n", "apps/v1beta1\n"), ErrAmbiguousTarget},
-		{"declared twice", dep + "---\n" + dep[strings.Index(dep, "apiVersion: apps/v1"):], ErrAmbiguousTarget},
+		{"declared twice", dep + "---\n" + from("apiVersion: apps/v1"), ErrAmbiguousTarget},
 		// Anchors, aliases and merge keys anywhere in the file are refused before anything decodes it (#595).
 		{"anchor on the path", sub("          limits:\n", "          limits: &lim\n"), ErrInvalidYAML},
 		{"anchor on the value", sub(`"512Mi"`, `&m "512Mi"`), ErrInvalidYAML},

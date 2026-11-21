@@ -278,7 +278,7 @@ func TestServiceAddressBoundary(t *testing.T) {
 		if err := tr.DialContext; err == nil {
 			t.Fatal("missing guarded dialer")
 		}
-		if err := p.client.CheckRedirect(nil, nil); err != http.ErrUseLastResponse {
+		if err := p.client.CheckRedirect(nil, nil); err != http.ErrUseLastResponse { //nolint:errorlint // net/http honours only this value itself, not a wrapper
 			t.Fatal("redirects permitted")
 		}
 	}

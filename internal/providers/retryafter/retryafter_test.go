@@ -28,7 +28,7 @@ func TestParse(t *testing.T) {
 	cases := map[string]time.Duration{
 		"":                    0,
 		"7":                   7 * time.Second,
-		" 7 ":                 7 * time.Second,
+		" 7 ":                 7 * time.Second, //nolint:gocritic // spaces around the value are what this case checks
 		"0":                   0,
 		"-5":                  0,
 		"1.5":                 0,

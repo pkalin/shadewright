@@ -326,8 +326,11 @@ func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 // marker (request UID and plan digest, invariant 5) before it fails the review check or closes it, and the provider
 // opened for it writes nothing else (openPlanEntry). One write is the exception: the failed check of a stopped
 // holder after any look that leaves the lock held, and of its stop for a pull request read gone (failStoppedCheck,
-// ADR-0046), follows no read that confirmed a pull request as the request's, and names only the recorded head. The entry applies only while stale holds (the stale mark, or
-// staleCleanupStopped, as planEntry passes it). Another URL is never accepted: closing a number elsewhere could
+// ADR-0046), follows no read that confirmed a pull request as the request's, and names the recorded head (from status,
+// or from a listing of the request's own branch when the same look adopts its lost pull request). The entry applies
+// only while stale holds (the stale mark, which needs a phase before the merge, or staleCleanupStopped, as planEntry
+// passes it): a stopped holder in any other phase or stop gets errRepositoryGone after an installation change, writes
+// nothing, and leaves the pass written before its stop in place (ADR-0046 limit (e)). Another URL is never accepted: closing a number elsewhere could
 // close someone else's pull request.
 func cleanupRepository(settings *remediationv1alpha1.RemediationSettings, rr *remediationv1alpha1.RemediationRequest,
 	stale bool) (repo remediationv1alpha1.GitRepository, reinstalled, ok bool) {
@@ -1854,8 +1857,8 @@ func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr
 // NeedsIntervention with ChangeRequestGone, cancelled or not. In the same step the review check of the recorded head
 // is failed (failStoppedCheck, decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop,
 // ADR-0045): the head is the request's own commit, and another pull request from its branch could merge it on a pass
-// written before the stop. Through a new installation of the plan's repository the same check is written on the same
-// recorded head (decision of 2026-11-21 on #925, ADR-0046). A failed write does not hold the stop: its status write carries condition
+// written before the stop. Through a new installation of the plan's repository (only while the stale mark holds) the same check is written on
+// the same recorded head (decision of 2026-11-21 on #925, ADR-0046). A failed write does not hold the stop: its status write carries condition
 // ReviewCheckNotFailed, and a look of the stopped holder that keeps the lock tries it again. A cancelled reconcile and
 // a failure of the Kubernetes API are returned, for the error backoff, before anything is written.
 func (r *RemediationRequestReconciler) stopGone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,

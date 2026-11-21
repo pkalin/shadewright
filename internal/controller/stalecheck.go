@@ -246,8 +246,11 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // (ChangeRequestGone), and every look of a stopped holder that leaves the lock held (failCheckAfterLook, the one rule
 // of the decision of 2026-11-21 on #925), so a stop for any other reason gets it at its first look, and a failed
 // write is tried again at the next. A repository reached through a new installation of the App (#290) gets the same
-// write, whichever pull request keeps the lock (ADR-0046): it names only the recorded head, by its full object ID from
-// status, and can only block that commit. A request that owns no review check (reviewer hints off, a handoff intent,
+// write, whichever pull request keeps the lock (ADR-0046), but a stopped holder reaches one only while the stale mark
+// or staleCleanupStopped holds (cleanupRepository): it names the recorded head, by its full object ID from status (or
+// from the listing of the request's own branch when the same look adopted its lost pull request), and can only block
+// that commit. The write only ever names the recorded head: the gate of the provider opened through a new installation
+// (gatedGit.CreateCheckRun) lets a failed run of that name through on any head, so only this function keeps to it. A request that owns no review check (reviewer hints off, a handoff intent,
 // the pull request handed over) writes nothing, and condition ReviewCheckNotFailed is removed with a line at Info when
 // it was set (endCheckNoteLogged), since no look tries the check again. Once Stale is recorded on the head, such a look
 // reads the latest review check of the head (stoppedCheckShown) and writes the failed check again only when the Git

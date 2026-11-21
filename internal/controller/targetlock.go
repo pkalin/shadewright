@@ -1281,7 +1281,8 @@ func (r *RemediationRequestReconciler) lockWaiters(ctx context.Context, obj clie
 // answered, but whose answer only a later look may settle (answeredUnknown: a first look at a missing number,
 // contradicting reads), counts: it leaves the lock held, so the failed check is owed on the recorded head as after any
 // look that leaves it held, and does not wait one more look (seed 1456 of the Git waits model, #925). Which pull
-// request keeps the lock is not read in such a look. A look whose reads failed writes nothing; the next look tries.
+// request keeps the lock is not read in such a look, and the write goes through whichever installation planEntry
+// opened: it is its own widening (ADR-0046 widening 3), not one that needs a new installation. A look whose reads failed writes nothing; the next look tries.
 // The change to the status (Stale on the head, or condition ReviewCheckNotFailed) is written here,
 // since heldUnsettled writes none for such a look. A conflict or any other failed status write is returned for the
 // error backoff: the check run is then written already, but Stale is not recorded, so each retry looks again and
@@ -1349,9 +1350,9 @@ func logCheckNoteEnd(ctx context.Context, rr *remediationv1alpha1.RemediationReq
 // so the look writes the failed check there unless the Git host already shows it last (failStoppedCheck reads it once
 // Stale is recorded). It decides from the lock and the check on the head, never from the verdict of the request's own
 // pull request: open elsewhere, closed on any base, merged elsewhere or gone, the same rule applies, so a new verdict
-// cannot reopen the gap. Nor does it read which pull request keeps the lock or through which installation the
-// repository is reached: through a new installation (#290) it writes the same check on the same recorded head, so the
-// order in which the Git host lists the open pull requests decides nothing. A failed
+// cannot reopen the gap. Nor does it read which pull request keeps the lock, nor treat a new installation as an
+// exception: where the look reaches one (#290; only after staleCleanupStopped, cleanupRepository) it writes the same
+// check on the same recorded head, so the order in which the Git host lists the open pull requests decides nothing. A failed
 // write sets condition ReviewCheckNotFailed and is tried again at each look while the lock is held. A look that
 // released the lock, or a merge the status records, ends the looks and the condition (endCheckNote,
 // lockverdict.Release). The stop's summary promises no close (stoppedCheckRun), so it is the same on any base. Only a

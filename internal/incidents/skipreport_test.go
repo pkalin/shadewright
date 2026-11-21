@@ -433,6 +433,20 @@ func TestTimedOutNotRecentWritesOverAStaleNotRecentReportAtMostOnce(t *testing.T
 	}
 }
 
+// A stale NotRecent from before the start that a pass rewrites successfully (new generation) keeps its
+// transition time and is not a new skip, so it is not reported (#983).
+func TestRewrittenStaleNotRecentIsNotReported(t *testing.T) {
+	ns := namespace(t)
+	staleNotRecent(t, ns)
+	before := testutil.ToFloat64(notRecentSkips)
+	_, rec, passes := startSkips(t, ns, nil)
+	passes.afterPasses(t, 3)
+	noEvent(t, rec, "an event for a NotRecent rewritten over a NotRecent")
+	if got := skipsSince(before); got != 0 {
+		t.Fatalf("skips counted %v, want 0", got)
+	}
+}
+
 // An update the server refused with a 4xx answer was not stored; a lost answer, a 5xx or an unknown error may
 // have been.
 func TestMayHaveLanded(t *testing.T) {

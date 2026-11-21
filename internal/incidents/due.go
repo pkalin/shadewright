@@ -624,6 +624,9 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 		if due {
 			status = metav1.ConditionTrue
 		}
+		// A NotRecent rewritten over a NotRecent (a stale generation) is not a new skip: it was reported by
+		// whoever wrote it, or before this process started, so neither the write nor a lost answer reports it.
+		newSkip := !due && reason == ReasonNotRecent && !saysNotRecent(inc)
 		// The transition time comes from the controller's clock, like every decision; SetStatusCondition keeps
 		// the old one when only the reason changes.
 		meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{
@@ -635,7 +638,7 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 			LastTransitionTime: metav1.NewTime(c.cfg.Now()),
 		})
 		if err := c.client.Status().Update(wctx, inc, client.FieldOwner(triggerFieldOwner)); err != nil {
-			triedNotRecent = !due && reason == ReasonNotRecent && mayHaveLanded(err)
+			triedNotRecent = newSkip && mayHaveLanded(err)
 			return err
 		}
 		wrote = true
@@ -643,7 +646,7 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 			// This write replaced whatever an earlier NotRecent write whose answer was lost left.
 			t.skipPending = false
 		}
-		if !due && reason == ReasonNotRecent {
+		if newSkip {
 			// inc holds the stored copy the answer returned, so the transition time remembered is the one the
 			// cache will show ([Controller.reportSkips]).
 			c.reportNotRecent(inc)

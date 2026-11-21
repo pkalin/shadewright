@@ -26,6 +26,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -62,6 +63,21 @@ import (
 // status of a pod whose status.reason is empty, a cause since #432: that one class is mapped back. A seed that
 // differs is shown in full; LINKS_DUMP=<dir> writes every seed's lines to compare with a run on main.
 //
+// The BackOff events (added on 2026-11-22, when the rule was narrowed: a BackOff links as main unless it is held
+// with room in the table and its only candidates are non-zero exits). Each sequence writes the lines of its BackOff
+// reconciles too (the result and each observation) and keeps those of the events the narrowed rule links as main:
+// every one in a sequence with no hold table or a CauseSeen that never confirms (none, no), else the events whose
+// pod, at every reconcile of the event, showed a cause as main reads it or no non-zero exit at all
+// (linkSeq.classify, from the inputs alone, so main and the code under test keep the same events). Each sequence
+// then runs a second time with the same draws and a table of one kept full by two holds of events it never names
+// (fillHolds), so that every consequence, BackOff or not, overflows, and every line of that run is kept. The
+// answers are in testdata/backoff-links-before-432.golden, per seed the SHA-256 and count of the kept lines of the
+// first run, a separator line and all lines of the second, written with WRITE_BACKOFF_GOLDEN=1 the same way as
+// the first golden: a throwaway detached worktree of f593769a (git worktree add --detach <dir> f593769a), this
+// file, race_on_test.go, race_off_test.go and testdata/links-before-432.golden copied into its
+// internal/analyzer/collector, and TestNonBackOffLinksAsMain run there with WRITE_BACKOFF_GOLDEN=1 (it checks the
+// first golden on main as it writes the second). The first golden is not written again.
+//
 // The room each sequence draws: holds on (room for every event), holds off (no table), or a table of one. The table
 // of one only runs with the ways of CauseSeen that never confirm an exit, so the room is the same as on main: a
 // BackOff linked to a confirmed exit is emitted at once instead of held, which frees the one place, and an
@@ -71,6 +87,9 @@ import (
 
 // linksGolden is the file of per-seed digests of the lines the sequences gave on main.
 const linksGolden = "testdata/links-before-432.golden"
+
+// backOffGolden is the file of per-seed digests of the BackOff lines and the full-table lines main gave.
+const backOffGolden = "testdata/backoff-links-before-432.golden"
 
 // linkSeeds is how many sequences TestNonBackOffLinksAsMain runs: 500, or the first 150 of them under the race
 // detector.
@@ -96,6 +115,8 @@ const (
 	holdsOn       = "on"
 	holdsOff      = "off"
 	holdsOverflow = "overflow"
+	// holdsFull is a table kept full for the whole sequence (runLinkSeq with full).
+	holdsFull = "full"
 )
 
 // linkWaitingReasons are waiting reasons of the app container: the causes of ADR-0039 point 3 and two that are not.
@@ -144,6 +165,60 @@ type linkSeq struct {
 	// gone is set once the pod is deleted.
 	gone   bool
 	counts map[string]int
+	// backOff holds the lines of each BackOff event; flagged and mainCause say what its pod showed at any of its
+	// reconciles (linkSeq.classify); compareAll is set for a sequence whose BackOff events all link as main.
+	backOff    map[string][]string
+	flagged    map[string]bool
+	mainCause  map[string]bool
+	compareAll bool
+}
+
+// linkMainCause reports whether the app container's status shows a cause as main reads it for an event at its own
+// time at (causeFingerprint on f593769a): a waiting cause reason, or, with hasAt, an OOM kill, current or last,
+// that finished at most 10 minutes before at.
+func linkMainCause(p *corev1.Pod, at time.Time, hasAt bool) bool {
+	for _, st := range p.Status.ContainerStatuses {
+		if st.Name != containerApp {
+			continue
+		}
+		if w := st.State.Waiting; w != nil && linkCauseWaits[w.Reason] {
+			return true
+		}
+		for _, t := range []*corev1.ContainerStateTerminated{st.State.Terminated, st.LastTerminationState.Terminated} {
+			if hasAt && t != nil && t.Reason == ReasonOOMKilled && !t.FinishedAt.IsZero() &&
+				!at.Before(t.FinishedAt.Time) && !at.After(t.FinishedAt.Add(10*time.Minute)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// classify records, before a reconcile of the BackOff event name, what its pod shows, from the inputs only (the
+// pod and the event as the sequence wrote them), so that main and the code under test pick the same events:
+// mainCause when the status shows a cause as main reads it, flagged when it shows none and the app container has
+// a non-zero exit, current or last, in any window (a superset of the exits a BackOff may be linked to).
+func (s *linkSeq) classify(name string) {
+	ev := &eventsv1.Event{}
+	if err := s.h.cl.Get(s.t.Context(), types.NamespacedName{Namespace: testNS, Name: name}, ev); err != nil {
+		s.t.Fatal(err)
+	}
+	if s.gone {
+		return
+	}
+	p := readPod(s.t, s.h, webPod)
+	at, ok := kubeletTime(ev)
+	if linkMainCause(p, at, ok) {
+		s.mainCause[name] = true
+		return
+	}
+	for _, st := range p.Status.ContainerStatuses {
+		for _, t := range []*corev1.ContainerStateTerminated{st.State.Terminated, st.LastTerminationState.Terminated} {
+			if t != nil && t.ExitCode != 0 {
+				s.flagged[name] = true
+			}
+		}
+	}
 }
 
 // causeSeen answers by the sequence's way of CauseSeen, the same on main and here.
@@ -254,12 +329,13 @@ func (s *linkSeq) status(step string) {
 	s.h.update(p)
 	res, err := s.h.pods.Reconcile(s.t.Context(), reqFor(webPod))
 	s.lines = append(s.lines, fmt.Sprintf("%s: pod res=%s err=%t", step, res.RequeueAfter, err != nil))
-	s.collect(step, "")
+	s.collect(step, "", "")
 }
 
 // collect drains the observations, records the pod reconciler's ones in the book, and writes the lines of those
-// not of a BackOff event; kind is the kind of the event reconciled, "" for the pod.
-func (s *linkSeq) collect(step, kind string) {
+// not of a BackOff event, and those of the BackOff event name apart; kind is the kind of the event reconciled, ""
+// for the pod.
+func (s *linkSeq) collect(step, kind, name string) {
 	for _, o := range s.h.drain() {
 		if o.Origin == fingerprint.SourcePodStatus {
 			// The book has about two in three of the delivered causes, chosen by the fingerprint, not by a draw:
@@ -270,6 +346,7 @@ func (s *linkSeq) collect(step, kind string) {
 			}
 		}
 		if kind == linkBackOff {
+			s.backOff[name] = append(s.backOff[name], s.render(step, o))
 			continue
 		}
 		s.lines = append(s.lines, s.render(step, o))
@@ -330,36 +407,54 @@ func (s *linkSeq) sample(step string) {
 // reconcile reconciles the event name and writes its result, unless it is a BackOff.
 func (s *linkSeq) reconcile(step, name string) {
 	kind := s.events[name]
+	if kind == linkBackOff {
+		s.classify(name)
+	}
 	res, err := s.h.events.Reconcile(s.t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{
 		Namespace: testNS, Name: name}})
+	line := fmt.Sprintf("%s: %s %s res=%s err=%t", step, name, kind, res.RequeueAfter, err != nil)
 	if kind != linkBackOff {
-		s.lines = append(s.lines, fmt.Sprintf("%s: %s %s res=%s err=%t", step, name, kind, res.RequeueAfter, err != nil))
+		s.lines = append(s.lines, line)
+	} else {
+		s.backOff[name] = append(s.backOff[name], line)
 	}
-	s.collect(step+" "+name, kind)
+	s.collect(step+" "+name, kind, name)
 }
 
-// runLinkSeq runs the sequence of seed and returns its lines.
-func runLinkSeq(t *testing.T, seed uint64, counts map[string]int) []string {
+// runLinkSeq runs the sequence of seed and returns its lines, and the lines of the BackOff events that link as main
+// (linkSeq.classify). full runs the same draws with a table of one that two holds of events the sequence never
+// names keep full, one in each share, so that every consequence overflows.
+func runLinkSeq(t *testing.T, seed uint64, counts map[string]int, full bool) ([]string, []string) {
 	rng := rand.New(rand.NewPCG(seed, 432)) // #nosec G404 -- a seeded corpus, not a secret
-	s := &linkSeq{t: t, rng: rng, book: map[string]bool{}, events: map[string]string{}, counts: counts}
+	s := &linkSeq{t: t, rng: rng, book: map[string]bool{}, events: map[string]string{}, counts: counts,
+		backOff: map[string][]string{}, flagged: map[string]bool{}, mainCause: map[string]bool{}}
 	s.seen = []string{seenNone, seenYes, seenNo, seenError, seenTimeout, seenBook}[rng.IntN(6)]
 	holding := []string{holdsOn, holdsOn, holdsOff, holdsOverflow}[rng.IntN(4)]
 	if holding == holdsOverflow && (s.seen == seenYes || s.seen == seenBook) {
 		holding = holdsOn
 	}
+	if full {
+		holding = holdsFull
+	}
 	cfg := Config{}
 	if s.seen != seenNone {
 		cfg.CauseSeen = s.causeSeen
 	}
-	if holding == holdsOverflow {
+	if holding == holdsOverflow || holding == holdsFull {
 		cfg.MaxHeldConsequences = 1
 	}
 	counts["CauseSeen "+s.seen]++
 	counts["holds "+holding]++
+	// Every BackOff links as main: no table, a full one, or a CauseSeen that never confirms (an unconfirmed exit
+	// leaves the hold as main has it).
+	s.compareAll = holding == holdsOff || holding == holdsFull || s.seen == seenNone || s.seen == seenNo
 	d, rs, _ := workload()
 	pod := specPod()
 	s.h = newHarness(t, cfg, d, rs, pod)
 	s.h.c.holdOff = holding == holdsOff
+	if full {
+		fillHolds(t, s.h)
+	}
 	s.h.clock.set(t0)
 	s.status("0")
 	steps := 8 + rng.IntN(8)
@@ -397,7 +492,44 @@ func runLinkSeq(t *testing.T, seed uint64, counts map[string]int) []string {
 			s.reconcile("end", name)
 		}
 	}
-	return s.lines
+	return s.lines, s.backOffCompared(full)
+}
+
+// fillHolds fills a table of one: a hold in each share, of events the sequence never names, which no reconcile
+// ends.
+func fillHolds(t *testing.T, h *harness) {
+	t.Helper()
+	for i, cause := range []string{"", "blocker-cause"} {
+		key := types.NamespacedName{Namespace: testNS, Name: fmt.Sprintf("blocker-%d", i)}
+		if _, ok := h.c.holds.put(key, consequenceHold{event: types.UID(key.Name), pod: "blocker-pod",
+			container: containerApp, reason: reasonBack, cause: cause, since: t0}); !ok {
+			t.Fatal("no room for a blocker hold")
+		}
+	}
+}
+
+// backOffCompared returns the lines of the BackOff events that link as main, in the order the sequence created
+// them: all of them in a sequence with compareAll, else those classify never flagged.
+func (s *linkSeq) backOffCompared(full bool) []string {
+	var out []string
+	for _, name := range s.names {
+		if s.events[name] != linkBackOff {
+			continue
+		}
+		switch {
+		case s.compareAll:
+		case s.flagged[name]:
+			s.counts["backoff exit not compared"]++
+			continue
+		case s.mainCause[name]:
+			s.counts["backoff oom kill or wait, CauseSeen "+s.seen]++
+		}
+		if full {
+			s.counts["backoff overflow, CauseSeen "+s.seen]++
+		}
+		out = append(out, s.backOff[name]...)
+	}
+	return out
 }
 
 // digest is the SHA-256 of lines, one per line.
@@ -409,10 +541,10 @@ func digest(lines []string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// readLinksGolden returns the digest and line count main gave per seed.
-func readLinksGolden(t *testing.T) map[uint64]string {
+// readLinksGolden returns the digest and line count main gave per seed in the golden file name.
+func readLinksGolden(t *testing.T, name string) map[uint64]string {
 	t.Helper()
-	f, err := os.Open(linksGolden)
+	f, err := os.Open(name) // #nosec G304 -- one of the two golden files of this test
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,13 +571,18 @@ func readLinksGolden(t *testing.T) map[uint64]string {
 // TestNonBackOffLinksAsMain is the comparison above.
 func TestNonBackOffLinksAsMain(t *testing.T) {
 	write := os.Getenv("WRITE_LINKS_GOLDEN") != ""
+	writeBackOff := os.Getenv("WRITE_BACKOFF_GOLDEN") != ""
 	dump := os.Getenv("LINKS_DUMP")
-	var want map[uint64]string
+	var want, wantBackOff map[uint64]string
 	if !write {
-		want = readLinksGolden(t)
+		want = readLinksGolden(t, linksGolden)
+	}
+	if !writeBackOff {
+		wantBackOff = readLinksGolden(t, backOffGolden)
 	}
 	n := linkSeeds()
 	results := make([][]string, n)
+	backOffs := make([][]string, n)
 	seedCounts := make([]map[string]int, n)
 	// The seeds are independent, each on its own harness: run in parallel, compared in order afterwards.
 	t.Run("seeds", func(t *testing.T) {
@@ -453,7 +590,10 @@ func TestNonBackOffLinksAsMain(t *testing.T) {
 			t.Run(strconv.FormatUint(seed, 10), func(t *testing.T) {
 				t.Parallel()
 				seedCounts[seed] = map[string]int{}
-				results[seed] = runLinkSeq(t, seed, seedCounts[seed])
+				var held []string
+				results[seed], held = runLinkSeq(t, seed, seedCounts[seed], false)
+				lines, fullBackOff := runLinkSeq(t, seed, seedCounts[seed], true)
+				backOffs[seed] = slices.Concat(held, []string{"-- full table"}, lines, fullBackOff)
 			})
 		}
 	})
@@ -461,8 +601,8 @@ func TestNonBackOffLinksAsMain(t *testing.T) {
 		return
 	}
 	counts := map[string]int{}
-	var out []string
-	failed, lines := 0, 0
+	var out, outBackOff []string
+	failed, failedBackOff, lines := 0, 0, 0
 	for seed := range n {
 		for k, v := range seedCounts[seed] {
 			counts[k] += v
@@ -471,11 +611,22 @@ func TestNonBackOffLinksAsMain(t *testing.T) {
 		lines += len(got)
 		entry := fmt.Sprintf("%s %d", digest(got), len(got))
 		out = append(out, fmt.Sprintf("%d %s", seed, entry))
+		gotBackOff := backOffs[seed]
+		lines += len(gotBackOff)
+		entryBackOff := fmt.Sprintf("%s %d", digest(gotBackOff), len(gotBackOff))
+		outBackOff = append(outBackOff, fmt.Sprintf("%d %s", seed, entryBackOff))
 		if dump != "" {
 			// #nosec G703 -- a directory the person running the test names, for a dump of its own lines
 			if err := os.WriteFile(filepath.Join(dump, fmt.Sprintf("seed-%03d.txt", seed)),
-				[]byte(strings.Join(got, "\n")+"\n"), 0o600); err != nil {
+				[]byte(strings.Join(got, "\n")+"\n-- backoff\n"+strings.Join(gotBackOff, "\n")+"\n"), 0o600); err != nil {
 				t.Fatal(err)
+			}
+		}
+		if !writeBackOff && wantBackOff[seed] != entryBackOff {
+			failedBackOff++
+			if failedBackOff <= 2 {
+				t.Errorf("seed %d: the BackOff lines differ from main (%s, main %s):\n%s", seed, entryBackOff,
+					wantBackOff[seed], strings.Join(gotBackOff, "\n"))
 			}
 		}
 		if write || want[seed] == entry {
@@ -489,9 +640,19 @@ func TestNonBackOffLinksAsMain(t *testing.T) {
 	if failed > 0 {
 		t.Errorf("%d of %d seeds differ from main", failed, linkSeeds())
 	}
+	if failedBackOff > 0 {
+		t.Errorf("%d of %d seeds differ from main in their BackOff lines", failedBackOff, linkSeeds())
+	}
 	if write {
 		text := "# seed sha256-of-lines line-count, written on origin/main before #432\n" + strings.Join(out, "\n") + "\n"
 		if err := os.WriteFile(linksGolden, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if writeBackOff {
+		text := "# seed sha256-of-lines line-count, BackOff lines and the full table, written on origin/main at " +
+			"f593769a\n" + strings.Join(outBackOff, "\n") + "\n"
+		if err := os.WriteFile(backOffGolden, []byte(text), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -500,7 +661,10 @@ func TestNonBackOffLinksAsMain(t *testing.T) {
 		"moved on during a hold", linkPodGone,
 		"CauseSeen " + seenNone, "CauseSeen " + seenYes, "CauseSeen " + seenNo, "CauseSeen " + seenError,
 		"CauseSeen " + seenTimeout, "CauseSeen " + seenBook, "holds " + holdsOn, "holds " + holdsOff,
-		"holds " + holdsOverflow,
+		"holds " + holdsOverflow, "holds " + holdsFull, "backoff exit not compared",
+		"backoff oom kill or wait, CauseSeen " + seenYes, "backoff oom kill or wait, CauseSeen " + seenBook,
+		"backoff overflow, CauseSeen " + seenYes, "backoff overflow, CauseSeen " + seenBook,
+		"backoff overflow, CauseSeen " + seenError,
 	} {
 		if counts[k] == 0 {
 			t.Errorf("no generated case of %q: %v", k, counts)

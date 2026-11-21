@@ -46,9 +46,9 @@ import (
 //
 // Properties, one line each:
 //   - S1: every event main links to an OOM kill or a wait links to the same cause here, while no non-zero exit is
-//     confirmed (an unconfirmed exit falls back to the OOM kill in the window).
+//     confirmed (a hold with an OOM kill or a wait has no exit candidates, decided 2026-11-22).
 //   - S2: no verdict against a non-zero exit is made without a CauseSeen ask for it in that reconcile, on any
-//     path: end of the hold, a cause first seen in the expiry reconcile, overflow, hold off, pod gone; a delivery
+//     path of a held BackOff: end of the hold, a cause first seen in the expiry reconcile, pod gone; a delivery
 //     retry keeps the verdict made before (N3, narrowed_cause_test.go).
 //   - S3: an ask that fails at the end does not wait again: the consequence goes on without the exit, with an
 //     error log naming the fingerprint and the label cause_unanswered; an answer no (or no CauseSeen) logs at info
@@ -352,8 +352,8 @@ func (e *exitHold) eventLogged(sink *kvSink, after time.Duration) reconcile.Resu
 	return res
 }
 
-// TestExitCauseRemovedOnlyAfterAsking is S2 and S3, a row per path that can end a hold of a non-zero-exit cause,
-// or emit one without a hold: each row checks how it ends, that CauseSeen was asked in the reconcile that
+// TestExitCauseRemovedOnlyAfterAsking is S2 and S3, a row per path that can end a hold of a non-zero-exit cause
+// (an event that overflows or is not held never asks, and links as main: TestNonBackOffLinksAsMain): each row checks how it ends, that CauseSeen was asked in the reconcile that
 // decided, and what was counted and logged when the exit was removed.
 func TestExitCauseRemovedOnlyAfterAsking(t *testing.T) {
 	grace := ConsequenceGrace + time.Second
@@ -380,27 +380,6 @@ func TestExitCauseRemovedOnlyAfterAsking(t *testing.T) {
 			e.update(cur)
 			e.log.book.record(e.fp)
 			e.eventLogged(sink, grace)
-		}, endCause, logWant{}},
-		{"overflow, controller has it", true, Config{MaxHeldConsequences: 1}, func(t *testing.T, e *exitHold, sink *kvSink) {
-			other := consequence("ev-other", ReasonUnhealthy, appPath, e.at)
-			e.create(other)
-			e.reconcileEvent(other.Name)
-			if e.c.holds.len() != 1 {
-				t.Fatal("the first consequence was not held, so the room is not full")
-			}
-			e.log.book.record(e.fp)
-			e.eventLogged(sink, 0)
-		}, endCause, logWant{}},
-		{"overflow, not confirmed", true, Config{MaxHeldConsequences: 1}, func(t *testing.T, e *exitHold, sink *kvSink) {
-			other := consequence("ev-other", ReasonUnhealthy, appPath, e.at)
-			e.create(other)
-			e.reconcileEvent(other.Name)
-			e.eventLogged(sink, 0)
-		}, endBare, logWant{label: holdCauseUnconfirmed}},
-		{"hold off, controller has it", true, Config{}, func(_ *testing.T, e *exitHold, sink *kvSink) {
-			e.c.holdOff = true
-			e.log.book.record(e.fp)
-			e.eventLogged(sink, 0)
 		}, endCause, logWant{}},
 		{"pod gone, controller has it, no release mark", true, Config{}, func(t *testing.T, e *exitHold, sink *kvSink) {
 			e.eventLogged(sink, 0)
@@ -523,16 +502,17 @@ func TestDropLogNamesTheRemovedExit(t *testing.T) {
 // Outside resolveExit no statement assigns an empty string to a cause field (CauseFingerprint, exitCause, a hold's
 // cause), or a literal to a hold's or an exit's observation or to a dereferenced observation, and only the named
 // functions assign the cause fields at all: fromEvent builds them, emit copies a decided hold's linked cause,
-// holdConsequence keeps a hold's cause as main does, addExit adds an exit candidate (and removes only the oldest past maxHeldExits), and
+// holdConsequence keeps a hold's cause as main does and drops its exits when it has one, addExit adds an exit
+// candidate (and removes only the oldest past maxHeldExits), and
 // confirm is the one setter of a confirmation.
 func TestOnlySettleRemovesACause(t *testing.T) {
-	const settle = "resolveExit"
+	const settle, hold = "resolveExit", "holdConsequence"
 	allowed := map[string][]string{
 		"CauseFingerprint": {"fromEvent", "emit", settle},
 		"exitCause":        {"fromEvent", settle},
-		"cause":            {"holdConsequence"},
-		"obs":              {"holdConsequence", "addExit"},
-		"exits":            {"addExit", "confirm"},
+		"cause":            {hold},
+		"obs":              {hold, "addExit"},
+		"exits":            {"addExit", "confirm", hold},
 		"confirmed":        {"confirm"},
 	}
 	files, err := filepath.Glob("*.go")

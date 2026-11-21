@@ -25,62 +25,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	corev1 "k8s.io/api/core/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
-
-// TestOverflowVerdictStandsWhenExitChanges is N3 for an event emitted at once for want of room: its verdict on the
-// exit is made at the first delivery, which finds the channel full. Before the retry the container exits again
-// with another code and the controller has seen that newer exit. The retry sends the verdict made the first time
-// (no cause), asks nothing more, and never carries the newer exit's fingerprint.
-func TestOverflowVerdictStandsWhenExitChanges(t *testing.T) {
-	e := newExitHold(t, true, Config{MaxHeldConsequences: 1, Buffer: 1})
-	other := consequence("ev-other", ReasonUnhealthy, appPath, e.at)
-	e.create(other)
-	e.reconcileEvent(other.Name)
-	if e.c.holds.len() != 1 {
-		t.Fatal("the other consequence was not held, so the table is not full")
-	}
-	sink := newKVSink()
-	e.c.out <- Observation{Fingerprint: fillerFingerprint}
-	if res := e.eventLogged(sink, 0); res.RequeueAfter != retryAfter {
-		t.Fatalf("requeue after %s, want the delivery retry", res.RequeueAfter)
-	}
-	e.log.book.mu.Lock()
-	asked := e.log.book.asked
-	e.log.book.mu.Unlock()
-	if asked == 0 {
-		t.Fatal("CauseSeen was never asked about the exit, so the test proves nothing")
-	}
-
-	p := readPod(t, e.harness, webPod)
-	p.Status.ContainerStatuses[0].LastTerminationState = corev1.ContainerState{
-		Terminated: terminated("crash-newer", reasonError, 3, e.at.Add(10*time.Second))}
-	p.Status.ContainerStatuses[0].RestartCount++
-	e.update(p)
-	e.reconcilePod(webPod)
-	newer := ""
-	for _, o := range e.drain() {
-		if o.Class == ClassCause && o.Fingerprint != e.fp {
-			newer = o.Fingerprint
-		}
-	}
-	if newer == "" {
-		t.Fatal("the pod reconciler delivered no newer exit")
-	}
-	e.log.book.record(newer)
-
-	e.eventLogged(sink, retryAfter)
-	e.log.book.mu.Lock()
-	again := e.log.book.asked - asked
-	e.log.book.mu.Unlock()
-	if again != 0 {
-		t.Errorf("CauseSeen asked %d more times on the delivery retry, want none", again)
-	}
-	if got := e.end(); got != endBare {
-		t.Errorf("the consequence ended %s, want %s: the verdict was made before the newer exit", got, endBare)
-	}
-}
 
 // TestFailedExitAskRetriedWithinGrace: CauseSeen runs out of time when asked about a held BackOff's exit. The hold
 // asks again after retryAfter, as it does for an OOM kill or a wait, not only at the end of ConsequenceGrace, and

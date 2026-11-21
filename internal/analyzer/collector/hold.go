@@ -83,12 +83,12 @@ const (
 // with no cause showed one it had seen: emitted with it at once), cause_unseen (the hold had a cause the
 // controller had not seen when the wait ended with the container still failing, or when the pod went, was replaced, or its template was retired: emitted with that cause), dropped (the event
 // ended the hold itself: deleted, no longer a Warning, replaced by another event of the name, or handled without
-// an observation for another reason; for a hold with a cause only an event that no longer exists; a BackOff whose
-// non-zero exit candidates were not confirmed counts as one with the OOM kill or wait it showed, or with no cause),
-// so that these five add up to the holds started; and overflow (no room to hold, emitted at once), a consequence
-// that was never held. Two more count, once per BackOff, a verdict on its non-zero exit candidates that confirmed
-// none (exitVerdict), beside the end of the hold: cause_unconfirmed (CauseSeen answered no, or is not configured)
-// and cause_unanswered (CauseSeen failed or ran out of its deadline when the verdict was due).
+// an observation for another reason; for a hold with a cause only an event that no longer exists; a hold whose
+// non-zero exit candidates were not confirmed counts as one with no cause), so that these five add up to the
+// holds started; and overflow (no room to hold, emitted at once), a consequence that was never held. Two more
+// count, once per held BackOff whose only candidates are non-zero exits, a verdict that confirmed none of them
+// (exitVerdict), beside the end of the hold: cause_unconfirmed (CauseSeen answered no, or is not configured) and
+// cause_unanswered (CauseSeen failed or ran out of its deadline when the verdict was due).
 var heldConsequences = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "shadewright_analyzer_held_consequences_total",
 	Help: "Consequence symptoms held by the collector, by outcome: opened, not_opened, released, cause_unseen, " +
@@ -121,13 +121,11 @@ type consequenceHold struct {
 	obs Observation
 	// exits are the non-zero exits the samples of a BackOff offered as its cause (Observation.exitCause), oldest
 	// first, at most maxHeldExits, with the observation of the last sample that offered each (decided 2026-11-21 on
-	// #432). A later sample adds one and removes none, except the oldest when the bound is reached (addExit), and the
-	// hold is indexed by each (byCause). One counts
-	// only once Config.CauseSeen confirmed it (heldExit.confirmed); the newest confirmed one is then the cause the
-	// hold emits (linked), else cause as main has it.
+	// #432), and the hold is indexed by each (byCause). A hold has exits only while it has no cause: a sample that
+	// shows an OOM kill or a wait drops them, and the hold links as main does (decided 2026-11-22). One counts only
+	// once Config.CauseSeen confirmed it (heldExit.confirmed); the newest confirmed one is then the cause the hold
+	// emits (linked).
 	exits []heldExit
-	// judged is set once the end of the hold asked about its exits (judgeExits): the verdict is made once.
-	judged bool
 	// caused is the share the hold was admitted to: set when its first sight showed a cause. It does not change
 	// for the life of the hold.
 	caused bool
@@ -215,7 +213,7 @@ func (s consequenceHold) linked() (Observation, bool) {
 	for _, e := range slices.Backward(s.exits) {
 		if e.confirmed {
 			o := e.obs
-			resolveExit(&o, o.exitCause, true)
+			resolveExit(&o, true)
 			return o, true
 		}
 	}
@@ -223,7 +221,7 @@ func (s consequenceHold) linked() (Observation, bool) {
 		return Observation{}, false
 	}
 	o := s.obs
-	resolveExit(&o, o.exitCause, false)
+	resolveExit(&o, false)
 	return o, true
 }
 
@@ -256,11 +254,10 @@ type consequenceHolds struct {
 	// byCause indexes the holds by each fingerprint they are found by (consequenceHold.causes): the cause and
 	// every exit candidate, for ReleaseCause. At most 1+maxHeldExits entries per hold.
 	byCause map[string]map[types.NamespacedName]struct{}
-	// overflowed keeps, by event key, an event emitted at once for want of room until its delivery ends, so that
-	// a delivery retry emits it again instead of holding it once room has freed, with the verdict on its exit
-	// candidate so that a retry does not ask again. At most max entries: past that an overflow is not remembered,
-	// and its retry may be held.
-	overflowed map[types.NamespacedName]overflowMark
+	// overflowed keeps, by event key, the UID of an event emitted at once for want of room until its delivery
+	// ends, so that a delivery retry emits it again instead of holding it once room has freed. At most max
+	// entries: past that an overflow is not remembered, and its retry may be held.
+	overflowed map[types.NamespacedName]types.UID
 }
 
 func newConsequenceHolds(capacity int) *consequenceHolds {
@@ -270,7 +267,7 @@ func newConsequenceHolds(capacity int) *consequenceHolds {
 		holds: map[types.NamespacedName]consequenceHold{}, total: map[bool]int{}, perNS: map[shareKey]int{},
 		byPod:      map[types.UID]map[types.NamespacedName]struct{}{},
 		byCause:    map[string]map[types.NamespacedName]struct{}{},
-		overflowed: map[types.NamespacedName]overflowMark{},
+		overflowed: map[types.NamespacedName]types.UID{},
 	}
 }
 
@@ -324,7 +321,7 @@ func removeFrom[K comparable](index map[K]map[types.NamespacedName]struct{}, id 
 func (h *consequenceHolds) get(key types.NamespacedName, uid types.UID) (consequenceHold, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if o, ok := h.overflowed[key]; ok && o.uid != uid {
+	if o, ok := h.overflowed[key]; ok && o != uid {
 		delete(h.overflowed, key)
 	}
 	s, ok := h.holds[key]
@@ -358,39 +355,7 @@ func (h *consequenceHolds) wasOverflow(key types.NamespacedName, uid types.UID) 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	o, ok := h.overflowed[key]
-	return ok && o.uid == uid
-}
-
-// overflowMark is an event emitted at once for want of room, and the verdict on its exit candidate once made.
-type overflowMark struct {
-	uid types.UID
-	// exit is the exit candidate a verdict was made on, "" before one; seen is that verdict.
-	exit string
-	seen bool
-}
-
-// overflowVerdict returns the verdict made on the overflowed event with this UID: the exit candidate it was made
-// on and whether it was confirmed, and false when none was made. The verdict stands whatever exit a later read of
-// the pod shows (decided 2026-11-21 on #432): a delivery retry sends it as made, never another exit.
-func (h *consequenceHolds) overflowVerdict(key types.NamespacedName, uid types.UID) (string, bool, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	o, ok := h.overflowed[key]
-	if !ok || o.uid != uid || o.exit == "" {
-		return "", false, false
-	}
-	return o.exit, o.seen, true
-}
-
-// recordOverflowVerdict keeps the verdict on exit for the overflowed event with this UID, when it is remembered.
-func (h *consequenceHolds) recordOverflowVerdict(key types.NamespacedName, uid types.UID, exit string,
-	confirmed bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if o, ok := h.overflowed[key]; ok && o.uid == uid {
-		o.exit, o.seen = exit, confirmed
-		h.overflowed[key] = o
-	}
+	return ok && o == uid
 }
 
 // markOverflow remembers that the event with this UID was emitted at once, and reports false when there is no
@@ -401,7 +366,7 @@ func (h *consequenceHolds) markOverflow(key types.NamespacedName, uid types.UID)
 	if _, ok := h.overflowed[key]; !ok && len(h.overflowed) >= h.max {
 		return false
 	}
-	h.overflowed[key] = overflowMark{uid: uid}
+	h.overflowed[key] = uid
 	return true
 }
 
@@ -574,18 +539,16 @@ func (c *Collector) askExit(ctx context.Context, obs Observation) (bool, error) 
 	if c.cfg.CauseSeen == nil {
 		return false, nil
 	}
-	resolveExit(&obs, obs.exitCause, true)
+	resolveExit(&obs, true)
 	return c.causeSeen(ctx, obs)
 }
 
 // resolveExit is the one place that decides the exit candidate of an observation (decided 2026-11-21 on #432):
-// exit is the candidate the verdict was made on, o.exitCause but for the delivery retry of an overflowed event,
-// whose verdict stands on the exit of its first delivery (decideExit). Confirmed, exit becomes its cause
-// fingerprint; otherwise its cause stays as main reads it (an OOM kill, a wait, or none). Either way the candidate
-// is cleared, so it never leaves the collector.
-func resolveExit(o *Observation, exit string, confirmed bool) {
-	if confirmed && exit != "" {
-		o.CauseFingerprint = exit
+// confirmed, the candidate becomes its cause fingerprint; otherwise its cause stays as main reads it. Either way
+// the candidate is cleared, so it never leaves the collector.
+func resolveExit(o *Observation, confirmed bool) {
+	if confirmed && o.exitCause != "" {
+		o.CauseFingerprint = o.exitCause
 	}
 	o.exitCause = ""
 }
@@ -596,99 +559,57 @@ func (s *consequenceHold) confirm(i int) {
 	s.exits[i].confirmed = true
 }
 
-// confirmExits asks, at a sample of hold s before the end of ConsequenceGrace, about each of its exit candidates
-// not confirmed yet, and reports whether one is confirmed now, and the first failed ask (the error of causeSeen),
-// which the caller treats as a failed ask about the cause: asked again after retryAfter within the grace
-// (holdConsequence). An answer no changes nothing; the end of the hold asks once more (judgeExits). The error is
-// only the reconcile's context ending.
-func (c *Collector) confirmExits(ctx context.Context, s *consequenceHold) (bool, error, error) {
+// askExits asks about the exits of hold s, newest first, until Config.CauseSeen confirms one (confirm). It
+// reports whether one is confirmed, else the first failed ask and the exit it was about. When the reconcile's
+// context ends it stops; the caller checks ctx.Err() first.
+func (c *Collector) askExits(ctx context.Context, s *consequenceHold) (bool, string, error) {
+	var named string
 	var failed error
-	for i := range s.exits {
-		if s.exits[i].confirmed {
-			continue
-		}
-		seen, err := c.askExit(ctx, s.exits[i].obs)
+	for i, e := range slices.Backward(s.exits) {
+		seen, err := c.askExit(ctx, e.obs)
 		switch {
 		case ctx.Err() != nil:
-			return false, nil, ctx.Err()
+			return false, "", ctx.Err()
 		case err != nil:
 			if failed == nil {
-				failed = err
+				failed, named = err, e.fp
 			}
 		case seen:
 			s.confirm(i)
+			return true, "", nil
 		}
 	}
-	return s.exitConfirmed(), failed, nil
+	return false, named, failed
 }
 
 // judgeExits makes the verdict on the exit candidates of hold s as it ends (the end of ConsequenceGrace, its pod
-// gone or replaced, the event leaving the collector), once (consequenceHold.judged): each one not confirmed yet is
+// gone or replaced, the event leaving the collector): once, as each of those ends the hold or decides it. Each is
 // asked about once more, and a failed ask waits for nothing more, as the hold has ended. A verdict that confirms
-// none is counted and logged once (exitVerdict), and the hold goes on with cause as main has it. Only the
-// reconcile's context ending is returned.
+// none is counted and logged (exitVerdict), and the hold goes on with no cause. Only the reconcile's context
+// ending is returned.
 func (c *Collector) judgeExits(ctx context.Context, s *consequenceHold) error {
-	if s.judged || len(s.exits) == 0 {
+	if len(s.exits) == 0 {
 		return nil
 	}
-	var failed error
-	named := s.exits[len(s.exits)-1].fp
-	for i := range s.exits {
-		if s.exits[i].confirmed {
-			continue
-		}
-		seen, err := c.askExit(ctx, s.exits[i].obs)
-		switch {
-		case ctx.Err() != nil:
-			return ctx.Err()
-		case err != nil:
-			// The log names the exit whose ask failed.
-			failed, named = err, s.exits[i].fp
-		case seen:
-			s.confirm(i)
-		}
-	}
-	s.judged = true
-	if !s.exitConfirmed() {
-		c.exitVerdict(ctx, s.reason, s.container, named, s.cause, failed)
-	}
-	return nil
-}
-
-// decideExit makes the verdict on the exit candidate of obs when no hold of its own decides it: no room to hold,
-// holds off, or a hold that was never stored. It is made once per event: a verdict kept for an overflowed event
-// (consequenceHolds.overflowVerdict) is given again without asking, on the exit it was made on, whatever exit obs
-// shows now; otherwise Config.CauseSeen is asked once, a failed ask waits for nothing (the event is not held, so
-// nothing would ask again; the verdict stands for its delivery retries too), and a verdict that does not confirm
-// it is counted and logged (exitVerdict). Only the reconcile's context ending is returned.
-func (c *Collector) decideExit(ctx context.Context, key types.NamespacedName, uid types.UID, obs *Observation) error {
-	if exit, confirmed, ok := c.holds.overflowVerdict(key, uid); ok {
-		resolveExit(obs, exit, confirmed)
-		return nil
-	}
-	if obs.exitCause == "" {
-		return nil
-	}
-	seen, err := c.askExit(ctx, *obs)
+	confirmed, named, failed := c.askExits(ctx, s)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	confirmed := err == nil && seen
-	c.holds.recordOverflowVerdict(key, uid, obs.exitCause, confirmed)
 	if !confirmed {
-		c.exitVerdict(ctx, obs.Reason, obs.Container, obs.exitCause, obs.CauseFingerprint, err)
+		if named == "" {
+			named = s.exits[len(s.exits)-1].fp
+		}
+		c.exitVerdict(ctx, s.reason, s.container, named, failed)
 	}
-	resolveExit(obs, obs.exitCause, confirmed)
 	return nil
 }
 
-// exitVerdict counts and logs a verdict that confirmed no non-zero exit of a consequence (decided 2026-11-21 on
-// #432), once per consequence: cause_unanswered with an error log naming the exit's fingerprint when an ask failed,
-// else cause_unconfirmed with an info log (an answer no, or no CauseSeen). The consequence goes on with cause, the
-// OOM kill or wait it shows as main reads it, or "" for none.
-func (c *Collector) exitVerdict(ctx context.Context, reason, container, exit, cause string, err error) {
-	log := logf.FromContext(ctx).WithValues("reason", reason, "container", container, "causeFingerprint", exit,
-		"fallbackFingerprint", cause)
+// exitVerdict counts and logs a verdict that confirmed no non-zero exit of a held BackOff (decided 2026-11-21 on
+// #432, counted only for a hold whose candidates are exits alone since 2026-11-22): cause_unanswered with an error
+// log naming the exit's fingerprint when an ask failed, else cause_unconfirmed with an info log (an answer no, or
+// no CauseSeen). The consequence goes on with no cause.
+func (c *Collector) exitVerdict(ctx context.Context, reason, container, exit string, err error) {
+	log := logf.FromContext(ctx).WithValues("reason", reason, "container", container, "causeFingerprint", exit)
 	if err != nil {
 		heldConsequences.WithLabelValues(holdCauseUnanswered).Inc()
 		log.Error(err, "Went on without the non-zero exit cause of a consequence, the Incident controller did not answer")
@@ -734,15 +655,15 @@ func (c *Collector) heldEventsOf(_ context.Context, obj client.Object) []reconci
 //   - A held event whose pod is gone or replaced: emitted with its cause (linked: a confirmed exit, else the last
 //     cause a sample showed; cause_unseen, or released when causeOutcome confirms a release), or, when it has
 //     none, holdDrop. Its exit candidates are judged first (judgeExits).
-//   - No room to hold a new one: holdEmit at once, without a verdict, so it goes through the gate. The event is
-//     remembered until its delivery ends, so a delivery retry emits it again even once room has freed. Its exit
-//     candidate, if any, is decided once (decideExit).
+//   - No room to hold a new one: holdEmit at once, without a verdict, so it goes through the gate, as main does:
+//     no exit is asked about or linked. The event is remembered until its delivery ends, so a delivery retry
+//     emits it again even once room has freed.
 //   - Otherwise the reconcile is a sample of the container. Its cause (an OOM kill or a wait) replaces the hold's
-//     as on main, and its exit candidate, a BackOff's only, is added to the hold's (consequenceHold.exits). A hold
-//     with a cause is stored first, then the controller is asked whether it has seen an exit candidate
-//     (confirmExits), then the cause (Config.CauseSeen, with the hold's observation; ReleaseCause gives the
-//     order): seen at the first sight, the consequence is emitted at once and was never held; seen later, it is
-//     released, a confirmed exit before the cause. Before the end of ConsequenceGrace: holdWait until that end.
+//     as on main and drops its exits; the exit candidate of a BackOff whose hold has no cause is added to the
+//     hold's (consequenceHold.exits). A hold with a cause or exits is stored first, then the controller is asked
+//     whether it has seen it (askHeld: the cause, or else an exit; Config.CauseSeen, with the hold's observation;
+//     ReleaseCause gives the order): seen at the first sight, the consequence is emitted at once and was never
+//     held; seen later, it is released. Before the end of ConsequenceGrace: holdWait until that end.
 //     At the end (endOfHold) the exits are judged, then a hold with a cause that causeOutcome confirms released
 //     emits with it, even when the pod shows none now. Any other hold, with a cause or none (amended 2026-11-16
 //     and 2026-11-17, fifth): holdEmit, with the cause if any (cause_unseen), when at least minHoldSamples
@@ -750,7 +671,7 @@ func (c *Collector) heldEventsOf(_ context.Context, obj client.Object) []reconci
 //     minHoldRestarts times during the hold, else holdDrop (not_opened).
 //
 // A hold with a cause emits the observation of the last sample that showed it (consequenceHold.linked). A
-// CauseSeen call about the cause or an exit candidate (askHeld) that does not answer within its deadline decides nothing: holdWait after
+// CauseSeen call (askHeld) that does not answer within its deadline decides nothing: holdWait after
 // retryAfter, the hold as it was. Any other error of it is returned, for the reconciler's backoff.
 func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedName, ev *eventsv1.Event,
 	obs *Observation, pod *corev1.Pod) (holdVerdict, time.Duration, error) {
@@ -771,7 +692,7 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 			return holdEmit, 0, err
 		}
 		if _, ok := s.linked(); ok {
-			return c.endWithCause(ctx, key, s, obs, c.causeOutcome(ctx, s), "its Pod is gone or replaced", true)
+			return c.endWithCause(ctx, key, s, obs, c.causeOutcome(ctx, s), "its Pod is gone or replaced")
 		}
 		heldConsequences.WithLabelValues(holdNotOpened).Inc()
 		logf.FromContext(ctx).V(1).Info("Dropped held consequence, its Pod is gone or replaced",
@@ -789,9 +710,11 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 		}
 	}
 	if obs.CauseFingerprint != "" {
+		// An OOM kill or a wait: the hold links as main does, and exits are not its candidates (decided
+		// 2026-11-22 on #432).
 		s.cause, s.obs = obs.CauseFingerprint, *obs
-	}
-	if obs.exitCause != "" {
+		s.exits = nil
+	} else if s.cause == "" && obs.exitCause != "" {
 		if dropped := s.addExit(*obs); dropped != "" {
 			logf.FromContext(ctx).V(1).Info("Dropped the oldest non-zero exit cause of a held consequence for a newer one",
 				"reason", s.reason, "container", s.container, "limit", maxHeldExits, "causeFingerprint", dropped)
@@ -809,7 +732,7 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 	}
 	left := s.since.Add(ConsequenceGrace).Sub(now)
 	if left <= 0 {
-		return c.endOfHold(ctx, key, s, obs, failing, held)
+		return c.endOfHold(ctx, key, s, obs, failing)
 	}
 	stored, ok := c.holds.put(key, s)
 	if !ok {
@@ -820,7 +743,7 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 		return holdEmit, 0, nil
 	}
 	// Asked only now that the hold is stored, so that a ReleaseCause call either came before and is seen here,
-	// or finds the hold. A confirmed exit is the cause before an OOM kill or a wait (linked).
+	// or finds the hold.
 	seen, err := c.askHeld(ctx, &stored)
 	if ctx.Err() != nil {
 		return holdEmit, 0, ctx.Err()
@@ -841,60 +764,49 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 		*obs, _ = stored.linked()
 		return holdEmit, 0, nil
 	}
-	return c.endWithCause(ctx, key, stored, obs, holdReleased, "the Incident controller saw its cause", true)
+	return c.endWithCause(ctx, key, stored, obs, holdReleased, "the Incident controller saw its cause")
 }
 
 // askHeld asks, at a sample of the stored hold s before the end of ConsequenceGrace, whether the Incident controller
-// has seen one of its causes: its exit candidates first (confirmExits), then cause. It reports whether one is seen,
-// and otherwise the failed ask, about an exit or the cause: either is asked again after retryAfter, not only at the
-// end of the hold (holdConsequence). The reconcile's context ending is returned as an error too.
+// has seen its cause: cause, as main asks it, or, for a hold whose candidates are exits alone, one of its exits
+// (askExits). It reports whether one is seen, and otherwise the failed ask, asked again after retryAfter within the
+// grace (holdConsequence). The caller checks the reconcile's context first.
 func (c *Collector) askHeld(ctx context.Context, s *consequenceHold) (bool, error) {
-	confirmed, exitFailed, err := c.confirmExits(ctx, s)
-	if err != nil || confirmed {
-		return confirmed, err
+	if s.cause != "" {
+		return c.causeSeen(ctx, s.obs)
 	}
-	if s.cause == "" {
-		return false, exitFailed
-	}
-	seen, err := c.causeSeen(ctx, s.obs)
-	if !seen && err == nil {
-		err = exitFailed
-	}
-	return seen, err
+	confirmed, _, err := c.askExits(ctx, s)
+	return confirmed, err
 }
 
 // endOfHold decides on a hold at the end of ConsequenceGrace by its samples (point 19), with a cause or without
 // (decided 2026-11-17, fifth, on #828): a consequence whose container did not keep failing is not emitted
 // (not_opened), one that did is emitted, with its cause when it has one. failing is whether this last sample saw
-// the container failing, and held whether the hold was stored before this sample. The exit candidates are judged
-// first (judgeExits): a confirmed one is the cause, else the cause as main has it.
+// the container failing. The exit candidates of a hold that has them are judged first (judgeExits): a confirmed
+// one is its cause.
 //
 // A hold with a cause the controller saw (causeOutcome is released: a confirmed exit, or ReleaseCause marked it
 // and CauseSeen confirms) is emitted whether its container still fails or not, as a release before the end is:
 // the controller links the consequence to its cause's Incident, which counts it as evidence and opens nothing of
 // its own.
 func (c *Collector) endOfHold(ctx context.Context, key types.NamespacedName, s consequenceHold, obs *Observation,
-	failing, held bool) (holdVerdict, time.Duration, error) {
+	failing bool) (holdVerdict, time.Duration, error) {
 	keptFailing := s.failing >= minHoldSamples && (failing || s.restarted >= minHoldRestarts)
 	hadCause := s.hasCause()
 	if err := c.judgeExits(ctx, &s); err != nil {
 		return holdEmit, 0, err
 	}
-	_, linked := s.linked()
-	if linked {
+	if _, linked := s.linked(); linked {
 		if outcome := c.causeOutcome(ctx, s); outcome == holdReleased || keptFailing {
-			return c.endWithCause(ctx, key, s, obs, outcome, "the hold ended", held)
+			return c.endWithCause(ctx, key, s, obs, outcome, "the hold ended")
 		}
 	}
 	if !keptFailing {
 		heldConsequences.WithLabelValues(holdNotOpened).Inc()
 		logf.FromContext(ctx).V(1).Info("Dropped held consequence, its container did not keep failing",
-			"reason", s.reason, "container", s.container, "cause", hadCause, "causeKept", linked,
-			"failingSamples", s.failing, "restarts", s.restarted)
+			"reason", s.reason, "container", s.container, "cause", hadCause, "failingSamples", s.failing, "restarts", s.restarted)
 		return holdDrop, 0, nil
 	}
-	// The verdict on this sample's exit is made: not confirmed, or it would be linked.
-	resolveExit(obs, obs.exitCause, false)
 	s.opened = true
 	if _, ok := c.holds.put(key, s); !ok {
 		// Not held before (a grace of zero): nothing to remember across a delivery retry.
@@ -906,27 +818,16 @@ func (c *Collector) endOfHold(ctx context.Context, key types.NamespacedName, s c
 
 // endWithCause ends a hold with a cause: obs becomes the observation it links (consequenceHold.linked), and the
 // hold is kept, decided, until its delivery ends, so that a delivery retry emits the same. The outcome is counted
-// once, when the hold is stored. held says the hold was stored before: when it cannot be stored again (the hold
-// was dropped meanwhile and there is no room), the outcome is still counted, so the outcomes add up to the holds
-// started, and the decision is logged as not remembered; a delivery retry then decides again.
+// once, when the hold was stored.
 func (c *Collector) endWithCause(ctx context.Context, key types.NamespacedName, s consequenceHold, obs *Observation,
-	outcome, why string, held bool) (holdVerdict, time.Duration, error) {
+	outcome, why string) (holdVerdict, time.Duration, error) {
 	*obs, _ = s.linked()
 	s.opened = true
-	_, stored := c.holds.put(key, s)
-	if !stored && !held {
-		// Never held (a grace of zero): no hold started, nothing to count.
-		return holdEmit, 0, nil
+	if _, ok := c.holds.put(key, s); ok {
+		heldConsequences.WithLabelValues(outcome).Inc()
+		logf.FromContext(ctx).V(1).Info("Emitted held consequence with its cause", "why", why,
+			"reason", s.reason, "container", s.container, "outcome", outcome)
 	}
-	heldConsequences.WithLabelValues(outcome).Inc()
-	log := logf.FromContext(ctx).WithValues("why", why, "reason", s.reason, "container", s.container,
-		"outcome", outcome)
-	if !stored {
-		log.Info("Emitted held consequence with its cause without remembering the decision, too many held",
-			"limit", c.holds.max)
-		return holdEmit, 0, nil
-	}
-	log.V(1).Info("Emitted held consequence with its cause")
 	return holdEmit, 0, nil
 }
 
@@ -954,7 +855,7 @@ func (c *Collector) heldCause(ctx context.Context, key types.NamespacedName, uid
 	if !ok {
 		return Observation{}, false, nil
 	}
-	_, _, _ = c.endWithCause(ctx, key, s, &obs, c.causeOutcome(ctx, s), why, true)
+	_, _, _ = c.endWithCause(ctx, key, s, &obs, c.causeOutcome(ctx, s), why)
 	return obs, true, nil
 }
 

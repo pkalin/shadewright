@@ -53,16 +53,17 @@ limitations under the License.
 // emitted at once.
 //
 // A non-zero exit is a cause of BackOff events only, and only on the Incident controller's word (decided
-// 2026-11-21 on #432): an Unhealthy event never links to one, since a liveness probe failure makes the kubelet
-// kill the container and so is the cause of the exit, not its consequence. The pod status of a BackOff offers the
-// newest exit in the window that finished after the OOM kill, if any, as a candidate (Observation.exitCause), next
-// to the cause main reads (CauseFingerprint). A hold keeps every candidate its samples offered and never removes
-// one, and is found by each when a cause is released. A candidate becomes the cause only when Config.CauseSeen
-// answered true for it (resolveExit, the one place that decides it); until then the consequence carries the cause
-// main links, an OOM kill or a wait, or none, so it links as main does. The verdict is made once per consequence:
-// at the end of its hold (asked once more, a failed ask waiting no longer), or at its emit when no hold decides
-// it (no room to hold), and a delivery retry asks nothing more. A verdict that confirms no candidate is logged and
-// counted cause_unconfirmed (the answer no, or no CauseSeen) or cause_unanswered (a failed or late answer).
+// 2026-11-21 on #432, narrowed 2026-11-22): an Unhealthy event never links to one, since a liveness probe failure
+// makes the kubelet kill the container and so is the cause of the exit, not its consequence. The pod status of a
+// BackOff offers the newest exit in the window as a candidate (Observation.exitCause), next to the cause main
+// reads (CauseFingerprint). Only a held BackOff whose candidates are exits alone uses it: a hold keeps the exits
+// its samples offered, at most maxHeldExits (a newer one replaces the oldest past that), and is found by each
+// when a cause is released; a sample that shows an OOM kill or a wait drops them, and the hold links as main
+// does. A BackOff that is not held (no room to hold) never asks about an exit and links as main does. A
+// candidate becomes the cause only when Config.CauseSeen answered true for it (resolveExit, the one place that
+// decides it). The verdict is made once per hold, at its end (asked once more, a failed ask waiting no longer),
+// and a delivery retry asks nothing more. A verdict that confirms no candidate is logged and counted
+// cause_unconfirmed (the answer no, or no CauseSeen) or cause_unanswered (a failed or late answer).
 //
 // Observation-level deduplication: per event the collector remembers the UID and the last handled
 // occurrence count (the series count, or the count of an older recorder, or one), and emits only the

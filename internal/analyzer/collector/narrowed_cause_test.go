@@ -30,12 +30,14 @@ import (
 //   - N1: a confirmed non-zero exit is a cause of BackOff events of the same container only; an Unhealthy event
 //     never links to one (TestNonBackOffLinksAsMain checks every event that is not a BackOff against main, with
 //     the same room in the hold table).
-//   - N2: the candidates of a hold are kept for its life: a later sample adds one and removes none, except the
-//     oldest exit once the hold has maxHeldExits (TestHeldExitsKeepTheNewest), and the hold is found by each when a
-//     cause is released; the OOM kill wins unless the exit is confirmed.
+//   - N2: the exit candidates of a hold whose candidates are exits alone are kept for its life: a later sample adds
+//     one and removes none, except the oldest exit once the hold has maxHeldExits (TestHeldExitsKeepTheNewest), and
+//     the hold is found by each when a cause is released. A sample that shows an OOM kill or a wait drops them
+//     (decided 2026-11-22): the hold then links as main.
 //   - N3: the verdict on an exit is made once: a delivery retry asks nothing, counts nothing and logs nothing more.
 //   - N4: a failed CauseSeen call at a final step never drops a consequence main emits: it goes on with the OOM
-//     kill if there is one, otherwise as main has it, and cause_unanswered is counted once.
+//     kill if there is one, otherwise as main has it; cause_unanswered is counted once for a hold of exits alone,
+//     never for one with an OOM kill (decided 2026-11-22).
 
 // TestLivenessNeverLinksToItsExit is N1 at the collector: the kubelet killed the app container for its liveness
 // probe (exit 137, reason Error) and the Incident controller has seen that termination. A liveness failure is the
@@ -202,8 +204,9 @@ func TestExitVerdictOnceAcrossRetries(t *testing.T) {
 
 // TestFailedAskAtFinalStepAsMain is N4 and finding E1 of the sixth pass on #432: CauseSeen runs out of time at
 // every ask, at each final step of a held BackOff (the end of the hold, its pod gone, the event leaving the
-// collector). With an OOM kill in the window it is emitted once with the kill, as main emits it; with none it ends
-// as main ends an event with no cause. cause_unanswered is counted once either way.
+// collector). With an OOM kill in the window it is emitted once with the kill, as main emits it, and nothing is
+// counted for the exit; with none it ends as main ends an event with no cause, and cause_unanswered is counted
+// once.
 func TestFailedAskAtFinalStepAsMain(t *testing.T) {
 	grace := ConsequenceGrace + time.Second
 	steps := []struct {
@@ -263,8 +266,12 @@ func TestFailedAskAtFinalStepAsMain(t *testing.T) {
 				if got != want {
 					t.Errorf("ended %s, want %s", got, want)
 				}
-				if n := outcomesSince(before)[holdCauseUnanswered]; n != 1 {
-					t.Errorf("cause_unanswered counted %v, want 1", n)
+				wantN := 1.0
+				if withOOM {
+					wantN = 0
+				}
+				if n := outcomesSince(before)[holdCauseUnanswered]; n != wantN {
+					t.Errorf("cause_unanswered counted %v, want %v", n, wantN)
 				}
 			})
 		}

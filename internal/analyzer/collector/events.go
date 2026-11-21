@@ -232,9 +232,8 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 // (shown, the cause fromEvent read at this reconcile, empty when none or not read) delivers only those
 // occurrences, with the cause of the decision. A hold that ended with no cause delivers them with the cause
 // shown now: a delivery retry rereads the cause. A non-zero exit is the cause of a BackOff only when
-// Config.CauseSeen confirmed it (decided 2026-11-21 on #432), and the verdict is made once: by the hold that decided
-// (its retry rereads the OOM kill or wait shown now, as main, and never the exit), or here, by decideExit, for an
-// event with no hold of its own, kept across a delivery retry of an overflowed event. Once that is delivered, the
+// Config.CauseSeen confirmed it during the hold (decided 2026-11-21 on #432); an event with no hold of its own
+// (overflow) never asks about it and links as main (decided 2026-11-22). Once that is delivered, the
 // event is reconciled again at once: the later occurrences are a new consequence, held for the cause shown now.
 func (r *eventReconciler) emit(ctx context.Context, key types.NamespacedName, ev *eventsv1.Event, obs Observation,
 	shown string, delta int64, mayRepeat bool) (ctrl.Result, error) {
@@ -247,15 +246,14 @@ func (r *eventReconciler) emit(ctx context.Context, key types.NamespacedName, ev
 			cause = o.CauseFingerprint
 			obs.CauseFingerprint = cause
 		}
-		// The hold made the verdict on its exits: the exit read now is not asked about again.
-		resolveExit(&obs, obs.exitCause, false)
 		if shown != "" && shown != cause && n > s.total {
 			delta = max(delta-(n-s.total), 0)
 			n, split = s.total, true
 		}
-	} else if err := r.c.decideExit(ctx, key, ev.UID, &obs); err != nil {
-		return ctrl.Result{}, err
 	}
+	// An exit is the cause only as a hold whose candidates are exits alone confirmed it (linked): the exit read
+	// now is not asked about.
+	resolveExit(&obs, false)
 	obs.Occurrence, obs.Began = "event:"+string(ev.UID), r.c.notFuture(created)
 	obs.Total, obs.Count, obs.MayRepeat = n, capCount(delta), mayRepeat
 	sent, err := r.c.deliver(ctx, obs)

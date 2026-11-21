@@ -160,8 +160,8 @@ func (c *Collector) podStatusInput(pod *corev1.Pod, owner, reason, note string) 
 // finished after that OOM kill if there is one; "" otherwise (ADR-0039 point 3, amended 2026-11-20, narrowed
 // 2026-11-21 on #432). The status keeps only the newest termination, so a BackOff the kubelet reported before an
 // exit was about the exit before, of the same crash loop. exit is a candidate only: the collector delivers it as
-// the cause only once Config.CauseSeen confirmed it (hold.go), and until then the consequence carries fp, as main
-// links it. An Unhealthy event never gets one: a liveness probe failure makes the kubelet kill the container, so
+// the cause only for a held BackOff whose candidates are exits alone (none with fp set), once Config.CauseSeen
+// confirmed it (hold.go); otherwise the consequence carries fp, as main links it. An Unhealthy event never gets one: a liveness probe failure makes the kubelet kill the container, so
 // its exit 137 or 143 is a consequence of the probe failure, not its cause, and the status does not tell which way
 // it went. The exits are those terminations offers with class cause (termination.class): a pod whose status.reason
 // is set offers none, and a pod being deleted offers none either (#966).

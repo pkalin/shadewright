@@ -516,6 +516,36 @@ func TestClaimDuringACancelWaitsForARead(t *testing.T) {
 	claimStands(t, got, cr)
 }
 
+// Finding of 2026-11-21 on #1058 (second pass): during the watch, condition PullRequestUnreadable still names a refusal
+// of another read, and the claim's read fails with a 5xx. The condition names the read failing now, as observeFailed
+// does on main (watchUnreadable), not the stale refusal.
+func TestClaimReadFailingNowReplacesAStaleRefusal(t *testing.T) {
+	r, g, _, rr, _, _ := claimHandingOver(t)
+	held := storedRR(t, r, rr)
+	const stale = "refused read of another call"
+	meta.SetStatusCondition(&held.Status.Conditions, metav1.Condition{
+		Type: api.ConditionPullRequestUnreadable, Status: metav1.ConditionTrue, Reason: ReasonGitForbidden,
+		Message: stale, ObservedGeneration: held.Generation,
+	})
+	if err := r.Status().Update(t.Context(), held); err != nil {
+		t.Fatal(err)
+	}
+	g.SetFail(func(op string) error {
+		if op == opGet {
+			return unavailable()
+		}
+		return nil
+	})
+	got, err := reconcileOnce(t, r, rr)
+	if err != nil {
+		t.Fatalf("reconcile = %v; want no error", err)
+	}
+	c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionPullRequestUnreadable)
+	if c == nil || c.Reason != ReasonRecoveryReadFailed || c.Message == stale {
+		t.Fatalf("PullRequestUnreadable %+v: want ReasonRecoveryReadFailed naming the failing read", c)
+	}
+}
+
 // Finding of 2026-11-21 on #1058: the settings entry of the plan's repository cannot be used, so the claim's read
 // cannot start, and the write of condition PullRequestUnreadable that says so is lost. The failed open is still
 // recorded (condition GitReadRetry names it), and the lost write is returned for the error backoff, not joined away.

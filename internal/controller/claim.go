@@ -23,6 +23,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -39,6 +40,9 @@ type claimPath struct {
 	pace time.Duration
 	// bound is the wait a failed read of the claim is retried within, besides the claim's own (retryGitRead).
 	bound waitBound
+	// unreadable is condition PullRequestUnreadable for a failed read of the claim, nil to leave it as it is: during the
+	// watch the one observeFailed sets (watchUnreadable), after it the one heldRecovery sets (recoveryUnreadable).
+	unreadable func(*remediationv1alpha1.RemediationRequest, error) *metav1.Condition
 }
 
 // claimOutcome is what one read of a held claim (settleClaim) came to, for the path that reached it.
@@ -57,12 +61,12 @@ const (
 
 // claimDuringWatch is the path of a replacement that watches after the abort of its handoff (observeStep).
 func (r *RemediationRequestReconciler) claimDuringWatch() claimPath {
-	return claimPath{pace: r.pullRequestPollInterval(), bound: boundBy(waitHandoffRecovery)}
+	return claimPath{pace: r.pullRequestPollInterval(), bound: boundBy(waitHandoffRecovery), unreadable: watchUnreadable}
 }
 
 // claimAfterWatch is the path of a replacement that ended before its takeover and keeps the lock (heldRecovery).
 func claimAfterWatch() claimPath {
-	return claimPath{pace: heldRecheckInterval, bound: unboundedRead(noBoundHeldLock)}
+	return claimPath{pace: heldRecheckInterval, bound: unboundedRead(noBoundHeldLock), unreadable: recoveryUnreadable}
 }
 
 // settleClaim is the one reader of a held claim (otherHeadClaim: rr holds the target lock before its takeover and a
@@ -163,7 +167,9 @@ func (r *RemediationRequestReconciler) claimPredecessor(ctx context.Context, rr 
 //   - answers that disagree are no failed call: the claim stands with nothing written, read again at the path's pace
 //     (claimAnswered); a first look that finds the number missing is an answer too, noted as one (goneAnswered);
 //   - a failed read of the Git host: a final refusal or settings that cannot reach the repository set condition
-//     PullRequestUnreadable that names it (recoveryUnreadable), and the read is retried visibly within the claim and
+//     PullRequestUnreadable that names it (recoveryUnreadable); during the watch, a failure worth retrying also names
+//     the read failing now when the cause the standing condition named is gone, as observeFailed does (via.unreadable,
+//     watchUnreadable); and the read is retried visibly within the claim and
 //     the path's bound (retryGitRead), never past the claim's end. When that condition cannot be written, the read's
 //     attempt is still recorded (retryGitRead) and the write's failure is returned for the error backoff;
 //   - any other failure (no Kubernetes API error and no Git read) is logged with its text and returned for the error
@@ -202,7 +208,7 @@ func (r *RemediationRequestReconciler) claimReadFailed(ctx context.Context, rr *
 	// The path's bound: the HandoffRecovery entry during the watch, none of its own after it (claimDuringWatch,
 	// claimAfterWatch); the claim's own entry bounds every retry either way.
 	bound := via.bound
-	if want := recoveryUnreadable(rr, err); want != nil {
+	if want := via.unreadable(rr, err); want != nil {
 		if werr := r.setUnreadable(ctx, rr, want); werr != nil {
 			// The condition was not written: the failed read is still recorded, and the write is tried again after
 			// the error backoff.

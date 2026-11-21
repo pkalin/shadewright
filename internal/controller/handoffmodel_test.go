@@ -3075,8 +3075,9 @@ func hmSeeds(t *testing.T) []uint64 {
 // predecessor is made again under its name (hRemakePred, armed for that shape too); P12 and P13 fail when the look at
 // stopped holders sends that claim to the generic look, which releases the lock with no record (seeds 911 and 2464
 // too, in the run of 1 to 6,000). 2941 (#1057): the settings entry of the repository cannot be used while a claim is
-// held, and the predecessor, not the claim holder, is deleted: its finalizer handed that failure to the error backoff
-// (P14). The fix covers the cleanup of every request deleted with an unusable entry or no settings object.
+// held, and the replacement that holds the claim is deleted (hDeleteClaim): its finalizer handed that failure to the
+// error backoff with only CleanupFailing shown (P14; seed 396 too). The fix covers the cleanup of every request
+// deleted with an unusable entry or no settings object.
 var hmFixedSeeds = []uint64{45273, 398, 2941}
 
 func TestHandoffModel(t *testing.T) {

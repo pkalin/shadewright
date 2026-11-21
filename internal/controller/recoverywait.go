@@ -676,6 +676,21 @@ func (r *RemediationRequestReconciler) recordFoundMerge(ctx context.Context,
 	return nil
 }
 
+// watchUnreadable is condition PullRequestUnreadable for err, a failed read of a replacement that watches after the
+// abort (observeFailed, and settleClaim during the watch): a final refusal or settings that cannot reach the
+// repository name themselves (recoveryUnreadable); a failure worth retrying, or a read past the step's own deadline,
+// names the read failing now when the cause the standing condition named is gone (nowUnreadable). nil when the
+// condition stays as it is. It reads the status and err only.
+func watchUnreadable(rr *remediationv1alpha1.RemediationRequest, err error) *metav1.Condition {
+	want := recoveryUnreadable(rr, err)
+	if want == nil && (providers.IsRetryable(err) || errors.Is(err, ErrTimeout)) {
+		if c := watchedRecovery(rr); c != nil {
+			want = nowUnreadable(rr, c, err)
+		}
+	}
+	return want
+}
+
 // observeFailed is the answer to err, a failure of observeStep. It never ends the request; only the end of its waits
 // does (endPassedWait):
 //   - the end of the reconcile's own context is returned as it is, and a pause waits (waitWhilePaused);
@@ -683,7 +698,7 @@ func (r *RemediationRequestReconciler) recordFoundMerge(ctx context.Context,
 //     of a refusal that came with it;
 //   - a final refusal of the Git host, or settings that cannot reach the repository, sets condition
 //     PullRequestUnreadable that names it; a failure worth retrying, or a read past the step's own deadline, names the
-//     read failing now when the cause the condition named is gone (nowUnreadable); either way the failed read is
+//     read failing now when the cause the condition named is gone (watchUnreadable); either way the failed read is
 //     retried visibly within the HandoffRecovery entry (retryGitRead);
 //   - every other failure goes to the error backoff, so it is logged and counted.
 func (r *RemediationRequestReconciler) observeFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
@@ -703,12 +718,7 @@ func (r *RemediationRequestReconciler) observeFailed(ctx context.Context, rr *re
 		return reconcile.Result{}, err
 	}
 	read := recoveryRead(err)
-	want := recoveryUnreadable(rr, err)
-	if want == nil && (providers.IsRetryable(err) || errors.Is(err, ErrTimeout)) {
-		if c := watchedRecovery(rr); c != nil {
-			want = nowUnreadable(rr, c, err)
-		}
-	}
+	want := watchUnreadable(rr, err)
 	if want != nil && gitReadFailure(read) {
 		if werr := r.setUnreadable(ctx, rr, want); werr != nil {
 			return reconcile.Result{}, errors.Join(err, werr)

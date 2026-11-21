@@ -766,15 +766,6 @@ func (c *Controller) counted(occurrence string) (int64, bool) {
 func (c *Controller) consume(ctx context.Context, o collector.Observation) bool {
 	o.Began = o.Began.Truncate(time.Second)
 	o.Container = containerName(ctx, o.Container)
-	if o.PodContainers != nil {
-		names := make([]string, 0, len(o.PodContainers))
-		for _, n := range o.PodContainers {
-			if n = containerName(ctx, n); n != "" {
-				names = append(names, n)
-			}
-		}
-		o.PodContainers = names
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	due := c.consumeLocked(ctx, o)
@@ -991,8 +982,6 @@ func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
 	if o.Container != "" {
 		add.containers = []string{o.Container}
 	}
-	// A pod's eviction names every container of the pod: the fold matches a consequence of any of them.
-	add.containers = append(add.containers, o.PodContainers...)
 	if isCause(o) {
 		add.cause = true
 		if _, known := c.causes[name]; !known {

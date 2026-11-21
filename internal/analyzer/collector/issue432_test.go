@@ -18,16 +18,11 @@ package collector
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 )
 
 // The reproductions of #432 seen on rc.3 outside the lab (2026-11-20): one cause of one Deployment opened
@@ -39,12 +34,10 @@ import (
 //   - P1: one crash loop of one container (non-zero exits, BackOff within KillCauseWindow) lands on one Incident.
 //   - P2: two faults of one container more than KillCauseWindow apart land on two Incidents, each consequence
 //     on the fault within the window, and a consequence past the window on none.
-//   - P3: the evicted pods of one workload land on one Incident, the eviction's read from pod status; their
-//     containers' terminations and the kubelet's Evicted events open none of their own.
-//   - P4: an evicted pod's message is kept in the eviction's symptom.
-//   - P5: an Evicted event changes nothing the pod's status delivers: it is skipped once the pod reconciler
-//     delivered the pod's eviction, and is otherwise the ordinary Event symptom it was on main, with its own
-//     fingerprint and no cause (decided 2026-11-21).
+//   - P3: every cause fingerprint on a consequence is the fingerprint of an observation the collector delivers
+//     for that pod (decided 2026-11-21): a pod being deleted offers only its OOM kills (#966).
+//
+// Evictions are not covered (decided 2026-11-21, #1077): evictionmain_test.go shows they behave as before.
 
 // incidentKeys returns the Incident each observation lands on: the cause's fingerprint for a consequence the
 // collector linked, its own fingerprint otherwise.
@@ -167,179 +160,6 @@ func TestIssue432TwoFaultsOpenTwoIncidents(t *testing.T) {
 			t.Errorf("BackOff past KillCauseWindow of the last crash links to %q, want none", o.CauseFingerprint)
 		}
 	}
-}
-
-// evictedPod is a pod of the web ReplicaSet named name with uid, evicted by the kubelet for its ephemeral
-// storage: phase Failed, reason Evicted, its app container terminated with reason and exit code 137 at at.
-func evictedPod(name string, uid types.UID, reason, containerID string, at time.Time) *corev1.Pod {
-	p := specPod()
-	p.Name, p.UID = name, uid
-	p.Status.Phase, p.Status.Reason = corev1.PodFailed, "Evicted"
-	p.Status.Message = "Pod ephemeral local storage usage exceeds the total limit of containers 1Gi."
-	p.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name: containerApp,
-		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-			ContainerID: containerID, Reason: reason, ExitCode: exitOOM,
-			StartedAt: metav1.NewTime(at.Add(-time.Minute)), FinishedAt: metav1.NewTime(at),
-		}},
-	}}
-	return p
-}
-
-// evictedRef is what the kubelet's Evicted Warning regards: pod name with uid, with no field path, so it
-// names no container.
-func evictedRef(pod string, uid types.UID) corev1.ObjectReference {
-	return corev1.ObjectReference{APIVersion: apiCore, Kind: kindPod, Namespace: testNS, Name: pod, UID: uid}
-}
-
-// TestIssue432EvictionOpensThreeIncidents is case (b) of #432 (P3, P4): a container over its ephemeral-storage limit is
-// evicted, its Deployment re-creates the pod and the new pod is evicted again. Each evicted pod shows its
-// container terminated with exit code 137, with reason Error (killed) or ContainerStatusUnknown (the kubelet
-// could not find it when the pod ended), and the kubelet reports Evicted about the pod. All three are
-// observations of no class on main, with fingerprints that differ by reason, so each opened an Incident of
-// its own once its second pod repeated it. The pod's status.reason Evicted is now the cause of the pod: one
-// observation per evicted pod, with the kubelet's message, and the Evicted event about a pod whose status
-// shows it is skipped.
-func TestIssue432EvictionOpensThreeIncidents(t *testing.T) {
-	// rc.3 (b): Error 21:14:27Z, ContainerStatusUnknown 21:16:24Z, Evicted 21:17:26Z. t0 stands for 21:12:00Z.
-	d, rs, _ := workload()
-	const podA, podB, podC = "web-7d4b9c8f6-aaaaa", "web-7d4b9c8f6-bbbbb", "web-7d4b9c8f6-ccccc"
-	uidA, uidB, uidC := types.UID("aaaaaaaa-0000-4000-8000-000000000001"),
-		types.UID("bbbbbbbb-0000-4000-8000-000000000002"), types.UID("cccccccc-0000-4000-8000-000000000003")
-	h := newHarness(t, Config{}, d, rs)
-	var got []Observation
-	evict := func(name string, uid types.UID, reason, cid string, at time.Time) {
-		h.clock.set(at)
-		h.create(evictedPod(name, uid, reason, cid, at))
-		h.reconcilePod(name)
-		got = append(got, h.drain()...)
-		ev := warning("ev-evicted-"+name, 0)
-		ev.Reason, ev.Action = "Evicted", ""
-		ev.Note = "Pod ephemeral local storage usage exceeds the total limit of containers 1Gi."
-		ev.EventTime = metav1.NewMicroTime(at)
-		ev.Regarding = evictedRef(name, uid)
-		h.create(ev)
-		h.reconcileEvent(ev.Name)
-		got = append(got, h.drain()...)
-	}
-	// Pod A evicted (Error 137), re-created as B, evicted (Error 137, opens Error at 21:14:27), re-created as C,
-	// evicted while its container could not be found (ContainerStatusUnknown).
-	evict(podA, uidA, reasonError, "containerd://a", t0.Add(20*time.Second))
-	evict(podB, uidB, reasonError, "containerd://b", t0.Add(2*time.Minute+27*time.Second))
-	evict(podC, uidC, "ContainerStatusUnknown", "", t0.Add(4*time.Minute+24*time.Second))
-
-	if len(got) != 3 {
-		t.Fatalf("got %d observations, want one eviction per pod and no Evicted event: %+v", len(got), got)
-	}
-	for _, o := range got {
-		if o.Reason != ReasonEvicted || o.Class != ClassCause || o.Origin != fingerprint.SourcePodStatus || o.Count != 1 {
-			t.Errorf("observation %s, class %q, origin %q, count %d; want the eviction from pod status, a cause, "+
-				"counted once", o.Reason, o.Class, o.Origin, o.Count)
-		}
-		// P4: the message the kubelet wrote is the symptom.
-		if !strings.Contains(o.Symptom, "ephemeral local storage usage exceeds the total limit") {
-			t.Errorf("eviction symptom %q lost the pod's message", o.Symptom)
-		}
-	}
-	if keys := incidentKeys(got); len(keys) != 1 {
-		t.Errorf("one eviction cause lands on %d Incidents, want 1: %v", len(keys), keys)
-	}
-}
-
-// evictedEvent is the kubelet's Evicted warning ev-evicted about pod name with uid, at at.
-func evictedEvent(pod string, uid types.UID, at time.Time) *eventsv1.Event {
-	ev := warning("ev-evicted", 0)
-	ev.Reason, ev.Action = ReasonEvicted, ""
-	ev.Note = "The node was low on resource: ephemeral-storage."
-	ev.EventTime = metav1.NewMicroTime(at)
-	ev.Regarding = evictedRef(pod, uid)
-	return ev
-}
-
-// TestIssue432EvictedEventWaitsForThePodStatus is P3 and P5 in the order the kubelet writes them: the Evicted
-// event comes before the pod's status shows the eviction. The collector waits EvictionSettleGrace, by its own
-// clock, for the status. The eviction is then one observation, read from the pod's status, and the event is
-// skipped; when the status never shows it, or the pod is gone, the event is the ordinary Event symptom it was
-// on main (decided 2026-11-21).
-func TestIssue432EvictedEventWaitsForThePodStatus(t *testing.T) {
-	d, rs, _ := workload()
-	running := specPod()
-	running.Status.Phase = corev1.PodRunning
-	const note = "The node was low on resource: ephemeral-storage. "
-	// fromStatus: the observation was read from the pod's status, the pod's eviction as a cause. Otherwise it
-	// is the ordinary Event symptom of the event: its own fingerprint and occurrence, no class, so an Event
-	// never sets status.cause and never stands in for the pod's status (decided 2026-11-21).
-	want := func(t *testing.T, h *harness, o Observation, fromStatus bool) {
-		t.Helper()
-		_, _, pod := workload()
-		fp := h.c.evictionFingerprint(testNS, string(d.UID), pod.Name, running.UID, note)
-		occ := termination{id: evictionID, evicted: true}.occurrence(running.UID)
-		origin, class := fingerprint.SourcePodStatus, ClassCause
-		if !fromStatus {
-			origin, class, occ = fingerprint.SourceEvent, ClassNone, "event:ev-ev-evicted"
-		}
-		if o.Reason != ReasonEvicted || o.Origin != origin || o.Class != class || (o.Fingerprint == fp) != fromStatus ||
-			o.Occurrence != occ || o.Count != 1 {
-			t.Errorf("got %s from %s, class %q, fingerprint %s, occurrence %s, count %d; want %s, class %q, "+
-				"pod-status fingerprint %t, occurrence %s, counted once", o.Reason, o.Origin, o.Class, o.Fingerprint,
-				o.Occurrence, o.Count, origin, class, fromStatus, occ)
-		}
-	}
-	t.Run("status shows the eviction during the wait", func(t *testing.T) {
-		h := newHarness(t, Config{}, d, rs, running.DeepCopy())
-		h.clock.set(t0)
-		ev := evictedEvent(running.Name, running.UID, t0)
-		ev.Note = note
-		h.create(ev)
-		if res := h.reconcileEvent("ev-evicted"); res.RequeueAfter != EvictionSettleGrace {
-			t.Fatalf("first look: requeue after %v, want %v", res.RequeueAfter, EvictionSettleGrace)
-		}
-		h.none()
-		cur := readPod(t, h, running.Name)
-		cur.Status = evictedPod(running.Name, running.UID, reasonError, "containerd://a", t0).Status
-		cur.Status.Message = note
-		h.update(cur)
-		h.clock.set(t0.Add(10 * time.Second))
-		h.reconcilePod(running.Name)
-		want(t, h, h.one(), true)
-		h.reconcileEvent("ev-evicted")
-		h.none()
-	})
-	t.Run("status never shows it", func(t *testing.T) {
-		h := newHarness(t, Config{}, d, rs, running.DeepCopy())
-		h.clock.set(t0)
-		ev := evictedEvent(running.Name, running.UID, t0)
-		ev.Note = note
-		h.create(ev)
-		h.reconcileEvent("ev-evicted")
-		h.none()
-		h.clock.set(t0.Add(EvictionSettleGrace - time.Second))
-		if res := h.reconcileEvent("ev-evicted"); res.RequeueAfter != time.Second {
-			t.Errorf("before the end of the wait: requeue after %v, want 1s", res.RequeueAfter)
-		}
-		h.none()
-		h.clock.set(t0.Add(EvictionSettleGrace))
-		h.reconcileEvent("ev-evicted")
-		want(t, h, h.one(), false)
-	})
-	t.Run("pod gone", func(t *testing.T) {
-		// The event's first look reads the running pod and its owner; the pod is deleted (a StatefulSet deletes
-		// a failed pod at once) before the pod reconciler delivers anything.
-		h := newHarness(t, Config{}, d, rs, running.DeepCopy())
-		h.clock.set(t0)
-		ev := evictedEvent(running.Name, running.UID, t0)
-		ev.Note = note
-		h.create(ev)
-		h.reconcileEvent("ev-evicted")
-		h.none()
-		if err := h.cl.Delete(t.Context(), running.DeepCopy()); err != nil {
-			t.Fatal(err)
-		}
-		h.reconcilePod(running.Name)
-		h.clock.set(t0.Add(5 * time.Second))
-		h.reconcileEvent("ev-evicted")
-		want(t, h, h.one(), false)
-	})
 }
 
 // TestIssue432LinkWindow is the window of a termination cause (P1, P2): a non-zero exit links within

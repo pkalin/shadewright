@@ -201,18 +201,6 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			return leave("its probe settled", true)
 		}
 	}
-	if evictionEvent(&ev) {
-		// The pod reconciler reads the eviction from the pod's status as the pod's cause. The kubelet's Evicted
-		// event is skipped once that was delivered, and is otherwise the ordinary symptom it always was: its own
-		// fingerprint, no cause, FoldOnly as above (decided 2026-11-21, eviction.go).
-		switch verdict, wait := r.c.settleEviction(ctx, key, &ev, pod); verdict {
-		case evictionWait:
-			return ctrl.Result{RequeueAfter: wait}, nil
-		case evictionSkip:
-			logf.FromContext(ctx).V(1).Info("Skipped Evicted Event, its Pod's eviction was delivered from its status")
-			return leave("its pod's eviction was delivered", true)
-		}
-	}
 	// A consequence whose pod shows no cause, or a cause the Incident controller has not seen yet, is held before
 	// it is emitted (ADR-0039 points 7 and 19, hold.go).
 	hv, wait, err := r.c.holdConsequence(ctx, key, &ev, &obs, pod)

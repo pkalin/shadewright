@@ -20,8 +20,7 @@ limitations under the License.
 //
 // What it watches: events.k8s.io/v1 Events of type Warning, and Pods with an abnormal container
 // termination (OOMKilled or a non-zero exit code) or a container waiting with a reason of
-// WaitingCauseReasons (an image or configuration error, never its message), or a pod its node evicted (one
-// observation for the pod, with the kubelet's message). OOMKilled comes from container status, never from an
+// WaitingCauseReasons (an image or configuration error, never its message). OOMKilled comes from container status, never from an
 // event reason, so the pod watch is how it is seen. There is no core/v1 Event watch: those are the same
 // objects in an older version, and watching both would count each event twice. Both watches use the
 // manager's cache, which the analyzer restricts to the watched namespaces. A termination OOMKilled and a
@@ -32,10 +31,11 @@ limitations under the License.
 // Consequences and causes (cause.go, ADR-0039): each observation carries where it was read (Origin: pod status
 // or an event; only a pod-status origin is hashed into the fingerprint, so an Event cannot imitate one), its
 // container (a status entry's name, or the container an event's regarding field path names in the verified
-// pod) and a Class. Only a pod-status OOM kill or waiting cause is a cause; a kubelet BackOff or Unhealthy event
-// on a named container is a consequence, and its CauseFingerprint is the cause its pod's status shows for that
-// container: a current waiting cause, else an OOM kill that finished at most KillCauseWindow before the
-// event's own time. A consequence with no cause is held (hold.go, ADR-0039 point 19): it is emitted only when,
+// pod) and a Class. Every pod-status symptom (an OOM kill, a non-zero exit or a waiting cause) is a cause; a
+// kubelet BackOff or Unhealthy event on a named container is a consequence, and its CauseFingerprint is the
+// cause its pod's status shows for that container: a current waiting cause, else a termination the collector
+// delivers for the pod, an OOM kill that finished at most KillCauseWindow before the event's own time or a
+// non-zero exit within KillCauseWindow of it on either side. A consequence with no cause is held (hold.go, ADR-0039 point 19): it is emitted only when,
 // ConsequenceGrace after the collector first saw it, its pod has the same UID, the container was seen failing
 // at least twice (each reconcile of the event, and each update of its pod, is a sample), and it is still failing
 // or restarted at least twice during the hold; otherwise it is handled without an observation. A consequence

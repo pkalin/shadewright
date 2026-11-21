@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -45,9 +44,8 @@ const (
 	idsPerContainer = 2
 )
 
-// termination is one container termination worth an observation, one waiting reason of
-// WaitingCauseReasons (waiting set), which has no finish time, or the eviction of the pod (evicted set,
-// eviction.go), which names no container and carries the kubelet's message.
+// termination is one container termination worth an observation, or one waiting reason of
+// WaitingCauseReasons (waiting set), which has no finish time.
 type termination struct {
 	container string
 	id        string
@@ -55,11 +53,6 @@ type termination struct {
 	exitCode  int32
 	finished  time.Time
 	waiting   bool
-	evicted   bool
-	message   string
-	// observed is set when finished is the time the collector read the pod, not a time the kubelet wrote (an
-	// eviction with no finish time and no DisruptionTarget condition).
-	observed bool
 }
 
 // terminations returns the abnormal terminations in a pod's status: OOMKilled or a non-zero exit code, in
@@ -127,12 +120,8 @@ func waitings(pod *corev1.Pod) []termination {
 // 2026-11-16); the consumer tells it apart by this prefix.
 const WaitingOccurrencePrefix = "waiting:"
 
-// podSymptoms returns the terminations and the waiting causes of a pod's status, or only its eviction when the
-// status shows one (eviction.go).
+// podSymptoms returns the terminations and the waiting causes of a pod's status.
 func podSymptoms(pod *corev1.Pod) []termination {
-	if e, ok := eviction(pod); ok {
-		return []termination{e}
-	}
 	return append(terminations(pod), waitings(pod)...)
 }
 
@@ -153,23 +142,6 @@ func (t termination) slot() string {
 		return "waiting:" + t.container
 	}
 	return t.container
-}
-
-// class is the termination's part in the consequence rule: every symptom read from pod status is a cause (an
-// OOM kill, a non-zero exit, a waiting reason, an eviction; ADR-0039 point 3, amended 2026-11-20).
-func (t termination) class() Class {
-	return ClassCause
-}
-
-// note is the symptom text of the termination's observation.
-func (t termination) note() string {
-	switch {
-	case t.evicted:
-		return evictionNote(t.message)
-	case t.waiting:
-		return waitingNote(t.container, t.reason)
-	}
-	return terminationNote(t.container, t.exitCode)
 }
 
 func hasPodSymptom(o client.Object) bool {
@@ -342,26 +314,11 @@ func (tr *terminationTracker) commit(key types.NamespacedName, uid types.UID, t 
 	}
 	s.handled[t.slot()] = ids
 	// A wait's finish time is the collector's first sight of it, not a time the cluster reported: it must not move
-	// the eviction bound, which would mark later terminations of other pods MayRepeat. Nor must an eviction's
-	// time of reading.
-	if !t.waiting && !t.observed && t.finished.After(s.newest) {
+	// the eviction bound, which would mark later terminations of other pods MayRepeat.
+	if !t.waiting && t.finished.After(s.newest) {
 		s.newest = t.finished
 	}
 	tr.seen.put(key, s)
-}
-
-// unhandled returns how many of ts the tracker has not handled for the pod.
-func (tr *terminationTracker) unhandled(key types.NamespacedName, uid types.UID, ts []termination) int {
-	tr.mu.Lock()
-	defer tr.mu.Unlock()
-	s, ok := tr.seen.get(key)
-	n := 0
-	for _, t := range ts {
-		if !ok || s.uid != uid || !slices.Contains(s.handled[t.slot()], t.id) {
-			n++
-		}
-	}
-	return n
 }
 
 func (tr *terminationTracker) forget(key types.NamespacedName) {
@@ -396,28 +353,15 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, err
 	}
 	ts := podSymptoms(&pod)
-	now := r.c.now()
 	for i := range ts {
 		// A finish time in the future would otherwise keep later terminations of other pods marked
 		// MayRepeat once this pod's state is dropped.
 		ts[i].finished = r.c.notFuture(ts[i].finished)
-		if ts[i].evicted && ts[i].finished.IsZero() {
-			// No time from the kubelet (decided 2026-11-21): the time of this read, so the eviction is new to
-			// this process and not marked MayRepeat.
-			ts[i].finished, ts[i].observed = now, true
-		}
 	}
+	now := r.c.now()
 	pending := r.c.pods.pending(req.NamespacedName, pod.UID, ts, start, now)
 	if len(pending) == 0 {
 		return r.repeatLater(req.NamespacedName, pod.UID, now), nil
-	}
-	if pending[0].evicted {
-		// The eviction replaces the pod's container terminations (eviction.go): one not handled yet, even one
-		// whose delivery is being retried, is dropped here and never reported.
-		if n := r.c.pods.unhandled(req.NamespacedName, pod.UID, terminations(&pod)); n > 0 {
-			logf.FromContext(ctx).Info("Dropped container terminations of an evicted Pod, its eviction is the cause",
-				"terminations", n)
-		}
 	}
 	subject, owner, v, err := r.c.owners.podSubject(ctx, &pod)
 	if err != nil {
@@ -443,27 +387,10 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return r.repeatLater(req.NamespacedName, pod.UID, now), nil
 	}
 	for _, t := range pending {
-		if t.evicted {
-			obs := r.c.evictionObservation(subject, pod.Namespace, pod.Name, pod.UID, t.message, t.finished,
-				t.mayRepeat, podContainerNames(&pod))
-			// A termination of the pod's containers delivered before the eviction showed (the kubelet writes the
-			// container's end before the pod's final phase): the eviction counts on its Incident and opens none
-			// (decided 2026-11-21).
-			if cause := r.c.evictions.causeFor(pod.UID, shownTerminations(&pod)); cause != "" {
-				obs.Fingerprint = cause
-			}
-			sent, err := r.c.deliver(ctx, obs)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			if !sent {
-				return ctrl.Result{RequeueAfter: retryAfter}, nil
-			}
-			r.c.evictions.noteEviction(pod.UID, obs.Fingerprint)
-			r.c.pods.commit(req.NamespacedName, pod.UID, t.termination, now)
-			continue
+		note := terminationNote(t.container, t.exitCode)
+		if t.waiting {
+			note = waitingNote(t.container, t.reason)
 		}
-		note := t.note()
 		at := t.finished
 		if t.repeat {
 			at = now
@@ -473,7 +400,9 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		// A waiting reason is never in immediateTerminationReasons: a wait is often short while an image is
 		// pulled (ADR-0039 point 4).
 		obs.Immediate = immediateTermination(t.reason)
-		obs.Container, obs.Class = t.container, t.class()
+		// Every symptom read from pod status is a cause: an OOM kill, a non-zero exit or a waiting reason
+		// (ADR-0039 point 3, amended 2026-11-20).
+		obs.Container, obs.Class = t.container, ClassCause
 		var sent bool
 		if t.repeat {
 			// The same occurrence reported again: nothing new to count (MayRepeat, Count 0), so the Incident
@@ -493,9 +422,6 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 		if !sent {
 			return ctrl.Result{RequeueAfter: retryAfter}, nil
-		}
-		if !t.waiting && !t.repeat {
-			r.c.evictions.noteTermination(pod.UID, t.termination, obs.Fingerprint)
 		}
 		r.c.pods.commit(req.NamespacedName, pod.UID, t.termination, now)
 	}

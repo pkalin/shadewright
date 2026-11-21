@@ -36,17 +36,17 @@ type Class string
 const (
 	// ClassNone is an observation the rule does not touch: it goes through the gate as any other.
 	ClassNone Class = ""
-	// ClassCause is a pod-status observation that can link consequences: an OOMKilled termination, a non-zero
-	// exit, a waiting reason of [WaitingCauseReasons], or the pod's eviction, which names no container (ADR-0039
-	// point 3, amended 2026-11-20). Only an observation with [fingerprint.SourcePodStatus] has it.
+	// ClassCause is a pod-status observation that can link consequences: a container termination (an OOM kill
+	// or a non-zero exit) or a waiting reason of [WaitingCauseReasons] (ADR-0039 point 3, amended 2026-11-20).
+	// Only an observation with [fingerprint.SourcePodStatus] has it.
 	ClassCause Class = "cause"
 	// ClassConsequence is a kubelet BackOff or Unhealthy event about a named container of the verified pod.
 	ClassConsequence Class = "consequence"
 )
 
-// KillCauseWindow is how long after an OOM kill's finishedAt a consequence on its container still links to
-// it (ADR-0039 point 5), and how far on either side of a non-zero exit's finishedAt (point 3, amended
-// 2026-11-20). Both times are written by the kubelet of the pod's node.
+// KillCauseWindow bounds the link of a consequence to a termination of its container: at most this long after
+// an OOM kill's finishedAt (ADR-0039 point 5), and at most this long on either side of a non-zero exit's
+// finishedAt (point 3, amended 2026-11-20). Both times are written by the kubelet of the pod's node.
 const KillCauseWindow = 10 * time.Minute
 
 // WaitingCauseReasons are the waiting reasons of a container's status that are a cause (ADR-0039 point 3): an
@@ -148,15 +148,15 @@ func (c *Collector) podStatusInput(pod *corev1.Pod, owner, reason, note string) 
 
 // causeFingerprint returns the fingerprint of the cause pod's status shows for the named container (init or
 // not), or "" when it shows none (ADR-0039 point 3, amended 2026-11-20): a current waiting reason of
-// WaitingCauseReasons first, because it is what the container does now; otherwise a termination, current or
-// last, that is a cause (an OOM kill or a non-zero exit, as terminations reads them) and that is within
-// KillCauseWindow of at, the observation's own time, the newest first. An OOM kill links only when at follows
-// its finishedAt (point 5). A non-zero exit links on either side of at: the status keeps only the newest
-// termination, and a BackOff or probe failure that the kubelet reported before it was about the termination
-// before, of the same crash loop. Without that time (hasAt false), a termination links nothing. No clock of
-// the collector takes part. owner is the pod's verified owner UID, as for the pod's own observations. Of an
-// evicted pod, the cause is the eviction as the pod reconciler delivered it, whatever the time, or none while
-// it was not delivered: its terminations are never delivered, so a consequence never links to one.
+// WaitingCauseReasons first, because it is what the container does now; otherwise one of the container's
+// terminations that the pod reconciler delivers (terminations, read from the whole pod, so a pod being deleted
+// offers only its OOM kills, #966), current or last, within KillCauseWindow of at, the observation's own time,
+// the newest first. An OOM kill links only when at follows its finishedAt (point 5). A non-zero exit links on
+// either side of at: the status keeps only the newest termination, and a BackOff or probe failure that the
+// kubelet reported before it was about the termination before, of the same crash loop. Without that time
+// (hasAt false), a termination links nothing. No clock of the collector takes part. owner is the pod's
+// verified owner UID, as for the pod's own observations. The fingerprint is the one of that termination's own
+// observation, so a consequence never names a cause the collector does not deliver.
 func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, init bool, at time.Time,
 	hasAt bool) string {
 	statuses := pod.Status.ContainerStatuses
@@ -167,11 +167,6 @@ func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, i
 	if i < 0 {
 		return ""
 	}
-	if evicted(pod) {
-		// The eviction replaced the pod's terminations, which were never delivered: a consequence links to the
-		// eviction the pod reconciler delivered from this status, or to nothing (decided 2026-11-21).
-		return c.evictions.evictionCause(pod.UID)
-	}
 	st := statuses[i]
 	if w := st.State.Waiting; w != nil && slices.Contains(WaitingCauseReasons, w.Reason) {
 		return fingerprint.Fingerprint(c.podStatusInput(pod, owner, w.Reason, waitingNote(container, w.Reason)))
@@ -180,8 +175,8 @@ func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, i
 		return ""
 	}
 	var cause *termination
-	for _, t := range containerTerminations(st) {
-		if t.finished.IsZero() || !linksAt(t, at) {
+	for _, t := range terminations(pod) {
+		if t.container != container || t.finished.IsZero() || !linksAt(t, at) {
 			continue
 		}
 		if cause == nil || t.finished.After(cause.finished) {

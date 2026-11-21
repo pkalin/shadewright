@@ -60,12 +60,10 @@ var probeSettledSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
 }, []string{labelProbe})
 
 // probeDecisionsPending is the number of probe failures whose decision is put off, or whose decision to count
-// waits for its delivery, and of kubelet Evicted events waiting for their pod's status (eviction.go), summed
-// over the collectors of the process.
+// waits for its delivery, summed over the collectors of the process.
 var probeDecisionsPending = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "shadewright_analyzer_probe_decisions_pending",
-	Help: "Readiness or startup probe failures whose decision is put off or whose count is not delivered yet, " +
-		"and kubelet Evicted events waiting for their pod's status.",
+	Help: "Readiness or startup probe failures whose decision is put off or whose count is not delivered yet.",
 })
 
 func init() {

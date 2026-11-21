@@ -148,10 +148,6 @@ type Observation struct {
 	// Container is the container the observation is about: a status entry's name, or for an event the
 	// container its regarding field path names in the verified pod (cause.go). Empty when none is named.
 	Container string
-	// PodContainers are, for a pod's eviction (which names no container, since it is a cause of the whole pod),
-	// the names of the pod's containers, so the late-cause fold matches a consequence of any of them (ADR-0039
-	// point 3, amended; decided 2026-11-21). Nil for every other observation.
-	PodContainers []string
 	// Class is the observation's part in the consequence rule (ADR-0039): ClassCause only for a pod-status
 	// observation, ClassConsequence only for a kubelet event on a named container, else ClassNone. The collector
 	// holds a consequence with no cause, or whose cause has no Incident yet, before it emits it (hold.go).
@@ -281,12 +277,8 @@ type Collector struct {
 	// conditions remembers the handled symptom states of objects read by module symptom sources, keyed by
 	// kind and name.
 	conditions *stateTracker
-	// probes remembers the probe failures whose decision is put off while their pod starts (probe.go), and the
-	// kubelet Evicted events that wait for their pod's status to show the eviction (eviction.go).
+	// probes remembers the probe failures whose decision is put off while their pod starts (probe.go).
 	probes *probeDeferrals
-	// evictions remembers, per pod, whether its eviction was delivered and the container terminations an
-	// eviction may count on (eviction.go).
-	evictions *evictionDeliveries
 	// holds remembers the consequences held for at most ConsequenceGrace (hold.go).
 	holds *consequenceHolds
 	// holdOff, set by tests of the observation's fields only, emits a consequence without holding it.
@@ -334,8 +326,6 @@ func New(cfg Config) (*Collector, error) {
 		series: newSeriesTracker(cfg.MaxEvents),
 		listed: newListedEvents(cfg.MaxEvents),
 		pods:   newTerminationTracker(cfg.MaxPods),
-		// Keyed by pod UID: the delivery of a pod's eviction outlives the pod (eviction.go).
-		evictions: newEvictionDeliveries(cfg.MaxPods),
 		// A tracker of its own, keyed by kind and name, so a pod and a watched object of the same name, or two
 		// watched kinds, keep apart.
 		conditions: newStateTracker(cfg.MaxObjects),

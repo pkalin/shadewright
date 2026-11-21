@@ -225,8 +225,7 @@ type IncidentStatus struct {
 	OccurrencesDroppedThrough *metav1.Time `json:"occurrencesDroppedThrough,omitempty"`
 
 	// containers are the names of the containers whose observations this Incident counted, at most 8 (ADR-0039
-	// point 8), written in the status write that counts an observation naming one; a pod's eviction names every
-	// container of the evicted pod (point 3, amended 2026-11-20). A name that is not a DNS
+	// point 8), written in the status write that counts an observation naming one. A name that is not a DNS
 	// label, or one past the eighth, is left out and logged. The late-cause fold compares them between a
 	// consequence Incident and its cause's Incident.
 	// +listType=set
@@ -235,8 +234,8 @@ type IncidentStatus struct {
 	Containers []Name `json:"containers,omitempty"`
 
 	// cause is true when the Incident was opened or counted by a pod-status observation of class cause, which the
-	// kubelet wrote: an OOM kill, a non-zero exit, a waiting reason or the pod's eviction (ADR-0039 points 3 and
-	// 8, point 3 amended 2026-11-20). Only such an Incident takes the evidence of
+	// kubelet wrote: an OOM kill, a non-zero exit or a waiting reason (ADR-0039 points 3 and 8, point 3 amended
+	// 2026-11-20). Only such an Incident takes the evidence of
 	// a consequence or folds a consequence Incident. An Event never sets it. Once true it stays true, and the
 	// status cannot be removed while it is.
 	// +optional

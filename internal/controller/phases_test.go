@@ -1856,6 +1856,70 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(rr.Status.Verification.LastReset.Time.Time).To(BeTemporally("==", bad))
 	})
 
+	// #970: one process, no restart. A bad check's status write is lost (its reset kept in unwrittenResets), and
+	// the next, good check opens a new window. When that write is lost too, status still holds the window this
+	// process opened before the bad check, so the third check must not take it for an earlier process's: one
+	// reset for the one bad check, and no ExecutorRestarted. When the second write is stored, the window it
+	// stored is this process's and the third check keeps it open.
+	lostTwice := func(secondStored bool) {
+		w := newWorld(nil)
+		applied := verifying(w)
+		start := applied.Add(30 * time.Second)
+		bad, n := drive(w, start, start.Add(need/2), verification.PollInterval, 1, quiet(w, start))
+		opened := fetch(w).Status.Verification
+		Expect(opened.WindowStart.Time).To(BeTemporally("==", start))
+		lose := &statusRecorder{Client: k8sClient,
+			fail: func(*remediationv1alpha1.RemediationRequest) bool { return true }}
+
+		setTargetStatus(w, 2, 1, revisionNew, revisionNew)
+		putReport(w, n, bad, start, nil)
+		w.r.Client = lose
+		_, err := reconcileAt(w, bad)
+		Expect(err).To(HaveOccurred())
+		Expect(fetch(w).Status.Verification).To(Equal(opened), "the bad check's reset was not stored")
+
+		setTargetStatus(w, 2, 2, revisionNew, revisionNew)
+		good := bad.Add(verification.PollInterval)
+		putReport(w, n+1, good, start, nil)
+		if secondStored {
+			w.r.Client = k8sClient
+			mustReconcileAt(w, good)
+			v := fetch(w).Status.Verification
+			Expect(v.WindowStart.Time).To(BeTemporally("==", good), "the good check opened a new window")
+			Expect(v.Resets).To(Equal(opened.Resets + 1))
+		} else {
+			_, err = reconcileAt(w, good)
+			Expect(err).To(HaveOccurred())
+			Expect(fetch(w).Status.Verification).To(Equal(opened), "the good check's window was not stored")
+			w.r.Client = k8sClient
+		}
+
+		third := good.Add(verification.PollInterval)
+		putReport(w, n+2, third, start, nil)
+		mustReconcileAt(w, third)
+		rr := fetch(w)
+		Expect(rr.Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+		v := rr.Status.Verification
+		Expect(v.Resets).To(Equal(opened.Resets+1), "one reset for the one bad check, none for a restart")
+		Expect(v.LastReset).NotTo(BeNil())
+		Expect(v.LastReset.Reason).To(Equal(remediationv1alpha1.ResetNotAvailable), "no restart happened")
+		Expect(v.LastReset.Time.Time).To(BeTemporally("==", bad))
+		Expect(v.WindowStart).NotTo(BeNil())
+		if secondStored {
+			Expect(v.WindowStart.Time).To(BeTemporally("==", good), "the stored window is kept open")
+		} else {
+			Expect(v.WindowStart.Time).To(BeTemporally("==", third), "the third check opens the window again")
+		}
+	}
+
+	It("records no executor restart when two status writes in a row are lost", func() {
+		lostTwice(false)
+	})
+
+	It("keeps the window a good check stored after a lost write of a bad one", func() {
+		lostTwice(true)
+	})
+
 	It("drops a kept reset when another writer ended the request", func() {
 		w := newWorld(nil)
 		applied := verifying(w)

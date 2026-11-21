@@ -53,7 +53,7 @@ func Tallied() []string {
 
 // ShowsTally reports whether reason is one of Tallied.
 func ShowsTally(reason string) bool {
-	return reason == OOMKilled || IsWaiting(reason)
+	return oomOrWaiting(reason)
 }
 
 // CausesUnhealthy reports whether a cause of reason may count Unhealthy events of its container (ADR-0039 point 3,
@@ -61,5 +61,12 @@ func ShowsTally(reason string) bool {
 // BackOff events only: a liveness probe failure makes the kubelet kill the container, so its exit is a
 // consequence of the probe failure, not its cause.
 func CausesUnhealthy(reason string) bool {
+	return oomOrWaiting(reason)
+}
+
+// oomOrWaiting reports whether reason is OOMKilled or one of Waiting: the one body of ShowsTally and
+// CausesUnhealthy while both hold the same reasons. They stay two functions because they will differ: a non-zero
+// exit joins ShowsTally with #1080, never CausesUnhealthy.
+func oomOrWaiting(reason string) bool {
 	return reason == OOMKilled || IsWaiting(reason)
 }

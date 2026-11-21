@@ -248,7 +248,7 @@ func (r *eventReconciler) emit(ctx context.Context, key types.NamespacedName, ev
 			obs.CauseFingerprint = cause
 		}
 		// The hold made the verdict on its exits: the exit read now is not asked about again.
-		resolveExit(&obs, false)
+		resolveExit(&obs, obs.exitCause, false)
 		if shown != "" && shown != cause && n > s.total {
 			delta = max(delta-(n-s.total), 0)
 			n, split = s.total, true

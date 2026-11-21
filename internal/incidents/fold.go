@@ -97,8 +97,7 @@ func foldable(inc, cause *remediationv1alpha1.Incident, requests []remediationv1
 		!foldCandidate(inc) {
 		return false
 	}
-	// A non-zero exit folds BackOff Incidents only (decided 2026-11-21 on #432).
-	if inc.Spec.Reason != string(remediationv1alpha1.AbsorbedBackOff) && !causereason.CausesUnhealthy(cause.Spec.Reason) {
+	if !causeTakes(cause.Spec.Reason, inc.Spec.Reason) {
 		return false
 	}
 	if inc.Spec.Subject.UID == "" || inc.Spec.Subject.UID != cause.Spec.Subject.UID {
@@ -146,6 +145,14 @@ func escalatesInc(inc *remediationv1alpha1.Incident, requests []remediationv1alp
 	}
 	phase, _, ok := requestOutcome(newest, requests)
 	return ok && phase == remediationv1alpha1.IncidentEscalated
+}
+
+// causeTakes is the one place that decides whether a cause Incident of reason causeReason takes a consequence of
+// reason consequence, whether counted as evidence ([Controller.causeFor]) or folded ([foldable]): a BackOff always,
+// an Unhealthy only for an OOM kill or a wait. A non-zero exit takes BackOff only (decided 2026-11-21 on #432): a
+// liveness probe failure makes the kubelet kill the container, so the exit follows the probe failure.
+func causeTakes(causeReason, consequence string) bool {
+	return consequence == string(remediationv1alpha1.AbsorbedBackOff) || causereason.CausesUnhealthy(causeReason)
 }
 
 // foldCandidate reports whether inc may still be folded into some cause: a consequence ([consequenceIncident])

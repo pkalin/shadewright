@@ -28,9 +28,11 @@ import (
 // The decision of 2026-11-21 on #432 (Count and Decision, head 5caef316) narrows the crash loop link. Properties,
 // one line each:
 //   - N1: a confirmed non-zero exit is a cause of BackOff events of the same container only; an Unhealthy event
-//     never links to one (TestNonBackOffLinksAsMain checks every event that is not a BackOff against main).
-//   - N2: the candidates of a hold are kept for its life: a later sample adds one and never removes one, and the
-//     hold is found by each when a cause is released; the OOM kill wins unless the exit is confirmed.
+//     never links to one (TestNonBackOffLinksAsMain checks every event that is not a BackOff against main, with
+//     the same room in the hold table).
+//   - N2: the candidates of a hold are kept for its life: a later sample adds one and removes none, except the
+//     oldest exit once the hold has maxHeldExits (TestHeldExitsKeepTheNewest), and the hold is found by each when a
+//     cause is released; the OOM kill wins unless the exit is confirmed.
 //   - N3: the verdict on an exit is made once: a delivery retry asks nothing, counts nothing and logs nothing more.
 //   - N4: a failed CauseSeen call at a final step never drops a consequence main emits: it goes on with the OOM
 //     kill if there is one, otherwise as main has it, and cause_unanswered is counted once.

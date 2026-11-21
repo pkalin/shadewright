@@ -41,8 +41,9 @@ import (
 )
 
 // The decision of 2026-11-21 on #432 (Count and Decision, head 5caef316) narrows the crash loop link: a confirmed
-// non-zero exit is a cause of BackOff events of its container and of nothing else. Property, one line: for every
-// event that is not a BackOff, this branch links exactly as main.
+// non-zero exit is a cause of BackOff events of its container and of nothing else. Property, one line (worded on
+// 2026-11-21): every event that is not a BackOff links, folds and emits as main does with the same room in the
+// hold table.
 //
 // TestNonBackOffLinksAsMain checks it over generated sequences. Each seed drives one pod through a random series of
 // steps: its app container's status changes (running, a waiting cause, CrashLoopBackOff, an OOM kill, a non-zero
@@ -61,9 +62,12 @@ import (
 // status of a pod whose status.reason is empty, a cause since #432: that one class is mapped back. A seed that
 // differs is shown in full; LINKS_DUMP=<dir> writes every seed's lines to compare with a run on main.
 //
-// The table of one only runs with the ways of CauseSeen that never confirm an exit: a BackOff linked to a confirmed
-// exit is emitted at once instead of held, which frees room that an Unhealthy event of the same namespace may then
-// take. That is a difference of load, not of link, and the overflow rows keep it out of the comparison.
+// The room each sequence draws: holds on (room for every event), holds off (no table), or a table of one. The table
+// of one only runs with the ways of CauseSeen that never confirm an exit, so the room is the same as on main: a
+// BackOff linked to a confirmed exit is emitted at once instead of held, which frees the one place, and an
+// Unhealthy event that main emitted at once for want of room is then held, and dropped when its container recovers
+// within the grace. That is the hold's designed result with more room, not another link, and
+// TestTableOfOneConfirmedExitFreesRoom pins it.
 
 // linksGolden is the file of per-seed digests of the lines the sequences gave on main.
 const linksGolden = "testdata/links-before-432.golden"

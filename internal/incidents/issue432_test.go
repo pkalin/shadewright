@@ -68,3 +68,39 @@ func TestIssue432CrashLoopOpensOneIncident(t *testing.T) {
 		t.Errorf("the Error Incident holds %d BackOff as evidence, want 6", n)
 	}
 }
+
+// TestExitCauseDoesNotAbsorbUnhealthy holds that a non-zero exit's Incident never counts an Unhealthy event as
+// evidence, also when an observation reaches the controller with the exit's fingerprint as its cause: the
+// controller checks the cause's reason itself (causeTakes), as the fold does, and does not rely on the collector
+// linking BackOff events only. The Unhealthy event opens its own Incident, as on main; a BackOff still counts.
+func TestExitCauseDoesNotAbsorbUnhealthy(t *testing.T) {
+	c, clock := newAt(t)
+	crash := func(i int, at time.Time) {
+		clock.set(at)
+		o := symptomOf(1, "Error", terminationID(i), 1, fingerprint.SourcePodStatus, "web", collector.ClassCause, at)
+		o.Began = at
+		c.consume(t.Context(), o)
+	}
+	crash(1, t0.Add(20*time.Second))
+	crash(2, t0.Add(2*time.Minute+28*time.Second))
+	at := t0.Add(3 * time.Minute)
+	clock.set(at)
+	unhealthy := consequenceOf(2, 1, "web", reasonUnhealthy, 3, 4, at)
+	c.mu.Lock()
+	seen := c.causeSeen(unhealthy)
+	c.mu.Unlock()
+	if seen {
+		t.Errorf("the controller answers that an Unhealthy event's non-zero exit cause was seen, want not")
+	}
+	c.consume(t.Context(), unhealthy)
+	if n, _ := absorbedOn(c, fp(1)); n != 0 {
+		t.Errorf("the exit's Incident holds %d Unhealthy as evidence, want 0", n)
+	}
+	if got := opened(c); !slices.Equal(got, []string{fp(1), fp(2)}) {
+		t.Errorf("open Incidents %v, want the exit's %s and the Unhealthy's own %s", got, fp(1), fp(2))
+	}
+	c.consume(t.Context(), consequenceOf(3, 1, "web", reasonBackOff, 4, 5, at))
+	if n, _ := absorbedOn(c, fp(1)); n != 5 {
+		t.Errorf("the exit's Incident holds %d BackOff as evidence, want 5", n)
+	}
+}

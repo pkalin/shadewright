@@ -523,7 +523,7 @@ func TestDropLogNamesTheRemovedExit(t *testing.T) {
 // Outside resolveExit no statement assigns an empty string to a cause field (CauseFingerprint, exitCause, a hold's
 // cause), or a literal to a hold's or an exit's observation or to a dereferenced observation, and only the named
 // functions assign the cause fields at all: fromEvent builds them, emit copies a decided hold's linked cause,
-// holdConsequence keeps a hold's cause as main does, addExit adds an exit candidate (and never removes one), and
+// holdConsequence keeps a hold's cause as main does, addExit adds an exit candidate (and removes only the oldest past maxHeldExits), and
 // confirm is the one setter of a confirmation.
 func TestOnlySettleRemovesACause(t *testing.T) {
 	const settle = "resolveExit"

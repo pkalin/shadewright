@@ -117,39 +117,45 @@ func text(f func(r *Redactor, s string) bool) func(r *Redactor, s string) (func(
 }
 
 var heapEntryPoints = []heapEntryPoint{
-	{"StringChecked", largestObject, text(func(r *Redactor, s string) bool { _, ok := r.StringChecked(s); return ok })},
-	{"StringTwiceChecked", largestObject, text(func(r *Redactor, s string) bool {
+	{"Redactor.StringChecked", largestObject, text(func(r *Redactor, s string) bool { _, ok := r.StringChecked(s); return ok })},
+	{"Redactor.StringTwiceChecked", largestObject, text(func(r *Redactor, s string) bool {
 		_, ok := r.StringTwiceChecked(s, nil)
 		return ok
 	})},
-	{"StringKeepingChecked", largestObject, text(func(r *Redactor, s string) bool {
+	{"Redactor.StringKeepingChecked", largestObject, text(func(r *Redactor, s string) bool {
 		_, ok := r.StringKeepingChecked(s, "hunter")
 		return ok
 	})},
-	{"StringsChecked", largestObject, func(r *Redactor, s string) (func() bool, int) {
+	{"Redactor.StringsChecked", largestObject, func(r *Redactor, s string) (func() bool, int) {
 		items := strings.Split(s, "\n")
 		return func() bool { _, ok := r.StringsChecked(items); return ok }, len(s) + 1
 	}},
-	{"PiecesWithin", largestObject, func(r *Redactor, s string) (func() bool, int) {
+	{epPiecesWithin, largestObject, func(r *Redactor, s string) (func() bool, int) {
 		ps, size := fieldPieces(s)
 		return func() bool { _, ok := r.PiecesWithin(ps, -1); return ok }, size
 	}},
-	{"PiecesWithin/values", largestObject, func(r *Redactor, s string) (func() bool, int) {
+	{epPiecesWithin + "/values", largestObject, func(r *Redactor, s string) (func() bool, int) {
 		ps, size := valuePieces(s)
 		return func() bool { _, ok := r.PiecesWithin(ps, -1); return ok }, size
 	}},
-	{"PiecesFitting", largestObject, func(r *Redactor, s string) (func() bool, int) {
+	{epPiecesFitting, largestObject, func(r *Redactor, s string) (func() bool, int) {
 		ps, size := fieldPieces(s)
 		return func() bool { _, ok := r.PiecesFitting(ps, func([]string) bool { return true }); return ok }, size
 	}},
-	{"ReplaceFrom", largestLog, text(func(r *Redactor, s string) bool {
+	{"Redactor.ReplaceFrom", largestLog, text(func(r *Redactor, s string) bool {
 		_, ok := r.ReplaceFrom(s, len(s)/2, nil, func(kind, _ string) string { return kind }, func(t string) string { return t })
 		return ok
 	})},
 }
 
+// The names of the Pieces entry points in the heap tests.
+const (
+	epPiecesWithin  = "Redactor.PiecesWithin"
+	epPiecesFitting = "Redactor.PiecesFitting"
+)
+
 // heapBound is the bound of the decision for an entry of n bytes.
-func heapBound(n int) uint64 { return uint64(HeapFixed + HeapPerByte*int64(n)) }
+func heapBound(n int) uint64 { return uint64(HeapFixed + HeapPerByte*int64(n)) } // #nosec G115 -- n is a size, never negative
 
 // heapSample is the metric the probe samples: the bytes of heap objects, live or not yet swept.
 const heapSample = "/memory/classes/heap/objects:bytes"

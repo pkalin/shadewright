@@ -66,7 +66,7 @@ func (tb *oldTraceBuilder) trace() oldTrace {
 // character or for a run (escapes, "?", a marker), parts copied from anywhere (inside a unit, across segments),
 // and a trace cut from its end. It counts the same steps.
 func TestTraceMatchesBefore(t *testing.T) {
-	rng := rand.New(rand.NewPCG(873, 47))
+	rng := rand.New(rand.NewPCG(873, 47)) //nolint:gosec // a fixed seed keeps the inputs the same on every run
 	units := []string{"\\u0001", "\\n", "?", " ", "a", "€", "[REDACTED:credential]", "(12 bytes left out)"}
 	for round := range 3000 {
 		src := unitValue(rng, 1+rng.IntN(3*unitStep))

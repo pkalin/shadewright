@@ -557,7 +557,9 @@ func newLineKinds(n int) *lineKinds {
 
 func (l *lineKinds) set(x int, k byte) { l.bits[x/32] |= uint64(k) << (2 * (x % 32)) }
 
-func (l *lineKinds) at(x int) byte { return byte(l.bits[x/32]>>(2*(x%32))) & 3 }
+func (l *lineKinds) at(x int) byte {
+	return byte(l.bits[x/32]>>(2*(x%32))) & 3 // #nosec G115 -- the low two bits are kept
+}
 
 // index builds the summaries of the blocks, once every kind is set: one step a byte.
 func (l *lineKinds) index(wm *meter.Meter) {

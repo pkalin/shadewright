@@ -48,8 +48,8 @@ func TestHeapGateWithholdsTooManyParts(t *testing.T) {
 		name string
 		run  func(ps []Piece) ([]string, bool)
 	}{
-		{"PiecesWithin", func(ps []Piece) ([]string, bool) { return defaultRedactor.PiecesWithin(ps, -1) }},
-		{"PiecesFitting", func(ps []Piece) ([]string, bool) {
+		{epPiecesWithin, func(ps []Piece) ([]string, bool) { return defaultRedactor.PiecesWithin(ps, -1) }},
+		{epPiecesFitting, func(ps []Piece) ([]string, bool) {
 			return defaultRedactor.PiecesFitting(ps, func([]string) bool { return true })
 		}},
 	} {

@@ -54,7 +54,7 @@ func unitValue(rng *rand.Rand, n int) string {
 // units at a shorter marker. The values are drawn so that checkpoints fall inside escapes, characters and runs of
 // invalid bytes.
 func TestWrittenUnitsMatchBefore(t *testing.T) {
-	rng := rand.New(rand.NewPCG(873, 21))
+	rng := rand.New(rand.NewPCG(873, 21)) //nolint:gosec // a fixed seed keeps the inputs the same on every run
 	for round := range 3000 {
 		v := unitValue(rng, rng.IntN(5*unitStep))
 		if round%4 == 0 { // a plain value, or one byte from it
@@ -135,7 +135,7 @@ func oldSize(o oldWritten, sp span) int {
 // a byte, and counts the same steps, with or without a match. The answers are drawn from pieces in every form, so
 // that blocks of the kinds fall anywhere.
 func TestEndAtValueLinesMatchesBefore(t *testing.T) {
-	rng := rand.New(rand.NewPCG(873, 440))
+	rng := rand.New(rand.NewPCG(873, 440)) //nolint:gosec // a fixed seed keeps the inputs the same on every run
 	for round := range 2000 {
 		var ps []Piece
 		for range 1 + rng.IntN(6) {

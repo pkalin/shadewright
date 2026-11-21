@@ -6903,13 +6903,14 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			goneOtherOpen  = verdictCase{changeGone, "another pull request open on the branch"}
 			isElsewhere    = verdictCase{changeElsewhere, "its own moved by a person to another base (#892)"}
 			mergedThere    = verdictCase{changeMergedElsewhere, "its own moved by a person to another base and merged there"}
+			closedThere    = verdictCase{changeClosedElsewhere, "its own moved by a person to another base and closed there"}
 			goneFirstLook  = verdictCase{changeUnknown, "a first look that finds it missing"}
 			failedRead     = verdictCase{changeUnknown, "a server error"}
 			unconfirmed404 = verdictCase{changeUnknown, "an unconfirmed 404"}
 			contradicting  = verdictCase{changeUnknown, "contradicting reads"}
 			forbidden      = verdictCase{changeUnknown, "a 403"}
 			cases          = []verdictCase{isOpen, isMerged, isClosed, isGone, goneOtherOpen, isElsewhere, mergedThere,
-				goneFirstLook, failedRead, unconfirmed404, contradicting, forbidden}
+				closedThere, goneFirstLook, failedRead, unconfirmed404, contradicting, forbidden}
 		)
 		name := func(c verdictCase) string {
 			if c.how == "" {
@@ -6980,6 +6981,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				moveAway(n)
 				_, err := git.Merge(n)
 				Expect(err).NotTo(HaveOccurred())
+			case closedThere:
+				moveAway(n)
+				Expect(git.Close(n)).To(Succeed())
 			case isGone, goneOtherOpen, goneFirstLook:
 				// Closed, and the status records a number the host has not: a 404 the branch confirms. Gone needs
 				// it seen missing once before by this process, at least confirmWait earlier (goneLooks). The closed one loses
@@ -7032,6 +7036,9 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				moveAway(own)
 				_, err := git.Merge(own)
 				Expect(err).NotTo(HaveOccurred())
+			case closedThere:
+				moveAway(own)
+				Expect(git.Close(own)).To(Succeed())
 			}
 			fault(c, 0)
 			return own, other
@@ -7227,6 +7234,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isOpen:        o(awaiting, none, held, kept, requeue),
 					isMerged:      o(merged, none, released, kept, done),
 					isClosed:      o(stopped, none, released, kept, done),
+					closedThere:   o(stopped, none, released, kept, done),
 					isGone:        lookAgain(o(stopped, none, held, kept, done)),
 					goneOtherOpen: lookAgain(o(stopped, none, held, kept, done)),
 					// Stopped ChangeRequestOnOtherBase, nothing written to it there.
@@ -7252,6 +7260,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isOpen:         o(stopped, none, held, kept, requeue),
 					isMerged:       o(stopped, none, released, kept, done),
 					isClosed:       o(stopped, none, released, kept, done),
+					closedThere:    o(stopped, none, released, kept, done),
 					isGone:         o(stopped, none, released, kept, done),
 					goneOtherOpen:  o(stopped, none, held, kept, requeue),
 					isElsewhere:    o(stopped, none, held, kept, requeue),
@@ -7270,6 +7279,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isOpen:        o(deleted, "own", "-", "-", done),
 					isMerged:      o(deleted, none, "-", "-", done),
 					isClosed:      o(deleted, none, "-", "-", done),
+					closedThere:   o(deleted, none, "-", "-", done),
 					isGone:        o(deleted, none, "-", "-", done),
 					goneOtherOpen: o(deleted, none, "-", "-", done),
 					// Closed there by its number (CloseChangeRequestAnyBase), then the finalizer goes.
@@ -7291,6 +7301,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isOpen:        o(stale, "own", held, kept, done),
 					isMerged:      o(awaiting, "own", held, kept, failed),
 					isClosed:      o(stale, "own", held, kept, done),
+					closedThere:   o(stale, none, held, kept, done), // Nothing to close on the target branch.
 					isGone:        o(stopped, none, held, kept, done),
 					goneOtherOpen: o(stopped, none, held, kept, done),
 					// Nothing closed there: stopped ChangeRequestOnOtherBase.
@@ -7324,6 +7335,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isOpen:         wait(o(expired, "own", held, kept, requeue), stepDelay),
 					isMerged:       o(merged, none, released, kept, done),
 					isClosed:       o(expired, none, released, kept, done),
+					closedThere:    o(expired, none, released, kept, done),
 					isGone:         seenAgain(wait(o(expired, none, held, kept, requeue), heldRecheckInterval)),
 					goneOtherOpen:  seenAgain(wait(o(expired, none, held, kept, requeue), heldRecheckInterval)),
 					isElsewhere:    wait(o(expired, none, held, kept, requeue), heldRecheckInterval),
@@ -7348,6 +7360,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isOpen:        o(stopped, "own", held, kept, done),
 					isMerged:      o(awaiting, "own", held, kept, failed),
 					isClosed:      o(stopped, "own", held, kept, done),
+					closedThere:   o(stopped, none, held, kept, done), // Nothing to close on the target branch.
 					isGone:        o(stopped, none, held, kept, done),
 					goneOtherOpen: o(stopped, none, held, kept, done),
 					// Nothing closed there: stopped ChangeRequestOnOtherBase.
@@ -7370,6 +7383,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isOpen:        o(created, none, held, kept, done),
 					isMerged:      o(merged, none, released, kept, done),
 					isClosed:      lookAgain(o(stopped, none, held, kept, done)),
+					closedThere:   lookAgain(o(stopped, none, held, kept, done)),
 					isGone:        o(created, none, held, kept, done),
 					goneOtherOpen: lookAgain(o(stopped, none, held, kept, done)),
 					// Found by its marker on the other base (decision of 2026-11-19 on #892): recorded, nothing
@@ -7407,6 +7421,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isOpen:         wait(o(expired, "own", held, kept, requeue), stepDelay),
 					isMerged:       o(merged, none, released, kept, done),
 					isClosed:       o(expired, none, released, kept, done),
+					closedThere:    o(expired, none, released, kept, done),
 					isGone:         o(expired, none, released, kept, done),
 					goneOtherOpen:  wait(o(expired, none, held, kept, requeue), heldRecheckInterval),
 					isElsewhere:    wait(o(expired, none, held, kept, requeue), heldRecheckInterval),
@@ -7425,6 +7440,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isOpen:        o(stale, "own", held, kept, done),
 					isMerged:      o(merged, none, released, kept, done),
 					isClosed:      o(stale, none, held, kept, done),
+					closedThere:   o(stale, none, held, kept, done),
 					isGone:        o(stale, none, held, kept, done),
 					goneOtherOpen: o(stale, none, held, kept, done),
 					// Found by its marker on the other base: nothing closed there, stopped ChangeRequestOnOtherBase.
@@ -7445,6 +7461,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 					isOpen:        o(deleted, "own", "-", "-", done),
 					isMerged:      o(deleted, none, "-", "-", done),
 					isClosed:      o(deleted, none, "-", "-", done),
+					closedThere:   o(deleted, none, "-", "-", done),
 					isGone:        o(deleted, none, "-", "-", done),
 					goneOtherOpen: o(deleted, none, "-", "-", done),
 					// Found by its marker on the other base and closed there.
@@ -7476,7 +7493,7 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			for _, c := range cases {
 				states[c.state] = true
 			}
-			Expect(states).To(HaveLen(len(changeStates)))
+			Expect(states).To(HaveLen(len(verdictTable)))
 			for caller, c := range callers {
 				Expect(c.want).To(HaveLen(len(cases)), caller)
 			}
@@ -7501,6 +7518,152 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				Expect(c.act(own, other)).To(Equal(expect(isGone, recorded, want)))
 			}
 		}, entries)
+
+		// The failed review check of a stale plan and of a cancel, with reviewer hints on (failCheckStep, decisions of
+		// 2026-11-20 on #925): what each verdict of its read of the recorded pull request writes on the recorded head.
+		// "target" is a failed check whose summary promises the close, "other base" one whose summary says nothing is
+		// closed on that base and a person decides, "gone" one whose summary says the pull request cannot be found and
+		// nothing is closed, and "none" no check at all. Gone writes the check, since the pull request is not read open
+		// on the target branch: it is the request's own
+		// recorded commit, and without the check an earlier pass there stays while another pull request from the
+		// branch is open (decision of 2026-11-20 on #925 replacing point 2). Through a new installation of the App
+		// (#290) gone writes nothing for a stale plan or a cancel (failCheckNotOursReinstalled), while the stop's check
+		// is written there too (ADR-0046): goneReinstalled is that cell. "stop" is the stop's
+		// check (failStoppedCheck, stoppedCheckTitle), whose summary promises no close on any base: the watch writes it
+		// when it stops the request for its pull request read gone, as stale and cancel do (decision of 2026-11-20 on
+		// #925 extending the replacement of point 2 to the stop), and when it reads the pull request open on another base.
+		type checkCell struct{ written, summary string }
+		const target, otherBase, goneSummary, stop = "target", "other base", "gone", "stop"
+		checkCases := []verdictCase{isOpen, isClosed, closedThere, isElsewhere, isGone, mergedThere, failedRead}
+		checkCallers := map[string]struct {
+			act             func(own, other int64)
+			title           string
+			want            map[verdictCase]string
+			goneReinstalled string
+		}{
+			"cleanUpStale": {
+				act:   func(own, other int64) { cleanUp(own, other) },
+				title: staleCheckTitle,
+				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
+					isElsewhere: otherBase, isGone: goneSummary, mergedThere: none, failedRead: none},
+				goneReinstalled: none,
+			},
+			"cancel the request": {
+				act: func(own, other int64) {
+					cancelIt()
+					_, _ = reconcileResult()
+				},
+				title: cancelCheckTitle,
+				// Open on another base, the cancel's look ends it Cancelled with the lock kept and writes no check in
+				// that reconcile: the stopped holder's later looks write the stop's check (failStoppedCheck), whose
+				// summary promises no close. Gone never reaches the cancel's check: the look at the pull request
+				// before the cancel reads it gone and stops the request with ChangeRequestGone, which writes the
+				// stop's check, through a new installation too (decision of 2026-11-21 on #925, ADR-0046). "the
+				// check step of a cancel" proves the row for the cancel's own check.
+				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
+					isElsewhere: none, isGone: stop, mergedThere: none, failedRead: none},
+				goneReinstalled: stop,
+			},
+			pathWatch: {
+				// The watch of an open request: it stops the request for its pull request read gone
+				// (ChangeRequestGone) or open on another base (ChangeRequestOnOtherBase), each with the stop's check;
+				// closed, merged there or a failed read write nothing in that reconcile. The stop on gone writes its
+				// check through a new installation too (decision of 2026-11-21 on #925, ADR-0046).
+				act: func(own, other int64) { _, _ = reconcileResult() },
+				want: map[verdictCase]string{isOpen: none, isClosed: none, closedThere: none,
+					isElsewhere: stop, isGone: stop, mergedThere: none, failedRead: none},
+				goneReinstalled: stop,
+			},
+			"the check step of a cancel": {
+				// failCancelCheck on its own, as cancelOpen calls it before the close: a pull request that goes
+				// between the look and the check's read of it meets the gone row here.
+				act:   func(own, other int64) { _ = reconciler().failCancelCheck(ctx, fetch()) },
+				title: cancelCheckTitle,
+				want: map[verdictCase]string{isOpen: target, isClosed: target, closedThere: otherBase,
+					isElsewhere: otherBase, isGone: goneSummary, mergedThere: none, failedRead: none},
+				goneReinstalled: none,
+			},
+		}
+		// reinstall leaves the request stale (PlanFresh False with a stale reason, the mark under which the plan's
+		// repository is opened through a new installation, cleanupRepository) and moves the settings entry of the
+		// plan's repository to a new installation of the GitHub App.
+		reinstall := func() {
+			GinkgoHelper()
+			got := fetch()
+			meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionPlanFresh,
+				Status: metav1.ConditionFalse, Reason: freshness.ReasonPlanChanged, Message: "the plan is stale"})
+			Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(settings), settings)).To(Succeed())
+			settings.Spec.Repositories[0].GitHub.InstallationID++
+			Expect(k8sClient.Update(ctx, settings)).To(Succeed())
+			live := &remediationv1alpha1.RemediationSettings{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(settings), live)).To(Succeed())
+			_, reinstalled, ok := cleanupRepository(live, fetch(), true)
+			Expect(ok && reinstalled).To(BeTrue(), "the request needs its repository through a new installation")
+		}
+		checkEntries := make([]TableEntry, 0, len(checkCallers)*(len(checkCases)+1))
+		for _, caller := range slices.Sorted(maps.Keys(checkCallers)) {
+			for i, c := range checkCases {
+				checkEntries = append(checkEntries, Entry(caller+" on "+name(c), caller, i, false))
+			}
+			if checkCallers[caller].goneReinstalled != "" {
+				checkEntries = append(checkEntries, Entry(caller+" on "+name(isGone)+" through a new installation",
+					caller, slices.Index(checkCases, isGone), true))
+			}
+		}
+		DescribeTable("writes the failed review check of a stale plan, a cancel or a stop as the verdict's rule says", func(caller string, i int, reinstalled bool) {
+			c, vc := checkCallers[caller], checkCases[i]
+			recorder = record.NewFakeRecorder(50)
+			hints = true
+			own, other := recorded(vc)
+			want := checkCell{written: c.want[vc]}
+			if reinstalled {
+				reinstall()
+				want.written = c.goneReinstalled
+			}
+			head := fetch().Status.PullRequest.HeadSHA
+			before := len(git.CheckRuns(head))
+			c.act(own, other)
+			git.SetFail(nil)
+			runs := git.CheckRuns(head)[before:]
+			got := checkCell{written: none}
+			for _, run := range runs {
+				Expect(run.Status).To(Equal(providers.CheckRunFailure), "only a failed check is written")
+				Expect(run.Summary).NotTo(ContainSubstring("hotfix"), "no text of the Git host in a summary")
+				got.written = target
+				switch {
+				case run.Title == stoppedCheckTitle:
+					got.written = stop
+				case strings.HasSuffix(run.Summary, otherBaseCheckSummary):
+					got.written = otherBase
+				case strings.HasSuffix(run.Summary, goneCheckSummary):
+					got.written = goneSummary
+				}
+				if got.written != stop {
+					Expect(run.Title).To(Equal(c.title), "the check of the caller's own path")
+				}
+				got.summary = run.Summary
+			}
+			switch want.written {
+			case target:
+				Expect(got.summary).To(HaveSuffix(closeSummary))
+			case otherBase:
+				Expect(got.summary).NotTo(ContainSubstring("Shadewright closes the pull request"))
+			case goneSummary:
+				Expect(got.summary).NotTo(ContainSubstring("another base"), "a pull request read gone is on no base")
+				Expect(got.summary).NotTo(ContainSubstring("Shadewright closes the pull request"))
+			case stop:
+				reason := ReasonChangeRequestGone
+				if vc == isElsewhere {
+					reason = ReasonChangeRequestOnOtherBase
+				}
+				Expect(got.summary).To(Equal(stoppedCheckRun(reason).Summary))
+				Expect(got.summary).NotTo(ContainSubstring("closes"), "the stop's check promises no close")
+				got.written = stop
+			}
+			got.summary = ""
+			Expect(got).To(Equal(want), "check runs written: %+v", runs)
+		}, checkEntries)
 	})
 
 })

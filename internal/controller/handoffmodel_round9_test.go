@@ -104,7 +104,8 @@ func TestHandoffReadsPerReconcileAndPerGitWrite(t *testing.T) {
 	// Measured on 2026-11-19: before, 11 reads from the API server and 5 from the cache; after, 23 and 2. The fake host
 	// asks the gate twice per write (the gate and the adapter's checkpoint), and each check reads the request and the
 	// predecessor: 3 starts + 4 writes x 2 checks x 2 reads + 4 other reads. A change here is a change of the cost.
-	if live != 23 || cached != 2 || writes != 4 {
-		t.Fatalf("reads %d from the API server, %d from the cache, %d writes; want 23, 2, 4", live, cached, writes)
+	// 2026-11-20 (#925): one more, the live read of the request right before the merge gate writes the review check.
+	if live != 24 || cached != 2 || writes != 4 {
+		t.Fatalf("reads %d from the API server, %d from the cache, %d writes; want 24, 2, 4", live, cached, writes)
 	}
 }

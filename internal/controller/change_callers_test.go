@@ -24,6 +24,7 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,12 +33,22 @@ import (
 	api "github.com/pkalin/shadewright/api/v1alpha1"
 )
 
+const (
+	// fnChangeByNumber is the reader of the recorded number, named in the allowlists below.
+	fnChangeByNumber = "changeByNumber"
+	// colFailed is the column of verdictRow that says a read failed.
+	colFailed = "failed"
+)
+
+// unknownRowMayHold names the columns of the changeUnknown row that may hold a value other than their zero.
+var unknownRowMayHold = map[string]bool{"name": true, "lookYields": true, colFailed: true}
+
 // pullRequestReads are the GitProvider methods that read pull requests, or a branch (BranchHead), with the
 // functions of this package allowed to call them. Every other function asks changeOf (#688), so one rule per
 // verdict holds for all of them. gatedGit only passes the calls on (killswitch.go).
 var pullRequestReads = map[string]map[string]bool{
-	opGet:  {"changeByNumber": true, "gatedGit.GetChangeRequest": true},
-	opList: {"checkOpenListing": true, "changeByNumber": true, "changeOnBranch": true, "gatedGit.ListChangeRequests": true},
+	opGet:  {fnChangeByNumber: true, "gatedGit.GetChangeRequest": true},
+	opList: {"checkOpenListing": true, fnChangeByNumber: true, "changeOnBranch": true, "gatedGit.ListChangeRequests": true},
 	opFind: {"gatedGit.FindChangeRequest": true},
 	// BranchHead reads a head, never whether a pull request exists: the step reads it to cut the branch (a 404
 	// creates it, and CreateBranch refuses one that exists at another commit), the handoff to update it, and the
@@ -151,6 +162,10 @@ func other(git providers.GitProvider) {
 // request, including an Incident cancellation, has a separate release rule.
 const releaseFunc = "Release"
 
+// releaseWrapper is releaseLock, which calls lockverdict.Release and logs a failed review check left unwritten
+// (#925): a call of it counts as a release, so only releasers may call it.
+const releaseWrapper = "releaseLock"
+
 var (
 	lockWriters = map[string]bool{"acquire": true}
 	releasers   = map[string]bool{
@@ -254,7 +269,11 @@ func callWrites(owner string, n *ast.CallExpr) []string {
 	if !isSel || sel.Sel.Name != "Deref" {
 		found = append(found, pointerCopies(n.Args, "passes the pointer of status.holdsTarget")...)
 	}
-	if isSel && sel.Sel.Name == releaseFunc && isPackage(sel.X, "lockverdict") && !releasers[owner] {
+	if isSel && sel.Sel.Name == releaseFunc && isPackage(sel.X, "lockverdict") && !releasers[owner] &&
+		owner != releaseWrapper {
+		found = append(found, "releases the lock outside the lock rule")
+	}
+	if id, ok := n.Fun.(*ast.Ident); ok && id.Name == releaseWrapper && !releasers[owner] {
 		found = append(found, "releases the lock outside the lock rule")
 	}
 	if isSel && (sel.Sel.Name == "DeepCopyInto" || sel.Sel.Name == "Unmarshal") && len(n.Args) > 0 {
@@ -302,6 +321,9 @@ func copyInto(rr, o *R) { o.Status.DeepCopyInto(&rr.Status) }
 func decode(rr *R, b []byte) { _ = json.Unmarshal(b, &rr.Status) }
 func patch(rr *R) { _ = client.RawPatch(types.MergePatchType, []byte(` + "`" + `{"status":{"holdsTarget":false}}` + "`" + `)) }
 func early(rr *R) { _ = lockverdict.Release(&rr.Status, s) }
+func wrapped(rr *R) { _ = releaseLock(ctx, rr, s) }
+func releaseLock(ctx C, rr *R, v L) error { return lockverdict.Release(&rr.Status, v) }
+func cancelUndecided(rr *R) { _ = releaseLock(ctx, rr, s) }
 func release(rr *R, s L) { rr.Status.HoldsTarget = new(false) }
 func acquire(rr *R) { rr.Status.HoldsTarget = new(true) }
 func releaseRefused(rr *R) { _ = lockverdict.Release(&rr.Status, s) }
@@ -319,12 +341,12 @@ func restoreStatus(rr *R, before *S) { rr.Status = *before }
 		}
 	})
 	for _, owner := range []string{"star", "plain", "alias", "varAlias", "passed", "returned", "parenStar", "viaStatus",
-		"addr", "literal", "replace", "copyInto", "decode", "patch", "early", "release"} {
+		"addr", "literal", "replace", "copyInto", "decode", "patch", "early", "wrapped", "release"} {
 		if !caught[owner] {
 			t.Errorf("the guard misses the write in %s", owner)
 		}
 	}
-	for _, owner := range []string{"acquire", "releaseRefused", "restoreStatus", "reads"} {
+	for _, owner := range []string{"acquire", "releaseRefused", "restoreStatus", "reads", "releaseLock", "cancelUndecided"} {
 		if caught[owner] {
 			t.Errorf("the guard refuses %s", owner)
 		}
@@ -503,17 +525,173 @@ func funcName(fn *ast.FuncDecl) string {
 	return fn.Name.Name
 }
 
-// TestEveryRuleCoversEveryVerdict checks that each caller's rule table has an entry for every verdict, and that
-// unknown never ends, releases or removes anything: it keeps the lock, retries the adoption, the finalizer's close
-// and the recovery.
-func TestEveryRuleCoversEveryVerdict(t *testing.T) {
-	check := func(name string, n int, unknownOK bool) {
-		t.Helper()
-		if n != len(changeStates) {
-			t.Errorf("%s has %d of %d verdicts", name, n, len(changeStates))
+// verdictReaders are the functions that build a verdict from the reads of the Git host (change.go) and the two
+// that look up its row (verdict.go): the only code of this package outside verdictTable that may name a
+// changeState or read changeVerdict.state (TestVerdictsDecidedOnlyInTheTable). Every other function asks
+// v.rule() and acts on its column.
+var verdictReaders = map[string]bool{
+	"changeOf": true, "readChange": true, "readOnConfigured": true, "openOnOtherBase": true, "readByNumber": true,
+	"checkOpenListing": true, fnChangeByNumber: true, "settleGone": true, "changeOnBranch": true, "stateOf": true,
+	"noteRead": true, "unknownChange": true, "noVerdict": true, "mergedVerdict": true, "decideVerdict": true, "rule": true,
+}
+
+// verdictConsts reads the list of verdicts from the const block of changeState in change.go, in their order, and
+// checks that the block is the plain iota form, so the i-th name is changeState(i). No list of verdicts is typed
+// by hand anywhere else (#925).
+func verdictConsts(t *testing.T) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "change.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST || len(gd.Specs) == 0 {
+			continue
 		}
-		if !unknownOK {
-			t.Errorf("%s does not retry or keep on unknown", name)
+		first := gd.Specs[0].(*ast.ValueSpec)
+		if id, ok := first.Type.(*ast.Ident); !ok || id.Name != "changeState" {
+			continue
+		}
+		var names []string
+		for i, spec := range gd.Specs {
+			vs := spec.(*ast.ValueSpec)
+			if len(vs.Names) != 1 {
+				t.Fatalf("the const block of changeState must name one verdict per line")
+			}
+			plain := len(vs.Values) == 0 && vs.Type == nil
+			if i == 0 {
+				id, ok := vs.Values[0].(*ast.Ident)
+				plain = len(vs.Values) == 1 && ok && id.Name == "iota"
+			}
+			if !plain {
+				t.Fatalf("%s: the const block of changeState must be the plain iota form", vs.Names[0].Name)
+			}
+			names = append(names, vs.Names[0].Name)
+		}
+		return names
+	}
+	t.Fatal("no const block of changeState in change.go")
+	return nil
+}
+
+// tableLiteral returns the composite literal of verdictTable and the field names of verdictRow, from verdict.go.
+func tableLiteral(t *testing.T) (*ast.CompositeLit, []string) {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "verdict.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table *ast.CompositeLit
+	var fields []string
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			switch s := spec.(type) {
+			case *ast.ValueSpec:
+				if len(s.Names) == 1 && s.Names[0].Name == "verdictTable" && len(s.Values) == 1 {
+					table, _ = s.Values[0].(*ast.CompositeLit)
+				}
+			case *ast.TypeSpec:
+				if st, ok := s.Type.(*ast.StructType); ok && s.Name.Name == "verdictRow" {
+					for _, fl := range st.Fields.List {
+						for _, n := range fl.Names {
+							fields = append(fields, n.Name)
+						}
+					}
+				}
+			}
+		}
+	}
+	if table == nil || len(fields) == 0 {
+		t.Fatal("verdictTable or verdictRow not found in verdict.go")
+	}
+	return table, fields
+}
+
+// missingCells returns what table, a literal of verdictTable, leaves undecided: a verdict of consts without a row,
+// a row of something that is not a verdict, and a row that does not name every field of verdictRow.
+func missingCells(table *ast.CompositeLit, consts, fields []string) []string {
+	var missing []string
+	rows := map[string]bool{}
+	for _, e := range table.Elts {
+		kv, ok := e.(*ast.KeyValueExpr)
+		if !ok {
+			missing = append(missing, "an element without a key")
+			continue
+		}
+		key, _ := kv.Key.(*ast.Ident)
+		if key == nil || !slices.Contains(consts, key.Name) || rows[key.Name] {
+			missing = append(missing, fmt.Sprintf("a row keyed by %s, not one verdict once", exprName(kv.Key)))
+			continue
+		}
+		rows[key.Name] = true
+		row, ok := kv.Value.(*ast.CompositeLit)
+		if !ok {
+			missing = append(missing, key.Name+": a row that is not a literal")
+			continue
+		}
+		named := map[string]bool{}
+		for _, c := range row.Elts {
+			if ckv, ok := c.(*ast.KeyValueExpr); ok {
+				if id, ok := ckv.Key.(*ast.Ident); ok {
+					named[id.Name] = true
+				}
+			}
+		}
+		for _, f := range fields {
+			if !named[f] {
+				missing = append(missing, key.Name+"."+f)
+			}
+		}
+	}
+	for _, c := range consts {
+		if !rows[c] {
+			missing = append(missing, c+": no row")
+		}
+	}
+	return missing
+}
+
+// exprName names an expression for a message.
+func exprName(e ast.Expr) string {
+	if id, ok := e.(*ast.Ident); ok {
+		return id.Name
+	}
+	return fmt.Sprintf("%T", e)
+}
+
+// TestVerdictTableDecidesEveryVerdict fails when a verdict of the const block has no row in verdictTable, or a row
+// leaves a column of verdictRow unnamed: a verdict or a decision added later is decided for every caller on purpose
+// (#925). The zero value of every column but the name is what a failed read does, so a state with no row keeps the
+// lock and retries.
+func TestVerdictTableDecidesEveryVerdict(t *testing.T) {
+	consts := verdictConsts(t)
+	table, fields := tableLiteral(t)
+	for _, m := range missingCells(table, consts, fields) {
+		t.Errorf("verdictTable: %s", m)
+	}
+	if len(verdictTable) != len(consts) {
+		t.Errorf("verdictTable has %d rows for %d verdicts", len(verdictTable), len(consts))
+	}
+	for i, name := range consts {
+		if _, ok := verdictTable[changeState(i)]; !ok {
+			t.Errorf("verdictTable has no row for %s", name)
+		}
+	}
+	unknown := verdictTable[changeUnknown]
+	if !unknown.failed || decideVerdict(changeState(len(consts))) != unknown {
+		t.Error("a state with no row must be handled as a failed read")
+	}
+	// Every column of the failed read but these is its zero value: keep the lock, write nothing, retry.
+	rv := reflect.ValueOf(unknown)
+	for i := range rv.NumField() {
+		f := rv.Type().Field(i).Name
+		if !unknownRowMayHold[f] && !rv.Field(i).IsZero() {
+			t.Errorf("the failed read's %s is not the zero value", f)
 		}
 	}
 	for _, state := range []changeState{changeUnknown, changeOpen} {
@@ -521,30 +699,146 @@ func TestEveryRuleCoversEveryVerdict(t *testing.T) {
 			t.Errorf("settleByRead gives a verdict for %v", state)
 		}
 	}
-	check("adoptRule", len(adoptRule), adoptRule[changeUnknown] == adoptRetry)
-	check("finalizeRule", len(finalizeRule), finalizeRule[changeUnknown] == finalizeRetry)
-	check("recoverRule", len(recoverRule), recoverRule[changeUnknown] == recoverRetry)
-	// The zero value of each outcome is the safe one, so a verdict missing from a table keeps and retries.
-	if adoptRetry != 0 || finalizeRetry != 0 || recoverRetry != 0 {
-		t.Error("the zero outcome of a rule must keep and retry")
+}
+
+// TestVerdictTableGuardRefusesAGap checks the check above on tables it must refuse: a verdict without a row, a row
+// without a column, and a row of something else.
+func TestVerdictTableGuardRefusesAGap(t *testing.T) {
+	consts, fields := []string{"changeA", "changeB"}, []string{"x", "y"}
+	for _, c := range []struct {
+		name, src string
+		missing   int
+	}{
+		{"complete", `{changeA: {x: 1, y: 2}, changeB: {x: 1, y: 2}}`, 0},
+		{"a verdict without a row", `{changeA: {x: 1, y: 2}}`, 1},
+		{"a row without a column", `{changeA: {x: 1}, changeB: {x: 1, y: 2}}`, 1},
+		{"a row of something else", `{changeA: {x: 1, y: 2}, changeB: {x: 1, y: 2}, other: {x: 1, y: 2}}`, 1},
+		{"a verdict twice", `{changeA: {x: 1, y: 2}, changeA: {x: 1, y: 2}, changeB: {x: 1, y: 2}}`, 1},
+	} {
+		e, err := parser.ParseExpr("map[changeState]verdictRow" + c.src)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := missingCells(e.(*ast.CompositeLit), consts, fields); len(got) != c.missing {
+			t.Errorf("%s: %v, want %d gaps", c.name, got, c.missing)
+		}
 	}
 }
 
-// changeStateNames are the names of every changeState, as the switches of this package write them.
-var changeStateNames = []string{"changeUnknown", "changeOpen", "changeMerged", "changeClosed", "changeGone",
-	"changeElsewhere", "changeMergedElsewhere"}
+// verdictUses lists the ways decl names a verdict outside the table: an identifier of consts, or a read of a
+// field state (changeVerdict.state: a comparison, a tagless switch, a negated predicate or a copy of it), in a
+// function that is not one of verdictReaders. The const block itself and verdictTable are the two declarations
+// allowed to name every verdict.
+func verdictUses(fset *token.FileSet, decl ast.Decl, consts []string) []string {
+	owner := ""
+	switch d := decl.(type) {
+	case *ast.FuncDecl:
+		owner = d.Name.Name
+		if verdictReaders[owner] {
+			return nil
+		}
+	case *ast.GenDecl:
+		for _, spec := range d.Specs {
+			switch s := spec.(type) {
+			case *ast.ValueSpec:
+				if id, ok := s.Type.(*ast.Ident); ok && id.Name == "changeState" && d.Tok == token.CONST {
+					return nil
+				}
+				if len(s.Names) == 1 && s.Names[0].Name == "verdictTable" {
+					return nil
+				}
+			}
+		}
+	}
+	var found []string
+	ast.Inspect(decl, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.Ident:
+			if slices.Contains(consts, x.Name) {
+				found = append(found, fmt.Sprintf("%s: %q names %s", fset.Position(x.Pos()), owner, x.Name))
+			}
+		case *ast.SelectorExpr:
+			if x.Sel.Name == "state" {
+				found = append(found, fmt.Sprintf("%s: %q reads the state of a verdict", fset.Position(x.Pos()), owner))
+			}
+		}
+		return true
+	})
+	return found
+}
 
-// missingStates returns, for a switch whose cases name a changeState (over true), every changeState it does not name
-// in a case of its own. A default never stands in for one: a verdict added later (changeElsewhere, #892) must be
-// handled where each switch decides, not taken for whatever the default does.
-func missingStates(sw *ast.SwitchStmt) (missing []string, over bool) {
+// TestVerdictsDecidedOnlyInTheTable fails when code of this package outside verdictTable and verdictReaders names a
+// verdict or reads changeVerdict.state, whatever the form: a switch with or without a tag, an if, a negated
+// predicate such as "not gone and not merged elsewhere" (#925). A verdict added later is then decided in the table
+// alone, for every caller.
+func TestVerdictsDecidedOnlyInTheTable(t *testing.T) {
+	consts := verdictConsts(t)
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			for _, use := range verdictUses(fset, decl, consts) {
+				t.Errorf("%s; decide it in verdictTable", use)
+			}
+		}
+	}
+}
+
+// TestVerdictGuardRefusesEveryForm checks the guard above on the forms of #925 it must refuse (a comparison, a
+// tagless switch, a negated predicate, a tagged switch, a verdict built outside the readers) and on what it must
+// pass (a reader, the const block, the table, a caller that asks for its column).
+func TestVerdictGuardRefusesEveryForm(t *testing.T) {
+	consts := []string{"changeUnknown", "changeOpen", "changeGone"}
+	for _, c := range []struct {
+		name, src string
+		refused   bool
+	}{
+		{"comparison", `func a(v changeVerdict) bool { return v.state == changeOpen }`, true},
+		{"tagless switch", `func a(v changeVerdict) { switch { case v.state == changeGone: } }`, true},
+		{"negated predicate", `func recordsFound(s changeState) bool { return s != changeGone }`, true},
+		{"tagged switch", `func a(v changeVerdict) { switch v.state { case changeOpen: } }`, true},
+		{"built outside the readers", `func a() changeVerdict { return changeVerdict{state: changeUnknown} }`, true},
+		{"a reader", `func changeByNumber(v changeVerdict) bool { return v.state == changeOpen }`, false},
+		{"the const block", `const ( changeUnknown changeState = iota; changeOpen )`, false},
+		{"the table", `var verdictTable = map[changeState]verdictRow{changeOpen: {}}`, false},
+		{"a column", `func a(v changeVerdict) bool { return v.rule().failed }`, false},
+	} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "x.go", "package controller\n"+c.src+"\n", 0)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		var found []string
+		for _, decl := range f.Decls {
+			found = append(found, verdictUses(fset, decl, consts)...)
+		}
+		if got := len(found) > 0; got != c.refused {
+			t.Errorf("%s: refused = %v (%v), want %v", c.name, got, found, c.refused)
+		}
+	}
+}
+
+// missingStates returns, for a switch whose cases name a verdict of consts (over true), every verdict it does not
+// name in a case of its own. A default never stands in for one. Only the readers switch over a verdict
+// (TestVerdictsDecidedOnlyInTheTable); this keeps their switches whole.
+func missingStates(sw *ast.SwitchStmt, consts []string) (missing []string, over bool) {
 	if sw.Tag == nil {
 		return nil, false
 	}
 	named := map[string]bool{}
 	for _, stmt := range sw.Body.List {
 		for _, e := range stmt.(*ast.CaseClause).List {
-			if id, ok := e.(*ast.Ident); ok && slices.Contains(changeStateNames, id.Name) {
+			if id, ok := e.(*ast.Ident); ok && slices.Contains(consts, id.Name) {
 				named[id.Name] = true
 			}
 		}
@@ -552,7 +846,7 @@ func missingStates(sw *ast.SwitchStmt) (missing []string, over bool) {
 	if len(named) == 0 {
 		return nil, false
 	}
-	for _, name := range changeStateNames {
+	for _, name := range consts {
 		if !named[name] {
 			missing = append(missing, name)
 		}
@@ -560,20 +854,17 @@ func missingStates(sw *ast.SwitchStmt) (missing []string, over bool) {
 	return missing, true
 }
 
-// TestEverySwitchNamesEveryVerdict fails when a switch of this package over a changeState leaves a verdict out of
-// its cases, so the open-on-another-base verdict (changeElsewhere, #892) and any later one is handled by each
-// caller on purpose. The rule tables are checked by TestEveryRuleCoversEveryVerdict.
+// TestEverySwitchNamesEveryVerdict fails when a switch of the readers over a changeState leaves a verdict out of
+// its cases, so a reader handles a verdict added later on purpose.
 func TestEverySwitchNamesEveryVerdict(t *testing.T) {
-	if len(changeStateNames) != len(changeStates) {
-		t.Fatalf("changeStateNames has %d names for %d verdicts", len(changeStateNames), len(changeStates))
-	}
+	consts := verdictConsts(t)
 	switches := 0
 	forEachSource(t, func(fset *token.FileSet, owner string, n ast.Node) {
 		sw, ok := n.(*ast.SwitchStmt)
 		if !ok {
 			return
 		}
-		missing, over := missingStates(sw)
+		missing, over := missingStates(sw, consts)
 		if !over {
 			return
 		}
@@ -582,21 +873,22 @@ func TestEverySwitchNamesEveryVerdict(t *testing.T) {
 			t.Errorf("%s: a switch over a changeState in %q has no case for %v", fset.Position(sw.Pos()), owner, missing)
 		}
 	})
-	if switches < 10 {
+	if switches < 2 {
 		t.Fatalf("found %d switches over a changeState; the guard does not see them", switches)
 	}
 }
 
-// TestSwitchGuardRefusesADefault checks the guard above: a default does not stand in for changeElsewhere, and a
-// switch over something else is not looked at.
+// TestSwitchGuardRefusesADefault checks the guard above: a default does not stand in for a verdict, and a switch
+// over something else is not looked at.
 func TestSwitchGuardRefusesADefault(t *testing.T) {
+	consts := []string{"changeUnknown", "changeOpen", "changeMerged", "changeClosed", "changeGone"}
 	for _, c := range []struct {
 		name, body string
 		missing    int
 	}{
-		{"default", `switch v.state { case changeUnknown, changeGone: default: }`, 5},
-		{"all but two", `switch v.state { case changeUnknown, changeOpen, changeMerged, changeClosed, changeGone: }`, 2},
-		{"all", `switch v.state { case changeUnknown, changeOpen, changeMerged: case changeClosed, changeGone, changeElsewhere, changeMergedElsewhere: }`, 0},
+		{"default", `switch v.state { case changeUnknown, changeGone: default: }`, 3},
+		{"all but two", `switch v.state { case changeUnknown, changeOpen, changeMerged: }`, 2},
+		{"all", `switch v.state { case changeUnknown, changeOpen: case changeMerged, changeClosed, changeGone: }`, 0},
 		{"another switch", `switch x { case 1: default: }`, 0},
 	} {
 		f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package controller\nfunc f() {\n"+c.body+"\n}\n", 0)
@@ -606,7 +898,7 @@ func TestSwitchGuardRefusesADefault(t *testing.T) {
 		var got int
 		ast.Inspect(f, func(n ast.Node) bool {
 			if sw, ok := n.(*ast.SwitchStmt); ok {
-				missing, _ := missingStates(sw)
+				missing, _ := missingStates(sw, consts)
 				got = len(missing)
 			}
 			return true

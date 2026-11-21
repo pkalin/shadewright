@@ -759,3 +759,31 @@ func TestGitRebaseMerge(t *testing.T) {
 		t.Errorf("a second rebase of a merged change request = %v, want a conflict", err)
 	}
 }
+
+// TestHideBaseNameNeverHidesTheTarget checks the contract of ListChangeRequestsAnyBase and GetChangeRequest (#925):
+// the target branch's name passes the provider's rule for target branches, so no answer leaves it out, while the name
+// of another base can be.
+func TestHideBaseNameNeverHidesTheTarget(t *testing.T) {
+	ctx := context.Background()
+	g, head := newRepo(t)
+	_, cr := mustOpen(t, g, head)
+	g.HideBaseName(base)
+	listed, err := g.ListChangeRequestsAnyBase(ctx, branch, true)
+	if err != nil || len(listed) != 1 || listed[0].BaseBranch != base {
+		t.Fatalf("listing on the target = %+v, %v; want the base name %q", listed, err, base)
+	}
+	if got, err := g.GetChangeRequest(ctx, cr.Number); err != nil || got.BaseBranch != base {
+		t.Fatalf("read on the target = %+v, %v; want the base name %q", got, err, base)
+	}
+	if err := g.CreateBranch(ctx, "hotfix", head); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetBase(cr.Number, "hotfix"); err != nil {
+		t.Fatal(err)
+	}
+	g.HideBaseName("hotfix")
+	listed, err = g.ListChangeRequestsAnyBase(ctx, branch, true)
+	if err != nil || len(listed) != 1 || listed[0].BaseBranch != "" {
+		t.Fatalf("listing on another base = %+v, %v; want the base name left out", listed, err)
+	}
+}

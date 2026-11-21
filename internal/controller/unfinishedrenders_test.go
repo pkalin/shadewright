@@ -483,10 +483,38 @@ func TestOnlyOwnMarksChanged(t *testing.T) {
 	applied := delivered(base, metav1.ConditionTrue, ReasonMergeCommitApplied, "applied")
 	pendingAndPhase := pendingCause.DeepCopy()
 	pendingAndPhase.Status.Phase = remediationv1alpha1.PhaseInconclusive
+	withApproved := func(from *remediationv1alpha1.RemediationRequest, reason string) *remediationv1alpha1.RemediationRequest {
+		rr := from.DeepCopy()
+		rr.ResourceVersion = "7"
+		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
+			Type: remediationv1alpha1.ConditionApproved, Status: metav1.ConditionFalse, Reason: reason, Message: reason})
+		return rr
+	}
+	waitingReview := withApproved(base, ReasonWaitingForReview)
+	liveNote := withApproved(base, ReasonReviewCheckLiveReadFailed)
+	liveNoteAndPhase := liveNote.DeepCopy()
+	liveNoteAndPhase.Status.Phase = remediationv1alpha1.PhaseSuperseded
+	checkNote := base.DeepCopy()
+	checkNote.ResourceVersion = "8"
+	meta.SetStatusCondition(&checkNote.Status.Conditions, metav1.Condition{
+		Type: remediationv1alpha1.ConditionReviewCheckNotFailed, Status: metav1.ConditionTrue, Reason: ReasonGitFailed,
+		Message: "m"})
+	checkNoteAndPhase := checkNote.DeepCopy()
+	checkNoteAndPhase.Status.Phase = remediationv1alpha1.PhaseSuperseded
 	for name, tc := range map[string]struct {
 		old, new *remediationv1alpha1.RemediationRequest
 		want     bool
 	}{
+		// #925: a failed live read before a review check write is noted on Approved, and a stopped request's failed
+		// check that cannot be written or looked at in ReviewCheckNotFailed, by looks that keep their pace.
+		"Approved live read note set":      {waitingReview, liveNote, true},
+		"live read note on a new request":  {base, liveNote, true},
+		"live read note ended":             {liveNote, waitingReview, true},
+		"live read note and a phase":       {waitingReview, liveNoteAndPhase, false},
+		"Approved to another reason":       {liveNote, withApproved(base, ReasonReviewCheckRefused), false},
+		"ReviewCheckNotFailed set":         {base, checkNote, true},
+		"ReviewCheckNotFailed removed":     {checkNote, base, true},
+		"ReviewCheckNotFailed and a phase": {base, checkNoteAndPhase, false},
 		// #771: deliveryReadFailed names a lasting cause in Delivered Unknown and returns the failure for the error
 		// backoff, in both modes; its write must not wake the request before that delay.
 		"Delivered pending set":          {base, pendingCause, true},

@@ -73,7 +73,9 @@ jobs:
           restore-keys: fuzz-corpus-${{ matrix.target }}-${{ runner.os }}-
 
       - name: Fuzz
-        run: make fuzz-one TARGET="${{ matrix.target }}" FUZZTIME="${FUZZTIME}"
+        env:
+          TARGET: ${{ matrix.target }}
+        run: make fuzz-one TARGET="${TARGET}" FUZZTIME="${FUZZTIME}"
 
       # go test writes a failing input to testdata/fuzz/<FuzzName>/ in the package; collect only the new files.
       # Also when the job timed out (cancelled), so an input written before that is not lost.

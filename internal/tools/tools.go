@@ -58,7 +58,8 @@ const (
 )
 
 // Redactor removes secrets from text; *redact.Redactor implements it. [New] also needs the redactor to decide on
-// an answer written as pieces (PiecesWithin and PiecesFitting, as *redact.Redactor does) and refuses one that
+// an answer written as pieces (PiecesWithin and PiecesFitting, as *redact.Redactor does), and to flag a withheld
+// text (StringChecked, which the log tool reads through incidentcontext.RenderLog), and refuses one that
 // cannot.
 type Redactor interface {
 	String(s string) string
@@ -121,7 +122,7 @@ func New(cfg Config) (*Set, error) {
 	}
 	red, ok := cfg.Redactor.(pieceRedactor)
 	if !ok {
-		return nil, fmt.Errorf("tools need a redactor that decides on an answer as pieces (PiecesWithin and PiecesFitting), got %T", cfg.Redactor)
+		return nil, fmt.Errorf("tools need a redactor that decides on an answer as pieces (PiecesWithin and PiecesFitting) and flags a withheld text (StringChecked), got %T", cfg.Redactor)
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = DefaultTimeout

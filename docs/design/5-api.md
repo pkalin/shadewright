@@ -403,7 +403,7 @@ Policies and requests refer to repositories by name only.
 
 <span class="sw-status sw-built">built</span> The analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76)), which the analyzer starts only with `--triage-model`, reads the rest of `analysis` and enforces it; it reserves one unit of `analysis.maxAnalysesPerDay` per attempt before its first model call (3.2). <span class="sw-status sw-planned">planned</span> `maxTokensPerDay` is enforced within one analysis only; counting it across analyses needs the spend counter of [#208](https://github.com/pkalin/shadewright/issues/208). Without `--triage-model` the only analysis limit in force is `analysis.maxAnalysesPerDay` in the trigger.
 
-- `maxContextBytes`: the redacted context of one analysis, default 32768, 4096 to 262144.
+- `maxContextBytes`: the redacted context text of one analysis, default 49152 (48 KiB), 4096 to 49152. It bounds the text of the blocks before the prompt escapes it and wraps each block in its tags, not the context message sent, which escaping can make several times larger ([#1054](https://github.com/pkalin/shadewright/issues/1054)). The analysis passes it to the context builder as its total bound ([#981](https://github.com/pkalin/shadewright/issues/981)); the section bounds stay constants that add up to 48 KiB (3.3), so a larger value would add no context and the CRD refuses it (decision of 2026-11-21).
 - `maxToolSteps`: read tool calls of one escalation, default 4, 0 to 16.
 - `maxOutputTokens`: per model call, sent as `MaxOutputTokens`, default 2048, 256 to 16384.
 - `maxConcurrentAnalyses`: default 1, 1 to 8.
@@ -473,7 +473,8 @@ Conditions of other types are kept as they are. Like the others, these appear on
 | Model `inferenceAPI` | `ChatCompletions` or `Responses`; Foundry and OpenAICompatible; Foundry `Responses` needs `apiVersion: v1` |
 | `maxTokensPerDay` | No default; 0 to 1,000,000,000; 0 stops calls |
 | `maxAnalysesPerDay` | Default 100; 0 to 10000; 0 disables the model |
-| Planned analysis limits | `maxContextBytes` 32768 (4096 to 262144); `maxToolSteps` 4 (0 to 16); `maxOutputTokens` 2048 (256 to 16384); `maxConcurrentAnalyses` 1 (1 to 8) |
+| `maxContextBytes` | Default 49152; 4096 to 49152; enforced, on the context text before escaping and wrapping |
+| Planned analysis limits | `maxToolSteps` 4 (0 to 16); `maxOutputTokens` 2048 (256 to 16384); `maxConcurrentAnalyses` 1 (1 to 8) |
 | Model calls per analysis | At most 3 + `maxToolSteps` |
 | Module lists | `platforms` at most 8 names, `integrations` at most 32; a name is a DNS label starting with a letter, at most 63 characters |
 | `status.integrations` | At most 64 entries (32 enabled, at most 32 more detected) |

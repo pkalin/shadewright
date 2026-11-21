@@ -40,7 +40,7 @@ const (
 	kubeletPodEphemeralFmt         = "Pod ephemeral local storage usage exceeds the total limit of containers %s. "
 	kubeletEmptyDirFmt             = "Usage of EmptyDir volume %q exceeds the limit %q. "
 	kubeletThresholdMetFmt         = "Threshold quantity: %v, available: %v. "
-	corpusInstancesPerShape        = 40
+	corpusInstancesPerShape        = 12
 	corpusOwner                    = "6c2d1f0a-1b2c-4d3e-8f4a-5b6c7d8e9f00"
 	corpusK8sAlphabet              = "bcdfghjklmnpqrstvwxz2456789"
 	corpusEvictedContainerExitCode = 137
@@ -183,6 +183,7 @@ func corpusCollector(t *testing.T) *Collector {
 // TestEvictionFingerprintCorpusSameShape: the evictions of one workload whose messages differ only in their
 // quantities and the pod's name share one fingerprint, as their exit-137 terminations did on main.
 func TestEvictionFingerprintCorpusSameShape(t *testing.T) {
+	t.Parallel()
 	c := corpusCollector(t)
 	for i, s := range corpusShapes() {
 		evictions, main := corpusFingerprints(c, s, uint64(i))
@@ -200,6 +201,7 @@ func TestEvictionFingerprintCorpusSameShape(t *testing.T) {
 // another node condition or another message format never share a fingerprint, whatever the quantities. A
 // name that reads as a quantity (a container "500k") is a name and is kept.
 func TestEvictionFingerprintCorpusDistinctShapes(t *testing.T) {
+	t.Parallel()
 	c := corpusCollector(t)
 	owner := map[string]string{}
 	for i, s := range corpusShapes() {

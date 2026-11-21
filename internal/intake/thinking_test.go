@@ -109,6 +109,49 @@ func TestUnreadableThinkingBlockIsQuarantined(t *testing.T) {
 	}
 }
 
+// The blocks sent back unchecked are opaque by shape: a redacted thinking block holds only its type and data, a
+// string, and a thinking block's signature is a string. Any other member, a value of another kind, a nested
+// value, a key twice or a block type the check does not know refuses the request with KindUnreadableBlock.
+func TestOpaqueBlockOfAnotherShapeIsQuarantined(t *testing.T) {
+	cases := map[string]string{
+		"redacted, other member":   `{"type":"redacted_thinking","data":"x","thinking":"password=hunter2"}`,
+		"redacted, nested content": `{"type":"redacted_thinking","data":"x","content":[{"type":"thinking","thinking":"password=hunter2"}]}`,
+		"redacted, data an object": `{"type":"redacted_thinking","data":{"note":"password=hunter2"}}`,
+		"redacted, data a number":  `{"type":"redacted_thinking","data":7}`,
+		"redacted, no data":        `{"type":"redacted_thinking"}`,
+		"redacted, data twice":     `{"type":"redacted_thinking","data":"x","data":"password=hunter2"}`,
+		"signature an object":      `{"type":"thinking","thinking":"ok","signature":{"note":"password=hunter2"}}`,
+		"signature a list":         `{"type":"thinking","thinking":"ok","signature":["password=hunter2"]}`,
+		"signature null":           `{"type":"thinking","thinking":"ok","signature":null}`,
+		"unknown type":             `{"type":"server_tool_use","id":"b","input":{"q":"password=hunter2"}}`,
+	}
+	i := uint64(0)
+	for name, block := range cases {
+		i++
+		t.Run(name, func(t *testing.T) {
+			s, f := thinkingRun(t, 930+i, `[`+block+`,`+thinkingCall+`]`)
+			if s.Status != StatusQuarantined || f.anthropic.calls() != 1 || !slices.Contains(s.Kinds, KindUnreadableBlock) {
+				t.Fatalf("score %+v after %d judge calls; want quarantined with %s", s, f.anthropic.calls(),
+					KindUnreadableBlock)
+			}
+		})
+	}
+}
+
+// A thinking block without a signature is read as before and goes back byte for byte.
+func TestThinkingWithoutSignatureIsSentByteForByte(t *testing.T) {
+	const blocks = `[{"type":"thinking","thinking":"The pod used more than 128Mi."},` + thinkingCall + `]`
+	s, f := thinkingRun(t, 950, blocks)
+	if s.Status != StatusScored || f.anthropic.calls() != 2 {
+		t.Fatalf("score %+v after %d judge calls; want scored after two", s, f.anthropic.calls())
+	}
+	for _, m := range f.anthropic.reqs[1].Messages {
+		if m.Role == providers.RoleAssistant && !bytes.Equal(m.ProviderBlocks.Bytes(), []byte(blocks)) {
+			t.Fatalf("blocks sent back %s, want %s", m.ProviderBlocks.Bytes(), blocks)
+		}
+	}
+}
+
 // Known limit, not caught: each thinking text is checked alone, so a value split over two thinking blocks, each
 // clean and the two joined not, goes back in the second request. Thinking texts are not joined because the
 // provider does not join them either; the case is closed by #1093, where the record's values never leave. This

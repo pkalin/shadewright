@@ -18,7 +18,12 @@ Status: draft for the MVP.
 - The RBAC of sections 2.2 and 10.
 - The Prometheus metrics of the three components ([reference](reference/metrics.md)).
 - Optional OpenTelemetry traces per analysis, off by default ([reference](reference/traces.md)).
-- The scoring intake of ADR-0047 as a command that scores one record file (`cmd/intake`, [reference](reference/intake.md)). The job and its trigger are planned.
+
+**Built outside the operator**
+
+A command run outside every cluster and installation, so it is not in the operator's status lists or the README's.
+
+- The scoring intake (`cmd/intake`) of ADR-0047 as a command that scores one record file ([reference](reference/intake.md)). The job and its trigger are planned.
 
 **Built, but not used by the analyzer yet**
 

@@ -348,9 +348,10 @@ func checkRequest(r *redact.Redactor, req providers.CompletionRequest) (checkedR
 }
 
 // KindUnreadableBlock is the kind of a refusal by checkRequest of provider blocks it cannot read: not a list of
-// objects without repeated keys, a block other than text, tool call, thinking or redacted thinking, or a thinking
-// block without its text as a string or with a member other than its type, text and signature. It is not a rule
-// of the redactor.
+// objects without repeated keys, a block other than text, tool call, thinking or redacted thinking, a thinking
+// block without its text as a string, with a signature that is not a string or with a member other than its
+// type, text and signature, or a redacted thinking block other than its type and its data as a string. It is not
+// a rule of the redactor.
 const KindUnreadableBlock = "unreadable-provider-block"
 
 // KindThinkingBlock is added to the rule kinds when the text of a thinking block of the judge's reply would be
@@ -373,9 +374,11 @@ const (
 // text, so that a flag at the end of one block and a value at the start of the next are read as one. It returns
 // the text of each thinking block apart, each whole (decision of 2026-11-21); thinking texts are not joined
 // with each other or with the text blocks, so a value split over two of them is not seen (closed by #1093). A
-// thinking block's signature and a redacted thinking block are encrypted by the provider, cannot be read and are
-// sent back unchanged. It returns false when the blocks are not a list of JSON objects with no key twice, hold a
-// block of any other type, or a thinking block whose text is not a string or that has another member: what the
+// thinking block's signature and a redacted thinking block's data are encrypted by the provider, cannot be read
+// and are sent back unchanged, so their shape is checked instead: the signature, when present, is a string, and
+// a redacted thinking block holds exactly its type and its data, a string. It returns false when the blocks are
+// not a list of JSON objects with no key twice, hold a block of any other type, a thinking block whose text or
+// signature is not a string or that has another member, or a redacted thinking block of another shape: what the
 // check cannot read refuses the request.
 func providerBlockTexts(o providers.Opaque) (texts, thinking []string, ok bool) {
 	data := o.Bytes()
@@ -396,14 +399,25 @@ func providerBlockTexts(o providers.Opaque) (texts, thinking []string, ok bool) 
 		}
 		switch b["type"] {
 		case blockRedactedThinking:
+			// Opaque by shape: exactly its type and data, a string. Nothing else goes back unchecked.
+			if _, ok := b["data"].(string); !ok || len(b) != 2 {
+				return nil, nil, false
+			}
 			continue
 		case blockThinking:
 			t, ok := b["thinking"].(string)
 			if !ok {
 				return nil, nil, false
 			}
-			for k := range b {
-				if k != "type" && k != "thinking" && k != "signature" {
+			for k, v := range b {
+				switch k {
+				case "type", "thinking":
+				case "signature":
+					// The signature goes back unchecked, so it must be a string, never a nested value.
+					if _, ok := v.(string); !ok {
+						return nil, nil, false
+					}
+				default:
 					return nil, nil, false
 				}
 			}

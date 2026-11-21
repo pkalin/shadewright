@@ -234,7 +234,7 @@ func TestSecretHoldingANameIsRefusedEarlier(t *testing.T) {
 
 // The judge's instructions say what the fixed words stand for.
 func TestJudgePromptNamesTheWords(t *testing.T) {
-	for _, w := range []string{"<record>", "<incident>", "<request>", "<fingerprint>"} {
+	for _, w := range []string{"[record-id]", "[incident-name]", "[request-name]", "[fingerprint]"} {
 		if !strings.Contains(judgePrompt, w) {
 			t.Fatalf("the judge's prompt does not say what %s stands for", w)
 		}

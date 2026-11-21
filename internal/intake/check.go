@@ -329,10 +329,10 @@ func checkRequest(r *redact.Redactor, req providers.CompletionRequest) (checkedR
 // Fixed words that stand for the record's names in every text built from the record for a model. The judge's
 // prompt says what each stands for.
 const (
-	wordRecord      = "<record>"
-	wordIncident    = "<incident>"
-	wordRequest     = "<request>"
-	wordFingerprint = "<fingerprint>"
+	wordRecord      = "[record-id]"
+	wordIncident    = "[incident-name]"
+	wordRequest     = "[request-name]"
+	wordFingerprint = "[fingerprint]"
 )
 
 // nameWords maps each value of keep, as keptValues returned it for rec (so each passed its shape check), to the

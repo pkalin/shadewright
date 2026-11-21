@@ -44,8 +44,10 @@ const (
 	DefaultPolicyBytes = 2 << 10
 )
 
-// Range of each bound accepted by [Limits.Validate]. The upper end equals the largest maxContextBytes the
-// settings accept, so a later setting cannot ask for an unbounded context.
+// Range of each bound accepted by [Limits.Validate] and [Builder.BuildWithin]. The upper end is the builder's
+// own limit, above the largest maxContextBytes the settings accept (49152, [DefaultTotalBytes]), so a section
+// bound or a builder configured outside the settings (the evaluation's contextBytes) cannot ask for an
+// unbounded context. The analyzer holds maxContextBytes to [MinTotalBytes] to [DefaultTotalBytes].
 const (
 	MinSectionBytes = 1 << 10
 	MinTotalBytes   = 4 << 10

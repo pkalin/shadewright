@@ -188,8 +188,10 @@ func (b *Builder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 }
 
 // BuildWithin assembles the context of inc as [Builder.Build] does, with total in place of the configured
-// [Limits.Total]: the analysis passes maxContextBytes of RemediationSettings (#981). Zero keeps the configured
-// total. The section bounds stay as configured, so a total above their sum adds no context. A total outside
+// [Limits.Total]: the analysis passes maxContextBytes of RemediationSettings (#981), which LimitsOf never
+// leaves at zero. Zero keeps the configured total: [Builder.Build] passes it, and so do callers that set
+// the total in the builder's own [Limits] (the evaluation harness, whose analysis.Limits leave it unset).
+// The section bounds stay as configured, so a total above their sum adds no context. A total outside
 // [MinTotalBytes] to [MaxLimitBytes] is an error, before any read.
 func (b *Builder) BuildWithin(ctx context.Context, inc *remediationv1alpha1.Incident, total int) (*Context, error) {
 	if total == 0 || total == b.limits.Total {

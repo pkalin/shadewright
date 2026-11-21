@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/modules"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
@@ -1950,6 +1951,22 @@ var _ = Describe("RemediationSettings", func() {
 				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
 				a.Models.Triage.MaxTokensPerDay = ptr.To[int64](1000000000)
 			}))
+		})
+
+		// The analyzer holds maxContextBytes to the builder's default total (LimitsOf, #981), and the default
+		// section bounds add up to it: the CRD's default and maximum and the code's constant must not drift.
+		It("keeps the default and maximum of maxContextBytes at the context builder's default total", func() {
+			Expect(incidentcontext.DefaultTotalBytes).To(Equal(49152))
+			crd := &apiextensionsv1.CustomResourceDefinition{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "remediationsettings.remediation.shadewright.io"},
+				crd)).To(Succeed())
+			field := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"].Properties["analysis"].
+				Properties["maxContextBytes"]
+			Expect(field.Maximum).NotTo(BeNil())
+			Expect(*field.Maximum).To(BeEquivalentTo(incidentcontext.DefaultTotalBytes))
+			Expect(field.Default).NotTo(BeNil())
+			Expect(string(field.Default.Raw)).To(Equal(fmt.Sprint(incidentcontext.DefaultTotalBytes)))
+			Expect(*field.Minimum).To(BeEquivalentTo(incidentcontext.MinTotalBytes))
 		})
 
 		DescribeTable("refuses limits out of their bounds",

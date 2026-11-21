@@ -973,6 +973,30 @@ func TestClean(t *testing.T) {
 	}
 }
 
+// Clean takes the withheld marker, which the callers that keep the text form write in place of a withheld value,
+// as a marker in any place, and only its exact long form: the short form and look-alikes stay values (#873).
+func TestCleanTakesTheWithheldMarker(t *testing.T) {
+	for _, in := range []string{
+		Withheld,
+		"password: " + Withheld,
+		"token=" + Withheld + " and pw=" + Withheld,
+	} {
+		if !defaultRedactor.Clean(in) {
+			t.Errorf("Clean(%q) = false, want the withheld marker taken as a marker", in)
+		}
+	}
+	for _, in := range []string{
+		"password: [withheld]",
+		"password: [REDACTED:withheldx]",
+		"password: [REDACTED:Withheld]",
+		"password: " + Withheld + "x",
+	} {
+		if defaultRedactor.Clean(in) {
+			t.Errorf("Clean(%q) = true, want the value found", in)
+		}
+	}
+}
+
 // A Redactor's StringKeeping applies its own rules, extra patterns included, around the kept strings.
 func TestRedactorStringKeeping(t *testing.T) {
 	r, err := New(Pattern{Kind: "ticket", Expr: `TICKET-[0-9]{4}`})

@@ -344,8 +344,8 @@ var markerPattern = regexp.MustCompile(`\[REDACTED(?::[a-z][a-z0-9-]{0,31})?\]|\
 func MarkerShapes(s string) [][]int { return markerPattern.FindAllStringIndex(s, -1) }
 
 // markers returns the byte ranges of the markers of r's rules in s, in order and not overlapping: a long or
-// short form naming a kind of one of r's rules, "[REDACTED]", or a run of at most three "*" (the longest
-// [marker] writes). A longer run of "*" or a marker naming another kind is not one this redactor wrote, so
+// short form naming a kind of one of r's rules, "[REDACTED]", the withheld marker [Withheld], or a run of at
+// most three "*" (the longest [marker] writes). A longer run of "*" or a marker naming another kind is not one this redactor wrote, so
 // Clean does not take it as clean.
 func (r *Redactor) markers(wm *meter.Meter, s string) []span {
 	var out []span
@@ -363,7 +363,9 @@ func (r *Redactor) isMarker(wm *meter.Meter, text string) bool {
 	switch {
 	case text[0] == '*':
 		return len(text) <= len("***")
-	case text == "[REDACTED]":
+	case text == "[REDACTED]", text == Withheld:
+		// Withheld is the marker of a whole entry the budget withheld (budget.go), which a caller that keeps the
+		// text form writes in place of a value: no rule has its kind, so only this exact long form is taken.
 		return true
 	case strings.HasPrefix(text, "[REDACTED:"):
 		return r.hasKind(wm, text[len("[REDACTED:"):len(text)-1])

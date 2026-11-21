@@ -473,7 +473,8 @@ func TestDiffPairsBeforeABlankLine(t *testing.T) {
 					for _, target := range slices.Sorted(maps.Keys(diffBodies)) {
 						fails, _ := diffBodies[target](data)
 						// P6 is the known failure of this class (knownPairsBeforeABlankLine): the release's
-						// reading grows with the square of the text, and the budget withholds it.
+						// reading grows about eight times per doubling of the text, faster than its square, and the
+						// budget withholds it.
 						fails = slices.DeleteFunc(fails, func(f string) bool { return strings.HasPrefix(f, "P6:") })
 						if len(fails) > 0 {
 							t.Errorf("%s(%v): %s", target, data, strings.Join(fails, "\n"))

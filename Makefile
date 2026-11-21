@@ -120,6 +120,14 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	python3 -I hack/docs-reasons-check.py
 	hack/check-plugin-deps_test.sh
 
+# The shards of the run of internal/redact with the tag redactwork in make test (top-level test names, joined
+# with |): the tests that took longest in that run, one or a few to a binary.
+REDACT_SHARD_1 := TestRepeatedPatternsStayLinear
+REDACT_SHARD_2 := TestTokenShapesWorkIsLinear
+REDACT_SHARD_3 := TestCanonEntryPointsLeakNothingMainHid|TestCanonStairWorkIsLinear|TestEveryStepIsMetered|TestCanonCorpusWorkIsLinear|TestNestedBlocksStayLinear|TestMonotonicStaysLinear
+REDACT_SHARD_4 := TestReadingsKeepTheSignalOfAHiddenText|TestConnStringsThroughEveryEntryPointAgainstMain|TestSpansOnRuneBoundariesCanonCorpus|TestSpansOnRuneBoundariesMultiByteCorpus|TestReplacementsEndOnCharacterBoundaries|TestFieldsOfEveryToolHideWhatMainHid|TestWindowedChunksFindWhatTheExpressionFinds|TestStringsDecidesAsTheJoinedText
+REDACT_SHARD_5 := TestBudgetFactorCoversTheCorpus|TestBlockCorporaThroughEveryEntryPoint
+
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
 	@# -timeout applies to each package's test binary. internal/controller (the plain tests, then the envtest suite
@@ -135,7 +143,17 @@ test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
 	@# excerpt's package and the context builder's get it.
 	@# The differential tests of the release's reading against its code before #873 check a share of their inputs
 	@# under -race (internal/redact/released/race_test.go) and all of them here.
-	go test -timeout 20m -tags redactwork ./internal/redact ./internal/redact/released ./internal/providers/logs/kube ./internal/incidentcontext
+	@# internal/redact with the tag took about 555 s in one binary on a laptop, so on a hosted runner (2.4 times
+	@# slower on main) it would pass -timeout 20m: it runs in six binaries, one after the other. The first five
+	@# select the heaviest tests by name (REDACT_SHARD_*), the last runs every other test with -skip, so a test
+	@# renamed out of a shard runs in the last binary and none drops out.
+	go test -timeout 20m -tags redactwork -run '^($(REDACT_SHARD_1))$$' ./internal/redact
+	go test -timeout 20m -tags redactwork -run '^($(REDACT_SHARD_2))$$' ./internal/redact
+	go test -timeout 20m -tags redactwork -run '^($(REDACT_SHARD_3))$$' ./internal/redact
+	go test -timeout 20m -tags redactwork -run '^($(REDACT_SHARD_4))$$' ./internal/redact
+	go test -timeout 20m -tags redactwork -run '^($(REDACT_SHARD_5))$$' ./internal/redact
+	go test -timeout 20m -tags redactwork -skip '^($(REDACT_SHARD_1)|$(REDACT_SHARD_2)|$(REDACT_SHARD_3)|$(REDACT_SHARD_4)|$(REDACT_SHARD_5))$$' ./internal/redact
+	go test -timeout 20m -tags redactwork ./internal/redact/released ./internal/providers/logs/kube ./internal/incidentcontext
 	@# The time bound of the wide mapping refusal is checked only without -race (internal/gitops/patch/race_test.go).
 	go test -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
 

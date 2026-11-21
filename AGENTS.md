@@ -157,9 +157,10 @@ Every issue names the ADRs it is tied to:
   and holds no shared counter). Dynamic
   analysis is the race detector and the Go fuzz targets: a `Fuzz` function in a parser or matcher of untrusted
   input goes into `FUZZ_TARGETS` in the Makefile (`make fuzz` fails when one is missing or an entry names no
-  such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a few minutes weekly; a target in a package
-  with a file built only with `redactwork` (the differential targets of `internal/redact` and of the context
-  builder) runs with that tag. The budget stops the work of an entry where it would pass its bound and withholds
+  such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a few minutes weekly (today its job is
+  cancelled at 30 minutes after the first eight targets, before the differential ones, until #999 is fixed); a
+  target in a package with a file built only with `redactwork` (the differential targets of `internal/redact` and
+  of the context builder) runs with that tag. The budget stops the work of an entry where it would pass its bound and withholds
   the entry, so a fuzz target finds a reading whose work grows faster than the text by its withhold: every target
   that reaches redaction fails an input under 64 KiB that redaction withholds for work (P6,
   `redacttest.SmallInput`, any build), and the fuzzer keeps that input. A failing input it finds is committed to
@@ -183,7 +184,7 @@ make verify-generated     # regenerate all of the above from scratch; fails on a
 make lint-fix             # golangci-lint, config in .golangci.yml
 make vulncheck            # govulncheck ./...; standard library findings depend on the local Go patch release
 make test                 # unit + envtest (real kube-apiserver and etcd, no cluster needed); race detector, needs a C compiler
-make fuzz                 # each Go fuzz target for FUZZTIME (default 30s), or only FUZZ=<dir>:<FuzzName>; CI runs it weekly (fuzz.yml)
+make fuzz                 # each Go fuzz target for FUZZTIME (default 30s), or only FUZZ=<dir>:<FuzzName>; CI runs it weekly (fuzz.yml; cancelled at 30 min before the differential targets until #999)
 KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.37.0 --bin-dir "$PWD/bin" -p path)" \
   go test ./internal/controller/... -ginkgo.focus "RemediationRequest"   # one spec; run `make test` once first, the bin dir must be absolute
 make test-e2e             # installs the pinned kind (KIND_VERSION) into bin/ and creates an isolated cluster; CI runs it, not needed locally

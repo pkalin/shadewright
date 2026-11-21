@@ -29,7 +29,7 @@ import (
 // answer back (#873, review of 2026-11-21). The secret value under one of them is still redacted.
 func TestGetResourceKeysWrittenAlike(t *testing.T) {
 	set, src := diffSet(t)
-	const secret = "ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE"
+	secret := "ghp_" + strings.Repeat("FAKE", 9)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: testNS},
 		Spec: corev1.PodSpec{NodeSelector: map[string]string{

@@ -1845,7 +1845,7 @@ func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr
 	if cancelRequested(rr) {
 		return errOpenElsewhere
 	}
-	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestOnOtherBase); ctx.Err() != nil ||
+	if err := r.failStoppedCheck(ctx, rr, nil, ReasonChangeRequestOnOtherBase); ctx.Err() != nil ||
 		isClusterError(err) {
 		return err
 	}
@@ -1863,7 +1863,7 @@ func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr
 // a failure of the Kubernetes API are returned, for the error backoff, before anything is written.
 func (r *RemediationRequestReconciler) stopGone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	v changeVerdict) error {
-	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestGone); ctx.Err() != nil ||
+	if err := r.failStoppedCheck(ctx, rr, nil, ReasonChangeRequestGone); ctx.Err() != nil ||
 		isClusterError(err) {
 		return err
 	}

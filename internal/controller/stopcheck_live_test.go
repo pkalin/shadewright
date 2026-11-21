@@ -260,7 +260,7 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 				looks = 2
 			}
 			for range looks {
-				err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention))
+				err := r.failStoppedCheck(ctx, p, nil, string(api.PhaseNeedsIntervention))
 				if err != nil && (!c.note || c.unread) {
 					t.Fatalf("failStoppedCheck: %v", err)
 				}
@@ -602,7 +602,7 @@ func TestStoppedCheckWrittenAsItsTimeRunsOutIsRecorded(t *testing.T) {
 		}
 		return nil
 	})
-	if err := r.failStoppedCheck(ctx, p, string(api.PhaseNeedsIntervention)); err != nil {
+	if err := r.failStoppedCheck(ctx, p, nil, string(api.PhaseNeedsIntervention)); err != nil {
 		t.Fatalf("failStoppedCheck: %v", err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale {

@@ -1422,7 +1422,9 @@ func unsettledRuleApplies(v changeVerdict, err error, said bool) bool {
 // write), for the error backoff: the check run is then
 // written already, but on a head without Stale recorded before the look Stale stays unrecorded, so the retry looks
 // again and writes the same failed run once more without reading it first; on a head with Stale stored already the
-// retry reads the check first (failStoppedCheck, ADR-0046 limit (g)).
+// retry reads the check first (failStoppedCheck, ADR-0046 limit (g)). The read of the request at the first try is
+// also the one the gate of the check write decides on (writeStoppedCheck): a request being deleted, recording a merge,
+// not holding the lock or not owning the check gets no write (#1008).
 func (r *RemediationRequestReconciler) afterLook(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	var want *remediationv1alpha1.RemediationRequestStatus
 	var written *remediationv1alpha1.RemediationRequest
@@ -1592,7 +1594,8 @@ func logCheckNoteEnd(ctx context.Context, rr *remediationv1alpha1.RemediationReq
 // lockverdict.Release). The stop's summary promises no close (stoppedCheckRun), so it is the same on any base. Only a
 // failure of the Kubernetes API is returned, for the error backoff, and so is the caller's cancellation, so that no
 // status write follows with a cancelled context; any other failure is said in status and does not hold the look,
-// whose pace stays heldRecheckInterval.
+// whose pace stays heldRecheckInterval. rr is the request as afterLook just read it from the API server, and it is
+// the read the write's gate decides on (writeStoppedCheck): no second read of the request is made.
 func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) error {
 	pr := rr.Status.PullRequest
@@ -1601,7 +1604,7 @@ func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,
 		endCheckNoteLogged(ctx, rr, "the pull request is merged or the target lock is released")
 		return nil
 	}
-	switch err := r.failStoppedCheck(ctx, rr, string(rr.Status.Phase)); {
+	switch err := r.failStoppedCheck(ctx, rr, rr, string(rr.Status.Phase)); {
 	case isClusterError(err):
 		return err
 	case ctx.Err() != nil:

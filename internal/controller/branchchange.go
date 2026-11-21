@@ -100,25 +100,26 @@ func (r *RemediationRequestReconciler) watchBranchChanged(ctx context.Context,
 	// By its number, on the recorded target branch (changeOf reads status.source); a failed read sets condition
 	// PullRequestUnreadable (noteRead, recordedBranch).
 	v := r.changeOf(ctx, git, rr, changeQuery{recordedBranch: true})
+	row := v.rule()
 	switch {
-	case v.state == changeUnknown:
+	case row.failed:
 		return fmt.Errorf("%w: %w", errBranchChangedUnread, v.err)
-	case v.state == changeMerged && v.pr.Number == pr.Number && v.pr.HeadSHA == pr.HeadSHA:
+	case row.mergedInto && v.pr.Number == pr.Number && v.pr.HeadSHA == pr.HeadSHA:
 		return r.recordMergeSeen(ctx, rr, v.pr)
-	case cancelRequested(rr) && v.state == changeElsewhere && v.pr.BaseBranch == string(repo.TargetBranch):
+	case cancelRequested(rr) && row.retargetCancel == retargetCancelMoved && v.pr.BaseBranch == string(repo.TargetBranch):
 		// Moved to the target branch the settings name now: open there, it keeps the cancel watch, as the cancel's
 		// look decides (cancelLook).
 		return errTargetBranchChanged
-	case cancelRequested(rr) && v.state == changeElsewhere:
+	case cancelRequested(rr) && row.retargetCancel == retargetCancelMoved:
 		// The request's own pull request, read by its number, is open on a third base, where a person moved it
 		// (fourth decision of 2026-11-19 on #892): the cancel ends Cancelled saying so (prOpenElsewhere), and nothing
 		// says it is closed or closes it.
 		return fmt.Errorf("%w: %w", errOpenElsewhere, errTargetBranchChanged)
-	case cancelRequested(rr) && v.state == changeMergedElsewhere:
+	case cancelRequested(rr) && row.retargetCancel == retargetCancelMergedElsewhere:
 		// Merged into a base a person moved it to: the cancel stops as the watch of an unchanged target branch does,
 		// with the merge named (stopMergedElsewhere), never as found closed.
 		return r.stopMergedElsewhere(ctx, rr, v.pr)
-	case cancelRequested(rr) && (v.state == changeClosed || v.state == changeGone):
+	case cancelRequested(rr) && row.retargetCancel == retargetCancelClosed:
 		// A cancel settles like any other stop (fifth decision of 2026-11-18 on #771): the pull request, closed or
 		// confirmed gone, cannot merge, so the cancel ends the request Cancelled (cancelOpen with prClosed).
 		return fmt.Errorf("%w: %w", errClosed, errTargetBranchChanged)
@@ -146,7 +147,7 @@ func (r *RemediationRequestReconciler) mergedRetargeted(ctx context.Context, rr 
 	}
 	v := r.changeOf(ctx, git, rr, changeQuery{configuredBranch: repo.TargetBranch})
 	switch {
-	case v.state == changeUnknown:
+	case v.failed():
 		return true, fmt.Errorf("%w: %w", errBranchChangedUnread, v.err)
 	case retargetedMergeCounts(rr, v):
 		return true, r.recordRetargetedMerge(ctx, git, rr, v.pr, repo.TargetBranch)
@@ -160,7 +161,7 @@ func (r *RemediationRequestReconciler) mergedRetargeted(ctx context.Context, rr 
 // removes condition PullRequestUnreadable (noteRead).
 func retargetedMergeCounts(rr *remediationv1alpha1.RemediationRequest, v changeVerdict) bool {
 	pr := rr.Status.PullRequest
-	return pr != nil && v.state == changeMerged && v.pr.Number == pr.Number && v.pr.HeadSHA == pr.HeadSHA
+	return pr != nil && v.rule().mergedInto && v.pr.Number == pr.Number && v.pr.HeadSHA == pr.HeadSHA
 }
 
 // recordRetargetedMerge is recordMergeSeen for cr, the request's pull request merged into branch, the target

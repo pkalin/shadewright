@@ -469,7 +469,8 @@ func (p *Provider) transportError(ctx context.Context, op string, err error) err
 
 // tokenError replaces an error of the token source with fixed text. Config.Tokens may be any TokenSource,
 // whose errors can carry transport or SDK text, a URL or a credential, so only the class is kept: canceled,
-// past its deadline, retryable (with the requested delay), not found or forbidden. Nothing of err stays reachable.
+// past its deadline, retryable (with the requested delay), not found, forbidden or unauthorized. Nothing of err
+// stays reachable.
 func tokenError(op string, err error) error {
 	msg := op + ": installation token unavailable"
 	switch {
@@ -486,6 +487,9 @@ func tokenError(op string, err error) error {
 	case providers.IsForbidden(err):
 		// The installation refuses the token (a permission the App lacks): final, like a 403 on a call.
 		return fmt.Errorf("%s: %w", msg, providers.ErrForbidden)
+	case providers.IsUnauthorized(err):
+		// GitHub rejects the App JWT (401): a wrong private key or a deleted App.
+		return fmt.Errorf("%s: %w", msg, providers.ErrUnauthorized)
 	}
 	return errors.New(msg)
 }
@@ -527,6 +531,9 @@ func statusError(op string, code int) error {
 		return fmt.Errorf("%w: %w", msg, providers.ErrConflict)
 	case http.StatusForbidden:
 		return fmt.Errorf("%w: %w", msg, providers.ErrForbidden)
+	case http.StatusUnauthorized:
+		// The token is no longer taken: the App was deleted or its key replaced.
+		return fmt.Errorf("%w: %w", msg, providers.ErrUnauthorized)
 	case http.StatusUnprocessableEntity:
 		return fmt.Errorf("%w: %w", msg, providers.ErrRejected)
 	}

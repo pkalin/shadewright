@@ -46,7 +46,7 @@ import (
 
 type noBuilder struct{}
 
-func (noBuilder) Build(context.Context, *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
+func (noBuilder) BuildWithin(context.Context, *remediationv1alpha1.Incident, int) (*incidentcontext.Context, error) {
 	return nil, errors.New("not in this test")
 }
 
@@ -281,7 +281,7 @@ func TestCheckPolicyReadsRefusesARoleWithoutTheName(t *testing.T) {
 // emptyBuilder builds an empty context, so an analysis goes on to its model.
 type emptyBuilder struct{}
 
-func (emptyBuilder) Build(context.Context, *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
+func (emptyBuilder) BuildWithin(context.Context, *remediationv1alpha1.Incident, int) (*incidentcontext.Context, error) {
 	return &incidentcontext.Context{}, nil
 }
 

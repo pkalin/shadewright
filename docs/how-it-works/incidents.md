@@ -11,7 +11,7 @@ An `Incident` is one problem on one workload, stored as a small object in the op
 The analyzer reads only the namespaces you list, and it reads three kinds of signal.
 
 - **Warning events.** Normal events are ignored. An event that is malformed, or about an object in another namespace, is dropped.
-- **Pod status.** Every container that ended abnormally (an out-of-memory kill, or a non-zero exit code) and every container stuck waiting on an image or a configuration error, such as `ImagePullBackOff`. It never reads the text a container leaves when it dies.
+- **Pod status.** Every container that ended abnormally (an out-of-memory kill, or a non-zero exit code) and every container stuck waiting on an image or a configuration error, such as `ImagePullBackOff`. A pod that is being deleted counts only for an out-of-memory kill: a container stopped by a rollout, a scale down or a node drain exits non-zero (137 or 143) and is no symptom. It never reads the text a container leaves when it dies.
 - **Add-on objects**, only when you enable the matching module: autoscalers, KEDA, Flux and Kyverno status. A KEDA scaler that has hit its replica ceiling is one example.
 
 Each signal is attached to the workload that owns the pod, such as the Deployment, so symptoms from successive pods of one workload count together. Text is redacted before anything is stored.

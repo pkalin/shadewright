@@ -163,7 +163,7 @@ func cancelRecorded(rr *remediationv1alpha1.RemediationRequest, reason string) b
 func (r *RemediationRequestReconciler) settleCancelled(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	v changeVerdict, reason string) (reconcile.Result, error) {
 	switch {
-	case v.state == changeMerged:
+	case v.rule().stopException == stopExceptMerged:
 		return r.followCancelledMerge(ctx, rr, v.pr)
 	case !cancelRecorded(rr, reason):
 		return r.recordCancelledOpen(ctx, rr, v.pr, reason)

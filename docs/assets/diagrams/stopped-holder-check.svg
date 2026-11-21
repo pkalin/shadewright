@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 584" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">The failed review check of a stopped holder while the lock is held</title>
+  <desc id="d">Overview of ADR-0046. A stopped request that holds the target lock, with reviewer hints on, looks at its lock every 10 minutes (faster after a failed status write). After each look that leaves the lock held, by its own pull request on any base or by another open pull request from its branch, it writes the stop's failed check run shadewright/review on the recorded head commit, unless the Git host already shows it last. Four writes are new against ADR-0045: the look no longer waits for condition ReviewCheckNotFailed, it writes when its own pull request was merged on another base, it writes at a look that settles nothing yet, and, after a stale cleanup stopped on a refusal, it writes through a new installation of the repository, settled or not, whichever pull request keeps the lock, and so does the stop for a pull request read gone that a waiting request with the stale mark makes. The check can only keep that commit from merging. A refused write sets ReviewCheckNotFailed and is tried again at the next look. Not covered: a deleted request (issue 984), reads that keep failing (issue 979), a look that a stop exception takes over, a request with hints off or a handoff (logged at Info), a pause, a target branch change or a repository gone, a pass on an earlier head of the branch, and a stopped holder whose installation changed after another stop, which leave a pass in place while the lock is held, and a request whose lock nothing holds. No new read and no new grant.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .no{fill:#ff8fa3;font-size:12.5px;font-weight:600}
+      .tag{fill:#c6a8ff;font-size:12.5px;font-weight:600}
+    </style>
+  </defs>
+  <rect width="1120" height="584" rx="18" fill="#0e0e16"/>
+
+  <rect class="box" x="36" y="36" width="310" height="214" rx="12"/>
+  <text class="tag" x="54" y="62">A STOPPED HOLDER LOOKS</text>
+  <text class="h" x="54" y="86">The look leaves the lock held</text>
+  <text class="s" x="54" y="112">By its own pull request on any base, or</text>
+  <text class="s" x="54" y="132">by another open one from its branch.</text>
+  <text class="s" x="54" y="158">Its own one may be open elsewhere,</text>
+  <text class="s" x="54" y="178">closed, merged elsewhere or gone.</text>
+  <text class="s" x="54" y="204">Every 10 minutes (faster after a failed status</text>
+  <text class="s" x="54" y="222">write). Only with hints on.</text>
+
+  <path class="f" d="M346 143H384" marker-end="url(#a)"/>
+  <path class="f" d="M722 143H760" marker-end="url(#a)"/>
+
+  <rect class="key" x="384" y="36" width="338" height="214" rx="12"/>
+  <text class="tag" x="402" y="62">WRITTEN</text>
+  <text class="h" x="402" y="86">The stop's failed check</text>
+  <text class="s" x="402" y="112">shadewright/review on the recorded head,</text>
+  <text class="s" x="402" y="132">unless the Git host shows it last.</text>
+  <text class="s" x="402" y="162">Fixed summary, promises no close;</text>
+  <text class="s" x="402" y="182">its reason or phase is a fixed constant.</text>
+  <text class="s" x="402" y="212">Refused: ReviewCheckNotFailed, tried</text>
+  <text class="s" x="402" y="232">again at the next look.</text>
+
+  <rect class="box" x="760" y="36" width="324" height="214" rx="12"/>
+  <text class="tag" x="778" y="62">EFFECT</text>
+  <text class="h" x="778" y="86">No pass from before the stop</text>
+  <text class="h" x="778" y="106">decides the merge</text>
+  <text class="s" x="778" y="132">A check run belongs to the commit:</text>
+  <text class="s" x="778" y="152">every pull request from the branch</text>
+  <text class="s" x="778" y="172">shows it. It can only keep that</text>
+  <text class="s" x="778" y="192">commit from merging.</text>
+
+  <rect class="key" x="36" y="274" width="510" height="190" rx="12"/>
+  <text class="tag" x="54" y="300">NEW AGAINST ADR-0045</text>
+  <text class="s" x="54" y="324">1. No wait for condition ReviewCheckNotFailed.</text>
+  <text class="s" x="54" y="346">2. Own pull request merged on another base while</text>
+  <text class="s" x="54" y="362">    another open one keeps the lock.</text>
+  <text class="s" x="54" y="384">3. A look that settles nothing yet writes too,</text>
+  <text class="s" x="54" y="400">    through whichever installation it opened.</text>
+  <text class="s" x="54" y="422">4. Through a new installation: every look after a</text>
+  <text class="s" x="54" y="438">    refused stale cleanup, and a stop for a pull</text>
+  <text class="s" x="54" y="454">    request read gone made with the stale mark.</text>
+
+  <rect class="ext" x="574" y="274" width="510" height="190" rx="12"/>
+  <text class="tag" x="592" y="300">NOT COVERED</text>
+  <text class="s" x="592" y="322">Deleted request (#984). Reads that keep failing (#979).</text>
+  <text class="s" x="592" y="340">A look a stop exception takes over writes nothing then.</text>
+  <text class="s" x="592" y="362">Hints off or a handoff: nothing, logged at Info.</text>
+  <text class="s" x="592" y="384">Pause, another target branch, repository gone: late.</text>
+  <text class="s" x="592" y="406">Lock released: no look.</text>
+  <text class="s" x="592" y="428">A pass on an earlier head of the branch stays.</text>
+  <text class="s" x="592" y="446">Other stops after an installation change: nothing.</text>
+
+  <rect class="box" x="36" y="488" width="1048" height="72" rx="12"/>
+  <text class="no" x="54" y="516">No new read, no new grant</text>
+  <text class="s" x="54" y="536">The reads are ADR-0043's and ADR-0045's; checks: write is already in every token request.</text>
+  <text class="s" x="54" y="552">Never on another base: push, comment, merge, update of title or body.</text>
+</svg>

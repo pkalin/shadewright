@@ -79,7 +79,7 @@ func retire(rs *appsv1.ReplicaSet) *appsv1.ReplicaSet {
 // terminating gives pod a deletion timestamp (and a finalizer, which the fake client needs to keep it).
 func terminating(pod *corev1.Pod) *corev1.Pod {
 	pod.DeletionTimestamp = &metav1.Time{Time: t0}
-	pod.Finalizers = []string{"test.shadewright.io/hold"}
+	pod.Finalizers = []string{testFinalizer}
 	return pod
 }
 

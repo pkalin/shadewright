@@ -40,6 +40,7 @@ jobs:
             gitops
             platforms
             integrations
+            intake
             chart
             docs
             ci

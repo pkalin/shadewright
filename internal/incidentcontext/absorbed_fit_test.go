@@ -397,7 +397,7 @@ func TestAbsorbedTallyTotalCutGenerated(t *testing.T) {
 		return inc
 	}
 	cuts := 0
-	for k := 0; k <= 1024; k++ {
+	for k := range 1025 {
 		// The total cut of the summary alone: the cut of the other sections comes first and is tested elsewhere.
 		c := &Context{Blocks: []Block{b.summaryBlock(wide(k))}}
 		b.fitTotal(c)

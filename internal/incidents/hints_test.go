@@ -315,7 +315,6 @@ func TestPassMarksAHintedIncidentDue(t *testing.T) {
 	if got.Status.HandledHint != nil || analyzedCondition(got) != nil {
 		t.Errorf("the mark answered the hint: handledHint %v, Analyzed %+v", got.Status.HandledHint, analyzedCondition(got))
 	}
-
 }
 
 // The mark of a hinted Incident takes a unit of the budget like any other: with one analysis left, an Incident

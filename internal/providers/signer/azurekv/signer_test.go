@@ -458,7 +458,8 @@ func authFailure(status int, retryAfter string) error {
 	if retryAfter != "" {
 		h.Set("Retry-After", retryAfter)
 	}
-	req, _ := http.NewRequest(http.MethodPost, "https://login.microsoftonline.com/example/oauth2/v2.0/token", nil)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"https://login.microsoftonline.com/example/oauth2/v2.0/token", nil)
 	return &azidentity.AuthenticationFailedError{RawResponse: &http.Response{
 		StatusCode: status,
 		Header:     h,
@@ -747,7 +748,7 @@ func TestDefaultTransportDoesNotFollowRedirects(t *testing.T) {
 		http.Redirect(w, r, "/next", http.StatusTemporaryRedirect)
 	}))
 	t.Cleanup(srv.Close)
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/keys/github-app/sign", strings.NewReader("{}"))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/keys/github-app/sign", strings.NewReader("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}

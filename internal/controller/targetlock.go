@@ -1415,12 +1415,14 @@ func unsettledRuleApplies(v changeVerdict, err error, said bool) bool {
 // the rule changed (state Stale on the head, or condition ReviewCheckNotFailed) is written in a status write of its
 // own; on a conflict the request is read again and that outcome carried over (carryCheckOutcome), without a second
 // check write, up to five tries (retry.DefaultRetry), after which the conflict is returned. A request that records
-// another pull request or head by then gets nothing, and the log says the outcome was dropped. rr takes the outcome,
+// another pull request or head by then gets nothing, and the log says the outcome was dropped; one whose merge is
+// recorded by then keeps its review check (a merge receipt pins it). rr takes the outcome,
 // and the new resourceVersion when it was the stored version. A request gone or replaced gets nothing. Only a failure
 // of the Kubernetes API is returned, naming what failed (the read of the request, of the settings, or the status
 // write), for the error backoff: the check run is then
-// written already, but Stale is not recorded, so the retry looks again and writes the same failed run once more without
-// reading it first (ADR-0046 limit (g)).
+// written already, but on a head without Stale recorded before the look Stale stays unrecorded, so the retry looks
+// again and writes the same failed run once more without reading it first; on a head with Stale stored already the
+// retry reads the check first (failStoppedCheck, ADR-0046 limit (g)).
 func (r *RemediationRequestReconciler) afterLook(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	var want *remediationv1alpha1.RemediationRequestStatus
 	var written *remediationv1alpha1.RemediationRequest
@@ -1489,15 +1491,18 @@ func (r *RemediationRequestReconciler) afterLook(ctx context.Context, rr *remedi
 
 // carryCheckOutcome sets, on live, the outcome of the failed review check's rule that want holds (the review check
 // state of the recorded pull request and condition ReviewCheckNotFailed), and reports whether anything is left to
-// write. Nothing is carried when live records another pull request or head than want, and the condition is not set on
-// a request that no longer holds the lock or whose merge is recorded (its looks have ended; ending it is carried).
+// write. Nothing is carried when live records another pull request or head than want; the review check state is not
+// carried onto a request whose merge is recorded (a merge receipt pins it), and the condition is not set on a request
+// that no longer holds the lock or whose merge is recorded (its looks have ended; ending it is carried).
 func carryCheckOutcome(live *remediationv1alpha1.RemediationRequest, want *remediationv1alpha1.RemediationRequestStatus) bool {
 	lp, wp := live.Status.PullRequest, want.PullRequest
 	if !samePullRequest(lp, wp) {
 		return false
 	}
 	base := live.Status.DeepCopy()
-	if lp != nil {
+	if lp != nil && !mergeRecorded(live) {
+		// A recorded merge keeps its review check: a merge receipt pins it (a validation rule on the object), and
+		// the looks have ended, so the state the look wrote is not carried onto it.
 		lp.ReviewCheck = wp.ReviewCheck.DeepCopy()
 	}
 	c := meta.FindStatusCondition(want.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)

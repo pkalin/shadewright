@@ -258,8 +258,8 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // reads the latest review check of the head (stoppedCheckShown) and writes the failed check again only when the Git
 // host shows another state last or none (decision of 2026-11-20 on #925): one read and at most one write per look,
 // bounded by those looks (heldRecheckInterval while the lock is held), with no polling of its own. Only a failed
-// status write after the check write is faster (ADR-0046 limit (g)): Stale is not recorded then, so each retry at the
-// error backoff writes the same failed run again without a read. Those looks run
+// status write after the check write on a head without Stale recorded is faster (ADR-0046 limit (g)): Stale is not
+// recorded then, so each retry at the error backoff writes the same failed run again without a read. Those looks run
 // while the request keeps its lock, which an open pull request keeps. It reads no pull request itself, so it never
 // changes what a look concludes (a first look at a missing number, goneLooks). A lost status write leaves the check
 // pending, and the next look writes the same failed run again.

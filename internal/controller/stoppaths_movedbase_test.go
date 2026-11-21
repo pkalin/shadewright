@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
@@ -1021,11 +1022,12 @@ func TestStoppedHolderSaysTheCheckWasNotFailed(t *testing.T) {
 	}
 }
 
-// #925, #1008: the status write of a look's failed review check (checkHeld's exit, afterLook) whose request
-// changed between its read and its write (an annotation) is not lost: on the conflict the request is read again and
-// the outcome carried over, so a condition ReviewCheckNotFailed is stored by that look, and so is Stale once the check
-// is written, which removes the condition. Before the single exit the conflict was returned and the outcome waited for
-// the next look.
+// #925, #1008: the status write of a look's failed review check (checkHeld's exit, afterLook) that meets a conflict
+// (another writer changed the request, an annotation, just before that write landed) is not lost: on the conflict the
+// request is read again and the outcome carried over, so a condition ReviewCheckNotFailed is stored by that look, and
+// so is Stale once the check is written, which removes the condition. An interceptor makes the first status write
+// that carries the outcome conflict, once per look. Before the single exit the conflict was returned and the outcome
+// waited for the next look.
 func TestStoppedHolderCheckOutcomeSurvivesAConflict(t *testing.T) {
 	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
 	ctx := context.Background()
@@ -1041,41 +1043,69 @@ func TestStoppedHolderCheckOutcomeSurvivesAConflict(t *testing.T) {
 		return nil
 	})
 	key := client.ObjectKeyFromObject(rr)
+	base := r.Client
 	get := func() *api.RemediationRequest {
 		t.Helper()
 		live := &api.RemediationRequest{}
-		if err := r.Get(ctx, key, live); err != nil {
+		if err := base.Get(ctx, key, live); err != nil {
 			t.Fatal(err)
 		}
 		return live
 	}
-	touchedLook := func() {
-		t.Helper()
-		stale := get()
-		other := get()
-		if other.Annotations == nil {
-			other.Annotations = map[string]string{}
-		}
-		other.Annotations["example.com/touched"] = fmt.Sprint(time.Now().UnixNano())
-		if err := r.Update(ctx, other); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := r.checkHeld(ctx, stale); err != nil {
-			t.Fatalf("checkHeld on a copy read before the annotation: %v; want the write carried over", err)
-		}
-		if live := get(); live.Annotations["example.com/touched"] != other.Annotations["example.com/touched"] {
-			t.Fatalf("annotations %v: the write of the look put back the copy it read", live.Annotations)
-		}
-	}
 	note := func(live *api.RemediationRequest) *metav1.Condition {
 		return meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
 	}
-	touchedLook()
+	// carries reports whether a status write holds the look's outcome: the condition, or state Stale.
+	carries := func(rr *api.RemediationRequest) bool {
+		pr := rr.Status.PullRequest
+		return note(rr) != nil || pr != nil && pr.ReviewCheck != nil && pr.ReviewCheck.State == api.ReviewCheckStale
+	}
+	armed, conflicts := false, 0
+	var touched string
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			out, ok := obj.(*api.RemediationRequest)
+			if !ok || !armed || !carries(out) {
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			}
+			armed = false
+			// Another writer changes the request between afterLook's read and its write.
+			other := get()
+			if other.Annotations == nil {
+				other.Annotations = map[string]string{}
+			}
+			touched = fmt.Sprint(time.Now().UnixNano())
+			other.Annotations["example.com/touched"] = touched
+			if err := base.Update(ctx, other); err != nil {
+				t.Fatal(err)
+			}
+			err := c.SubResource(sub).Update(ctx, obj, opts...)
+			if apierrors.IsConflict(err) {
+				conflicts++
+			}
+			return err
+		},
+	})
+	look := func() {
+		t.Helper()
+		armed, conflicts = true, 0
+		if _, err := r.checkHeld(ctx, get()); err != nil {
+			t.Fatalf("checkHeld: %v; want the write carried over", err)
+		}
+		if conflicts != 1 {
+			t.Fatalf("%d conflicts on the status write that carries the outcome: want one", conflicts)
+		}
+		if live := get(); live.Annotations["example.com/touched"] != touched {
+			t.Fatalf("annotations %v: the write of the look put back the copy it read", live.Annotations)
+		}
+	}
+	look()
 	if c := note(get()); c == nil || c.Reason != ReasonGitFailed {
 		t.Fatalf("ReviewCheckNotFailed %+v after a look whose write met a conflict: want it stored", c)
 	}
 	failing = false
-	touchedLook()
+	look()
 	live := get()
 	if rc := live.Status.PullRequest.ReviewCheck; !failedOnly(g.CheckRuns(head)) || rc == nil ||
 		rc.State != api.ReviewCheckStale || note(live) != nil {

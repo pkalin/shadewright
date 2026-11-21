@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -126,18 +128,125 @@ type claimPathCase struct {
 		*api.RemediationRequest, providers.ChangeRequest, func(time.Duration))
 }
 
-// claimPaths are the four ways to reach a held claim: during the watch and after its end, through the predecessor
-// that still hands over and with the predecessor made again under its name.
-var claimPaths = []claimPathCase{
-	{name: "during the watch, through the predecessor", handsOver: true, setup: claimHandingOver},
-	{name: "during the watch, predecessor made again", setup: claimedDuringWatch},
-	{name: "after the watch, through the predecessor", handsOver: true, setup: claimAfterTheWatch},
-	{name: "after the watch, predecessor made again", setup: func(t *testing.T) (*RemediationRequestReconciler,
-		*fakegit.Git, *api.RemediationRequest, *api.RemediationRequest, providers.ChangeRequest, func(time.Duration)) {
-		r, g, p, rr, cr, move := claimAfterTheWatch(t)
+// claimSetup is a way to stand a claim on cr: during the watch or after its end, the predecessor handing over.
+type claimSetup func(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *api.RemediationRequest,
+	*api.RemediationRequest, providers.ChangeRequest, func(time.Duration))
+
+// predecessorChange is what becomes of the predecessor once the claim stands (nil: it still hands over and records
+// cr).
+type predecessorChange struct {
+	name   string
+	change func(t *testing.T, r *RemediationRequestReconciler, p *api.RemediationRequest)
+}
+
+var predecessorChanges = []predecessorChange{
+	{name: "through the predecessor"},
+	{name: "predecessor made again", change: func(t *testing.T, r *RemediationRequestReconciler,
+		p *api.RemediationRequest) {
+		t.Helper()
 		remakePredecessor(t, r, p)
-		return r, g, p, rr, cr, move
 	}},
+	{name: "predecessor gone", change: func(t *testing.T, r *RemediationRequestReconciler, p *api.RemediationRequest) {
+		t.Helper()
+		p = storedRR(t, r, p)
+		p.Finalizers = nil
+		if err := r.Update(t.Context(), p); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Delete(t.Context(), p); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	{name: "predecessor no longer hands over", change: func(t *testing.T, r *RemediationRequestReconciler,
+		p *api.RemediationRequest) {
+		t.Helper()
+		p = storedRR(t, r, p)
+		p.Status.Handoff.To.UID = "0ad0ff00-0000-4000-8000-000000000006"
+		if err := r.Status().Update(t.Context(), p); err != nil {
+			t.Fatal(err)
+		}
+	}},
+	{name: "predecessor records another number", change: func(t *testing.T, r *RemediationRequestReconciler,
+		p *api.RemediationRequest) {
+		t.Helper()
+		p = storedRR(t, r, p)
+		p.Status.PullRequest.Number += 100
+		if err := r.Status().Update(t.Context(), p); err != nil {
+			t.Fatal(err)
+		}
+	}},
+}
+
+// claimPaths are the ways to reach a held claim: during the watch and after its end, each with the predecessor still
+// handing over, made again under its name, gone, no longer handing over to the replacement, or recording another
+// pull request number (decision of 2026-11-21 on #1058).
+var claimPaths = func() []claimPathCase {
+	paths := make([]claimPathCase, 0, 2*len(predecessorChanges))
+	for _, when := range []struct {
+		name  string
+		setup claimSetup
+	}{{"during the watch", claimHandingOver}, {"after the watch", claimAfterTheWatch}} {
+		for _, pc := range predecessorChanges {
+			paths = append(paths, claimPathCase{name: when.name + ", " + pc.name, handsOver: pc.change == nil,
+				setup: func(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *api.RemediationRequest,
+					*api.RemediationRequest, providers.ChangeRequest, func(time.Duration)) {
+					r, g, p, rr, cr, move := when.setup(t)
+					if pc.change != nil {
+						pc.change(t, r, p)
+					}
+					return r, g, p, rr, cr, move
+				}})
+		}
+	}
+	return paths
+}()
+
+// answeredAs is the repository with change request n answered as set does it, by its number and in every listing.
+type answeredAs struct {
+	providers.GitProvider
+	n   int64
+	set func(*providers.ChangeRequest)
+}
+
+func (a *answeredAs) GetChangeRequest(ctx context.Context, n int64) (providers.ChangeRequest, error) {
+	cr, err := a.GitProvider.GetChangeRequest(ctx, n)
+	if err == nil && n == a.n {
+		a.set(&cr)
+	}
+	return cr, err
+}
+
+func (a *answeredAs) ListChangeRequests(ctx context.Context, head string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	all, err := a.GitProvider.ListChangeRequests(ctx, head, openOnly)
+	return a.each(all), err
+}
+
+func (a *answeredAs) ListChangeRequestsAnyBase(ctx context.Context, head string, openOnly bool) (
+	[]providers.ChangeRequest, error) {
+	all, err := a.GitProvider.ListChangeRequestsAnyBase(ctx, head, openOnly)
+	return a.each(all), err
+}
+
+func (a *answeredAs) each(all []providers.ChangeRequest) []providers.ChangeRequest {
+	for i := range all {
+		if all[i].Number == a.n {
+			a.set(&all[i])
+		}
+	}
+	return all
+}
+
+// wrapRepository has r open every repository through wrap.
+func wrapRepository(r *RemediationRequestReconciler, wrap func(providers.GitProvider) providers.GitProvider) {
+	open := r.OpenRepository
+	r.OpenRepository = func(ctx context.Context, repo api.GitRepository) (providers.GitProvider, error) {
+		git, err := open(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		return wrap(git), nil
+	}
 }
 
 // claimVerdictCase is what the Git host answers about the claimed pull request from the claim's first read on, and
@@ -145,16 +254,29 @@ var claimPaths = []claimPathCase{
 type claimVerdictCase struct {
 	name string
 	// answer makes the Git host answer so.
-	answer func(t *testing.T, g *fakegit.Git, cr providers.ChangeRequest)
+	answer func(t *testing.T, r *RemediationRequestReconciler, g *fakegit.Git, cr providers.ChangeRequest)
 	// recordedAtOnce: the next read records the merge (MergedWithForeignChange); otherwise the claim stands until its
 	// own end, which records it MergeContentUnreadable with a message that holds says.
 	recordedAtOnce bool
-	says           string
+	// lookAgain is a read of the claim confirmWait after the first, before the move to its end: for a pull request
+	// gone, the end then falls on the first look of a new confirmation instead of the one that confirms it.
+	lookAgain bool
+	says      string
+}
+
+const answeredNothingMatched = "answered and nothing it found matched"
+
+// goneVerdict is the claimed pull request deleted from the host: 404 by its number, in no listing.
+func goneVerdict(t *testing.T, r *RemediationRequestReconciler, _ *fakegit.Git, cr providers.ChangeRequest) {
+	t.Helper()
+	wrapRepository(r, func(git providers.GitProvider) providers.GitProvider {
+		return &deletedChangeRequest{GitProvider: git, n: cr.Number}
+	})
 }
 
 var claimVerdicts = []claimVerdictCase{
 	{name: "merged, the merge commit reported", recordedAtOnce: true,
-		answer: func(t *testing.T, g *fakegit.Git, cr providers.ChangeRequest) {
+		answer: func(t *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, cr providers.ChangeRequest) {
 			t.Helper()
 			head, err := g.BranchHead(context.Background(), cr.BaseBranch)
 			if err != nil {
@@ -165,18 +287,30 @@ var claimVerdicts = []claimVerdictCase{
 			}
 		}},
 	{name: "merged, no merge commit ever reported", says: "kept failing",
-		answer: func(*testing.T, *fakegit.Git, providers.ChangeRequest) {}},
-	{name: "merged into another base", says: "answered and nothing it found matched",
-		answer: func(t *testing.T, g *fakegit.Git, cr providers.ChangeRequest) { moveToOtherBase(t, g, cr.Number) }},
-	{name: "the marker taken out", says: "answered and nothing it found matched",
-		answer: func(t *testing.T, g *fakegit.Git, cr providers.ChangeRequest) {
+		answer: func(*testing.T, *RemediationRequestReconciler, *fakegit.Git, providers.ChangeRequest) {}},
+	{name: "merged into another base", says: answeredNothingMatched,
+		answer: func(t *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, cr providers.ChangeRequest) {
+			moveToOtherBase(t, g, cr.Number)
+		}},
+	{name: "the marker taken out", says: answeredNothingMatched,
+		answer: func(t *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, cr providers.ChangeRequest) {
 			t.Helper()
 			if err := g.SetBody(cr.Number, "edited by a person"); err != nil {
 				t.Fatal(err)
 			}
 		}},
+	{name: "closed by a person", says: answeredNothingMatched,
+		answer: func(t *testing.T, r *RemediationRequestReconciler, _ *fakegit.Git, cr providers.ChangeRequest) {
+			wrapRepository(r, func(git providers.GitProvider) providers.GitProvider {
+				return &answeredAs{GitProvider: git, n: cr.Number, set: func(c *providers.ChangeRequest) {
+					c.State, c.MergeCommit = providers.ChangeRequestClosed, ""
+				}}
+			})
+		}},
+	{name: "gone, the end confirms it", says: answeredNothingMatched, answer: goneVerdict},
+	{name: "gone, the end on a first look", says: answeredNothingMatched, answer: goneVerdict, lookAgain: true},
 	{name: "404 by number, listed on the branch", says: "disagreed",
-		answer: func(_ *testing.T, g *fakegit.Git, _ providers.ChangeRequest) {
+		answer: func(_ *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, _ providers.ChangeRequest) {
 			g.SetFail(func(op string) error {
 				if op == opGet {
 					return providers.ErrNotFound
@@ -185,7 +319,7 @@ var claimVerdicts = []claimVerdictCase{
 			})
 		}},
 	{name: "an answer not asked for", says: "disagreed",
-		answer: func(_ *testing.T, g *fakegit.Git, _ providers.ChangeRequest) {
+		answer: func(_ *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, _ providers.ChangeRequest) {
 			g.SetFail(func(op string) error {
 				if op == opList {
 					return providers.ErrUntrustedAnswer
@@ -194,7 +328,7 @@ var claimVerdicts = []claimVerdictCase{
 			})
 		}},
 	{name: "every read fails", says: "kept failing",
-		answer: func(_ *testing.T, g *fakegit.Git, _ providers.ChangeRequest) {
+		answer: func(_ *testing.T, _ *RemediationRequestReconciler, g *fakegit.Git, _ providers.ChangeRequest) {
 			g.SetFail(func(string) error { return unavailable() })
 		}},
 }
@@ -208,11 +342,18 @@ func TestClaimSettledTheSameOnEveryPath(t *testing.T) {
 		for _, verdict := range claimVerdicts {
 			t.Run(path.name+"/"+verdict.name, func(t *testing.T) {
 				r, g, p, rr, cr, move := path.setup(t)
-				verdict.answer(t, g, cr)
+				verdict.answer(t, r, g, cr)
 				ends := gitWait(storedRR(t, r, rr), waitMergeContent).Ends.Time
 				got, err := reconcileOnce(t, r, rr)
 				if err != nil {
 					t.Fatalf("reconcile = %v; want no error", err)
+				}
+				if verdict.lookAgain {
+					claimStands(t, got, cr)
+					move(confirmWait)
+					if got, err = reconcileOnce(t, r, rr); err != nil {
+						t.Fatalf("reconcile a confirmation later = %v; want no error", err)
+					}
 				}
 				if !verdict.recordedAtOnce {
 					claimStands(t, got, cr)
@@ -256,11 +397,15 @@ func claimStands(t *testing.T, got *api.RemediationRequest, cr providers.ChangeR
 	}
 }
 
-// #1057: the claim holder is deleted while its settings entry cannot be used. Its finalizer ends the claim (a request
-// being deleted holds none) and keeps trying the cleanup at a pace, with conditions that say why, instead of handing the
-// settings error to the error backoff with nothing shown.
+// #1057: the claim holder is deleted while its settings entry cannot be used (the cleanup of any request deleted
+// with an unusable entry or no settings object goes the same way; the claim holder is the case the issue found). Its
+// finalizer ends the claim (a request being deleted holds none) and keeps trying the cleanup at a pace, with conditions
+// that say why and the Warning Event PullRequestUnreadable every other path records with that condition, instead of
+// handing the settings error to the error backoff with nothing shown.
 func TestClaimHolderDeletedWithAnUnusableEntry(t *testing.T) {
 	r, _, _, rr, _, _ := claimHandingOver(t)
+	rec := record.NewFakeRecorder(20)
+	r.Recorder = rec
 	r.OpenRepository = func(context.Context, api.GitRepository) (providers.GitProvider, error) {
 		return nil, fmt.Errorf("the key is not a PEM key: %w", providers.ErrInvalidConfig)
 	}
@@ -289,6 +434,132 @@ func TestClaimHolderDeletedWithAnUnusableEntry(t *testing.T) {
 			t.Fatalf("condition %s = %+v: want it True with reason %s", want, c, reasonRepositoryUnusable)
 		}
 	}
+	ev := drain(rec)
+	if n := countPrefix(ev, "Warning "+EventPullRequestUnreadable+" "); n != 1 {
+		t.Fatalf("Events %q: want one Warning %s, for the one change of the condition", ev, EventPullRequestUnreadable)
+	}
+}
+
+// countPrefix is how many of events start with prefix.
+func countPrefix(events []string, prefix string) int {
+	n := 0
+	for _, e := range events {
+		if strings.HasPrefix(e, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// Finding of 2026-11-21 on #1058: a failure of a read of the claim that is neither the Kubernetes API's nor a Git read
+// (every provider call is named a Git read by changeOf, so this is a failure of the executor's own, such as an error
+// of the record's step it does not classify) is not named a Git read. claimReadFailed returns it for the error backoff,
+// as observeFailed does, records no wait for "read the Git host" and no failed read for the claim's end, so the claim
+// never ends MergeContentUnreadable because of it.
+func TestClaimReadOfAnUnknownFailureGoesToTheBackoff(t *testing.T) {
+	for _, path := range []struct {
+		name  string
+		setup claimSetup
+		via   func(*RemediationRequestReconciler) claimPath
+	}{
+		{"during the watch", claimHandingOver, (*RemediationRequestReconciler).claimDuringWatch},
+		{"after the watch", claimAfterTheWatch, func(*RemediationRequestReconciler) claimPath { return claimAfterWatch() }},
+	} {
+		t.Run(path.name, func(t *testing.T) {
+			r, _, _, rr, _, move := path.setup(t)
+			held := storedRR(t, r, rr)
+			// The last read past the claim's end, where a failed read would end it MergeContentUnreadable.
+			move(gitWait(held, waitMergeContent).Ends.Sub(r.now()))
+			key := client.ObjectKeyFromObject(held)
+			r.gitRetries().markLastRead(key, []waitKind{waitMergeContent})
+			unknown := errors.New("an answer the executor does not know")
+			_, out, err := r.claimReadFailed(t.Context(), held, path.via(r), unknown)
+			if !errors.Is(err, unknown) || out != claimUnread {
+				t.Fatalf("claimReadFailed = %v, %v; want the failure returned for the error backoff, unread", out, err)
+			}
+			if m := r.gitRetries().take(key); m.failed != "" {
+				t.Fatalf("failed read %q noted: the claim's end would say the reads kept failing", m.failed)
+			}
+			got := storedRR(t, r, rr)
+			for _, w := range got.Status.GitWaits {
+				if w.Operation == "read the Git host" {
+					t.Fatalf("waits %+v: the failure was recorded as a Git read", got.Status.GitWaits)
+				}
+			}
+		})
+	}
+}
+
+// Finding of 2026-11-21 on #1058: during a cancel, a failed read of the claimed pull request is no read that
+// answered. The cancel waits and the claim and the lock are kept, as for any failed read of the watch on main
+// (observeFailed); once a read answers and records nothing, the cancel goes on.
+func TestClaimDuringACancelWaitsForARead(t *testing.T) {
+	r, g, _, rr, cr, _ := claimHandingOver(t)
+	held := storedRR(t, r, rr)
+	held.Spec.Cancel = true
+	if err := r.Update(t.Context(), held); err != nil {
+		t.Fatal(err)
+	}
+	g.SetFail(func(op string) error {
+		if op == opGet {
+			return unavailable()
+		}
+		return nil
+	})
+	got, err := reconcileOnce(t, r, rr)
+	if err != nil {
+		t.Fatalf("reconcile = %v; want no error", err)
+	}
+	if got.Status.Phase != api.PhasePolicyChecked {
+		t.Fatalf("phase %q: the cancel finished on a read of the claim that failed", got.Status.Phase)
+	}
+	claimStands(t, got, cr)
+}
+
+// Finding of 2026-11-21 on #1058: the settings entry of the plan's repository cannot be used, so the claim's read
+// cannot start, and the write of condition PullRequestUnreadable that says so is lost. The failed open is still
+// recorded (condition GitReadRetry names it), and the lost write is returned for the error backoff, not joined away.
+func TestClaimReadUnstartableWithTheConditionWriteLost(t *testing.T) {
+	r, _, _, rr, _, _ := claimAfterTheWatch(t)
+	r.OpenRepository = func(context.Context, api.GitRepository) (providers.GitProvider, error) {
+		return nil, fmt.Errorf("the key is not a PEM key: %w", providers.ErrInvalidConfig)
+	}
+	lost := errors.New("condition write lost")
+	r.Client = &unreadablePatchLost{Client: r.Client, err: lost}
+	if _, err := reconcileOnce(t, r, rr); !errors.Is(err, lost) {
+		t.Fatalf("reconcile = %v; want the lost write returned", err)
+	}
+	got := storedRR(t, r, rr)
+	if c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionGitReadRetry); c == nil ||
+		!strings.Contains(c.Message, "open the repository") {
+		t.Fatalf("GitReadRetry %+v, waits %+v: want the failed open recorded", c, got.Status.GitWaits)
+	}
+}
+
+// unreadablePatchLost fails every status patch that sets condition PullRequestUnreadable to an unusable entry, with err.
+type unreadablePatchLost struct {
+	client.Client
+	err error
+}
+
+func (u *unreadablePatchLost) Status() client.SubResourceWriter {
+	return &unreadableStatusLost{SubResourceWriter: u.Client.Status(), err: u.err}
+}
+
+type unreadableStatusLost struct {
+	client.SubResourceWriter
+	err error
+}
+
+func (u *unreadableStatusLost) Patch(ctx context.Context, obj client.Object, patch client.Patch,
+	opts ...client.SubResourcePatchOption) error {
+	if rr, ok := obj.(*api.RemediationRequest); ok {
+		if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPullRequestUnreadable); c != nil &&
+			c.Reason == reasonRepositoryUnusable {
+			return u.err
+		}
+	}
+	return u.SubResourceWriter.Patch(ctx, obj, patch, opts...)
 }
 
 // claimedNumber is, for the tests, the number of the pull request rr's claim on a merge of another head names (otherHeadClaim), 0

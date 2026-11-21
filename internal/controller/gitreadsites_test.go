@@ -161,7 +161,9 @@ var gitReadSites = map[string]gitReadSite{
 	"recoverywait.go:observeFailed:1": {bound: handoffRecoveryBound, check: checkRecoveryWaitBound},
 	"recoverywait.go:heldRecovery:1":  {bound: heldLockBound},
 	// The bound of the path that reaches the claim (claimDuringWatch, claimAfterWatch); the claim's entry ends it.
-	"claim.go:claimReadFailed:1":               {bound: callerBound},
+	"claim.go:claimReadFailed:1": {bound: callerBound},
+	// The same bound for the failed read whose condition PullRequestUnreadable could not be written.
+	"claim.go:claimReadFailed:2":               {bound: callerBound},
 	"incidentcancel.go:followCancelledMerge:1": {bound: heldLockBound},
 	"incidentcancel.go:closeCancelled:1":       {bound: heldLockBound},
 	"merge.go:mergeCheckFailed:1": {bound: mergeCheckBound,

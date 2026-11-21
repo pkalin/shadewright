@@ -375,11 +375,13 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 		return res, true, err
 	}
 	if otherHeadClaim(rr) {
-		res, recorded, err := r.settleClaim(ctx, rr, r.claimDuringWatch())
-		if err != nil || recorded {
+		res, out, err := r.settleClaim(ctx, rr, r.claimDuringWatch())
+		if err != nil || out != claimAnswered {
+			// A record, or no read that answered: with spec.cancel set, the cancel waits for a read that answers and
+			// the claim is kept, as for any failed read of the watch (observeFailed).
 			return res, true, err
 		}
-		// With spec.cancel set, a claim that recorded nothing lets the cancel finish, as any read that recorded nothing.
+		// With spec.cancel set, a read that answered and recorded nothing lets the cancel finish, as any such read.
 		return res, !cancelRequested(rr), nil
 	}
 	from := rr.Status.Handoff.From

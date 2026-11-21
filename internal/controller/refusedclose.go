@@ -439,9 +439,15 @@ func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context
 	failing := cleanupFailingCondition(rr, err)
 	wasFailing := meta.IsStatusConditionTrue(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
 	changed, _ := r.setRefused(rr, failing)
-	if unreadable := repositoryRead(rr, err); unreadable != nil && putUnreadable(&rr.Status.Conditions, unreadable) {
-		changed = true
+	// Condition PullRequestUnreadable rides the same write, with the Event every other path that sets it records
+	// (unreadableEvent), after the write.
+	wasUnreadable := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+	if wasUnreadable != nil {
+		wasUnreadable = wasUnreadable.DeepCopy()
 	}
+	unreadable := repositoryRead(rr, err)
+	unreadableChanged := unreadable != nil && putUnreadable(&rr.Status.Conditions, unreadable)
+	changed = changed || unreadableChanged
 	var want metav1.Condition
 	var refusedChanged, refusedEvent bool
 	if refused {
@@ -452,6 +458,9 @@ func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context
 		if uerr := r.Status().Update(ctx, rr); uerr != nil {
 			return reconcile.Result{}, nil, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
 				rr.Namespace, rr.Name, uerr)
+		}
+		if unreadableChanged {
+			r.unreadableEvent(rr, wasUnreadable, unreadable)
 		}
 		if !wasFailing {
 			r.refusedEvent(rr, EventCleanupFailing, failing)

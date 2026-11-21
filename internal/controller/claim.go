@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
@@ -39,6 +40,20 @@ type claimPath struct {
 	// bound is the wait a failed read of the claim is retried within, besides the claim's own (retryGitRead).
 	bound waitBound
 }
+
+// claimOutcome is what one read of a held claim (settleClaim) came to, for the path that reached it.
+type claimOutcome int
+
+const (
+	// claimAnswered: the Git host answered (also with answers that disagree) and nothing was written; the claim stands.
+	claimAnswered claimOutcome = iota
+	// claimRecorded: the merge was recorded on the request (or the record went through as a stop).
+	claimRecorded
+	// claimUnread: no read answered (a failed read, a pause, settings that cannot reach the repository): nothing about
+	// the claimed pull request is known from this reconcile, so a cancel waits for a read that answers, as for any
+	// other failed read of the watch (observeFailed).
+	claimUnread
+)
 
 // claimDuringWatch is the path of a replacement that watches after the abort of its handoff (observeStep).
 func (r *RemediationRequestReconciler) claimDuringWatch() claimPath {
@@ -64,45 +79,47 @@ func claimAfterWatch() claimPath {
 //     the listing has open, an answer about a pull request not asked for, another merged head than the claim's):
 //     nothing is written, the claim stands, and rr is read again at the path's pace; at the claim's end the wait ends
 //     MergeContentUnreadable saying the answers disagreed (endAfterLastRead);
-//   - any other answer (closed, gone, the marker taken out, open, merged or closed on another base): nothing is written, the claim and the
-//     lock stand until the claim's own end, which records the merge MergeContentUnreadable saying the reads answered
-//     and nothing matched; never the generic look, which can release the lock without a record;
-//   - a read that fails, also the read of what the merge brought and the open of the repository: retried visibly
-//     (retryGitRead, condition GitReadRetry, and condition PullRequestUnreadable for a refusal or settings that cannot
-//     reach the repository), never past the claim's end, which then says the reads kept failing; a pause waits.
+//   - any other answer (closed, gone, the marker taken out, open, merged or closed on another base): nothing is
+//     written, the claim and the lock stand until the claim's own end, which records the merge MergeContentUnreadable
+//     saying the reads answered and nothing matched; never the generic look, which can release the lock without a
+//     record. A pull request missing by its number and from the listing says so on either look of its confirmation
+//     (changeQuery.goneAnswered), not only on the one that confirms it gone;
+//   - a read of the Git host that fails, also the read of what the merge brought and the open of the repository:
+//     retried visibly (retryGitRead, condition GitReadRetry, and condition PullRequestUnreadable for a refusal or
+//     settings that cannot reach the repository), never past the claim's end, which then says the reads kept failing;
+//     a pause waits. Any other failure is returned for the error backoff (claimReadFailed).
 //
-// recorded is true when a record was written. Only a failure of the Kubernetes API, or the end of ctx, is returned.
+// out says what the read came to (claimOutcome). A failure of the Kubernetes API, the end of ctx, and a failure that
+// is no Git read are returned.
 func (r *RemediationRequestReconciler) settleClaim(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	via claimPath) (res reconcile.Result, recorded bool, err error) {
+	via claimPath) (res reconcile.Result, out claimOutcome, err error) {
 	claim := gitWait(rr, waitMergeContent).PullRequest
 	pred, err := r.claimPredecessor(ctx, rr, claim.Number)
 	if err != nil {
-		return reconcile.Result{}, false, err
+		return reconcile.Result{}, claimUnread, err
 	}
 	readCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 	defer cancel()
 	git, err := r.openStoppedRead(readCtx, rr)
 	if err != nil {
-		res, err := r.claimReadFailed(ctx, rr, via, recoveryStepErr(ctx, readCtx, err))
-		return res, false, err
+		return r.claimReadFailed(ctx, rr, via, recoveryStepErr(ctx, readCtx, err))
 	}
 	inheriting := rr.DeepCopy()
 	inheriting.Status.Handoff.From.Phase = remediationv1alpha1.HandoffDone
-	v := r.changeOf(readCtx, git, inheriting, changeQuery{number: claim.Number, marker: true, openOnBranch: true})
+	v := r.changeOf(readCtx, git, inheriting, changeQuery{number: claim.Number, marker: true, openOnBranch: true,
+		goneAnswered: true})
 	// changeOf may record PullRequestUnreadable through the copy: rr takes that write, never the copy's handoff.
 	rr.ResourceVersion, rr.Status.Conditions = inheriting.ResourceVersion, inheriting.Status.Conditions
 	key := client.ObjectKeyFromObject(rr)
 	switch rule := v.rule().recovery; {
 	case rule == recoveryRetry:
-		res, err := r.claimReadFailed(ctx, rr, via, recoveryStepErr(ctx, readCtx, v.err))
-		return res, false, err
+		return r.claimReadFailed(ctx, rr, via, recoveryStepErr(ctx, readCtx, v.err))
 	case rule == recoveryMerged && v.pr.Number == claim.Number && v.pr.HeadSHA == claim.HeadSHA:
 		switch err := recoveryStepErr(ctx, readCtx, r.recordOtherHeadMerge(readCtx, git, rr, pred, v.pr)); {
 		case err == nil, errors.Is(err, errStopped):
-			return reconcile.Result{RequeueAfter: stepDelay}, true, nil
+			return reconcile.Result{RequeueAfter: stepDelay}, claimRecorded, nil
 		default:
-			res, err := r.claimReadFailed(ctx, rr, via, err)
-			return res, false, err
+			return r.claimReadFailed(ctx, rr, via, err)
 		}
 	case rule == recoveryMerged:
 		// Another merged head than the one the claim's first read stored: a pull request merges once, so the answers
@@ -111,7 +128,7 @@ func (r *RemediationRequestReconciler) settleClaim(ctx context.Context, rr *reme
 	}
 	keptClaimLog(ctx, rr, v)
 	res, err = r.recoveryPace(ctx, rr, via.pace)
-	return res, false, err
+	return res, claimAnswered, err
 }
 
 // claimPredecessor is the request rr replaces, read from the API server, when it hands over to rr and records the
@@ -143,41 +160,61 @@ func (r *RemediationRequestReconciler) claimPredecessor(ctx context.Context, rr 
 // claimReadFailed is settleClaim's answer to err, a read of the claim that did not answer:
 //   - the end of the reconcile's own context is returned as it is, and a pause waits (waitWhilePaused);
 //   - a failure of the Kubernetes API is returned, for the error backoff;
-//   - answers that disagree are no failed call: the claim stands with nothing written, read again at the path's pace;
-//   - anything else is a failed Git read: a final refusal or settings that cannot reach the repository set condition
+//   - answers that disagree are no failed call: the claim stands with nothing written, read again at the path's pace
+//     (claimAnswered); a first look that finds the number missing is an answer too, noted as one (goneAnswered);
+//   - a failed read of the Git host: a final refusal or settings that cannot reach the repository set condition
 //     PullRequestUnreadable that names it (recoveryUnreadable), and the read is retried visibly within the claim and
-//     the path's bound (retryGitRead), never past the claim's end.
+//     the path's bound (retryGitRead), never past the claim's end. When that condition cannot be written, the read's
+//     attempt is still recorded (retryGitRead) and the write's failure is returned for the error backoff;
+//   - any other failure (no Kubernetes API error and no Git read) is logged with its text and returned for the error
+//     backoff, as observeFailed does: it is never named a Git read, so it never ends the claim MergeContentUnreadable.
+//
+// A read that matched nothing (settleClaim) and a failed read both come back at the path's pace with no error: what
+// tells them apart for the claim's end is what this reconcile noted (noteAnswered in changeOf, failedRead and the
+// GitWait entry from retryGitRead), which endAfterLastRead reads, and, for a cancel, the outcome (claimUnread).
 func (r *RemediationRequestReconciler) claimReadFailed(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	via claimPath, err error) (reconcile.Result, error) {
+	via claimPath, err error) (reconcile.Result, claimOutcome, error) {
 	switch {
 	case ctx.Err() != nil:
-		return reconcile.Result{}, err
+		return reconcile.Result{}, claimUnread, err
 	case errors.Is(err, freshness.ErrPaused):
 		// Before the Kubernetes API's failures: the pause the record's write meets is marked as one of them.
-		return r.waitWhilePaused(ctx, rr)
+		res, err := r.waitWhilePaused(ctx, rr)
+		return res, claimUnread, err
 	case isClusterError(err):
-		return reconcile.Result{}, err
+		return reconcile.Result{}, claimUnread, err
 	case answeredUnknown(err):
-		// changeOf noted the disagreement on rr's key, unless the answer came from a read below it.
-		r.gitRetries().noteDisagreed(client.ObjectKeyFromObject(rr))
-		return r.recoveryPace(ctx, rr, via.pace)
-	}
-	if want := recoveryUnreadable(rr, err); want != nil {
-		if werr := r.setUnreadable(ctx, rr, want); werr != nil {
-			return reconcile.Result{}, errors.Join(err, werr)
+		// changeOf noted the answer on rr's key, unless it came from a read below it.
+		if errors.Is(err, errGoneUnconfirmed) {
+			r.gitRetries().noteAnswered(client.ObjectKeyFromObject(rr))
+		} else {
+			r.gitRetries().noteDisagreed(client.ObjectKeyFromObject(rr))
 		}
+		res, err := r.recoveryPace(ctx, rr, via.pace)
+		return res, claimAnswered, err
 	}
 	read := recoveryRead(err)
 	if !gitReadFailure(read) {
-		read = readFailure(readOp(err), err)
+		logf.FromContext(ctx).Info("Could not read the claimed merge of RemediationRequest; retried with the error "+
+			"backoff", "remediationRequest", client.ObjectKeyFromObject(rr), "error", err.Error())
+		return reconcile.Result{}, claimUnread, err
 	}
 	// The path's bound: the HandoffRecovery entry during the watch, none of its own after it (claimDuringWatch,
 	// claimAfterWatch); the claim's own entry bounds every retry either way.
 	bound := via.bound
+	if want := recoveryUnreadable(rr, err); want != nil {
+		if werr := r.setUnreadable(ctx, rr, want); werr != nil {
+			// The condition was not written: the failed read is still recorded, and the write is tried again after
+			// the error backoff.
+			_, rerr := r.retryGitRead(ctx, rr, read, bound)
+			return reconcile.Result{}, claimUnread, errors.Join(werr, rerr)
+		}
+	}
 	res, err := r.retryGitRead(ctx, rr, read, bound)
 	if err != nil {
-		return reconcile.Result{}, err
+		return reconcile.Result{}, claimUnread, err
 	}
 	// The path's pace at the least, never past the end of a wait rr records.
-	return r.recoveryPace(ctx, rr, max(res.RequeueAfter, via.pace))
+	res, err = r.recoveryPace(ctx, rr, max(res.RequeueAfter, via.pace))
+	return res, claimUnread, err
 }

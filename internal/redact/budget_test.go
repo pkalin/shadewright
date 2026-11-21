@@ -192,9 +192,8 @@ const passwordFlagRun = "-password, repeated"
 
 // gluedQuotedPairs are lines of quoted pairs glued with no separator (auth="a" repeated), with and without a
 // tail, of about n bytes each: the release before reads each pair's value again for every key before it on the
-// line, up to a window, so the cost per byte rises to about 1,100 steps of that reading at 64 KiB and stays
-// there (1,201 at 1 MiB), and Strings, which takes that reading twice, to about 2,300 to 2,600: a linear shape
-// above WorkPerByte, which String withholds past 32 KiB and Strings past 8 KiB (decision of 2026-11-21 on #873;
+// line, up to a window: a shape whose work grows linearly (TestCorpusWorkGrowsLinearly) but passes WorkPerByte
+// per byte, withheld from the sizes of withholdSizes (TestBudgetWithholdSizes; decision of 2026-11-21 on #873;
 // found by FuzzDiffGetPodLogs).
 func gluedQuotedPairs(n int) map[string]string {
 	out := map[string]string{}
@@ -207,20 +206,19 @@ func gluedQuotedPairs(n int) map[string]string {
 }
 
 // maxGrowth is how many times its work at 32 KiB an entry may take at 64 KiB (decision of 2026-11-21 on #873):
-// twice, and a margin for the part of the work that is not proportional to the text. The largest measured outside
-// growthExcused is 2.29 (PiecesWithin on TOKEN="a" before a blank line, whose blank line is a fixed 4 KiB), then
-// 2.22 on the glued quoted pairs; every form and staircase grows at most 2.05 times.
+// twice, and a margin for the part of the work that is not proportional to the text (TOKEN="a" before a blank
+// line has a fixed blank line of 4 KiB).
 const maxGrowth = 2.3
 
 // growthExcused are the shapes of corpusShapes on which the work is known to grow faster than the text, each with
-// its reason and its measured growth: the release's reading of a flag followed by a comma reads each value to the
-// end of the run (released.tokenEnd), and almost all the work is that reading. #962 makes them linear and removes
-// them from here. They are measured at String alone (their work at 64 KiB is 430 to 510 million steps) and must
-// still grow faster than maxGrowth there, so a shape made linear cannot stay excused. The budget withholds them
-// whole (TestBudgetWithholdsTheQuadraticTokenShapes).
+// its reason: the release's reading of a flag followed by a comma reads each value to the end of the run
+// (released.tokenEnd), and almost all the work is that reading. #962 makes them linear and removes them from here.
+// They are measured at String alone and must still grow faster than maxGrowth there, so a shape made linear
+// cannot stay excused. The budget withholds them whole (TestBudgetWithholdsTheQuadraticTokenShapes, from the sizes
+// of TestBudgetWithholdSizes).
 var growthExcused = map[string]string{
-	"--token,} repeated": "#962: the release's reading of a flag repeated, 3.77 times from 32 to 64 KiB",
-	passwordFlagRun:      "#962: the release's reading of a flag repeated, 3.96 times from 32 to 64 KiB",
+	"--token,} repeated": "#962: the release's reading of a flag repeated",
+	passwordFlagRun:      "#962: the release's reading of a flag repeated",
 }
 
 // growthOf returns how many times its work on small e takes on large, an input about twice as long: the work is
@@ -281,8 +279,7 @@ func TestCorpusWorkGrowsLinearly(t *testing.T) {
 }
 
 // B1 can fail: a reading that reads the rest of the text again at every line, as the staircases once did (#845),
-// grows 2.9 times for twice the size (a staircase of twice the bytes has fewer than twice the lines) and fails the
-// check unless excused.
+// grows more than maxGrowth times for twice the size and fails the check unless excused.
 func TestCorpusGrowthCheckFindsAQuadraticReading(t *testing.T) {
 	quadratic := budgetEntry{name: "a quadratic reading", size: func(in string) int { return len(in) },
 		run: func(wm *meter.Meter, in string) string {

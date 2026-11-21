@@ -22,10 +22,8 @@ import (
 )
 
 // keptFuzzBound is the longest input FuzzReleasedMatchesKeptCopy compares. The kept copy's work grows faster than
-// its input on some shapes (#873): measured on a laptop, one call took at most about 10 ms at 4 KiB ("--token,}"
-// repeated 7.9 ms, the repeated label unit of FuzzDiffBuild 10.1 ms, a staircase of "pass: |" 5.1 ms), and 50 to
-// 60 ms at 16 KiB, 250 to 620 ms at 64 KiB. At 4 KiB the fuzzer still runs about a hundred inputs a second on the
-// slowest shapes; a longer input is passed over, not compared.
+// its input on some shapes (#873: "--token,}" repeated, the repeated label unit of FuzzDiffBuild, a staircase of
+// "pass: |"), so the fuzzer would slow down on long inputs; a longer input is passed over, not compared.
 const keptFuzzBound = 4 << 10
 
 // FuzzReleasedMatchesKeptCopy fuzzes the parity of this package, rewritten by #873 so that its work is linear,

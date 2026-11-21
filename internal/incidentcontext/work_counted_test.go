@@ -170,10 +170,8 @@ func TestBuildWorkIsLinear(t *testing.T) {
 // repeatedLabelWorkPerByte bounds the work of a whole Build per byte of one label name that every metric template
 // answers in its one series (the shape of FuzzDiffBuild input 81e201e983440dcc, metricsKey): each expression of
 // the rules reads a long window of the label once, alone and in its answer (redact's windows.go), and the
-// release's reading reads the label at two passes, not at each of 16 (#873, second round). Measured at that build:
-// 840, 804 and 801 steps per byte at 4 KiB, 40 KiB and 400 KiB; at 842c2015, before it, 1,180 at 40 KiB (403 of
-// them the release's reading). With the chunks of the third round, which count the hash of each place a chunk may
-// end: 878, 837 and 833.
+// release's reading reads the label at two passes, not at each of 16 (#873, second round). The test logs the
+// steps per byte it measures; only this bound is asserted.
 const repeatedLabelWorkPerByte = 900
 
 // The work of a whole Build on one label name repeated by every metric template stays within
@@ -203,10 +201,9 @@ func shortWindowLabel(n int) string {
 // shortWindowsExpressionBytes bounds the bytes a whole Build hands to the regular expressions of the rules, per
 // byte of one label name of short windows that every metric template answers in its one series (shortWindowLabel,
 // the label of FuzzDiffBuild input 22905eb52eae1385): each expression reads the label alone and the answer that
-// writes it in eight lines, and reads a chunk of short windows it read before once (redact's windows.go). Measured
-// at the build of #873 third round: 97 and 83 bytes per byte of the label at 40 KiB and 400 KiB; before it, 266
-// and 264, every copy read by each expression. The steps of the whole Build were 609 and 591 per byte against 669
-// and 666, and its wall time less than half: a byte the matcher reads costs far more than one step.
+// writes it in eight lines, and reads a chunk of short windows it read before once (redact's windows.go); before
+// #873 every copy was read by each expression. The test logs the bytes per byte it measures; only this bound is
+// asserted.
 const shortWindowsExpressionBytes = 128
 
 // The bytes a whole Build hands to the regular expressions on one label name of short windows repeated by every

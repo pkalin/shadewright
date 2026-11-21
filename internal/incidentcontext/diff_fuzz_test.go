@@ -308,9 +308,8 @@ func FuzzDiffBuild(f *testing.F) {
 	})
 }
 
-// maxBuildField caps each field of an input of FuzzDiffBuild, in bytes: both builds of an input of 160 KiB (the
-// seed found-873-22905eb52eae1385, a label of 40 KiB repeated) took 4 s, and four times that with the fuzzer's
-// instrumentation, so a worker on the runner went past its 60 s limit (#873). The fields of eight at this cap still
+// maxBuildField caps each field of an input of FuzzDiffBuild, in bytes: with longer fields a worker on the runner
+// went past its time limit on the seed found-873-22905eb52eae1385, a label repeated (#873). The fields of eight at this cap still
 // fill every section; the work on long inputs is bounded by the redactor's budget and checked by the work tests
 // (TestBuildWorkOfARepeatedLabelOfShortWindows, package redact TestBudgetBoundsTheFourShapes), not here.
 const maxBuildField = 2 << 10

@@ -56,7 +56,8 @@ type DeliveryStatus struct {
 	Generation int64
 	// ObservedGeneration is the generation the unit's status describes; 0 when it says none.
 	ObservedGeneration int64
-	// Message is the delivery system's own summary; it is untrusted text.
+	// Message is the delivery system's own summary; it is untrusted text. It is
+	// empty when MessageWithheld is true: a reader that sets the flag leaves no text of the message here.
 	Message string
 	// MessageWithheld is true when the reader's redaction withheld the message whole (package redact, its work
 	// budget): Message is then empty, and a caller shows the status as a source that failed. Only this flag says

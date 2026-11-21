@@ -646,8 +646,8 @@ section 2); a command of an author without write access is never recorded, so it
 CapReached: MaxHints hints of the request are Consumed or Reserved already, which count for its whole
 supersede chain. TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the
 end of its first line. NotRedactable: the redacted text still holds something the redactor would change,
-or redaction withheld the text whole because it ran out of its work budget. Empty: the command has no
-text. EditedAfterSeen: a comment the executor had read already was edited to carry the command. An edit of a
+or redaction withheld the text whole because it ran out of its work budget; it is decided before TooLong,
+so a long hint whose redaction runs out of its budget is NotRedactable. Empty: the command has no text. EditedAfterSeen: a comment the executor had read already was edited to carry the command. An edit of a
 stored hint's comment is recorded on the hint (editedAfterAccept), not here.
 
 - Underlying type: string

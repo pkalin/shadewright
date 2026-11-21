@@ -139,7 +139,7 @@ var diffSeeds = [][]byte{
 	seedPairsBeforeABlankLine, // TOKEN="a" repeated, a quote, a line end, 4,096 blanks, a quote and a fullwidth colon
 	{0xf1, 0, 242, 0, 7, 0},   // a run of one invalid byte and an "x", 3,150 times
 	// "--token,}" repeated to 36 KiB (#873): the release's reading reads each value to the end of the run
-	// (released.tokenEnd), about 4,500 steps per byte there, so the entry is withheld (P3, P5).
+	// (released.tokenEnd), so the entry is withheld (P3, P5; the sizes of TestBudgetWithholdSizes).
 	seedTokenRepeat,
 }
 

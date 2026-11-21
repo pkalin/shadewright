@@ -17,11 +17,8 @@ limitations under the License.
 package redact
 
 import (
-	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 // Cost is linear on inputs built from the tokens of the rules themselves (#845, third decision of 2026-11-18,
@@ -64,8 +61,8 @@ var (
 // linearity change of #873 that left its output unchanged, TestReleasedIsTheReleaseBefore and kept_test.go), and
 // not fixed for this shape (#962): the budget withholds such an entry instead (TestBudgetWithholdsTheQuadraticTokenShapes). The work
 // of this package on it is linear: the plain run of plainWordEnd reads the run of flags once, where each flag
-// read up to maxValueExtent bytes of it before (377,785, 1,326,458, 3,571,606 and 8,061,008 steps for 2,304 to
-// 18,432 bytes of "--token,}").
+// read up to maxValueExtent bytes of it before. The sizes from which the budget withholds it are those of
+// TestBudgetWithholdSizes.
 const tokenEndRun = "--" + canonTokenKey + ","
 
 // complexityKnownSuperlinear are the units on which the reading of the release before (and only it) is known to
@@ -92,9 +89,8 @@ func complexityUnits() []string {
 // may cost, for the part of the work that does not grow with n. complexityWindowStep is how much more again a
 // doubling across windowMinText may cost: texts shorter than it are read whole and longer ones by windows
 // (windows.go), whose fixed cost per byte is higher, a one-time step. It is measured on the work of this package
-// alone, which the windows are part of and the reading of the release before is not: the largest is 3.61 times
-// the work for "args: [\"--password\", " + ":-" from 2,070 to 4,118 bytes, where the doublings on either side
-// cost at most 2.2 times.
+// alone, which the windows are part of and the reading of the release before is not; the doubling across it on
+// "args: [\"--password\", " + ":-" needs that step.
 const (
 	complexityN          = 256
 	complexitySlack      = 1.1
@@ -170,44 +166,5 @@ func TestTokenShapesWorkIsLinearExceptTwo(t *testing.T) {
 		in := open + strings.Repeat("}", n)
 		total, release := decisionWork(t, in)
 		t.Logf("%q and %d closing braces: %d steps, %d of them the release's", open, n, total, release)
-	}
-}
-
-// The fourth shape of #873 ("--token,}" repeated, complexityKnownSuperlinear) is withheld from a size that
-// depends on the entry point, as each reads the text a number of times of its own (the ADR-0015 amendment of
-// 2026-11-20 states them): at each, the largest size of the doublings from 1,152 bytes that is still decided,
-// and the next, withheld. The inputs are one line, so Strings and PiecesWithin have one string or data piece.
-func TestTokenEndRunWithheldFrom(t *testing.T) {
-	parallelUnderRace(t)
-	// The largest size decided, by entry point, as one text so that the names of budgetEntries stay literals
-	// there alone.
-	decided := map[string]int{}
-	for field := range strings.FieldsSeq(`String=4608 StringKeeping=4608 Clean=4608 StringTwice=4608
-		ReplaceFrom=4608 Replace=4608 ReleasedText=4608 Strings=2304 PiecesWithin=4608 PiecesFitting=4608`) {
-		name, size, _ := strings.Cut(field, "=")
-		n, err := strconv.Atoi(size)
-		if err != nil {
-			t.Fatal(err)
-		}
-		decided[name] = n
-	}
-	for _, e := range budgetEntries {
-		want, ok := decided[e.name]
-		if !ok {
-			t.Errorf("%s: no size stated", e.name)
-			continue
-		}
-		for _, n := range []int{want, 2 * want} {
-			in := strings.Repeat(tokenEndRun+"}", n/len(tokenEndRun+"}"))
-			_, decidedIn, _ := meteredSpent(e, in, budgetOf(e.size(in)))
-			if decidedIn != (n <= want) {
-				t.Errorf("%s on \"--token,}\" repeated to %d bytes: decided %v, want %v", e.name, len(in), decidedIn,
-					n <= want)
-			}
-			if got := e.public(in); n > want && !withheldOut(got) {
-				t.Errorf("%s on \"--token,}\" repeated to %d bytes returned %q, not withheld", e.name, len(in),
-					redacttest.Clip(got))
-			}
-		}
 	}
 }

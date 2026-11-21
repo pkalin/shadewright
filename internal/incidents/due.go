@@ -48,6 +48,9 @@ const triggerFieldOwner = "shadewright-analysis-trigger"
 // PassTimeout, shorter than the interval: ctx lasts as long as the controller, so a call that stalls without
 // a deadline would stop every later pass.
 func (c *Controller) triggerLoop(ctx context.Context) {
+	// The conditions are written with second precision, so a NotRecent this loop writes in its first second is
+	// not taken for one written before it began ([Controller.reportSkips]).
+	c.triggerStart = c.cfg.Now().Truncate(time.Second)
 	tick := time.NewTicker(c.cfg.TriggerInterval)
 	defer tick.Stop()
 	for {
@@ -126,6 +129,7 @@ func (c *Controller) markDue(ctx context.Context) error {
 	s := TriggerSettings{Debounce: c.cfg.Debounce, SettleLimit: c.cfg.SettleLimit, Cooldown: c.cfg.Cooldown,
 		AnalysisTimeout: c.cfg.AnalysisTimeout, RecentWindow: c.cfg.RecentWindow}
 	c.watch(list.Items, now, s)
+	c.reportSkips(list.Items)
 	used, closed, readErr := c.readBudget(ctx, now, &s)
 
 	items := list.Items
@@ -179,11 +183,11 @@ func (c *Controller) markDue(ctx context.Context) error {
 			}
 			continue
 		}
-		due, reason, wrote, err := c.setDue(ctx, inc, now, due, reason, decide, "")
+		due, reason, _, err := c.setDue(ctx, inc, now, due, reason, decide, "")
 		if closed == "" {
 			c.rememberWaiting(inc.UID, reason, now)
 		}
-		if err := c.account(inc, due, reason, wrote, wasDue, err, &used); err != nil {
+		if err := c.account(inc, due, reason, wasDue, err, &used); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -203,7 +207,7 @@ func (c *Controller) markDue(ctx context.Context) error {
 		if wrote || err != nil {
 			writes++
 		}
-		if err := c.account(inc, false, ReasonNotRecent, wrote, wasDue, err, nil); err != nil {
+		if err := c.account(inc, false, ReasonNotRecent, wasDue, err, nil); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -238,6 +242,19 @@ type trace struct {
 	lastSeen     time.Time
 	sampled      time.Time
 	lasting      bool
+	// skipReported is the lastTransitionTime of the NotRecent condition last reported ([Controller.reportNotRecent]),
+	// or zero.
+	skipReported time.Time
+	// skipPending: a NotRecent write of this Incident returned an error after which it may have landed
+	// ([mayHaveLanded]), so it may stand unreported. The first pass that reads NotRecent reports it once, or
+	// clears it unreported when that NotRecent's transition time was reported already ([Controller.reportSkips]).
+	// A read of another reason keeps it, since the cache may lag behind the write; only a report
+	// ([Controller.reportNotRecent]), a later write
+	// of AnalysisDue by this loop or the Incident found gone ([Controller.setDue]) clears it, or the trace is
+	// forgotten with the Incident ([Controller.watch]). The transition time alone cannot tell such a write: one
+	// written over another not-due reason keeps that reason's lastTransitionTime, which can be before the loop
+	// began.
+	skipPending bool
 }
 
 // decider returns the decision of [Due] for one Incident, with what the controller knows of it ([Memory])
@@ -265,14 +282,13 @@ func (c *Controller) settles(inc *remediationv1alpha1.Incident) bool {
 	return c.hintsListed && c.analysisRequest != nil && SettlesWithoutAnalysis(inc, c.hintRequestsOf(inc))
 }
 
-// account reports a NotRecent that setDue wrote, counts a unit of the budget in *used (when used is not nil)
-// for a mark that says due, and returns err: a failed write may still have landed (a lost answer), and a
-// mark it did not change still says due (wasDue), so either way the Incident takes its unit.
-func (c *Controller) account(inc *remediationv1alpha1.Incident, due bool, reason string, wrote, wasDue bool, err error,
+// account counts a unit of the budget in *used (when used is not nil) for a mark that says due, and returns
+// err: a failed write may still have landed (a lost answer), and a mark it did not change still says due
+// (wasDue), so either way the Incident takes its unit. A NotRecent written is reported by [Controller.setDue]
+// or, when its answer was lost, by [Controller.reportSkips] (from its transition time or the pending mark
+// setDue left).
+func (c *Controller) account(inc *remediationv1alpha1.Incident, due bool, reason string, wasDue bool, err error,
 	used *int) error {
-	if wrote && reason == ReasonNotRecent {
-		c.reportNotRecent(inc)
-	}
 	// A lost hint run the analysis ends without a model call takes no unit ([SettlesWithoutAnalysis]).
 	settles := reason == ReasonAnalysisTimedOut && c.settles(inc)
 	if used != nil && (due || (err != nil && wasDue)) && !settles {
@@ -453,13 +469,65 @@ func (c *Controller) heldLocked(fp string) time.Time {
 	return t
 }
 
+// reportSkips reports, from the cached Incidents of the pass, each NotRecent condition this trigger loop wrote
+// whose report is still owed: one whose write landed but whose answer was lost (the deadline ran out), so
+// [Controller.setDue] did not report it. Such a condition says not due, NotRecent, and either a write of it
+// returned an error after which it may have landed ([mayHaveLanded]; the pending mark of the Incident's
+// [trace]) or its lastTransitionTime is at or after the loop began (truncated to the second), and in both cases
+// its lastTransitionTime differs from the one last reported for that Incident. A pending mark is reported by
+// the first pass that reads NotRecent, which clears it; one whose NotRecent shows the transition time reported
+// already is cleared without a report, so writes over a NotRecent of a stale generation that keep failing
+// report it once, not once per pass. A read of another reason keeps the mark and reports nothing: the cache
+// may still show the reason from before a write that landed. Only a later write of AnalysisDue by this loop,
+// the Incident found gone ([Controller.setDue]) or its trace forgotten clears it unreported. A mark kept for a
+// write that did not land costs at most one event, when a NotRecent written by another process is read for it
+// later. So this loop reports exactly once each NotRecent it wrote that still stands when it is next read or
+// written. A write that makes the Incident due again over a NotRecent that landed but was not reported yet
+// drops that report, an accepted limit (#983): the Incident is analyzed after all.
+// A NotRecent written before the loop began (a restart, a new leader) is not reported: the process that wrote
+// it did, so a restart sends no burst of events. One the previous leader writes in the loop's first second or
+// later (a leader handover) is reported by both, an extra report accepted as a known limit (#983). What is
+// remembered goes with the Incident's [trace], so a deleted Incident's is forgotten ([Controller.watch]). The
+// last transition time reported is kept while the condition says something else, so a cache that lags behind
+// the write does not make it reported twice; the next NotRecent of that Incident has a new transition time,
+// since only a mark that says due takes NotRecent away.
+func (c *Controller) reportSkips(items []remediationv1alpha1.Incident) {
+	for i := range items {
+		inc := &items[i]
+		t := c.memory[inc.UID]
+		if t == nil {
+			continue
+		}
+		pending := t.skipPending
+		if !saysNotRecent(inc) {
+			continue
+		}
+		at := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue).LastTransitionTime.Time
+		if at.Equal(t.skipReported) {
+			// Reported already: a pending write that left the same transition (one rewritten over a NotRecent
+			// whose generation was stale keeps its transition time) is no new skip.
+			t.skipPending = false
+			continue
+		}
+		if !pending && at.Before(c.triggerStart) {
+			continue
+		}
+		c.reportNotRecent(inc)
+	}
+}
+
 // reportNotRecent counts an Incident newly marked NotRecent and reports it in a Normal event about the
-// Incident, so a skipped analysis is visible. It runs once per write of that reason ([conditionAgrees]), not on
-// every pass: the condition keeps NotRecent until the Incident is next marked due, so a second quiet spell
-// before that is neither written nor counted again. The event is written in the operator namespace, the
+// Incident, so a skipped analysis is visible, and remembers the condition's lastTransitionTime in the
+// Incident's [trace]. It runs once per write of that reason ([conditionAgrees]), from [Controller.setDue] when
+// the write's answer arrives and from [Controller.reportSkips] when it was lost, not on every pass: the
+// condition keeps NotRecent until the Incident is next marked due, so a second quiet spell before that is
+// neither written nor counted again. The event is written in the operator namespace, the
 // Incident's, with the grant on core Events the analyzer holds there; its message holds nothing from the
 // cluster. It names the window [Due] applies ([recentWindow]).
 func (c *Controller) reportNotRecent(inc *remediationv1alpha1.Incident) {
+	if t, cond := c.memory[inc.UID], meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue); t != nil && cond != nil {
+		t.skipReported, t.skipPending = cond.LastTransitionTime.Time, false
+	}
 	notRecentSkips.Inc()
 	if c.cfg.Recorder == nil {
 		return
@@ -521,16 +589,18 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 		conditionAgrees(cached, due, reason, runEnded(cached, now, c.cfg.AnalysisTimeout)) {
 		return due, reason, false, nil
 	}
-	wrote := false
+	wrote, triedNotRecent := false, false
 	wctx, cancel := context.WithTimeout(ctx, c.cfg.WriteTimeout)
 	defer cancel()
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		// Each attempt starts with no write tried: a Conflict on an earlier one, followed by a failed read on
+		// this one, sent nothing that could have landed.
+		wrote, triedNotRecent = false, false
 		inc := &remediationv1alpha1.Incident{}
 		if err := c.reader.Get(wctx, types.NamespacedName{Namespace: c.cfg.Namespace, Name: cached.Name}, inc); err != nil {
 			return err
 		}
 		due, reason = decide(inc)
-		wrote = false
 		// A reviewer hint refused without an analysis is answered in the same update (ADR-0028 section 3),
 		// also when the condition already agrees: the answer is what the executor reads.
 		ref, outcome := HintAnswer(inc, c.hintRequestsOf(inc), due, reason)
@@ -554,6 +624,9 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 		if due {
 			status = metav1.ConditionTrue
 		}
+		// A NotRecent rewritten over a NotRecent (a stale generation) is not a new skip: it was reported by
+		// whoever wrote it, or before this process started, so neither the write nor a lost answer reports it.
+		newSkip := !due && reason == ReasonNotRecent && !saysNotRecent(inc)
 		// The transition time comes from the controller's clock, like every decision; SetStatusCondition keeps
 		// the old one when only the reason changes.
 		meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{
@@ -565,18 +638,49 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 			LastTransitionTime: metav1.NewTime(c.cfg.Now()),
 		})
 		if err := c.client.Status().Update(wctx, inc, client.FieldOwner(triggerFieldOwner)); err != nil {
+			triedNotRecent = newSkip && mayHaveLanded(err)
 			return err
 		}
 		wrote = true
+		if t := c.memory[cached.UID]; t != nil {
+			// This write replaced whatever an earlier NotRecent write whose answer was lost left.
+			t.skipPending = false
+		}
+		if newSkip {
+			// inc holds the stored copy the answer returned, so the transition time remembered is the one the
+			// cache will show ([Controller.reportSkips]).
+			c.reportNotRecent(inc)
+		}
 		return nil
 	})
 	if apierrors.IsNotFound(err) {
+		if t := c.memory[cached.UID]; t != nil {
+			t.skipPending = false
+		}
 		return false, ReasonNotObserved, false, nil
 	}
 	if err != nil {
+		if t := c.memory[cached.UID]; t != nil && triedNotRecent {
+			// The write may have landed with its answer lost ([mayHaveLanded]): the next pass reports it if it
+			// reads NotRecent ([Controller.reportSkips]).
+			t.skipPending = true
+		}
 		return due, reason, false, fmt.Errorf("setting AnalysisDue on Incident %s: %w", cached.Name, err)
 	}
 	return due, reason, wrote, nil
+}
+
+// mayHaveLanded reports whether an update that returned err may still have been stored: its answer was lost
+// (a timeout, a deadline or a cancellation, a connection error) or the server's answer does not say the update
+// was refused (a 5xx, an unknown error). An update the server refused with a 4xx answer (Invalid, Forbidden,
+// Conflict, NotFound, TooManyRequests and the like) was not stored.
+func mayHaveLanded(err error) bool {
+	var status apierrors.APIStatus
+	if errors.As(err, &status) {
+		code := status.Status().Code
+		return code < 400 || code >= 500
+	}
+	return true
 }
 
 // conditionAgrees reports whether the Incident's AnalysisDue condition already holds the decision (due,

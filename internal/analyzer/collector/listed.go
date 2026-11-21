@@ -18,13 +18,32 @@ package collector
 
 import (
 	"sync"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
+
+// StaleOnStart is how long before the collector's start an event listed at start must have last occurred to
+// only fold (#996, ADR-0039 amendment of 2026-11-21). It is longer than a leader lease handover and a
+// rollout of the analyzer, so an event that changed while no collector ran (its occurrences handled by none)
+// is within it and counts as before.
+const StaleOnStart = 5 * time.Minute
+
+// staleOnStartFolded counts the event observations marked FoldOnly by goneOnStart.
+var staleOnStartFolded = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "shadewright_analyzer_stale_on_start_folded_total",
+	Help: "Events listed at start, unchanged since, about a gone pod and last seen more than 5 minutes before the start, sent as fold only.",
+})
+
+func init() {
+	metrics.Registry.MustRegister(staleOnStartFolded)
+}
 
 // listedVersion is the version of an event as the collector's start listed it.
 type listedVersion struct {
@@ -101,15 +120,40 @@ func (c *Collector) eventPredicate() predicate.Funcs {
 	return p
 }
 
-// goneOnStart reports whether ev, as fromEvent read it, is an event from before the collector's start about a
-// pod that no longer exists (#996): the start listed it, it has not changed since, and its regarding object is
-// a Pod that the one read of it found gone or replaced by another of the same name (pod is nil). Such an
-// event opens no Incident: its observation is marked FoldOnly. An event about any other kind is not decided
-// here.
-func (c *Collector) goneOnStart(ev *eventsv1.Event, pod *corev1.Pod) bool {
+// goneOnStart reports whether ev, as fromEvent read it, is an old event from before the collector's start
+// about a pod that no longer exists (#996): the start listed it, it has not changed since, its regarding
+// object is a Pod that the one read of it found gone or replaced by another of the same name (pod is nil),
+// and its last occurrence (lastListedOccurrence) is more than StaleOnStart before start. Such an event opens
+// no Incident: its observation is marked FoldOnly, and staleOnStartFolded counts it. An event last seen
+// within StaleOnStart, or with no usable time, counts as before: it may have changed while no collector ran
+// (a restart or a leader handover), and folding it would drop occurrences no collector handled. An event
+// about any other kind is not decided here.
+func (c *Collector) goneOnStart(ev *eventsv1.Event, pod *corev1.Pod, start time.Time) bool {
 	reg := ev.Regarding
 	if pod != nil || reg.Kind != kindPod || reg.APIVersion != apiCore {
 		return false
 	}
-	return c.listed.unchanged(ev)
+	if !c.listed.unchanged(ev) {
+		return false
+	}
+	if last, ok := lastListedOccurrence(ev); !ok || !last.Before(start.Add(-StaleOnStart)) {
+		return false
+	}
+	staleOnStartFolded.Inc()
+	return true
+}
+
+// lastListedOccurrence is the event's last occurrence as its reporter wrote it: the series' last observed
+// time, else the deprecated last timestamp, else the event time; false when none is set. The creation
+// timestamp does not count (an event with no other time counts as before).
+func lastListedOccurrence(ev *eventsv1.Event) (time.Time, bool) {
+	switch {
+	case ev.Series != nil && !ev.Series.LastObservedTime.IsZero():
+		return ev.Series.LastObservedTime.Time, true
+	case !ev.DeprecatedLastTimestamp.IsZero():
+		return ev.DeprecatedLastTimestamp.Time, true
+	case !ev.EventTime.IsZero():
+		return ev.EventTime.Time, true
+	}
+	return time.Time{}, false
 }

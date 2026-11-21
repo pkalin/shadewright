@@ -187,8 +187,8 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		logf.FromContext(ctx).V(1).Info("Ignored Event that cannot be correlated")
 		return leave("it can no longer be correlated", true)
 	}
-	// An event the start listed, unchanged since, about a pod that is gone opens no Incident (#996).
-	obs.FoldOnly = r.c.goneOnStart(&ev, pod)
+	// An old event the start listed, unchanged since, about a pod that is gone opens no Incident (#996).
+	obs.FoldOnly = r.c.goneOnStart(&ev, pod, start)
 	if probe, ok := probeOf(&ev); ok {
 		// A readiness or startup probe failure of a pod that starts or shuts down (#726), decided from the pod
 		// as fromEvent read it.

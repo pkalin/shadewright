@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,10 +57,14 @@ func TestEventOfAGonePodListedAtStartIsFoldOnly(t *testing.T) {
 	h := newHarness(t, Config{})
 	ev := failedMount(h)
 	listAtStart(h, ev)
+	before := testutil.ToFloat64(staleOnStartFolded)
 	h.reconcileEvent(ev.Name)
 	got := h.one()
 	if !got.FoldOnly {
 		t.Fatalf("event of a gone pod listed at start: %+v, want FoldOnly", got)
+	}
+	if n := testutil.ToFloat64(staleOnStartFolded) - before; n != 1 {
+		t.Fatalf("stale_on_start_folded_total rose by %v, want 1", n)
 	}
 	if !got.MayRepeat || got.Total != 14 || got.Occurrence != "event:"+string(ev.UID) {
 		t.Fatalf("event of a gone pod listed at start: %+v, want MayRepeat with Total 14 and its UID", got)
@@ -118,5 +123,80 @@ func TestDeletedListedEventIsForgotten(t *testing.T) {
 	h.reconcileEvent(ev.Name)
 	if n := h.c.listed.len(); n != 0 {
 		t.Fatalf("%d listed events remembered after the delete, want 0", n)
+	}
+}
+
+// The gap case (#996, decision of 2026-11-21): while no collector ran (a restart or a leader handover), the
+// event's count rose and its pod was deleted. The new collector lists it at start, unchanged since, about a
+// gone pod, but its last occurrence is within StaleOnStart of the start: no collector handled those
+// occurrences, so it counts as before and is not FoldOnly.
+func TestRecentEventOfAGonePodListedAtStartIsNotFoldOnly(t *testing.T) {
+	for _, last := range []time.Duration{-time.Minute, -StaleOnStart} {
+		h := newHarness(t, Config{})
+		ev := warning("mount", 0)
+		ev.Reason, ev.Action, ev.Note = "FailedMount", "", "MountVolume.SetUp failed for volume config"
+		ev.CreationTimestamp = metav1.NewTime(t0.Add(-20 * time.Minute))
+		ev.EventTime = metav1.NewMicroTime(t0.Add(-20 * time.Minute))
+		ev.Series = &eventsv1.EventSeries{Count: 14, LastObservedTime: metav1.NewMicroTime(t0.Add(-15 * time.Minute))}
+		h.create(ev)
+		// Raised while no collector ran: the stored event the start lists.
+		ev.Series.Count = 16
+		ev.Series.LastObservedTime = metav1.NewMicroTime(t0.Add(last))
+		h.update(ev)
+		stored := &eventsv1.Event{}
+		if err := h.cl.Get(t.Context(), client.ObjectKeyFromObject(ev), stored); err != nil {
+			t.Fatal(err)
+		}
+		listAtStart(h, stored)
+		before := testutil.ToFloat64(staleOnStartFolded)
+		h.reconcileEvent(ev.Name)
+		got := h.one()
+		if got.FoldOnly || got.Total != 16 {
+			t.Fatalf("last occurrence %v before the start: %+v, want not FoldOnly with Total 16", -last, got)
+		}
+		if n := testutil.ToFloat64(staleOnStartFolded) - before; n != 0 {
+			t.Fatalf("stale_on_start_folded_total rose by %v, want 0", n)
+		}
+	}
+}
+
+// The last occurrence is the series' last observed time, else the deprecated last timestamp, else the event
+// time: an old event time with a recent deprecated last timestamp is recent.
+func TestDeprecatedLastTimestampOfAListedEventIsItsLastOccurrence(t *testing.T) {
+	h := newHarness(t, Config{})
+	ev := warning("mount", 0)
+	ev.Reason, ev.Action = "FailedMount", ""
+	ev.EventTime = metav1.NewMicroTime(t0.Add(-time.Hour))
+	ev.DeprecatedLastTimestamp = metav1.NewTime(t0.Add(-time.Minute))
+	ev.DeprecatedCount = 3
+	h.create(ev)
+	stored := &eventsv1.Event{}
+	if err := h.cl.Get(t.Context(), client.ObjectKeyFromObject(ev), stored); err != nil {
+		t.Fatal(err)
+	}
+	listAtStart(h, stored)
+	h.reconcileEvent(ev.Name)
+	if got := h.one(); got.FoldOnly {
+		t.Fatalf("event with a recent deprecated last timestamp: %+v, want not FoldOnly", got)
+	}
+}
+
+// An event with no usable time (no series, no deprecated last timestamp, no event time) counts as before: its
+// creation timestamp is the API server's and does not decide.
+func TestListedEventOfAGonePodWithNoTimeIsNotFoldOnly(t *testing.T) {
+	h := newHarness(t, Config{})
+	ev := warning("mount", 0)
+	ev.Reason, ev.Action = "FailedMount", ""
+	ev.CreationTimestamp = metav1.NewTime(t0.Add(-time.Hour))
+	ev.EventTime = metav1.MicroTime{}
+	h.create(ev)
+	stored := &eventsv1.Event{}
+	if err := h.cl.Get(t.Context(), client.ObjectKeyFromObject(ev), stored); err != nil {
+		t.Fatal(err)
+	}
+	listAtStart(h, stored)
+	h.reconcileEvent(ev.Name)
+	if got := h.one(); got.FoldOnly {
+		t.Fatalf("event with no usable time: %+v, want not FoldOnly", got)
 	}
 }

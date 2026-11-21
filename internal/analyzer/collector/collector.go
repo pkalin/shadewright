@@ -127,8 +127,8 @@ type Observation struct {
 	// then count Increase(what it already counted for this Occurrence).
 	MayRepeat bool
 	// FoldOnly is set on the observation of an event from before the collector's start about a pod that is
-	// gone (#996, decided 2026-11-21): the start listed the event and it has not changed since, and its pod
-	// was not found. Such an observation opens no Incident. The consumer counts it only on an Incident that
+	// gone (#996, decided 2026-11-21): the start listed the event and it has not changed since, its last
+	// occurrence is more than StaleOnStart before the start, and its pod was not found. Such an observation opens no Incident. The consumer counts it only on an Incident that
 	// exists: the one that counted its occurrence, or the one of its fingerprint; with neither it is dropped.
 	// A restart thus opens no Incident that the running collector would not have opened.
 	FoldOnly bool

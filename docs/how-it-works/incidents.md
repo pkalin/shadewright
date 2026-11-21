@@ -22,7 +22,7 @@ Each symptom gets a fingerprint: a hash of the namespace, the owning workload, t
 
 A symptom seen once opens nothing. It opens an Incident when it is seen again between 2 and 15 minutes after the first time. This keeps a short blip, such as a probe failing while a pod starts, from becoming an Incident. A few symptoms open one at once, because a single sighting already proves the problem: a container killed for running out of memory is the usual case.
 
-A restart of the analyzer loses nothing that matters. First sightings are held in memory only, and a real symptom comes back. A restart opens nothing new either: an old event about a pod that was deleted before the restart is counted only on an Incident that already exists, and an event already counted on an Incident stays on it.
+A restart of the analyzer loses nothing that matters. First sightings are held in memory only, and a real symptom comes back. A restart opens nothing new either: an event about a pod that was deleted before the restart, last seen more than 5 minutes before it, is counted only on an Incident that already exists, and an event already counted on an Incident stays on it.
 
 A crash loop produces many follow-on events (`BackOff`, failing probes). When the pod status already shows the cause, those events are counted on the cause's Incident and open none of their own.
 

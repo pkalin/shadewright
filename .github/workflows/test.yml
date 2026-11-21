@@ -8,6 +8,10 @@ on:
         description: Whether the job runs; ci.yml passes false when no file of this group changed.
         type: boolean
         default: true
+    secrets:
+      CODECOV_TOKEN:
+        description: Upload token of the Codecov project; without it the coverage job uploads nothing and passes.
+        required: false
 
 permissions: {}
 
@@ -72,6 +76,15 @@ jobs:
             done
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      # cover.out is written by the unit-race line of make test; the coverage job uploads it.
+      - name: Upload coverage profile
+        if: ${{ success() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: cover.out
+          if-no-files-found: ignore
+
       # The junit files and JSON logs of every test line of make test, also when a test failed.
       - name: Upload test reports
         if: always()
@@ -80,3 +93,43 @@ jobs:
           name: test-reports
           path: test-reports/
           if-no-files-found: ignore
+
+  # The upload has its own job because the Codecov action downloads the uploader at run time. Here it runs away
+  # from the test job's caches and gets nothing but the coverage file and the upload token.
+  coverage:
+    needs: test
+    if: ${{ inputs.run != false && needs.test.result == 'success' }}
+    permissions:
+      contents: read
+    name: coverage upload
+    runs-on: ubuntu-latest
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+    steps:
+      - name: No token
+        if: env.CODECOV_TOKEN == ''
+        run: echo "no token, nothing uploaded"
+
+      - name: Clone the code
+        if: env.CODECOV_TOKEN != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the coverage profile
+        if: env.CODECOV_TOKEN != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage
+
+      # version pins the uploader the action downloads, so a run does not take whatever is latest.
+      - name: Upload to Codecov
+        if: env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: cover.out
+          disable_search: true
+          fail_ci_if_error: false
+          version: v11.3.2
+          disable_telem: true

@@ -42,7 +42,7 @@ type Labels map[string][]string
 // in controller-runtime's registry (#873): a test that checks that registry adds it to its own table.
 func WithRedaction(want map[string]Labels) map[string]Labels {
 	all := maps.Clone(want)
-	all["shadewright_redaction_withheld_total"] = Labels{"reason": {redact.ReasonWork, redact.ReasonSize}}
+	all["shadewright_redaction_withheld_total"] = Labels{"reason": {redact.ReasonWork, redact.ReasonSize, redact.ReasonHeap}}
 	return all
 }
 

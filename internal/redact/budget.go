@@ -49,6 +49,21 @@ const (
 	// request body (3 MiB), so no object that can exist is withheld by it; an object stored is smaller still
 	// (about 1.5 MiB with etcd's default request limit).
 	MaxEntry = 4 << 20
+	// HeapPerByte and HeapFixed bound the heap one redaction may hold (#873, decision of 2026-11-21 on the heap): at
+	// most HeapPerByte bytes for each byte of the entry plus HeapFixed, 46 MiB for the largest entry a caller passes
+	// (an object of about 1.5 MiB), inside the 48 MiB the decision allows and well inside the analyzer's limit of
+	// 128 Mi. TestHeapOfOneEntryIsBounded measures it at the largest entry of every entry point, on the worst shapes.
+	HeapPerByte = 28
+	HeapFixed   = 4 << 20
+	// FreePieces is how many pieces an answer (Pieces), or strings a sequence (Strings), may hold whatever its
+	// bytes: past it, an answer of more than one piece for every PieceBytes bytes, or a sequence of more than one
+	// string for every ItemBytes bytes, is withheld before any work (ReasonHeap). What a piece or a string holds
+	// besides its bytes (its place in the answer, the spans found in it, its result) would take it over HeapPerByte.
+	// An answer a read tool writes for an object has each value with its key and the text around it, so it stays
+	// under one piece for every PieceBytes bytes.
+	FreePieces = 4096
+	PieceBytes = 2
+	ItemBytes  = 16
 )
 
 // Withheld is what an entry point returns in place of an entry it withholds: a fixed marker, with nothing of the
@@ -64,18 +79,33 @@ const (
 	ReasonWork = "work"
 	// ReasonSize: the entry is longer than MaxEntry, withheld before any work.
 	ReasonSize = "size"
+	// ReasonHeap: the entry is made of more pieces or strings than its bytes allow (FreePieces), withheld before
+	// any work, so that its redaction holds no more heap than the bound (HeapPerByte).
+	ReasonHeap = "heap"
 )
 
 // withheldTotal counts the entries withheld, by reason; both series start at zero.
 var withheldTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "shadewright_redaction_withheld_total",
-	Help: "Entries redaction withheld whole, by reason (work: the work budget ran out; size: longer than the bound).",
+	Help: "Entries redaction withheld whole, by reason (work: the work budget ran out; size: longer than the bound; " +
+		"heap: more pieces or strings than its bytes allow).",
 }, []string{"reason"})
 
 func init() {
 	metrics.Registry.MustRegister(withheldTotal)
 	withheldTotal.WithLabelValues(ReasonWork)
 	withheldTotal.WithLabelValues(ReasonSize)
+	withheldTotal.WithLabelValues(ReasonHeap)
+}
+
+// tooManyParts reports whether an entry of size bytes made of parts pieces (or strings), each standing for
+// perPart bytes, is withheld before any work for the heap they would hold (ReasonHeap), and counts it if so.
+func tooManyParts(parts, size, perPart int) bool {
+	if parts <= FreePieces+size/perPart {
+		return false
+	}
+	withheldTotal.WithLabelValues(ReasonHeap).Inc()
+	return true
 }
 
 // budgetOf returns the budget of an entry of size bytes.

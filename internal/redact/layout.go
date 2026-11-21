@@ -180,6 +180,9 @@ func (r *Redactor) meteredPieces(ps []Piece, f func(wm *meter.Meter) []string) (
 	for _, p := range ps {
 		size += len(p.Text) + len(p.Key)
 	}
+	if size <= MaxEntry && tooManyParts(len(ps), size, PieceBytes) {
+		return withheldStrings(len(ps)), false
+	}
 	if out, ok := metered(size, f); ok {
 		return out, true
 	}
@@ -191,7 +194,13 @@ func (r *Redactor) meteredPieces(ps []Piece, f func(wm *meter.Meter) []string) (
 // joined by line breaks: what String hides joined, Strings hides apart).
 // With fits not nil, the form of the markers is the first at which fits holds (PiecesFitting) instead.
 func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined bool, fits func([]string) bool) []string {
-	var data []string
+	n := 0
+	for _, p := range ps {
+		if p.Data {
+			n++
+		}
+	}
+	data := make([]string, 0, n) // sized once: the heap of an answer of many pieces is a few words a piece
 	for _, p := range ps {
 		tick(wm, 1)
 		if p.Data {
@@ -199,16 +208,10 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 		}
 	}
 	starts := seqValues(wm, data)
-	ws := make([]written, len(ps))
-	var raw strings.Builder
-	for i, p := range ps {
-		tick(wm, 1)
-		ws[i] = write(wm, p)
-		raw.WriteString(ws[i].text)
-	}
-	// own holds, by piece, the spans found in its written text; reading 1 first. A value repeated in the pieces
-	// (a label in the series lines of several metric templates) is read once: ownSpans depends on the text only.
-	own := make([][]span, len(ps))
+	l := newAnswerLayout(wm, ps, n)
+	// own holds, by data piece, the spans found in its written text; reading 1 first. A value repeated in the
+	// pieces (a label in the series lines of several metric templates) is read once: ownSpans depends on the text
+	// only.
 	read := make(map[string][]span)
 	// The long windows the rules read in the values alone, read again in the answer only where something else
 	// stands around them (windows.go).
@@ -216,12 +219,12 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 	k := 0
 	for i, p := range ps {
 		tick(wm, 1)
-		w := ws[i]
+		w := l.w(i)
 		if !p.Data {
 			continue
 		}
 		if hiddenByObject(wm, p) {
-			own[i] = []span{{start: 0, end: len(w.text), kind: KindCredential, rule: len(r.rules)}}
+			l.add(i, span{start: 0, end: len(w.text), kind: KindCredential, rule: len(r.rules)})
 		} else {
 			found, ok := read[p.Text]
 			if !ok {
@@ -230,28 +233,28 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 			}
 			for _, sp := range found {
 				tick(wm, 1)
-				own[i] = append(own[i], w.carry(wm, sp))
+				l.add(i, w.carry(wm, sp))
 			}
 			if s := starts[k]; s >= 0 && s < len(p.Text) {
-				own[i] = append(own[i], w.carry(wm, span{start: s, end: len(p.Text), kind: KindCredential, rule: len(r.rules)}))
+				l.add(i, w.carry(wm, span{start: s, end: len(p.Text), kind: KindCredential, rule: len(r.rules)}))
 			}
 		}
 		k++
 	}
 	// Reading 2: the answer as the tool writes it, each match ended at the line breaks of the values.
-	wsize := func(i int) int { return len(ws[i].text) }
-	answer := raw.String()
+	wsize := func(i int) int { return int(l.off[i+1] - l.off[i]) }
+	answer := l.answer
 	matches := r.ruleMatchesWith(wm, answer, ids)
-	widen := func(i int, sp span) span { return ws[i].widen(wm, sp) }
-	text := func(i int) string { return ws[i].text }
+	widen := func(i int, sp span) span { return l.w(i).widen(wm, sp) }
+	text := func(i int) string { return l.w(i).text }
 	if joined {
 		// What String hides in the answer, the reading of the release before included, as String reads it: a match
 		// is not ended at the line breaks of the values (#845, fifteenth decision, P2).
 		whole := append(slices.Clone(matches), r.releasedString(wm, answer, false, nil)...)
-		r.cutAnswer(wm, ps, own, settle(wm, answer, whole), widen, text)
+		r.cutAnswer(wm, ps, l.add, settle(wm, answer, whole), widen, text)
 	}
-	reading2 := endAtValueLines(wm, ps, ws, answer, matches)
-	r.cutAnswer(wm, ps, own, settle(wm, answer, endAtObjectValues(wm, ps, wsize, reading2)), widen, text)
+	reading2 := endAtValueLines(wm, ps, l.w, answer, matches)
+	r.cutAnswer(wm, ps, l.add, settle(wm, answer, endAtObjectValues(wm, ps, wsize, reading2)), widen, text)
 	// Reading 3: the release before, on the pieces as they were read.
 	hidden := mergeSpans(wm, r.releasedPieces(wm, ps))
 	off, h := 0, 0
@@ -276,16 +279,16 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 			}
 			sp.start, sp.end = from, min(sp.end, end)-off
 			if sp.end > sp.start { // an empty value has no byte to carry the span to
-				own[i] = append(own[i], ws[i].carry(wm, sp))
+				l.add(i, l.w(i).carry(wm, sp))
 			}
 		}
 		off = end
 	}
-	merged := make([][]span, len(ps))
+	l.group()
 	for i, p := range ps {
 		tick(wm, 1)
 		if p.Data {
-			merged[i] = mergeSpans(wm, own[i])
+			l.merge(wm, i)
 		}
 	}
 	out := make([]string, len(ps))
@@ -294,7 +297,7 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 			tick(wm, 1)
 			for i := range ps {
 				tick(wm, 1)
-				out[i] = ws[i].render(wm, merged[i], level)
+				out[i] = l.w(i).render(wm, l.spansOf(i), level)
 			}
 			if fits(out) {
 				break
@@ -302,31 +305,136 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 		}
 		return out
 	}
-	level := fitLevel(wm, ws, merged, limit)
+	level := fitLevel(wm, len(ps), l.w, l.spansOf, limit)
 	for i := range ps {
 		tick(wm, 1)
-		out[i] = ws[i].render(wm, merged[i], level)
+		out[i] = l.w(i).render(wm, l.spansOf(i), level)
 	}
 	return out
 }
 
-// fitLevel returns the first level of the markers (markerAt) at which the pieces written ws, with the sorted,
-// disjoint spans of each replaced (written.render), are at most limit bytes long; the last level when none is,
-// 0 when limit is negative.
-func fitLevel(wm *meter.Meter, ws []written, merged [][]span, limit int) int {
+// answerLayout is the answer the pieces make as written, kept so that an answer of many short pieces holds a few
+// words a piece (#873, decision of 2026-11-21 on the heap): the answer once, where each piece starts in it, and
+// for each data piece the map of its units and the spans found in it.
+type answerLayout struct {
+	answer string
+	off    []int32 // where piece i starts in answer; the last is the length of answer
+	data   []int32 // the index of piece i among the data pieces, -1 for a piece the tool writes
+	units  []*units
+	// spans holds the spans found in the data pieces, in the order they were found, and owner the data piece of
+	// each, until group sorts them by piece (keeping that order within a piece) and from[d] says where the spans of
+	// data piece d start: a piece without one holds four bytes for them.
+	spans []span
+	owner []int32
+	from  []int32
+	kept  []int32 // after merge, how many spans each data piece keeps
+}
+
+// newAnswerLayout writes the pieces ps, n of which are data pieces, as the answer writes them.
+func newAnswerLayout(wm *meter.Meter, ps []Piece, n int) *answerLayout {
+	l := &answerLayout{off: make([]int32, len(ps)+1), data: make([]int32, len(ps)), units: make([]*units, 0, n),
+		from: make([]int32, n+1)}
+	total := 0
+	for _, p := range ps {
+		total += writtenLen(p)
+	}
+	var raw strings.Builder
+	raw.Grow(total) // sized once, so the answer is not held twice while it grows
+	for i, p := range ps {
+		tick(wm, 1)
+		w := write(wm, p)
+		l.data[i] = -1
+		if p.Data {
+			l.data[i] = int32(len(l.units)) // #nosec G115 -- an entry is at most MaxEntry bytes
+			l.units = append(l.units, w.units)
+		}
+		raw.WriteString(w.text)
+		l.off[i+1] = int32(raw.Len()) // #nosec G115 -- an answer is at most six times an entry
+	}
+	l.answer = raw.String()
+	return l
+}
+
+// w returns piece i as the answer writes it.
+func (l *answerLayout) w(i int) written {
+	w := written{text: l.answer[l.off[i]:l.off[i+1]]}
+	if d := l.data[i]; d >= 0 {
+		w.units = l.units[d]
+	}
+	return w
+}
+
+// add adds a span to data piece i.
+func (l *answerLayout) add(i int, sp span) {
+	l.spans, l.owner = append(l.spans, sp), append(l.owner, l.data[i])
+}
+
+// group sorts the spans by their data piece, keeping the order in which each piece's were found, once every
+// reading has added its own.
+func (l *answerLayout) group() {
+	for _, d := range l.owner {
+		l.from[d+1]++
+	}
+	for d := 1; d < len(l.from); d++ {
+		l.from[d] += l.from[d-1]
+	}
+	at := slices.Clone(l.from[:len(l.from)-1])
+	sorted := make([]span, len(l.spans))
+	for x, d := range l.owner {
+		sorted[at[d]] = l.spans[x]
+		at[d]++
+	}
+	l.spans, l.owner = sorted, nil
+}
+
+// merge merges the spans of data piece i in place (mergeSpans), once they are grouped; the merged spans stay at
+// the start of the piece's part and from says where they end through ends.
+func (l *answerLayout) merge(wm *meter.Meter, i int) {
+	d := l.data[i]
+	own := l.spans[l.from[d]:l.from[d+1]]
+	merged := mergeSpans(wm, own)
+	l.ends(d, len(merged))
+}
+
+// ends records that data piece d keeps its first n spans.
+func (l *answerLayout) ends(d int32, n int) {
+	if l.kept == nil {
+		l.kept = make([]int32, len(l.from)-1)
+	}
+	l.kept[d] = int32(n) // #nosec G115 -- as in newAnswerLayout
+}
+
+// spansOf returns the spans of piece i, nil for a piece the tool writes.
+func (l *answerLayout) spansOf(i int) []span {
+	d := l.data[i]
+	if d < 0 {
+		return nil
+	}
+	n := l.from[d+1] - l.from[d]
+	if l.kept != nil {
+		n = l.kept[d]
+	}
+	return l.spans[l.from[d] : l.from[d]+n]
+}
+
+// fitLevel returns the first level of the markers (markerAt) at which the n pieces written w(i), with the sorted,
+// disjoint spans of each, spans(i), replaced (written.render), are at most limit bytes long; the last level when
+// none is, 0 when limit is negative.
+func fitLevel(wm *meter.Meter, n int, w func(i int) written, spans func(i int) []span, limit int) int {
 	level := 0
 	for ; limit >= 0 && level < markerLevels-1; level++ {
 		tick(wm, 1)
-		n := 0
-		for i, w := range ws {
+		size := 0
+		for i := range n {
 			tick(wm, 1)
-			n += len(w.text)
-			for _, sp := range merged[i] {
+			wi := w(i)
+			size += len(wi.text)
+			for _, sp := range spans(i) {
 				tick(wm, 1)
-				n += len(markerAt(wm, sp.kind, w.size(wm, sp, level), level)) - (sp.end - sp.start)
+				size += len(markerAt(wm, sp.kind, wi.size(wm, sp, level), level)) - (sp.end - sp.start)
 			}
 		}
-		if n <= limit {
+		if size <= limit {
 			break
 		}
 	}
@@ -338,11 +446,13 @@ func fitLevel(wm *meter.Meter, ws []written, merged [][]span, limit int) int {
 // covers, as the release before wrote its markers on the values before they were escaped), so `\"` is one "*".
 // The work is linear in the length of sp.
 func (w written) size(wm *meter.Meter, sp span, level int) int {
-	if level == 0 || w.unitEnd == nil {
+	if level == 0 || !w.mapped() || sp.end <= sp.start {
 		return sp.end - sp.start
 	}
-	n := 0
-	for x := sp.start; x < sp.end; x = w.unitEnd[x] {
+	tick(wm, 1)
+	_, x := w.unitOfText(sp.start)
+	n := 1
+	for ; x < sp.end; x += w.textUnit(x) {
 		tick(wm, 1)
 		n++
 	}
@@ -367,13 +477,13 @@ func (w written) render(wm *meter.Meter, spans []span, level int) string {
 	return b.String()
 }
 
-// cutAnswer adds to own, by data piece, the spans of a reading of the whole answer (sorted, disjoint, on the
+// cutAnswer adds with add, by data piece, the spans of a reading of the whole answer (sorted, disjoint, on the
 // text of that reading, where piece i is written text(i)), cut at each piece's ends and carried to the piece's
 // written text by to. A span that begins before a piece takes it from its first byte that is no blank: the blanks
 // before that stay as the indentation they are, as for a value a key outside it takes. A piece the
 // object hides whole takes nothing more: it is hidden whole already. The work is linear in the length of the
 // text and the number of pieces and spans.
-func (r *Redactor) cutAnswer(wm *meter.Meter, ps []Piece, own [][]span, spans []span, to func(i int, sp span) span, text func(i int) string) {
+func (r *Redactor) cutAnswer(wm *meter.Meter, ps []Piece, add func(i int, sp span), spans []span, to func(i int, sp span) span, text func(i int) string) {
 	off, next := 0, 0
 	for i, p := range ps {
 		tick(wm, 1)
@@ -401,7 +511,7 @@ func (r *Redactor) cutAnswer(wm *meter.Meter, ps []Piece, own [][]span, spans []
 				}
 				sp.start, sp.end = from, min(sp.end, end)-off
 				if sp.end > sp.start {
-					own[i] = append(own[i], to(i, sp))
+					add(i, to(i, sp))
 				}
 			}
 		}
@@ -419,12 +529,82 @@ func isLineBreak(_ *meter.Meter, c rune) bool {
 	return false
 }
 
-// Kinds of the bytes of the answer for endAtValueLines.
+// Kinds of the bytes of the answer for endAtValueLines, two bits each.
 const (
 	byteSolid     = iota // any other byte
 	byteBlank            // a space or a tab, or a line break the tool writes
 	byteLineBreak        // a byte of the unit a line break of a value is written as
 )
+
+// kindBlock is the number of bytes of the answer a block of lineKinds summarises.
+const kindBlock = 64
+
+// lineKinds holds the kind of each byte of an answer, two bits a byte, and for each block of kindBlock bytes the
+// first block at or after it that holds a byte of each kind that ends a search (byteSolid, byteLineBreak): about
+// three eighths of a byte for each byte of the answer, so the heap it holds stays a small part of the bound of an
+// entry (#873, decision of 2026-11-21 on the heap).
+type lineKinds struct {
+	n     int
+	bits  []uint64
+	solid []int32 // the first block at or after b with a solid byte, len(solid)-1 for none
+	brk   []int32 // the same for a byte of a line break of a value
+}
+
+// newLineKinds returns the kinds of an answer of n bytes, every byte solid until set.
+func newLineKinds(n int) *lineKinds {
+	return &lineKinds{n: n, bits: make([]uint64, (n+31)/32)}
+}
+
+func (l *lineKinds) set(x int, k byte) { l.bits[x/32] |= uint64(k) << (2 * (x % 32)) }
+
+func (l *lineKinds) at(x int) byte { return byte(l.bits[x/32]>>(2*(x%32))) & 3 }
+
+// index builds the summaries of the blocks, once every kind is set: one step a byte.
+func (l *lineKinds) index(wm *meter.Meter) {
+	nb := (l.n + kindBlock - 1) / kindBlock
+	l.solid, l.brk = make([]int32, nb+1), make([]int32, nb+1)
+	l.solid[nb], l.brk[nb] = int32(nb), int32(nb) // #nosec G115 -- an entry is at most MaxEntry bytes
+	for x := l.n - 1; x >= 0; x-- {
+		tick(wm, 1)
+		b := x / kindBlock
+		if x == min(l.n, (b+1)*kindBlock)-1 { // the last byte of its block: the block starts as the one after it
+			l.solid[b], l.brk[b] = l.solid[b+1], l.brk[b+1]
+		}
+		switch l.at(x) {
+		case byteSolid:
+			l.solid[b] = int32(b) // #nosec G115 -- as above
+		case byteLineBreak:
+			l.brk[b] = int32(b) // #nosec G115 -- as above
+		}
+	}
+}
+
+// next returns the first byte at or after x of kind k (byteSolid or byteLineBreak), n for none: a scan of at most
+// two blocks.
+func (l *lineKinds) next(x int, k byte) int {
+	blocks := l.solid
+	if k == byteLineBreak {
+		blocks = l.brk
+	}
+	b := x / kindBlock
+	if b >= len(blocks)-1 {
+		return l.n
+	}
+	if int(blocks[b]) == b {
+		for ; x < min(l.n, (b+1)*kindBlock); x++ {
+			if l.at(x) == k {
+				return x
+			}
+		}
+	}
+	b = int(blocks[b+1])
+	if b >= len(blocks)-1 {
+		return l.n
+	}
+	for x = b * kindBlock; l.at(x) != k; x++ {
+	}
+	return x
+}
 
 // endAtValueLines ends each match of reading 2 on the answer as written (the pieces ws joined) at the first line
 // break of a value after the match's first byte that is no blank and no line break (#845, tenth decision of
@@ -433,65 +613,68 @@ const (
 // lines after it stay, as main kept them. A match still reaches across what the encoding puts side by side (a
 // key and its value, the items of a list, a flag and its argument), and a value that begins on the line after
 // its key is still taken: the line breaks before the match's first other byte do not end it. The matches are
-// changed in place and returned. The work and the allocation are linear in the length of the answer and the
-// number of matches.
-func endAtValueLines(wm *meter.Meter, ps []Piece, ws []written, answer string, matches []span) []span {
+// changed in place and returned. The work is linear in the length of the answer and the number of matches; the
+// kinds of the bytes are held only when there is a match, in about three eighths of a byte per byte of the answer
+// (lineKinds). The steps are counted as when every byte held its kind in a byte and two offsets, with or without a
+// match, so the budget of an entry did not move with the heap it holds.
+func endAtValueLines(wm *meter.Meter, ps []Piece, ws func(i int) written, answer string, matches []span) []span {
 	n := len(answer)
-	kind := make([]byte, n)
+	var kinds *lineKinds
+	if len(matches) > 0 {
+		kinds = newLineKinds(n)
+	}
+	set := func(x int, k byte) {
+		if kinds != nil && k != byteSolid {
+			kinds.set(x, k)
+		}
+	}
 	off := 0
 	for i, p := range ps {
 		tick(wm, 1)
-		w := ws[i]
+		w := ws(i)
 		if !p.Data {
 			for j := range len(w.text) {
 				tick(wm, 1)
 				if c := w.text[j]; c == ' ' || c == '\t' || c == '\n' || c == '\r' {
-					kind[off+j] = byteBlank
+					set(off+j, byteBlank)
 				}
 			}
 			off += len(w.text)
 			continue
 		}
-		for j := 0; j < len(p.Text); {
-			tick(wm, 1)
-			c, size := utf8.DecodeRuneInString(p.Text[j:])
-			s, e := j, j+size
-			if w.start != nil {
-				s, e = w.start[j], w.end[j]
-			}
-			k := byte(byteSolid)
-			switch {
-			case c == utf8.RuneError && size == 1:
-			case isLineBreak(wm, c):
-				k = byteLineBreak
-			case c == ' ' || c == '\t':
-				k = byteBlank
-			}
-			for x := s; x < e; x++ {
+		w.eachUnit(func(vs, ve, us, ue int) {
+			for j := vs; j < ve; {
 				tick(wm, 1)
-				kind[off+x] = k
+				c, size := utf8.DecodeRuneInString(p.Text[j:])
+				if j+size > ve {
+					size = ve - j // a byte of a run of invalid bytes, one unit in JSON
+				}
+				k := byte(byteSolid)
+				switch {
+				case c == utf8.RuneError && size == 1:
+				case isLineBreak(wm, c):
+					k = byteLineBreak
+				case c == ' ' || c == '\t':
+					k = byteBlank
+				}
+				for x := us; x < ue; x++ {
+					tick(wm, 1)
+					set(off+x, k)
+				}
+				j += size
 			}
-			j += size
-		}
+		})
 		off += len(w.text)
 	}
-	// nextSolid[x] and nextBreak[x] are the first byte at or after x of that kind, n for none.
-	nextSolid, nextBreak := make([]int, n+1), make([]int, n+1)
-	nextSolid[n], nextBreak[n] = n, n
-	for x := n - 1; x >= 0; x-- {
-		tick(wm, 1)
-		nextSolid[x], nextBreak[x] = nextSolid[x+1], nextBreak[x+1]
-		switch kind[x] {
-		case byteSolid:
-			nextSolid[x] = x
-		case byteLineBreak:
-			nextBreak[x] = x
-		}
+	if kinds == nil {
+		tick(wm, n) // the steps of index, as when the kinds were always built
+		return matches
 	}
+	kinds.index(wm)
 	for i := range matches {
 		tick(wm, 1)
-		if q := nextSolid[min(matches[i].start, n)]; q < matches[i].end {
-			matches[i].end = min(matches[i].end, nextBreak[q])
+		if q := kinds.next(min(matches[i].start, n), byteSolid); q < matches[i].end {
+			matches[i].end = min(matches[i].end, kinds.next(q, byteLineBreak))
 		}
 	}
 	return matches
@@ -541,23 +724,53 @@ func hiddenByObject(wm *meter.Meter, p Piece) bool {
 	return p.Data && (p.Whole || (p.Key != "" && secretKey(wm, p.Key)))
 }
 
+// unitStep is the distance, in bytes, between two checkpoints of the map of a written piece's units.
+const unitStep = 64
+
 // written is a piece as the answer writes it, with the units it was written in: each character of a data piece
 // (an invalid byte counts as one, and in JSON a run of them) is one unit of the value and one of the answer.
+//
+// The map from bytes to units is kept as checkpoints, one every unitStep bytes of the value and of the text, and
+// the units between two checkpoints are read again from the value or from the text when a span is carried or
+// widened (unitOfValue, unitOfText): about a sixteenth of a byte for each byte, where an offset for each byte of
+// the value and two for each byte of the text held about twenty times the value for a value of characters JSON
+// writes as six-byte escapes (#873, decision of 2026-11-21 on the heap). What a span is carried or widened to is
+// the same.
 type written struct {
 	text string
-	// For a piece written in another form than AsIs: start and end give, for each byte of the value, the
-	// offsets in text where the unit holding it starts and ends; unitStart and unitEnd give the same for each
-	// byte of text. nil when text is the value.
-	start, end, unitStart, unitEnd []int
+	// units maps the bytes of a piece written in another form than AsIs; nil when text is the value, so that a
+	// piece of an answer of many short pieces holds a text and a pointer.
+	*units
 }
+
+// units is the map of a written piece's units: the value, its form, and for each checkpoint b past the first of
+// the value, where in the text (unitText[b-1]) and in the value (unitValue[b-1]) the unit holding byte b*unitStep
+// of the value starts; the first is 0 in both, so a short value holds no checkpoint.
+type units struct {
+	form                Form
+	value               string
+	unitText, unitValue []int32
+	// textBack[b-1] is how many bytes before byte b*unitStep of the text the unit holding it starts: a unit is at
+	// most six bytes long.
+	textBack []uint8
+}
+
+// mapped reports whether w's text is not its value, so that its offsets are mapped by units.
+func (w written) mapped() bool { return w.units != nil }
 
 // write writes the piece p as the answer writes it.
 func write(wm *meter.Meter, p Piece) written {
-	if !p.Data || p.Form == AsIs {
-		return written{text: p.Text}
+	if !p.Data || p.Form == AsIs || p.Text == "" {
+		return written{text: p.Text} // an empty value has no byte a span is carried from
 	}
 	n := len(p.Text)
-	w := written{start: make([]int, n), end: make([]int, n)}
+	if plain(p.Form, p.Text) {
+		// Every unit is one byte written as itself: the text is the value and every span stays as it is, so the piece
+		// holds no map (the steps are those of the loop below: a unit, its byte in the value and in the text).
+		tick(wm, 3*n)
+		return written{text: p.Text}
+	}
+	w := written{units: &units{form: p.Form, value: p.Text}}
 	var b strings.Builder
 	b.Grow(n)
 	for i := 0; i < n; {
@@ -572,7 +785,7 @@ func write(wm *meter.Meter, p Piece) written {
 			// (#845, fifteenth decision, P4).
 			for i+size < n {
 				tick(wm, 1)
-				if r, sz := utf8.DecodeRuneInString(p.Text[i+size:]); r != utf8.RuneError || sz != 1 {
+				if !invalidAt(p.Text, i+size) {
 					break
 				}
 				size++
@@ -582,18 +795,163 @@ func write(wm *meter.Meter, p Piece) written {
 			writeUnit(wm, &b, p.Form, p.Text[i:i+size], c, size)
 		}
 		to := b.Len()
-		for j := i; j < i+size; j++ {
-			tick(wm, 1)
-			w.start[j], w.end[j] = from, to
+		for (len(w.unitText)+1)*unitStep < i+size {
+			w.unitText, w.unitValue = append(w.unitText, int32(from)), append(w.unitValue, int32(i)) // #nosec G115 -- an entry is at most MaxEntry bytes
 		}
-		for range to - from {
-			tick(wm, 1)
-			w.unitStart, w.unitEnd = append(w.unitStart, from), append(w.unitEnd, to)
+		for (len(w.textBack)+1)*unitStep < to {
+			w.textBack = append(w.textBack, uint8((len(w.textBack)+1)*unitStep-from)) // #nosec G115 -- a unit is at most six bytes
 		}
+		tick(wm, size+to-from) // as many steps as an offset for each byte of the value and two for each of the text
 		i += size
 	}
 	w.text = b.String()
 	return w
+}
+
+// plain reports whether every byte of s is ASCII that form f writes as itself: no control character, no DEL on
+// a line, no quote or backslash in JSON.
+func plain(f Form, s string) bool {
+	for i := range len(s) {
+		switch c := s[i]; {
+		case c >= utf8.RuneSelf, c < 0x20:
+			return false
+		case f == Line && c == 0x7f, f == JSON && (c == '"' || c == '\\'):
+			return false
+		}
+	}
+	return true
+}
+
+// writtenLen returns the length of the piece p as the answer writes it (write), without writing it.
+func writtenLen(p Piece) int {
+	if !p.Data || p.Form == AsIs {
+		return len(p.Text)
+	}
+	n := 0
+	for i := 0; i < len(p.Text); {
+		c, size := utf8.DecodeRuneInString(p.Text[i:])
+		n += unitWidth(p.Form, c, size)
+		if p.Form == JSON && c == utf8.RuneError && size == 1 {
+			for i+size < len(p.Text) && invalidAt(p.Text, i+size) {
+				size++
+			}
+		}
+		i += size
+	}
+	return n
+}
+
+// invalidAt reports whether the byte of s at i is an invalid byte: one that starts no valid UTF-8 sequence.
+func invalidAt(s string, i int) bool {
+	c, size := utf8.DecodeRuneInString(s[i:])
+	return c == utf8.RuneError && size == 1
+}
+
+// unitWidth is the length writeUnit writes for the character c of size bytes in form f.
+func unitWidth(f Form, c rune, size int) int {
+	invalid := c == utf8.RuneError && size == 1
+	switch f {
+	case Line:
+		switch {
+		case invalid, unicode.IsControl(c) || c == ' ' || c == ' ':
+			return 1
+		}
+	case JSON:
+		switch {
+		case invalid:
+			return 1
+		case c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t' || c == '\b' || c == '\f':
+			return 2
+		case c < 0x20 || c == ' ' || c == ' ':
+			return 6
+		}
+	}
+	return size
+}
+
+// eachUnit calls f with each unit of w in order: its bytes [vs, ve) in the value and [us, ue) in the text. With
+// form AsIs a unit is a character, or an invalid byte, and both ranges are the same.
+func (w written) eachUnit(f func(vs, ve, us, ue int)) {
+	if !w.mapped() {
+		for i := 0; i < len(w.text); {
+			_, size := utf8.DecodeRuneInString(w.text[i:])
+			f(i, i+size, i, i+size)
+			i += size
+		}
+		return
+	}
+	pos := 0
+	for i := 0; i < len(w.value); {
+		c, size := utf8.DecodeRuneInString(w.value[i:])
+		width := unitWidth(w.form, c, size)
+		if w.form == JSON && c == utf8.RuneError && size == 1 {
+			for i+size < len(w.value) && invalidAt(w.value, i+size) {
+				size++
+			}
+		}
+		f(i, i+size, pos, pos+width)
+		i += size
+		pos += width
+	}
+}
+
+// unitOfValue returns where in the text the unit holding byte j of the value starts and ends: at most unitStep
+// bytes of the value read from the checkpoint before j, and a run of invalid bytes only up to j.
+func (w written) unitOfValue(j int) (us, ue int) {
+	x := j - j%unitStep
+	i, pos := 0, 0
+	if b := j / unitStep; b > 0 {
+		i, pos = int(w.unitValue[b-1]), int(w.unitText[b-1])
+	}
+	for {
+		c, size := utf8.DecodeRuneInString(w.value[i:])
+		if w.form == JSON && c == utf8.RuneError && size == 1 {
+			// A run of invalid bytes, one unit "?": byte p is in it, and j is when every byte up to j is invalid.
+			p := max(i, x)
+			for p < j && invalidAt(w.value, p+1) {
+				p++
+			}
+			if p >= j {
+				return pos, pos + 1
+			}
+			i, pos = p+1, pos+1
+			continue
+		}
+		width := unitWidth(w.form, c, size)
+		if j < i+size {
+			return pos, pos + width
+		}
+		i, pos = i+size, pos+width
+	}
+}
+
+// textUnit returns the length of the unit that starts at byte s of the text, read from the text: in JSON an
+// escape ("\u" and four digits, or "\" and one character), otherwise one character (the text is valid UTF-8).
+func (w written) textUnit(s int) int {
+	if w.form == JSON && w.text[s] == '\\' {
+		if w.text[s+1] == 'u' {
+			return 6
+		}
+		return 2
+	}
+	_, size := utf8.DecodeRuneInString(w.text[s:])
+	return size
+}
+
+// unitOfText returns where the unit holding byte y of the text starts and ends: at most unitStep bytes read from
+// the checkpoint before y.
+func (w written) unitOfText(y int) (us, ue int) {
+	s := 0
+	if b := y / unitStep; b > 0 {
+		s = b*unitStep - int(w.textBack[b-1])
+	}
+	for {
+		l := w.textUnit(s)
+		if y < s+l {
+			return s, s + l
+		}
+		s += l
+	}
 }
 
 // jsonHex are the digits of a "\u00XX" escape.
@@ -647,16 +1005,18 @@ func writeUnit(_ *meter.Meter, b *strings.Builder, f Form, raw string, c rune, s
 
 // widen widens a span of the written text to the whole units it touches.
 func (w written) widen(_ *meter.Meter, sp span) span {
-	if w.unitStart != nil {
-		sp.start, sp.end = w.unitStart[sp.start], w.unitEnd[sp.end-1]
+	if w.mapped() {
+		sp.start, _ = w.unitOfText(sp.start)
+		_, sp.end = w.unitOfText(sp.end - 1)
 	}
 	return sp
 }
 
 // carry carries a span of the value to the units of the written text it was written as.
 func (w written) carry(_ *meter.Meter, sp span) span {
-	if w.start != nil {
-		sp.start, sp.end = w.start[sp.start], w.end[sp.end-1]
+	if w.mapped() {
+		sp.start, _ = w.unitOfValue(sp.start)
+		_, sp.end = w.unitOfValue(sp.end - 1)
 	}
 	return sp
 }

@@ -316,7 +316,7 @@ func TestCauseFingerprintSeriesTime(t *testing.T) {
 // TestWaitingReasonWinsOverAnOlderKill checks that a current waiting reason of the list is the cause even when
 // an OOM kill of the same container is within the window.
 func TestWaitingReasonWinsOverAnOlderKill(t *testing.T) {
-	for _, reason := range WaitingCauseReasons {
+	for _, reason := range WaitingCauseReasons() {
 		t.Run(reason, func(t *testing.T) {
 			h, pod := causeHarness(t, func(p *corev1.Pod) {
 				withTermination(p, "containerd://oom", ReasonOOMKilled, exitOOM, t0.Add(-time.Minute))
@@ -431,7 +431,7 @@ func TestWaitingReasons(t *testing.T) {
 		h.none()
 	}
 	fps := map[string]string{}
-	for _, reason := range WaitingCauseReasons {
+	for _, reason := range WaitingCauseReasons() {
 		for _, msg := range []string{secret, "Back-off pulling image \"registry.example/app:1\"", ""} {
 			h, pod := causeHarness(t, func(p *corev1.Pod) {
 				p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: containerApp, RestartCount: 2,

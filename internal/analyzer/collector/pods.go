@@ -30,11 +30,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/pkalin/shadewright/internal/incidents/causereason"
 )
 
 const (
-	// ReasonOOMKilled is the termination reason of a container the kernel killed for using too much memory.
-	ReasonOOMKilled = "OOMKilled"
+	// ReasonOOMKilled is the termination reason of a container the kernel killed for using too much memory
+	// (causereason.OOMKilled, which the context builder reads too).
+	ReasonOOMKilled = causereason.OOMKilled
 	// reasonTerminated replaces a termination reason that is not a plain CamelCase word.
 	reasonTerminated = "Terminated"
 	// reportingKubelet is the reporting controller of observations read from pod status.
@@ -104,7 +107,7 @@ func waitings(pod *corev1.Pod) []termination {
 	var out []termination
 	for _, st := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
 		w := st.State.Waiting
-		if w == nil || !slices.Contains(WaitingCauseReasons, w.Reason) {
+		if w == nil || !causereason.IsWaiting(w.Reason) {
 			continue
 		}
 		out = append(out, termination{

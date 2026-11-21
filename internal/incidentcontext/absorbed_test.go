@@ -57,7 +57,7 @@ func tallyOf(t *testing.T, summary string) []string {
 
 func cause(tally ...remediationv1alpha1.AbsorbedTally) *remediationv1alpha1.Incident {
 	inc := incident(deploymentRef())
-	inc.Spec.Reason, inc.Spec.Symptom = reasonOOMKilled, "Container app terminated with exit code 137"
+	inc.Spec.Reason, inc.Spec.Symptom = causereason.OOMKilled, "Container app terminated with exit code 137"
 	inc.Status.Cause, inc.Status.Absorbed = true, tally
 	return inc
 }
@@ -90,7 +90,7 @@ func TestSummaryShowsTheAbsorbedTally(t *testing.T) {
 const reasonNonZeroExit = "Error"
 
 // The decision of 2026-11-21 on #432 (B, corrected the same day): the tally block is shown only for the reasons
-// that showed it before #432 (tallyReasons), which a non-zero exit is not. A cause Incident of a non-zero exit (reason Error, the crash loop of #432) whose status.absorbed holds
+// that showed it before #432 (causereason.Tallied), which a non-zero exit is not. A cause Incident of a non-zero exit (reason Error, the crash loop of #432) whose status.absorbed holds
 // a tally gets the summary of an Incident with none, byte for byte: the model's input does not change until #1080
 // adds the reason.
 func TestSummaryOfANonZeroExitShowsNoTally(t *testing.T) {
@@ -110,10 +110,9 @@ func TestSummaryOfANonZeroExitShowsNoTally(t *testing.T) {
 }
 
 // The decision of 2026-11-21 on #432 (corrects B): the Incidents that showed the tally block before #432 still
-// show it, byte for byte: an OOM kill and each waiting reason the collector reads as a cause (causereason.Waiting,
-// the list behind collector.WaitingCauseReasons).
+// show it, byte for byte: an OOM kill and each waiting reason the collector reads as a cause (causereason.Tallied).
 func TestSummaryShowsTheTallyForEachReasonOfMain(t *testing.T) {
-	want := append([]string{reasonOOMKilled}, causereason.Waiting...)
+	want := causereason.Tallied()
 	b := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
 	before := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
 	anyReasonShowsTally(before)
@@ -128,6 +127,21 @@ func TestSummaryShowsTheTallyForEachReasonOfMain(t *testing.T) {
 		if old := one(t, build(t, before, inc), SectionSummary).Text; got != old {
 			t.Errorf("%s: summary:\n%s\nwant, as before #432:\n%s", reason, got, old)
 		}
+	}
+}
+
+// A Builder whose showsTally is nil (one not made by New, or a test that cleared it) shows the tally for the same
+// reasons as one made by New, causereason.Tallied, and not for a non-zero exit: nil is not "none".
+func TestNilShowsTallyReadsTheList(t *testing.T) {
+	b := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
+	b.showsTally = nil
+	inc := cause(absorbed(remediationv1alpha1.AbsorbedBackOff, 12, testNow.Add(-time.Minute)))
+	if got := one(t, build(t, b, inc), SectionSummary).Text; len(tallyOf(t, got)) != 2 {
+		t.Errorf("an OOM kill's summary with showsTally nil shows no tally:\n%s", got)
+	}
+	inc.Spec.Reason = reasonNonZeroExit
+	if got := one(t, build(t, b, inc), SectionSummary).Text; strings.Contains(got, absorbedHeader) {
+		t.Errorf("a non-zero exit's summary with showsTally nil shows the tally:\n%s", got)
 	}
 }
 

@@ -491,6 +491,15 @@ For an enabled module, the analyzer must also be allowed to read the add-on's ki
 - The gauge `shadewright_analyzer_symptom_source_watched` is `0` for that kind, and the analyzer logs `Not watching a symptom source kind` once per change (`Watch of a symptom source kind failed` for each failed watch).
 - With the Kyverno module enabled and `analyzer.modules.kyverno.clusterWide.enabled` off (the least-privilege default), `ClusterPolicy` and `ClusterPolicyReport` are left out on purpose: they are not named in the condition, the gauge has no series for them, and the log says `the chart leaves its optional grant out` once. Turn the value on to read them. The chart tells the analyzer which grants it rendered (`--module-grants`); a kustomize install passes no such flag, so there every module kind is checked and one without its role is reported as `NotGranted`.
 
+## A crash loop opens a second Incident
+
+A `BackOff` or `Unhealthy` event of a container that exited with a non-zero code counts on the exit's Incident only once the Incident controller confirmed it has seen that exit ([ADR-0039](adr/0039-consequence-symptoms-attach-to-their-causes-incident.md) point 3). When it is not confirmed, the event counts on an out-of-memory kill of the same container in the window if there is one, or goes on as an event with no cause and can open an Incident of its own. Two outcomes of `shadewright_analyzer_held_consequences_total` ([metrics](reference/metrics.md)) count each such removal:
+
+- `cause_unconfirmed`: the controller answered that it has not seen the exit yet, or the analyzer runs without it. The analyzer logs `Went on without the non-zero exit cause of a consequence, the Incident controller has not confirmed it` at info level. A steady rate means the exit's Incident opens later than the 2 minute hold of the event, for example when the Incident gate waits for a second sighting of it.
+- `cause_unanswered`: the question failed or ran out of time when the decision was due. The analyzer logs `Went on without the non-zero exit cause of a consequence, the Incident controller did not answer` at error level, with `causeFingerprint` and the error, and the event does not wait longer. Look for the Incident controller's own errors in the same log (for example a failed load of its Incidents after a start).
+
+Both log lines name the exit's fingerprint (`causeFingerprint`) and, under `fallbackFingerprint`, the out-of-memory kill the event counts on instead, empty when none. The two Incidents of such a crash loop resolve by the usual rules.
+
 ## A component Pod stays not Ready
 
 A Pod of the executor, the analyzer or the verifier turns Ready once the informers of the kinds it cannot work without have synced ([health probes](operate.md#health-probes) lists them). Until then `kubectl -n shadewright-system get pods` shows it `0/1`, and `kubectl describe pod` shows one of two startup probe failures:

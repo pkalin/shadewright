@@ -152,7 +152,11 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	// shown is the cause fingerprint the event's pod shows at this reconcile, once fromEvent has read it.
 	shown := ""
 	leave := func(why string, commit bool) (ctrl.Result, error) {
-		if o, ok := r.c.heldCause(ctx, key, ev.UID, why); ok && (delta > 0 || mayRepeat) {
+		o, ok, err := r.c.heldCause(ctx, key, ev.UID, why)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if ok && (delta > 0 || mayRepeat) {
 			heldEmitted = true
 			return r.emit(ctx, key, &ev, o, shown, delta, mayRepeat)
 		}
@@ -227,8 +231,10 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 // delivery records the series total (consequenceHolds.decided), and a retried one whose pod shows another cause
 // (shown, the cause fromEvent read at this reconcile, empty when none or not read) delivers only those
 // occurrences, with the cause of the decision. A hold that ended with no cause delivers them with the cause
-// shown now: a delivery retry rereads the cause. Whatever path it came by, a non-zero exit stays the cause only
-// when Config.CauseSeen confirmed it (decided 2026-11-21 on #432); else it is removed here. Once that is
+// shown now: a delivery retry rereads the cause. Whatever path it came by (a hold, no room to hold, a delivery
+// retry), a non-zero exit stays the cause only when Config.CauseSeen confirmed it (decided 2026-11-21 on #432):
+// settleExitCause asks for one not confirmed yet, here, and puts the OOM kill of the window or no cause in its
+// place when the answer is not yes. Once that is
 // delivered, the event is reconciled again at once: the later occurrences are a new consequence, held for the
 // cause shown now.
 func (r *eventReconciler) emit(ctx context.Context, key types.NamespacedName, ev *eventsv1.Event, obs Observation,
@@ -238,17 +244,18 @@ func (r *eventReconciler) emit(ctx context.Context, key types.NamespacedName, ev
 	if s, ok := r.c.holds.decided(key, ev.UID, n); ok {
 		if s.cause != "" {
 			// A hold that ended with no cause keeps the cause read now, which the controller may have seen.
-			obs.CauseFingerprint, obs.causeExit, obs.causeConfirmed = s.cause, s.obs.causeExit, s.obs.causeConfirmed
+			obs.copyCause(s.obs)
 		}
 		if shown != "" && shown != s.cause && n > s.total {
 			delta = max(delta-(n-s.total), 0)
 			n, split = s.total, true
 		}
 	}
-	if obs.causeExit && !obs.causeConfirmed {
-		// A non-zero exit is a cause only once the Incident controller confirmed it saw it (decided 2026-11-21 on
-		// #432): unconfirmed, the event goes without a cause, as one whose pod shows none.
-		obs.CauseFingerprint = ""
+	// A non-zero exit is a cause only once the Incident controller confirmed it saw it (decided 2026-11-21 on #432):
+	// asked here when nothing confirmed it yet, it goes without the exit when the answer is not yes, and a failed
+	// ask waits for nothing more (settleExitCause).
+	if _, err := r.c.settleExitCause(ctx, &obs, true); err != nil {
+		return ctrl.Result{}, err
 	}
 	obs.causeExit, obs.causeConfirmed = false, false
 	obs.Occurrence, obs.Began = "event:"+string(ev.UID), r.c.notFuture(created)
@@ -313,7 +320,8 @@ func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observat
 	obs.Class = eventClass(ev, obs.Container)
 	if obs.Class == ClassConsequence {
 		at, ok := kubeletTime(ev)
-		obs.CauseFingerprint, obs.causeExit = c.causeFingerprint(pod, owner, obs.Container, init, at, ok)
+		obs.CauseFingerprint, obs.causeExit, obs.causeFallback = c.causeFingerprint(pod, owner, obs.Container, init, at,
+			ok)
 	}
 	return obs, pod, subjectUsable, nil
 }

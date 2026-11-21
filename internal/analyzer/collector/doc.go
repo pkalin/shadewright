@@ -51,10 +51,14 @@ limitations under the License.
 // those first seen with a cause and those with none in two shares apart; over the bound a consequence is
 // emitted at once.
 //
-// A non-zero exit is the exception (decided 2026-11-21 on #432): it stays the cause of an emitted consequence only
-// when Config.CauseSeen answered true for it. Every other end of the hold (no answer by the end, the pod gone,
-// replaced or deleted, an analyzer restart, no room to hold, no CauseSeen) treats the hold as one with no cause,
-// and the event reconciler removes an unconfirmed exit from the observation before it delivers it.
+// A non-zero exit is the exception (decided 2026-11-21 on #432): it is taken over an OOM kill in the window only
+// when it finished after it, and it stays the cause of an emitted consequence only when Config.CauseSeen answered
+// true for it. One function removes it (settleExitCause, hold.go), and only after asking CauseSeen for it in the
+// same reconcile, on every path (a sample, the end of the hold, the pod gone, the event leaving, no room to hold,
+// a delivery retry). Removed, it gives way to the OOM kill of the window, as main links it, else to no cause,
+// and the hold goes on as one with that cause; the removal is logged and counted cause_unconfirmed (the answer
+// no, or no CauseSeen) or cause_unanswered (a failed or late answer when the decision was due, which waits no
+// longer).
 //
 // Observation-level deduplication: per event the collector remembers the UID and the last handled
 // occurrence count (the series count, or the count of an older recorder, or one), and emits only the

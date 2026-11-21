@@ -29,7 +29,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/incidents/causereason"
 	"github.com/pkalin/shadewright/internal/redact"
 )
 
@@ -68,7 +67,7 @@ const (
 	cutValues
 )
 
-// summaryBlock describes the Incident, most relevant first. A cause Incident of a reason of [tallyReasons] with a
+// summaryBlock describes the Incident, most relevant first. A cause Incident of a reason of causereason.Tallied with a
 // non-empty absorbed tally gets the tally last and always whole (#796, decided 2026-11-16): the summary keeps room for the longest
 // tally ([longestTally]) and fits its other lines in what is left. They fit by shortening values, never by
 // removing a line: the symptom, then the reporting controller, then the reason, then the subject's name, each
@@ -127,7 +126,7 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 	}
 	blk := Block{Section: SectionSummary, Provenance: ProvenanceIncident, Availability: Available}
 	var t lines
-	if b.showsTally != nil && b.showsTally(s.Reason) {
+	if b.tallyShown(s.Reason) {
 		absorbedLines(&t, st.Absorbed)
 	}
 	if t.Len() == 0 {
@@ -528,18 +527,6 @@ func (b *Builder) state(l *lines, s corev1.ContainerState) string {
 	}
 	return "unknown"
 }
-
-// tallyReasons are the Incident reasons whose summary shows the absorbed tally to the model (ADR-0039 point 18,
-// decided 2026-11-21 on #432): the ones that showed it before #432, an OOM kill and the waiting reasons the
-// collector reads as a cause (causereason.Waiting, the list behind collector.WaitingCauseReasons). An Incident of any other
-// reason, a non-zero exit of a crash loop too, gets no block even when status.absorbed holds a tally: the count
-// stays in its status and in kubectl output, and a non-zero exit joins this list once its own scenario is
-// recorded and run on the real models (#1080, ADR-0025 decision 3). New gives each builder this list
-// (Builder.showsTally); a builder without one shows no block.
-var tallyReasons = append([]string{reasonOOMKilled}, causereason.Waiting...)
-
-// reasonOOMKilled is the reason of an Incident of an OOM kill read from pod status.
-const reasonOOMKilled = "OOMKilled"
 
 // absorbedReasons are the consequence reasons the summary shows from status.absorbed, in the order it shows
 // them: the values of the AbsorbedReason enum (ADR-0039 point 16), the fixed table of the rule. An entry with

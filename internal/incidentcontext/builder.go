@@ -21,12 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidents/causereason"
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
@@ -118,8 +118,8 @@ type Builder struct {
 	timeout          time.Duration
 	buildTimeout     time.Duration
 	now              func() time.Time
-	// showsTally reports whether the summary of an Incident of this reason shows its absorbed tally: a reason of
-	// [tallyReasons] (status.go). Nil shows it for none.
+	// showsTally, set by tests only, replaces the list of reasons whose summary shows the absorbed tally. Nil,
+	// as New leaves it, is that list: causereason.Tallied (tallyShown).
 	showsTally func(reason string) bool
 }
 
@@ -163,7 +163,6 @@ func New(cfg Config) (*Builder, error) {
 		pods: cfg.Pods, objects: cfg.Objects, namespaces: namespaces, metrics: cfg.Metrics, logs: cfg.Logs, redactor: cfg.Redactor,
 		limits: cfg.Limits, timeout: cfg.SourceTimeout, buildTimeout: cfg.BuildTimeout, now: cfg.Now,
 		policies: maps.Clone(cfg.Policies), policyReader: cfg.PolicyReader, requestNamespace: cfg.RequestNamespace,
-		showsTally: func(reason string) bool { return slices.Contains(tallyReasons, reason) },
 	}, nil
 }
 
@@ -383,4 +382,15 @@ func (b *Builder) fitTotal(c *Context) {
 			blk.addLabel(LabelContextCut)
 		}
 	}
+}
+
+// tallyShown reports whether the summary of an Incident of reason shows its absorbed tally (ADR-0039 point 18,
+// decided 2026-11-21 on #432): a reason of causereason.Tallied, an OOM kill and the waiting reasons the collector
+// reads as a cause; a non-zero exit is not on it until #1080. A Builder not made by New (showsTally nil) reads the
+// same list, so no Builder hides the tally of those reasons from the model.
+func (b *Builder) tallyShown(reason string) bool {
+	if b.showsTally != nil {
+		return b.showsTally(reason)
+	}
+	return causereason.ShowsTally(reason)
 }

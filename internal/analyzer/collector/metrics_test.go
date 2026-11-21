@@ -64,7 +64,8 @@ func TestSymptomSourceWatchedIsBounded(t *testing.T) {
 	replacedTemplateCheckErrors.WithLabelValues(kindStatefulSet).Add(0)
 	probeSettledSkipped.WithLabelValues("Readiness").Add(0)
 	probeSettledSkipped.WithLabelValues("Startup").Add(0)
-	holdOutcomes := []string{holdOpened, holdNotOpened, holdReleased, holdCauseUnseen, holdDropped, holdOverflow}
+	holdOutcomes := []string{holdOpened, holdNotOpened, holdReleased, holdCauseUnseen, holdDropped, holdOverflow,
+		holdCauseUnconfirmed, holdCauseUnanswered}
 	for _, o := range holdOutcomes {
 		heldConsequences.WithLabelValues(o).Add(0)
 	}

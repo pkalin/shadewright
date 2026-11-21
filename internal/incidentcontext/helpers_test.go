@@ -204,7 +204,7 @@ func webSources() sources {
 }
 
 // anyReasonShowsTally makes each builder show the absorbed tally whatever the Incident's reason: the fit tests
-// check the bound at the schema's longest reason, which must hold for any reason tallyReasons may take later.
+// check the bound at the schema's longest reason, which must hold for any reason causereason.Tallied may take later.
 func anyReasonShowsTally(bs ...*Builder) {
 	for _, b := range bs {
 		b.showsTally = func(string) bool { return true }

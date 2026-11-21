@@ -31,7 +31,7 @@ Before each call (the judge, the cross-check, the judge with the tool result) th
 
 The `reason` of a `budget` outcome names the cap, and every `budget` outcome logs a warning with the family and the month. Only the month cap clears by itself, in the next month. A call over the call cap or the run cap gets `budget` on every run, because the same record makes the same request: such a record is scored only after the cap is raised with `--max-call-tokens` or `--max-run-tokens`.
 
-Reservations are empty files in `--spend-dir`, `spend/<month>/<family>/<day>.<record ID>.<run>.<call>.<tokens>.json`, created only if absent. The day is the UTC day of the same clock read as the month, as `20060102`, and must fall in that month. The record ID goes into the name only in the shape step 1 checks (a lower-case UUID, a dash and a valid time), so no other text reaches a name. The run ID is random per run and stands for the message ID and dequeue count of the job's names (ADR-0047 section 5), which a file run does not have. A name of the layout before the day and the record were added, `<run>.<call>.<tokens>.json`, is still read and counts toward the month's sum, but toward no record's attempts. A file there that is neither stops the run with an error, because the month's sum cannot be trusted. Nothing of a model's answer is stored there or anywhere else, and a run never reuses an earlier run's answers.
+Reservations are empty files in `--spend-dir`, `spend/<month>/<family>/<day>.<record ID>.<run>.<call>.<tokens>.json`, created only if absent. The day is the UTC day of the same clock read as the month, as `20060102`, and must fall in that month. The record ID goes into the name only in the shape step 1 checks (a lower-case UUID, a dash and a valid time), so no other text reaches a name. The run ID is random per run and stands for the message ID and dequeue count of the job's names (ADR-0047 section 5), which a file run does not have. A file there of any other name stops the run with an error that names it, because the month's sum cannot be trusted. Nothing of a model's answer is stored there or anywhere else, and a run never reuses an earlier run's answers.
 
 ## Attempts per record
 
@@ -56,7 +56,7 @@ Two runs of one record that start together can both count one attempt before eit
 | `--max-run-tokens` | 100000 | Cap of one run. |
 | `--max-month-tokens` | 4000000 | Cap of a month, for each family. |
 | `--dry-run` | false | A built-in fake model of each family answers a fixed score: no key, no network. Reservations are still counted. |
-| `--extra-attempt` | | Record ID of the record this run scores even when it had its 2 attempts of the UTC day; for one run by hand. When it names another record than `--record`, the run ends with exit code 2 before any reservation. |
+| `--extra-attempt` | | Record ID of the record this run scores even when it had its 2 attempts of the UTC day; for one run by hand. When it names another record than a well-named `--record`, and no score file exists, the run ends with exit code 2 before any reservation. |
 
 Both families need a model and a key file unless `--dry-run` is set. The two key files must differ; each adapter refuses the other's file. The keys are those of whoever runs the command (ADR-0047 section 1), read from the files at each call; never the intake's keys from the vault, which only the job gets through its identity (section 6), and never the analyzer's or the lab's.
 
@@ -69,7 +69,7 @@ The score JSON has `status` (`scored`, `unjudged`, `invalid`, `quarantined` or `
 | 0 | An outcome was written, or the score file existed already. |
 | 1 | A step failed (a read, a reservation, a model call, the run's deadline of 8 minutes): try again. No score was written; the reservations made before the failed step stay in `--spend-dir` and count against the caps. |
 | 2 | A flag or the configuration is wrong. |
-| 3 | The record had its 2 attempts of the UTC day (see [Attempts per record](#attempts-per-record)). Nothing was reserved, called or written. Try again on a later UTC day, or once with `--extra-attempt`. |
+| 3 | The record had its 2 attempts of the UTC day (see [Attempts per record](#attempts-per-record)). No call was made and no score written; a run that raced another may have reserved its first call, which counts against the month's cap. Try again on a later UTC day, or once with `--extra-attempt`. |
 
 ## Known limits
 

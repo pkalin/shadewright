@@ -34,10 +34,9 @@ import (
 type Reservation struct {
 	// Month is the intake's own month, "2006-01", read from its clock once at the start of a run.
 	Month string
-	// Day is the UTC day of the same clock read, "20060102". Empty only in a name of the layout before the
-	// record and the day were keyed (List still reads those, for the month's sum).
+	// Day is the UTC day of the same clock read, "20060102".
 	Day string
-	// Record is the record ID, in the shape recordIDFromName checks and nothing else. Empty only with Day.
+	// Record is the record ID, in the shape recordIDFromName checks and nothing else.
 	Record string
 	// Family is the provider family of the call.
 	Family Family
@@ -72,7 +71,7 @@ func Spent(rs []Reservation) int64 {
 }
 
 // Attempts returns the number of distinct runs among the reservations of the record on the day: the record's
-// attempts that day. A name of the old layout has no record and counts for none.
+// attempts that day. An empty record counts for none.
 func Attempts(rs []Reservation, day, record string) int {
 	runs := map[string]bool{}
 	for _, r := range rs {
@@ -89,9 +88,6 @@ var (
 	// reservationPattern is "<day>.<record ID>.<run>.<call>.<tokens>.json". The record ID is checked again
 	// with recordIDFromName; none of the parts holds a dot.
 	reservationPattern = regexp.MustCompile(`^([0-9]{8})\.([0-9a-z-]{1,64})\.([a-z0-9][a-z0-9-]{0,63})\.([1-3])\.([0-9]{1,12})\.json$`)
-	// oldReservationPattern is "<run>.<call>.<tokens>.json", the layout before #989. List reads it for the
-	// month's sum; Reserve no longer writes it.
-	oldReservationPattern = regexp.MustCompile(`^([a-z0-9][a-z0-9-]{0,63})\.([1-3])\.([0-9]{1,12})\.json$`)
 )
 
 // dayLayout is the UTC day of a reservation's name.
@@ -140,22 +136,15 @@ func ReservationName(r Reservation) (string, error) {
 		strconv.FormatInt(r.Tokens, 10) + ".json", nil
 }
 
-// parseReservation reads a name of the month's family directory: the current layout, or the old one with no
-// day or record. It returns false for any other name, and for a day outside the month or a record that is not
-// a record ID.
+// parseReservation reads a name of the month's family directory, "<day>.<record ID>.<run>.<call>.<tokens>.json".
+// It returns false for any other name, and for a day outside the month or a record that is not a record ID.
 func parseReservation(name, month string, family Family) (Reservation, bool) {
-	r := Reservation{Month: month, Family: family}
-	var call, tokens string
-	if m := reservationPattern.FindStringSubmatch(name); m != nil {
-		if !dayInMonth(m[1], month) || !checkedRecordID(m[2]) {
-			return Reservation{}, false
-		}
-		r.Day, r.Record, r.Run, call, tokens = m[1], m[2], m[3], m[4], m[5]
-	} else if m := oldReservationPattern.FindStringSubmatch(name); m != nil {
-		r.Run, call, tokens = m[1], m[2], m[3]
-	} else {
+	m := reservationPattern.FindStringSubmatch(name)
+	if m == nil || !dayInMonth(m[1], month) || !checkedRecordID(m[2]) {
 		return Reservation{}, false
 	}
+	r := Reservation{Month: month, Family: family, Day: m[1], Record: m[2], Run: m[3]}
+	call, tokens := m[4], m[5]
 	c, err := strconv.Atoi(call)
 	if err != nil {
 		return Reservation{}, false
@@ -174,7 +163,8 @@ type DirLedger struct {
 }
 
 // List reads the names of the month's reservations of the family. A directory that does not exist holds none.
-// A name that is not a reservation's is an error: neither the sum nor the count of attempts can be trusted.
+// A name that does not parse is an error naming it, never skipped: neither the sum nor the count of attempts
+// can be trusted. This holds for a name with no day or record as well.
 func (l DirLedger) List(ctx context.Context, month string, family Family) ([]Reservation, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -194,7 +184,7 @@ func (l DirLedger) List(ctx context.Context, month string, family Family) ([]Res
 	for _, e := range entries {
 		r, ok := parseReservation(e.Name(), month, family)
 		if !ok || !e.Type().IsRegular() {
-			return nil, errors.New("the spend directory holds an entry that is not a reservation")
+			return nil, fmt.Errorf("the spend directory holds an entry that is not a reservation: %q", e.Name())
 		}
 		out = append(out, r)
 	}

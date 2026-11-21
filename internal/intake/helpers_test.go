@@ -133,7 +133,8 @@ type memLedger struct {
 	spentErr error
 }
 
-// List returns the reservations of the month and family, and spent[f] as one reservation of the old layout.
+// List returns the reservations of the month and family, and spent[f] as one reservation of no day or record
+// (spend made before the test, which counts toward no record's attempts).
 func (l *memLedger) List(_ context.Context, month string, f Family) ([]Reservation, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

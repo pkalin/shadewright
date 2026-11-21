@@ -93,13 +93,13 @@ func TestAttemptsCountRunsNotCalls(t *testing.T) {
 		{Day: "20261121", Record: testRecordID, Run: "a", Call: 3},
 		{Day: "20261120", Record: testRecordID, Run: "b", Call: 1},
 		{Day: "20261121", Record: strings.Replace(testRecordID, "0f8e", "1f8e", 1), Run: "c", Call: 1},
-		{Run: "old", Call: 1},
+		{Run: "none", Call: 1},
 	}
 	if n := Attempts(rs, "20261121", testRecordID); n != 1 {
 		t.Fatalf("attempts = %d, want 1", n)
 	}
 	if n := Attempts(rs, "20261121", ""); n != 0 {
-		t.Fatalf("names of the old layout counted as %d attempts of no record", n)
+		t.Fatalf("reservations with no record counted as %d attempts of no record", n)
 	}
 }
 
@@ -247,56 +247,46 @@ func TestConcurrentRunsOfARecordMakeAtMostTwoAttempts(t *testing.T) {
 	}
 }
 
-// The month's sum is the same in the new layout as the token counts of the old names, and a directory of
-// the old layout is still summed: the record and the day in the name change no sum.
-func TestMonthSumUnchangedByTheNewLayout(t *testing.T) {
+// The month's sum is the sum of the token counts in the names: the record and the day in a name change no sum.
+func TestMonthSumIsTheTokensOfTheNames(t *testing.T) {
 	ctx := context.Background()
 	rng := rngOf(101, 102)
-	old := DirLedger{Root: t.TempDir()}
-	cur := DirLedger{Root: t.TempDir()}
-	oldDir := filepath.Join(old.Root, "spend", testMonth, string(FamilyOpenAI))
-	if err := os.MkdirAll(oldDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	l := DirLedger{Root: t.TempDir()}
 	var want int64
 	for i := range 200 {
 		tokens := int64(rng.IntN(60_000))
 		if i%17 == 0 {
 			tokens = maxTokens
 		}
-		call := 1 + rng.IntN(3)
-		run := "run-" + strconv.Itoa(i)
 		want += tokens
-		// The name the code before the change wrote.
-		name := run + "." + strconv.Itoa(call) + "." + strconv.FormatInt(tokens, 10) + ".json"
-		if err := os.WriteFile(filepath.Join(oldDir, name), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
 		day := strconv.Itoa(20261101 + rng.IntN(30))
-		if err := cur.Reserve(ctx, Reservation{Month: testMonth, Day: day, Record: uidOf(rng) + "-20261120t093000z",
-			Family: FamilyOpenAI, Run: run, Call: call, Tokens: tokens}); err != nil {
+		if err := l.Reserve(ctx, Reservation{Month: testMonth, Day: day, Record: uidOf(rng) + "-20261120t093000z",
+			Family: FamilyOpenAI, Run: "run-" + strconv.Itoa(i), Call: 1 + rng.IntN(3), Tokens: tokens}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for name, l := range map[string]DirLedger{"old layout": old, "new layout": cur} {
-		rs, err := l.List(ctx, testMonth, FamilyOpenAI)
-		if err != nil || Spent(rs) != want || len(rs) != 200 {
-			t.Fatalf("%s: sum %d of %d names, %v; want %d", name, Spent(rs), len(rs), err, want)
-		}
+	rs, err := l.List(ctx, testMonth, FamilyOpenAI)
+	if err != nil || Spent(rs) != want || len(rs) != 200 {
+		t.Fatalf("sum %d of %d names, %v; want %d", Spent(rs), len(rs), err, want)
 	}
-	// Both layouts in one directory sum together.
-	entries, err := os.ReadDir(oldDir)
-	if err != nil {
+}
+
+// A name with no day or record ("<run>.<call>.<tokens>.json") is not a reservation: List refuses the
+// directory with an error that names the file, as for any other name it cannot read, and never sums less.
+func TestListRefusesANameWithNoDayOrRecord(t *testing.T) {
+	ctx := context.Background()
+	l := DirLedger{Root: t.TempDir()}
+	if err := l.Reserve(ctx, Reservation{Month: testMonth, Day: "20261121", Record: testRecordID,
+		Family: FamilyOpenAI, Run: "run-a", Call: 1, Tokens: 100}); err != nil {
 		t.Fatal(err)
 	}
-	curDir := filepath.Join(cur.Root, "spend", testMonth, string(FamilyOpenAI))
-	for _, e := range entries {
-		if err := os.WriteFile(filepath.Join(curDir, e.Name()), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
+	const name = "run-b.1.5000.json"
+	if err := os.WriteFile(filepath.Join(l.Root, "spend", testMonth, string(FamilyOpenAI), name), nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if rs, err := cur.List(ctx, testMonth, FamilyOpenAI); err != nil || Spent(rs) != 2*want {
-		t.Fatalf("both layouts: sum %d, %v; want %d", Spent(rs), err, 2*want)
+	rs, err := l.List(ctx, testMonth, FamilyOpenAI)
+	if err == nil || !strings.Contains(err.Error(), `"`+name+`"`) || rs != nil {
+		t.Fatalf("list = %v, %v; want an error naming %s", rs, err, name)
 	}
 }
 

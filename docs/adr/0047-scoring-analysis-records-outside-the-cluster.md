@@ -1,6 +1,6 @@
 # ADR-0047: Analysis records written by an analyzer we do not run are scored by an intake outside any user cluster
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-21
 
 ## Context

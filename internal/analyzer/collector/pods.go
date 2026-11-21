@@ -63,11 +63,18 @@ type termination struct {
 // finished in the same seconds with the same exit code and reason are taken for one, so they count once;
 // the API reports those times in whole seconds, and nothing else tells them apart. The termination message
 // is never read: it is free text written by the container.
+//
+// A pod being deleted (deletionTimestamp set) shows only its OOM kills: its containers are stopped by the
+// deletion, with exit code 137 after the grace period or 143 for a runtime that exits on SIGTERM, and a
+// rollout, a scale down or a node drain is no symptom (#966). Deciding from the pod's own state compares no
+// clocks; a crash of that pod not handled before its deletion is not observed either. A deletionTimestamp is
+// never removed, so a termination left out here is never taken up later for the same pod.
 func terminations(pod *corev1.Pod) []termination {
+	deleting := pod.DeletionTimestamp != nil
 	var out []termination
 	for _, st := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
 		for _, t := range []*corev1.ContainerStateTerminated{st.LastTerminationState.Terminated, st.State.Terminated} {
-			if t == nil || (t.Reason != ReasonOOMKilled && t.ExitCode == 0) {
+			if t == nil || (t.Reason != ReasonOOMKilled && (t.ExitCode == 0 || deleting)) {
 				continue
 			}
 			reason := t.Reason

@@ -445,14 +445,21 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	for _, t := range pending {
 		if t.evicted {
 			obs := r.c.evictionObservation(subject, pod.Namespace, pod.Name, pod.UID, t.message, t.finished,
-				t.mayRepeat, true)
-			out, err := r.c.deliverEviction(ctx, pod.UID, obs, shownTerminations(&pod))
+				t.mayRepeat, podContainerNames(&pod))
+			// A termination of the pod's containers delivered before the eviction showed (the kubelet writes the
+			// container's end before the pod's final phase): the eviction counts on its Incident and opens none
+			// (decided 2026-11-21).
+			if cause := r.c.evictions.causeFor(pod.UID, shownTerminations(&pod)); cause != "" {
+				obs.Fingerprint = cause
+			}
+			sent, err := r.c.deliver(ctx, obs)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
-			if out == evictionRetry {
+			if !sent {
 				return ctrl.Result{RequeueAfter: retryAfter}, nil
 			}
+			r.c.evictions.noteEviction(pod.UID, obs.Fingerprint)
 			r.c.pods.commit(req.NamespacedName, pod.UID, t.termination, now)
 			continue
 		}

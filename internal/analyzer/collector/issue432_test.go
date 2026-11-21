@@ -42,9 +42,9 @@ import (
 //   - P3: the evicted pods of one workload land on one Incident, the eviction's read from pod status; their
 //     containers' terminations and the kubelet's Evicted events open none of their own.
 //   - P4: an evicted pod's message is kept in the eviction's symptom.
-//   - P5: an Evicted event alone hides nothing: about a pod whose status never shows the eviction, or about
-//     a pod that is gone, it delivers the pod's eviction observation; it is skipped only once that observation
-//     was delivered (decided 2026-11-21).
+//   - P5: an Evicted event changes nothing the pod's status delivers: it is skipped once the pod reconciler
+//     delivered the pod's eviction, and is otherwise the ordinary Event symptom it was on main, with its own
+//     fingerprint and no cause (decided 2026-11-21).
 
 // incidentKeys returns the Incident each observation lands on: the cause's fingerprint for a consequence the
 // collector linked, its own fingerprint otherwise.
@@ -258,29 +258,31 @@ func evictedEvent(pod string, uid types.UID, at time.Time) *eventsv1.Event {
 
 // TestIssue432EvictedEventWaitsForThePodStatus is P3 and P5 in the order the kubelet writes them: the Evicted
 // event comes before the pod's status shows the eviction. The collector waits EvictionSettleGrace, by its own
-// clock, for the status. The eviction is then one observation, delivered by whichever reconciler comes first,
-// with one fingerprint and one occurrence ID whether it was read from the pod's status or from the event
-// (decided 2026-11-21): when the status never shows it, or the pod is gone, the event delivers it.
+// clock, for the status. The eviction is then one observation, read from the pod's status, and the event is
+// skipped; when the status never shows it, or the pod is gone, the event is the ordinary Event symptom it was
+// on main (decided 2026-11-21).
 func TestIssue432EvictedEventWaitsForThePodStatus(t *testing.T) {
 	d, rs, _ := workload()
 	running := specPod()
 	running.Status.Phase = corev1.PodRunning
 	const note = "The node was low on resource: ephemeral-storage. "
-	// fromStatus: the observation was read from the pod's status, a cause; from the event's note it keeps the
-	// event as its origin and has no class (an Event never sets status.cause).
+	// fromStatus: the observation was read from the pod's status, the pod's eviction as a cause. Otherwise it
+	// is the ordinary Event symptom of the event: its own fingerprint and occurrence, no class, so an Event
+	// never sets status.cause and never stands in for the pod's status (decided 2026-11-21).
 	want := func(t *testing.T, h *harness, o Observation, fromStatus bool) {
 		t.Helper()
-		origin, class := fingerprint.SourcePodStatus, ClassCause
-		if !fromStatus {
-			origin, class = fingerprint.SourceEvent, ClassNone
-		}
 		_, _, pod := workload()
 		fp := h.c.evictionFingerprint(testNS, string(d.UID), pod.Name, running.UID, note)
 		occ := termination{id: evictionID, evicted: true}.occurrence(running.UID)
-		if o.Reason != ReasonEvicted || o.Origin != origin || o.Class != class ||
-			o.Fingerprint != fp || o.Occurrence != occ || o.Count != 1 {
-			t.Errorf("got %s from %s, class %q, fingerprint %s, occurrence %s, count %d; want the pod's eviction "+
-				"%s, %s, counted once", o.Reason, o.Origin, o.Class, o.Fingerprint, o.Occurrence, o.Count, fp, occ)
+		origin, class := fingerprint.SourcePodStatus, ClassCause
+		if !fromStatus {
+			origin, class, occ = fingerprint.SourceEvent, ClassNone, "event:ev-ev-evicted"
+		}
+		if o.Reason != ReasonEvicted || o.Origin != origin || o.Class != class || (o.Fingerprint == fp) != fromStatus ||
+			o.Occurrence != occ || o.Count != 1 {
+			t.Errorf("got %s from %s, class %q, fingerprint %s, occurrence %s, count %d; want %s, class %q, "+
+				"pod-status fingerprint %t, occurrence %s, counted once", o.Reason, o.Origin, o.Class, o.Fingerprint,
+				o.Occurrence, o.Count, origin, class, fromStatus, occ)
 		}
 	}
 	t.Run("status shows the eviction during the wait", func(t *testing.T) {

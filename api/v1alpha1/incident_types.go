@@ -225,7 +225,8 @@ type IncidentStatus struct {
 	OccurrencesDroppedThrough *metav1.Time `json:"occurrencesDroppedThrough,omitempty"`
 
 	// containers are the names of the containers whose observations this Incident counted, at most 8 (ADR-0039
-	// point 8), written in the status write that counts an observation naming one. A name that is not a DNS
+	// point 8), written in the status write that counts an observation naming one; a pod's eviction names every
+	// container of the evicted pod (point 3, amended 2026-11-20). A name that is not a DNS
 	// label, or one past the eighth, is left out and logged. The late-cause fold compares them between a
 	// consequence Incident and its cause's Incident.
 	// +listType=set

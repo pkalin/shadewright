@@ -25,7 +25,11 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 )
 
 // The rows of the decision of 2026-11-21 on #432 about evictions. Property: one eviction gives exactly one
@@ -75,13 +79,16 @@ func oneEviction(t *testing.T, got []Observation) {
 	}
 }
 
-// TestEvictionEventDeliversWhenThePodIsGone is finding 3: the cache shows the pod evicted when the event is
-// read, and the pod is deleted before the pod reconciler delivers the eviction. The event was committed as
-// handled on what the cache showed, and the eviction was lost.
-func TestEvictionEventDeliversWhenThePodIsGone(t *testing.T) {
+// TestEvictionEventOfAGonePod: the cache shows the pod evicted when the event is read, and the pod is deleted
+// before the pod reconciler delivers the eviction. The event waits for the pod reconciler while the status shows
+// the eviction, and with the pod gone it is the ordinary Event symptom it was on main: counted once, never lost.
+func TestEvictionEventOfAGonePod(t *testing.T) {
 	h, pod := evictionSetup(t)
 	setEvicted(t, h, pod.Name, t0)
-	h.reconcileEvent("ev-evicted")
+	if res := h.reconcileEvent("ev-evicted"); res.RequeueAfter != retryAfter {
+		t.Fatalf("event while the status shows an undelivered eviction: requeue after %v, want %v",
+			res.RequeueAfter, retryAfter)
+	}
 	got := h.drain()
 	deletePod(t, h, pod.Name)
 	h.reconcilePod(pod.Name)
@@ -89,12 +96,15 @@ func TestEvictionEventDeliversWhenThePodIsGone(t *testing.T) {
 	h.reconcileEvent("ev-evicted")
 	got = append(got, h.drain()...)
 	oneEviction(t, got)
+	if got[0].Origin != fingerprint.SourceEvent || got[0].Class != ClassNone {
+		t.Errorf("event of a gone pod: origin %q class %q, want an Event symptom with no class", got[0].Origin,
+			got[0].Class)
+	}
 }
 
-// TestEvictionDeliveredOnceInEveryOrder: the pod reconciler and the event reconciler each deliver the eviction
-// when they come first and skip it when the other did, so it is counted once in either order, and a late
-// status after the event's wait (findings 12 and 13) adds nothing.
-func TestEvictionDeliveredOnceInEveryOrder(t *testing.T) {
+// TestEvictionDeliveredOnceInEitherOrder: the pod reconciler delivers the eviction from the pod's status, and
+// the event is skipped once it did, whichever was reconciled first.
+func TestEvictionDeliveredOnceInEitherOrder(t *testing.T) {
 	t.Run("pod first", func(t *testing.T) {
 		h, pod := evictionSetup(t)
 		setEvicted(t, h, pod.Name, t0)
@@ -109,47 +119,132 @@ func TestEvictionDeliveredOnceInEveryOrder(t *testing.T) {
 		h.reconcileEvent("ev-evicted")
 		got := h.drain()
 		h.reconcilePod(pod.Name)
-		oneEviction(t, append(got, h.drain()...))
-	})
-	t.Run("status after the wait", func(t *testing.T) {
-		h, pod := evictionSetup(t)
+		got = append(got, h.drain()...)
+		h.clock.set(t0.Add(retryAfter))
 		h.reconcileEvent("ev-evicted")
-		h.clock.set(t0.Add(EvictionSettleGrace))
-		h.reconcileEvent("ev-evicted")
-		got := h.drain()
-		h.clock.set(t0.Add(EvictionSettleGrace + time.Minute))
-		setEvicted(t, h, pod.Name, t0.Add(EvictionSettleGrace+30*time.Second))
-		h.reconcilePod(pod.Name)
-		oneEviction(t, append(got, h.drain()...))
+		got = append(got, h.drain()...)
+		oneEviction(t, got)
+		if got[0].Origin != fingerprint.SourcePodStatus || got[0].Class != ClassCause {
+			t.Errorf("eviction: origin %q class %q, want the pod-status cause", got[0].Origin, got[0].Class)
+		}
 	})
-	t.Run("other reconciler delivering", func(t *testing.T) {
-		h, pod := evictionSetup(t)
-		setEvicted(t, h, pod.Name, t0)
-		if prior, _ := h.c.evictions.claim(pod.UID, nil); prior != evictionNotDelivered {
-			t.Fatalf("claim of a new eviction: %v", prior)
-		}
-		if res := h.reconcileEvent("ev-evicted"); res.RequeueAfter != retryAfter {
-			t.Errorf("event while the pod reconciler delivers: requeue after %v, want %v", res.RequeueAfter,
-				retryAfter)
-		}
-		if res := h.reconcilePod(pod.Name); res.RequeueAfter != retryAfter {
-			t.Errorf("pod while the event reconciler delivers: requeue after %v, want %v", res.RequeueAfter,
-				retryAfter)
-		}
-		h.none()
-		h.c.evictions.finish(pod.UID, false) // that delivery failed: the next try delivers
-		h.reconcileEvent("ev-evicted")
-		got := h.drain()
-		h.reconcilePod(pod.Name)
-		oneEviction(t, append(got, h.drain()...))
+}
+
+// TestForgedEvictedEventHidesNoEviction (decided 2026-11-21): a kubelet Evicted event about a running pod, with
+// the pod's real UID, whose status does not show an eviction within EvictionSettleGrace (here forged: the pod
+// runs on). It is then an ordinary Event symptom and marks nothing about the pod. When the pod is evicted for
+// real later, its status delivers the eviction as the cause. Before, the event delivered the pod's eviction
+// observation from its note, marked it delivered, and the real one was never delivered.
+func TestForgedEvictedEventHidesNoEviction(t *testing.T) {
+	h, pod := evictionSetup(t)
+	h.reconcileEvent("ev-evicted")
+	h.none()
+	h.clock.set(t0.Add(EvictionSettleGrace))
+	h.reconcileEvent("ev-evicted")
+	forged := h.one()
+	if forged.Origin != fingerprint.SourceEvent || forged.Class != ClassNone {
+		t.Errorf("forged event: origin %q class %q, want an Event symptom with no class", forged.Origin,
+			forged.Class)
+	}
+	h.clock.set(t0.Add(EvictionSettleGrace + time.Minute))
+	setEvicted(t, h, pod.Name, t0.Add(EvictionSettleGrace+30*time.Second))
+	h.reconcilePod(pod.Name)
+	got := h.drain()
+	if len(got) != 1 || got[0].Reason != ReasonEvicted || got[0].Origin != fingerprint.SourcePodStatus ||
+		got[0].Class != ClassCause || got[0].Count != 1 {
+		t.Fatalf("real eviction after a forged event: %+v, want the eviction from pod status as the cause", got)
+	}
+	if got[0].Fingerprint == forged.Fingerprint {
+		t.Errorf("the real eviction landed on the forged event's fingerprint %s", forged.Fingerprint)
+	}
+}
+
+// TestEvictedEventOfAGonePodListedAtStartIsFoldOnly: an old kubelet Evicted event of a pod that is gone, listed
+// at start, keeps the mark of an old event of a gone pod (FoldOnly) and opens no Incident, as any other event.
+// Before, the event delivered the pod's eviction observation, built anew, and the mark was lost.
+func TestEvictedEventOfAGonePodListedAtStartIsFoldOnly(t *testing.T) {
+	h := newHarness(t, Config{})
+	ev := evictedEvent(specPod().Name, specPod().UID, t0.Add(-20*time.Minute))
+	ev.CreationTimestamp = metav1.NewTime(t0.Add(-20 * time.Minute))
+	h.create(ev)
+	stored := &eventsv1.Event{}
+	if err := h.cl.Get(t.Context(), client.ObjectKeyFromObject(ev), stored); err != nil {
+		t.Fatal(err)
+	}
+	listAtStart(h, stored)
+	h.reconcileEvent(ev.Name)
+	got := h.one()
+	if !got.FoldOnly || got.Origin != fingerprint.SourceEvent || got.Occurrence != "event:"+string(stored.UID) {
+		t.Fatalf("old Evicted event of a gone pod: %+v, want a FoldOnly Event symptom", got)
+	}
+}
+
+// TestEvictedEventKeepsItsFingerprint: an Evicted event handled as a symptom has the fingerprint, origin and
+// occurrence any event had on main (ADR-0039 point 1), built here from the event's fields as fromEvent builds
+// every event's, and not the pod-status fingerprint of the pod's eviction.
+func TestEvictedEventKeepsItsFingerprint(t *testing.T) {
+	h, pod := evictionSetup(t)
+	h.reconcileEvent("ev-evicted") // waits for the pod's status
+	h.none()
+	stored := &eventsv1.Event{}
+	if err := h.cl.Get(t.Context(), client.ObjectKey{Namespace: testNS, Name: "ev-evicted"}, stored); err != nil {
+		t.Fatal(err)
+	}
+	h.clock.set(t0.Add(EvictionSettleGrace))
+	h.reconcileEvent("ev-evicted")
+	got := h.one()
+	d, _, _ := workload()
+	want := fingerprint.Fingerprint(fingerprint.Observation{
+		ClusterID: h.c.cfg.ClusterID, Namespace: testNS, OwnerUID: string(d.UID), ResourceUID: string(pod.UID),
+		Reason: stored.Reason, Action: stored.Action, Type: stored.Type,
+		ReportingController: stored.ReportingController, Note: stored.Note, RegardingKind: stored.Regarding.Kind,
+		RegardingName: stored.Regarding.Name, Source: fingerprint.SourceEvent,
 	})
+	if got.Fingerprint != want || got.Origin != fingerprint.SourceEvent ||
+		got.Occurrence != "event:"+string(stored.UID) || got.Class != ClassNone {
+		t.Errorf("Evicted event: fingerprint %s origin %q occurrence %s class %q; want %s, event, event:%s, none",
+			got.Fingerprint, got.Origin, got.Occurrence, got.Class, want, stored.UID)
+	}
+}
+
+// TestConsequenceOfAnEvictedPod (decided 2026-11-21): the terminations of an evicted pod are dropped, so a
+// BackOff of its container never links to one of them. It links to the eviction once the pod reconciler
+// delivered it, and to nothing before. Before, it linked to the dropped termination, whose Incident never opens.
+func TestConsequenceOfAnEvictedPod(t *testing.T) {
+	h, pod := evictionSetup(t)
+	setEvicted(t, h, pod.Name, t0)
+	backOff := consequence("ev-backoff", reasonBack, "spec.containers{app}", t0.Add(time.Second))
+	h.create(backOff)
+	read := func() Observation {
+		t.Helper()
+		stored := &eventsv1.Event{}
+		if err := h.cl.Get(t.Context(), client.ObjectKeyFromObject(backOff), stored); err != nil {
+			t.Fatal(err)
+		}
+		o, _, _, err := h.c.fromEvent(t.Context(), stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	if o := read(); o.Class != ClassConsequence || o.CauseFingerprint != "" {
+		t.Fatalf("BackOff before the eviction is delivered: class %q cause %q, want a consequence with none",
+			o.Class, o.CauseFingerprint)
+	}
+	h.reconcilePod(pod.Name)
+	eviction := h.one()
+	if o := read(); o.CauseFingerprint != eviction.Fingerprint {
+		t.Errorf("BackOff after the eviction is delivered: cause %q, want the eviction's %s", o.CauseFingerprint,
+			eviction.Fingerprint)
+	}
 }
 
 // TestEvictionCountsOnAReportedTermination is finding 2, the fallback row: the kubelet writes the killed
 // container (exit code 137, phase still Running) before the pod's final phase. The DisruptionTarget condition
 // is not in that write (kubelet status_manager.go, mergePodStatus, v1.37.2), so the termination is reported as
-// a cause. The eviction that shows next counts on that termination's Incident and opens none, read from the
-// pod's status or, when the pod is gone, from the event.
+// a cause. The eviction that shows next in the pod's status counts on that termination's Incident and opens
+// none. When the pod is gone before its status was read, the event is the ordinary Event symptom with its own
+// fingerprint: one more Incident, never one less (decided 2026-11-21).
 func TestEvictionCountsOnAReportedTermination(t *testing.T) {
 	intermediate := func(t *testing.T, h *harness, name string) Observation {
 		t.Helper()
@@ -191,9 +286,10 @@ func TestEvictionCountsOnAReportedTermination(t *testing.T) {
 		h.clock.set(t0.Add(20 * time.Second))
 		h.reconcileEvent("ev-evicted")
 		got := h.drain()
-		if len(got) != 1 || got[0].Reason != ReasonEvicted || got[0].Fingerprint != term.Fingerprint {
-			t.Fatalf("eviction of a gone pod after a reported termination: %+v, want one eviction on %s", got,
-				term.Fingerprint)
+		if len(got) != 1 || got[0].Reason != ReasonEvicted || got[0].Origin != fingerprint.SourceEvent ||
+			got[0].Fingerprint == term.Fingerprint {
+			t.Fatalf("Evicted event of a gone pod after a reported termination: %+v, want an Event symptom of its own",
+				got)
 		}
 	})
 	t.Run("an older crash of the pod is no cause of the eviction", func(t *testing.T) {

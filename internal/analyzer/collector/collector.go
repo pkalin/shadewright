@@ -148,6 +148,10 @@ type Observation struct {
 	// Container is the container the observation is about: a status entry's name, or for an event the
 	// container its regarding field path names in the verified pod (cause.go). Empty when none is named.
 	Container string
+	// PodContainers are, for a pod's eviction (which names no container, since it is a cause of the whole pod),
+	// the names of the pod's containers, so the late-cause fold matches a consequence of any of them (ADR-0039
+	// point 3, amended; decided 2026-11-21). Nil for every other observation.
+	PodContainers []string
 	// Class is the observation's part in the consequence rule (ADR-0039): ClassCause only for a pod-status
 	// observation, ClassConsequence only for a kubelet event on a named container, else ClassNone. The collector
 	// holds a consequence with no cause, or whose cause has no Incident yet, before it emits it (hold.go).

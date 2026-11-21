@@ -154,7 +154,9 @@ func (c *Collector) podStatusInput(pod *corev1.Pod, owner, reason, note string) 
 // its finishedAt (point 5). A non-zero exit links on either side of at: the status keeps only the newest
 // termination, and a BackOff or probe failure that the kubelet reported before it was about the termination
 // before, of the same crash loop. Without that time (hasAt false), a termination links nothing. No clock of
-// the collector takes part. owner is the pod's verified owner UID, as for the pod's own observations.
+// the collector takes part. owner is the pod's verified owner UID, as for the pod's own observations. Of an
+// evicted pod, the cause is the eviction as the pod reconciler delivered it, whatever the time, or none while
+// it was not delivered: its terminations are never delivered, so a consequence never links to one.
 func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, init bool, at time.Time,
 	hasAt bool) string {
 	statuses := pod.Status.ContainerStatuses
@@ -164,6 +166,11 @@ func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, i
 	i := slices.IndexFunc(statuses, func(s corev1.ContainerStatus) bool { return s.Name == container })
 	if i < 0 {
 		return ""
+	}
+	if evicted(pod) {
+		// The eviction replaced the pod's terminations, which were never delivered: a consequence links to the
+		// eviction the pod reconciler delivered from this status, or to nothing (decided 2026-11-21).
+		return c.evictions.evictionCause(pod.UID)
 	}
 	st := statuses[i]
 	if w := st.State.Waiting; w != nil && slices.Contains(WaitingCauseReasons, w.Reason) {

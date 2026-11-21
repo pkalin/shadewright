@@ -43,6 +43,8 @@ import (
 const (
 	foldConsequenceUID = types.UID("61616161-6161-4161-8161-616161616161")
 	foldCauseUID       = types.UID("62626262-6262-4262-8262-626262626262")
+	// reasonExitError is the reason of a termination with a non-zero exit code read from pod status.
+	reasonExitError = "Error"
 	// foldContainer is the container the cause and the consequence of the fold tests name.
 	foldContainer = "web"
 )
@@ -113,7 +115,16 @@ func TestFoldable(t *testing.T) {
 			c.Status.FirstSeen, c.Status.LastSeen = ago(3*time.Hour), ago(3*time.Hour)
 			cause.Status.FirstSeen = ago(5 * time.Hour)
 		}, want: true},
-		"Unhealthy":       {change: func(c, _ *remediationv1alpha1.Incident) { c.Spec.Reason = reasonUnhealthy }, want: true},
+		"Unhealthy": {change: func(c, _ *remediationv1alpha1.Incident) { c.Spec.Reason = reasonUnhealthy }, want: true},
+		"BackOff, cause a non-zero exit": {change: func(_, cause *remediationv1alpha1.Incident) {
+			cause.Spec.Reason = reasonExitError
+		}, want: true},
+		"Unhealthy, cause a non-zero exit": {change: func(c, cause *remediationv1alpha1.Incident) {
+			c.Spec.Reason, cause.Spec.Reason = reasonUnhealthy, reasonExitError
+		}},
+		"Unhealthy, cause a wait": {change: func(c, cause *remediationv1alpha1.Incident) {
+			c.Spec.Reason, cause.Spec.Reason = reasonUnhealthy, "ImagePullBackOff"
+		}, want: true},
 		"phase Analyzing": {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Phase = remediationv1alpha1.IncidentAnalyzing }, want: true},
 		"phase Proposed":  {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Phase = remediationv1alpha1.IncidentProposed }, want: true},
 		"no phase":        {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Phase = "" }, want: true},
@@ -129,7 +140,7 @@ func TestFoldable(t *testing.T) {
 		"already folded": {change: func(c, _ *remediationv1alpha1.Incident) {
 			c.Status.FoldedInto = &remediationv1alpha1.IncidentRef{Name: "x", UID: "y"}
 		}},
-		"non-zero exit termination":    {change: func(c, _ *remediationv1alpha1.Incident) { c.Spec.Reason = "Error" }},
+		"non-zero exit termination":    {change: func(c, _ *remediationv1alpha1.Incident) { c.Spec.Reason = reasonExitError }},
 		"Failed Event":                 {change: func(c, _ *remediationv1alpha1.Incident) { c.Spec.Reason = "Failed" }},
 		"OOMKilled":                    {change: func(c, _ *remediationv1alpha1.Incident) { c.Spec.Reason = reasonOOM }},
 		"BackOff not from the kubelet": {change: func(c, _ *remediationv1alpha1.Incident) { c.Spec.ReportingController = "forged" }},
@@ -327,7 +338,7 @@ func TestFoldLeavesWhatIsNotItsConsequence(t *testing.T) {
 		return inc
 	}
 	termination := other(3, "64646464-6464-4464-8464-646464646464", func(inc *remediationv1alpha1.Incident) {
-		o := symptomOf(3, "Error", terminationID(3), 1, fingerprint.SourcePodStatus, "web", collector.ClassNone, triggerNow)
+		o := symptomOf(3, reasonExitError, terminationID(3), 1, fingerprint.SourcePodStatus, "web", collector.ClassNone, triggerNow)
 		inc.Spec = specOf(o)
 	})
 	failed := other(4, "65656565-6565-4565-8565-656565656565", func(inc *remediationv1alpha1.Incident) { inc.Spec.Reason = "Failed" })

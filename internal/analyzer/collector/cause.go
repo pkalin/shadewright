@@ -45,13 +45,13 @@ const (
 	ClassConsequence Class = "consequence"
 )
 
-// KillCauseWindow bounds the link of a consequence to a termination of its container: at most this long after
-// an OOM kill's finishedAt (ADR-0039 point 5), and at most this long on either side of a non-zero exit's
-// finishedAt (point 3, amended 2026-11-20). Both times are written by the kubelet of the pod's node. It bounds the
-// link of one observation only. The fold of a consequence Incident into its cause's (ADR-0039 point 12, in
-// internal/incidents) has a window of its own, incidents.RecurWithin (15 minutes), between the creation times
-// of the two Incidents.
-const KillCauseWindow = 10 * time.Minute
+// TerminationCauseWindow bounds the link of a consequence to a termination of its container: at most this long
+// after an OOM kill's finishedAt (ADR-0039 point 5), and, for a BackOff only, at most this long on either side of a
+// non-zero exit's finishedAt (point 3, amended 2026-11-20 and narrowed 2026-11-21). Both times are written by the
+// kubelet of the pod's node. It bounds the link of one observation only. The fold of a consequence Incident into
+// its cause's (ADR-0039 point 12, in internal/incidents) has a window of its own, incidents.RecurWithin (15
+// minutes), between the creation times of the two Incidents.
+const TerminationCauseWindow = 10 * time.Minute
 
 // WaitingCauseReasons returns a copy of the waiting reasons of a container's status that are a cause (ADR-0039
 // point 3): an image that cannot be pulled, or a configuration the kubelet cannot create the container from. Any
@@ -150,54 +150,55 @@ func (c *Collector) podStatusInput(pod *corev1.Pod, owner, reason, note string) 
 }
 
 // causeFingerprint returns the fingerprint of the cause pod's status shows for the named container (init or
-// not), or "" when it shows none (ADR-0039 point 3, amended 2026-11-20): a current waiting reason of
-// WaitingCauseReasons first, because it is what the container does now; otherwise one of the container's
-// terminations that the pod reconciler delivers as a cause, current or last, within KillCauseWindow of at, the
-// observation's own time. An OOM kill links only when at follows its finishedAt (point 5), and is read as main
-// reads it (killFingerprint). A non-zero exit (terminations, read from the whole pod, so a pod being deleted offers
-// none, #966; termination.class, so an evicted pod offers none either) links on either side of at: the status
-// keeps only the newest termination, and a BackOff or probe failure that the kubelet reported before it was about
-// the termination before, of the same crash loop. The newest non-zero exit wins when it finished after the OOM
-// kill in the window, if any; then exit is set and fallback is that OOM kill's fingerprint ("" when none). The
-// collector delivers the exit as the cause only once Config.CauseSeen confirmed it, and settleExitCause, the one
-// place that removes it, puts fallback in its place (decided 2026-11-21 on #432, hold.go): so a consequence main
-// links to an OOM kill keeps that link while the exit is not confirmed. With two terminations in the window and
-// the exit confirmed, a consequence reported before the newer one counts on the newer termination's Incident, not
-// on the one it followed; both are of the same container, a limit of grouping, not of the evidence. Without at
-// (hasAt false), a termination links nothing. No clock of the collector takes part. owner is the pod's verified
-// owner UID, as for the pod's own observations. The fingerprint is the one of that termination's own observation.
+// not), as main reads it, or "" when it shows none (ADR-0039 point 3): a current waiting reason of
+// WaitingCauseReasons first, because it is what the container does now; otherwise an OOM kill, current or last,
+// that finished at most TerminationCauseWindow before at, the observation's own time (killOf). Without that time
+// (hasAt false), or with a time before the kill, the kill links nothing.
 //
-// The terminations are matched on the container's name alone, across init and app containers: the API server
-// refuses a pod whose init and app containers share a name (container names are unique across the spec, and
-// the kubelet reports a status under each spec name), so a name picks one container of either list.
+// exit is, for a BackOff only (backOff set) and when the status shows no waiting cause, the fingerprint of the
+// newest non-zero exit of the container, current or last, within TerminationCauseWindow of at on either side, that
+// finished after that OOM kill if there is one; "" otherwise (ADR-0039 point 3, amended 2026-11-20, narrowed
+// 2026-11-21 on #432). The status keeps only the newest termination, so a BackOff the kubelet reported before an
+// exit was about the exit before, of the same crash loop. exit is a candidate only: the collector delivers it as
+// the cause only once Config.CauseSeen confirmed it (hold.go), and until then the consequence carries fp, as main
+// links it. An Unhealthy event never gets one: a liveness probe failure makes the kubelet kill the container, so
+// its exit 137 or 143 is a consequence of the probe failure, not its cause, and the status does not tell which way
+// it went. The exits are those terminations offers with class cause (termination.class): a pod whose status.reason
+// is set offers none, and a pod being deleted offers none either (#966).
+//
+// No clock of the collector takes part. owner is the pod's verified owner UID, as for the pod's own observations,
+// and each fingerprint is the one of that cause's own observation. The terminations are matched on the
+// container's name alone, across init and app containers: the API server refuses a pod whose init and app
+// containers share a name, so a name picks one container of either list.
 func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, init bool, at time.Time,
-	hasAt bool) (fp string, exit bool, fallback string) {
+	hasAt, backOff bool) (fp, exit string) {
 	statuses := pod.Status.ContainerStatuses
 	if init {
 		statuses = pod.Status.InitContainerStatuses
 	}
 	i := slices.IndexFunc(statuses, func(s corev1.ContainerStatus) bool { return s.Name == container })
 	if i < 0 {
-		return "", false, ""
+		return "", ""
 	}
 	st := statuses[i]
 	if w := st.State.Waiting; w != nil && causereason.IsWaiting(w.Reason) {
-		return fingerprint.Fingerprint(c.podStatusInput(pod, owner, w.Reason, waitingNote(container, w.Reason))),
-			false, ""
+		return fingerprint.Fingerprint(c.podStatusInput(pod, owner, w.Reason, waitingNote(container, w.Reason))), ""
 	}
 	if !hasAt {
-		return "", false, ""
+		return "", ""
 	}
 	kill := killOf(st, at)
-	killFP := ""
 	if kill != nil {
-		killFP = fingerprint.Fingerprint(c.podStatusInput(pod, owner, ReasonOOMKilled,
+		fp = fingerprint.Fingerprint(c.podStatusInput(pod, owner, ReasonOOMKilled,
 			terminationNote(container, kill.ExitCode)))
+	}
+	if !backOff {
+		return fp, ""
 	}
 	var newest *termination
 	for _, t := range terminations(pod) {
 		if t.container != container || t.reason == ReasonOOMKilled || t.finished.IsZero() ||
-			t.class(pod) != ClassCause || !linksAt(t, at) {
+			t.class(pod) != ClassCause || !exitLinksAt(t, at) {
 			continue
 		}
 		if newest == nil || t.finished.After(newest.finished) {
@@ -205,15 +206,15 @@ func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, i
 		}
 	}
 	if newest == nil || (kill != nil && !newest.finished.After(kill.FinishedAt.Time)) {
-		return killFP, false, ""
+		return fp, ""
 	}
-	return fingerprint.Fingerprint(c.podStatusInput(pod, owner, newest.reason,
-		terminationNote(container, newest.exitCode))), true, killFP
+	return fp, fingerprint.Fingerprint(c.podStatusInput(pod, owner, newest.reason,
+		terminationNote(container, newest.exitCode)))
 }
 
 // killOf returns the OOM kill of the container status st that a consequence at its own time at links to, as main
 // reads it (ADR-0039 point 5): of the state and the last state, the newest OOM kill that finished at most
-// KillCauseWindow before at, the state's on a tie; nil when none.
+// TerminationCauseWindow before at, the state's on a tie; nil when none.
 func killOf(st corev1.ContainerStatus, at time.Time) *corev1.ContainerStateTerminated {
 	var kill *corev1.ContainerStateTerminated
 	for _, t := range []*corev1.ContainerStateTerminated{st.State.Terminated, st.LastTerminationState.Terminated} {
@@ -221,7 +222,7 @@ func killOf(st corev1.ContainerStatus, at time.Time) *corev1.ContainerStateTermi
 			continue
 		}
 		finished := t.FinishedAt.Time
-		if at.Before(finished) || at.After(finished.Add(KillCauseWindow)) {
+		if at.Before(finished) || at.After(finished.Add(TerminationCauseWindow)) {
 			continue
 		}
 		if kill == nil || finished.After(kill.FinishedAt.Time) {
@@ -231,16 +232,8 @@ func killOf(st corev1.ContainerStatus, at time.Time) *corev1.ContainerStateTermi
 	return kill
 }
 
-// linksAt reports whether termination t is within KillCauseWindow of at, the observation's own time: after
-// its finish for an OOM kill (ADR-0039 point 5), on either side of it for a non-zero exit (point 3, amended
-// 2026-11-20).
-func linksAt(t termination, at time.Time) bool {
-	finished := t.finished
-	if at.After(finished.Add(KillCauseWindow)) {
-		return false
-	}
-	if t.reason == ReasonOOMKilled {
-		return !at.Before(finished)
-	}
-	return !at.Before(finished.Add(-KillCauseWindow))
+// exitLinksAt reports whether the non-zero exit t is within TerminationCauseWindow of at, the observation's own
+// time, on either side of its finish (point 3, amended 2026-11-20). An OOM kill is killOf's.
+func exitLinksAt(t termination, at time.Time) bool {
+	return !at.After(t.finished.Add(TerminationCauseWindow)) && !at.Before(t.finished.Add(-TerminationCauseWindow))
 }

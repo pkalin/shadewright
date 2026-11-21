@@ -40,9 +40,10 @@ import (
 // Property, one line: a non-zero-exit fingerprint on an emitted consequence was confirmed by CauseSeen.
 
 // TestHeldExitCauseOfDeletedPodNotEmitted is finding 1 of the fourth pass on #432: CauseSeen answers false, the
-// pod's container stopped with exit 1, an Unhealthy event is held with that cause, then the pod is deleted and
-// goes. Before the fix the hold ended by emitting the Unhealthy with the exit's fingerprint, though nothing
-// confirmed (and, for a pod being deleted, nothing delivers) that termination.
+// pod's container stopped with exit 1, a BackOff event is held with that exit as its candidate, then the pod is
+// deleted and goes. Before the fix the hold ended by emitting the consequence with the exit's fingerprint, though
+// nothing confirmed (and, for a pod being deleted, nothing delivers) that termination. (Since the rule was
+// narrowed on 2026-11-21, an Unhealthy event never has an exit candidate at all.)
 func TestHeldExitCauseOfDeletedPodNotEmitted(t *testing.T) {
 	book := &causeBook{}
 	d, rs, _ := workload()
@@ -52,13 +53,13 @@ func TestHeldExitCauseOfDeletedPodNotEmitted(t *testing.T) {
 	h.clock.set(at)
 	h.reconcilePod(webPod)
 	h.drain()
-	ev := consequence("ev-unhealthy", ReasonUnhealthy, appPath, at)
+	ev := consequence("ev-backoff", reasonBack, appPath, at)
 	h.create(ev)
 	if res := h.reconcileEvent(ev.Name); res.RequeueAfter == 0 {
-		t.Fatal("the Unhealthy event was not held")
+		t.Fatal("the BackOff event was not held")
 	}
 	h.none()
-	if s, ok := h.c.holds.get(reqFor(ev.Name).NamespacedName, ev.UID); !ok || s.cause == "" {
+	if s, ok := h.c.holds.get(reqFor(ev.Name).NamespacedName, ev.UID); !ok || !s.hasCause() {
 		t.Fatal("the hold has no cause, so the test proves nothing")
 	}
 	deleteHeld(t, h)

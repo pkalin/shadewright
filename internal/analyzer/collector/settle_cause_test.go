@@ -41,28 +41,26 @@ import (
 	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 )
 
-// The decision of 2026-11-21 on #432 (Count and Decision, head 30f136dd): one function removes a non-zero-exit
-// cause (settleExitCause), and only after it asked Config.CauseSeen for that fingerprint in the same reconcile.
+// The decision of 2026-11-21 on #432 (Count and Decision, head 30f136dd, narrowed at head 5caef316): one function
+// decides a non-zero-exit cause (resolveExit), and it becomes the cause only after Config.CauseSeen confirmed it.
 //
 // Properties, one line each:
 //   - S1: every event main links to an OOM kill or a wait links to the same cause here, while no non-zero exit is
 //     confirmed (an unconfirmed exit falls back to the OOM kill in the window).
-//   - S2: no non-zero-exit cause is removed without a CauseSeen ask for it in that reconcile, on any path: end of
-//     the hold, a cause first seen in the expiry reconcile, overflow, hold off, pod gone, a delivery retry.
+//   - S2: no verdict against a non-zero exit is made without a CauseSeen ask for it in that reconcile, on any
+//     path: end of the hold, a cause first seen in the expiry reconcile, overflow, hold off, pod gone; a delivery
+//     retry keeps the verdict made before (N3, narrowed_cause_test.go).
 //   - S3: an ask that fails at the end does not wait again: the consequence goes on without the exit, with an
 //     error log naming the fingerprint and the label cause_unanswered; an answer no (or no CauseSeen) logs at info
 //     with the label cause_unconfirmed.
-//   - S4: no code outside settleExitCause clears a cause (TestOnlySettleRemovesACause).
+//   - S4: no code outside resolveExit clears a cause (TestOnlySettleRemovesACause).
 
-// mainCauseFingerprint is causeFingerprint as origin/main (f2d69cd7) has it, kept as the reference of S1: a
+// mainCauseFingerprint is causeFingerprint as origin/main (f2d69cd7) has it, for the app container, kept as the reference of S1: a
 // current waiting reason of WaitingCauseReasons first, else the newest OOM kill of the state or the last state
-// that finished at most KillCauseWindow before at, the state's on a tie.
-func mainCauseFingerprint(c *Collector, pod *corev1.Pod, owner, container string, init bool, at time.Time,
-	hasAt bool) string {
+// that finished at most TerminationCauseWindow before at, the state's on a tie.
+func mainCauseFingerprint(c *Collector, pod *corev1.Pod, owner string, at time.Time, hasAt bool) string {
+	container := containerApp
 	statuses := pod.Status.ContainerStatuses
-	if init {
-		statuses = pod.Status.InitContainerStatuses
-	}
 	i := slices.IndexFunc(statuses, func(s corev1.ContainerStatus) bool { return s.Name == container })
 	if i < 0 {
 		return ""
@@ -80,7 +78,7 @@ func mainCauseFingerprint(c *Collector, pod *corev1.Pod, owner, container string
 			continue
 		}
 		finished := t.FinishedAt.Time
-		if at.Before(finished) || at.After(finished.Add(KillCauseWindow)) {
+		if at.Before(finished) || at.After(finished.Add(TerminationCauseWindow)) {
 			continue
 		}
 		if kill == nil || finished.After(kill.FinishedAt.Time) {
@@ -147,7 +145,7 @@ func TestOOMKillNotHiddenByUnconfirmedExit(t *testing.T) {
 	at := t0.Add(time.Minute)
 	ev := consequence("ev-backoff", reasonBack, appPath, at)
 	h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, pod, ev)
-	oomFP := mainCauseFingerprint(h.c, pod, ownerOf(t, h), containerApp, false, at, true)
+	oomFP := mainCauseFingerprint(h.c, pod, ownerOf(t, h), at, true)
 	if oomFP == "" {
 		t.Fatal("main links nothing here, so the test proves nothing")
 	}
@@ -234,7 +232,7 @@ func TestCauseLinksAsMainForKillsAndWaits(t *testing.T) {
 		st.State, st.LastTerminationState = cur.state, last.state
 		pod.Status.ContainerStatuses = []corev1.ContainerStatus{st}
 		if rng.IntN(6) == 0 {
-			pod.Status.Phase, pod.Status.Reason = corev1.PodFailed, podReasonEvicted
+			pod.Status.Phase, pod.Status.Reason = corev1.PodFailed, reasonEvicted
 		}
 		at := t0.Add(time.Duration(rng.IntN(37)-12) * 30 * time.Second)
 		hasAt := rng.IntN(10) != 0
@@ -247,7 +245,7 @@ func TestCauseLinksAsMainForKillsAndWaits(t *testing.T) {
 		kind := kindNone
 		var kill *genState
 		for _, g := range []*genState{&cur, &last} {
-			if g.oom && hasAt && !at.Before(g.finished) && !at.After(g.finished.Add(KillCauseWindow)) &&
+			if g.oom && hasAt && !at.Before(g.finished) && !at.After(g.finished.Add(TerminationCauseWindow)) &&
 				(kill == nil || g.finished.After(kill.finished)) {
 				kill = g
 			}
@@ -267,7 +265,7 @@ func TestCauseLinksAsMainForKillsAndWaits(t *testing.T) {
 		book := &causeBook{}
 		d, rs, _ := workload()
 		h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, pod, ev)
-		want := mainCauseFingerprint(h.c, pod, ownerOf(t, h), containerApp, false, at, hasAt)
+		want := mainCauseFingerprint(h.c, pod, ownerOf(t, h), at, hasAt)
 		if (want == "") != (kind == kindNone) {
 			t.Fatalf("seed %d: the reference and the construction disagree: %q, %s", seed, want, kind)
 		}
@@ -410,7 +408,7 @@ func TestExitCauseRemovedOnlyAfterAsking(t *testing.T) {
 			e.podGone(t)
 			e.eventLogged(sink, time.Minute)
 		}, endCause, logWant{}},
-		{"delivery retry after the exit was removed, confirmed in between", true, Config{Buffer: 1}, func(t *testing.T, e *exitHold, sink *kvSink) {
+		{"delivery retry after the verdict, confirmed in between", true, Config{Buffer: 1}, func(t *testing.T, e *exitHold, sink *kvSink) {
 			e.eventLogged(sink, 0)
 			e.eventLogged(sink, time.Minute)
 			e.c.out <- Observation{Fingerprint: fillerFingerprint}
@@ -420,7 +418,7 @@ func TestExitCauseRemovedOnlyAfterAsking(t *testing.T) {
 			e.log.book.record(e.fp)
 			e.drain()
 			e.eventLogged(sink, grace+retryAfter)
-		}, endCause, logWant{label: holdCauseUnconfirmed}},
+		}, endBare, logWant{label: holdCauseUnconfirmed}},
 		{"end of hold, CauseSeen fails", true, Config{}, func(t *testing.T, e *exitHold, sink *kvSink) {
 			e.eventLogged(sink, 0)
 			e.eventLogged(sink, time.Minute)
@@ -520,17 +518,22 @@ func TestDropLogNamesTheRemovedExit(t *testing.T) {
 	t.Fatalf("no drop log: %+v", sink.lines())
 }
 
-// TestOnlySettleRemovesACause is S4, over the collector's source: outside settleExitCause, no statement assigns
-// an empty string to a cause field (CauseFingerprint, causeFallback, a hold's cause), or an Observation or hold
-// literal to a hold's obs, and only the named functions assign the cause fields at all: fromEvent builds them,
-// copyCause copies them, holdConsequence and settleHold keep a hold's cause equal to its observation's.
+// TestOnlySettleRemovesACause is S4, over the collector's source, for the rule narrowed on 2026-11-21 (#432): a
+// non-zero exit reaches CauseFingerprint only through resolveExit, the one function that decides an exit candidate.
+// Outside resolveExit no statement assigns an empty string to a cause field (CauseFingerprint, exitCause, a hold's
+// cause), or a literal to a hold's or an exit's observation or to a dereferenced observation, and only the named
+// functions assign the cause fields at all: fromEvent builds them, emit copies a decided hold's linked cause,
+// holdConsequence keeps a hold's cause as main does, addExit adds an exit candidate (and never removes one), and
+// confirm is the one setter of a confirmation.
 func TestOnlySettleRemovesACause(t *testing.T) {
-	const settle = "settleExitCause"
+	const settle = "resolveExit"
 	allowed := map[string][]string{
-		"CauseFingerprint": {"fromEvent", "copyCause", settle},
-		"causeFallback":    {"fromEvent", "copyCause", settle},
-		"cause":            {"holdConsequence", "settleHold"},
-		"obs":              {"holdConsequence"},
+		"CauseFingerprint": {"fromEvent", "emit", settle},
+		"exitCause":        {"fromEvent", settle},
+		"cause":            {"holdConsequence"},
+		"obs":              {"holdConsequence", "addExit"},
+		"exits":            {"addExit", "confirm"},
+		"confirmed":        {"confirm"},
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -557,6 +560,11 @@ func TestOnlySettleRemovesACause(t *testing.T) {
 					return true
 				}
 				for i, lhs := range as.Lhs {
+					if star, ok := lhs.(*ast.StarExpr); ok && len(as.Rhs) == len(as.Lhs) {
+						if _, lit := as.Rhs[i].(*ast.CompositeLit); lit {
+							t.Errorf("%s: %s replaces *%v with a literal", fset.Position(as.Pos()), fn.Name.Name, star.X)
+						}
+					}
 					sel, ok := lhs.(*ast.SelectorExpr)
 					if !ok {
 						continue

@@ -55,3 +55,11 @@ func Tallied() []string {
 func ShowsTally(reason string) bool {
 	return reason == OOMKilled || IsWaiting(reason)
 }
+
+// CausesUnhealthy reports whether a cause of reason may count Unhealthy events of its container (ADR-0039 point 3,
+// narrowed 2026-11-21 on #432): an OOM kill or a waiting reason, as before #432. A non-zero exit is a cause of
+// BackOff events only: a liveness probe failure makes the kubelet kill the container, so its exit is a
+// consequence of the probe failure, not its cause.
+func CausesUnhealthy(reason string) bool {
+	return reason == OOMKilled || IsWaiting(reason)
+}

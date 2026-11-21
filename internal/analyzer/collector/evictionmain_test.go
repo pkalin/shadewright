@@ -291,7 +291,7 @@ var evictionSequences = []struct {
 		s.collect("listed at start")
 	}},
 	// The kubelet's BackOff and liveness failures of the evicted container, with their own times up to 10
-	// minutes (KillCauseWindow) before and after the eviction's exit 137, reconciled once the pod shows the
+	// minutes (TerminationCauseWindow) before and after the eviction's exit 137, reconciled once the pod shows the
 	// eviction: they link to nothing, as before.
 	{"consequences around the eviction", func(s *evictionSeq) {
 		s.h.create(runningPod(evPodA, evUIDA))

@@ -64,11 +64,12 @@ func deleteHeld(t *testing.T, h *harness) {
 
 // TestConsequenceLinksOnlyADeliveredTermination is the property over the kinds of pod: running in a crash loop,
 // being deleted (a rollout or scale down stops its container with 143, or the kernel kills it for memory),
-// evicted by its node, and with restartPolicy Never. The BackOff and the liveness failure of the container
-// link only to a fingerprint the pod reconciler delivered for that pod, and link when it delivered one in the
-// window and, for a non-zero exit, the Incident controller confirmed it (decided 2026-11-21): each case runs once
-// with a CauseSeen that has seen every delivered cause, and once with the hold off, where nothing is asked and
-// so only an OOM kill links.
+// evicted by its node, stopped by a node shutdown or a deadline (any status.reason), and with restartPolicy Never.
+// The BackOff and the liveness failure of the container link only to a fingerprint the pod reconciler delivered
+// for that pod, and link when it delivered one in the window and, for a non-zero exit, only the BackOff and only
+// when the Incident controller confirmed it (decided 2026-11-21, twice): each case runs once with a CauseSeen that
+// has seen every delivered cause, and once with the hold off, where nothing is asked and so only an OOM kill
+// links.
 func TestConsequenceLinksOnlyADeliveredTermination(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -80,21 +81,25 @@ func TestConsequenceLinksOnlyADeliveredTermination(t *testing.T) {
 		{"deleting, stopped with 143", stoppedPod(reasonError, 143, corev1.RestartPolicyAlways, corev1.PodRunning, ""), true, false},
 		{"deleting, OOM killed", stoppedPod(ReasonOOMKilled, exitOOM, corev1.RestartPolicyAlways, corev1.PodRunning, ""), true, true},
 		{"evicted", stoppedPod(reasonError, exitOOM, corev1.RestartPolicyAlways, corev1.PodFailed, reasonEvicted), false, false},
+		{"node shutdown", stoppedPod(reasonError, 143, corev1.RestartPolicyAlways, corev1.PodFailed, "Terminated"), false, false},
+		{"deadline exceeded", stoppedPod(reasonError, 137, corev1.RestartPolicyAlways, corev1.PodFailed, "DeadlineExceeded"), false, false},
+		{"another pod reason", stoppedPod(reasonError, 1, corev1.RestartPolicyAlways, corev1.PodFailed, "UnexpectedAdmissionError"), false, false},
 		{"restartPolicy Never", stoppedPod(reasonError, 1, corev1.RestartPolicyNever, corev1.PodFailed, ""), false, true},
 	}
 	for _, c := range cases {
 		for _, confirmed := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/confirmed=%t", c.name, confirmed), func(t *testing.T) {
-				linkedCase(t, c.pod.DeepCopy(), c.deleting, confirmed,
-					c.linked && (confirmed || c.pod.Status.ContainerStatuses[0].State.Terminated.Reason == ReasonOOMKilled))
+				oom := c.pod.Status.ContainerStatuses[0].State.Terminated.Reason == ReasonOOMKilled
+				linkedCase(t, c.pod.DeepCopy(), c.deleting, confirmed, c.linked && (confirmed || oom), oom)
 			})
 		}
 	}
 }
 
 // linkedCase runs one case of TestConsequenceLinksOnlyADeliveredTermination: with confirmed, a CauseSeen that
-// has seen every cause the pod reconciler delivered; without, the hold off. want is whether the consequences link.
-func linkedCase(t *testing.T, pod *corev1.Pod, deleting, confirmed, want bool) {
+// has seen every cause the pod reconciler delivered; without, the hold off. want is whether the BackOff links; the
+// Unhealthy event links only when want and the termination is an OOM kill (oom).
+func linkedCase(t *testing.T, pod *corev1.Pod, deleting, confirmed, want, oom bool) {
 	t.Helper()
 	book := &causeBook{}
 	d, rs, _ := workload()
@@ -117,12 +122,20 @@ func linkedCase(t *testing.T, pod *corev1.Pod, deleting, confirmed, want bool) {
 		book.record(o.Fingerprint)
 	}
 	for _, reason := range []string{reasonBack, ReasonUnhealthy} {
+		want := want && (reason == reasonBack || oom)
 		ev := consequence("ev-"+reason, reason, appPath, at)
 		h.create(ev)
 		h.reconcileEvent(ev.Name)
 		got := h.drain()
 		if want && len(got) == 0 {
 			t.Errorf("%s was not emitted at once, want it linked", reason)
+		}
+		if !want && len(got) == 0 {
+			// Held for want of a cause, as main holds it: what it links, if anything, is checked at its end.
+			h.clock.set(at.Add(ConsequenceGrace + time.Second))
+			h.reconcileEvent(ev.Name)
+			got = h.drain()
+			h.clock.set(at)
 		}
 		for _, o := range got {
 			if o.CauseFingerprint != "" && !slices.Contains(delivered, o.CauseFingerprint) {

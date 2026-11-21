@@ -42,5 +42,9 @@ func TestPredicatesMatchTheLists(t *testing.T) {
 		if IsWaiting(r) != slices.Contains(Waiting(), r) || ShowsTally(r) != slices.Contains(Tallied(), r) {
 			t.Errorf("%q: IsWaiting %v, ShowsTally %v disagree with the lists", r, IsWaiting(r), ShowsTally(r))
 		}
+		// A non-zero exit (Error, or any other termination reason) is a cause of BackOff only (2026-11-21).
+		if want := r == OOMKilled || slices.Contains(Waiting(), r); CausesUnhealthy(r) != want {
+			t.Errorf("%q: CausesUnhealthy %v, want %v", r, CausesUnhealthy(r), want)
+		}
 	}
 }

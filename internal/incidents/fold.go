@@ -32,6 +32,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidents/causereason"
 )
 
 // The late-cause fold (ADR-0039 points 12 to 15 and 23): when a cause Incident (status.cause) is created, a
@@ -76,6 +77,8 @@ func reachedPullRequest(rr *remediationv1alpha1.RemediationRequest) bool {
 // RemediationRequests of the namespace; only those whose incidentRef names inc, by name and UID, count.
 //
 //   - cause has status.cause and is not inc itself.
+//   - A cause of a non-zero exit folds a BackOff Incident only; an OOM kill or a wait folds BackOff and Unhealthy
+//     (causereason.CausesUnhealthy, decided 2026-11-21 on #432).
 //   - inc is a consequence ([consequenceIncident]), not a cause, never folded before (status.folded) and in
 //     phase Open, Analyzing or Proposed, or with no phase yet. A Resolved Incident is closed already, and its
 //     resolvedTime cannot change; an Escalated one waits for a person. status.folded is the durable guard
@@ -92,6 +95,10 @@ func reachedPullRequest(rr *remediationv1alpha1.RemediationRequest) bool {
 func foldable(inc, cause *remediationv1alpha1.Incident, requests []remediationv1alpha1.RemediationRequest) bool {
 	if !cause.Status.Cause || inc.Name == cause.Name || inc.UID == cause.UID || !inc.HasDerivedName() ||
 		!foldCandidate(inc) {
+		return false
+	}
+	// A non-zero exit folds BackOff Incidents only (decided 2026-11-21 on #432).
+	if inc.Spec.Reason != string(remediationv1alpha1.AbsorbedBackOff) && !causereason.CausesUnhealthy(cause.Spec.Reason) {
 		return false
 	}
 	if inc.Spec.Subject.UID == "" || inc.Spec.Subject.UID != cause.Spec.Subject.UID {

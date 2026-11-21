@@ -31,8 +31,8 @@ import (
 // on one Incident, its own fingerprint or, for a linked consequence, its cause's.
 //
 // Properties (ADR-0039 point 3, amended 2026-11-20), one line each:
-//   - P1: one crash loop of one container (non-zero exits, BackOff within KillCauseWindow) lands on one Incident.
-//   - P2: two faults of one container more than KillCauseWindow apart land on two Incidents, each consequence
+//   - P1: one crash loop of one container (non-zero exits, BackOff within TerminationCauseWindow) lands on one Incident.
+//   - P2: two faults of one container more than TerminationCauseWindow apart land on two Incidents, each consequence
 //     on the fault within the window, and a consequence past the window on none.
 //   - P3: every cause fingerprint on a consequence is the fingerprint of an observation the collector delivers
 //     for that pod (decided 2026-11-21): a pod being deleted offers only its OOM kills (#966).
@@ -85,7 +85,7 @@ func crashLoopPod(finished time.Time, restarts int32) *corev1.Pod {
 // code 2 (reason Error, read from pod status) and the kubelet reports BackOff for it. On main the termination
 // was a symptom of no class and the BackOff found no cause in the pod status, so it was held for
 // ConsequenceGrace and emitted unlinked: a second Incident about 2 minutes after the first. A non-zero exit is
-// now a cause, and the BackOff links to the newest termination within KillCauseWindow of its own time, on
+// now a cause, and the BackOff links to the newest termination within TerminationCauseWindow of its own time, on
 // either side: here the status already shows a crash 13 seconds after the event.
 func TestIssue432CrashLoopBackOffLandsOnOneIncident(t *testing.T) {
 	// rc.3 (a): Error Incident 20:27:28Z, BackOff Incident 20:29:15Z. t0 stands for 20:25:00Z.
@@ -125,7 +125,7 @@ func TestIssue432CrashLoopBackOffLandsOnOneIncident(t *testing.T) {
 }
 
 // TestIssue432TwoFaultsOpenTwoIncidents is P2: a container crashes with exit code 2, then, more than
-// KillCauseWindow later, with exit code 1. Each BackOff counts on the crash within the window of its time,
+// TerminationCauseWindow later, with exit code 1. Each BackOff counts on the crash within the window of its time,
 // and a BackOff past the window of the last crash links to nothing. Two faults stay two Incidents.
 func TestIssue432TwoFaultsOpenTwoIncidents(t *testing.T) {
 	d, rs, _ := workload()
@@ -159,8 +159,8 @@ func TestIssue432TwoFaultsOpenTwoIncidents(t *testing.T) {
 	if b := backOff("ev-first", t0.Add(90*time.Second)); b.CauseFingerprint != first.Fingerprint {
 		t.Errorf("BackOff of the first fault links to %q, want %q", b.CauseFingerprint, first.Fingerprint)
 	}
-	second := crash(1, 3, t0.Add(time.Minute+KillCauseWindow+time.Minute))
-	if b := backOff("ev-second", t0.Add(time.Minute+KillCauseWindow+90*time.Second)); b.CauseFingerprint != second.Fingerprint {
+	second := crash(1, 3, t0.Add(time.Minute+TerminationCauseWindow+time.Minute))
+	if b := backOff("ev-second", t0.Add(time.Minute+TerminationCauseWindow+90*time.Second)); b.CauseFingerprint != second.Fingerprint {
 		t.Errorf("BackOff of the second fault links to %q, want %q", b.CauseFingerprint, second.Fingerprint)
 	}
 	if first.Fingerprint == second.Fingerprint {
@@ -169,7 +169,7 @@ func TestIssue432TwoFaultsOpenTwoIncidents(t *testing.T) {
 	if keys := incidentKeys(got); len(keys) != 2 {
 		t.Errorf("two faults land on %d Incidents, want 2: %v", len(keys), keys)
 	}
-	late := t0.Add(time.Minute + 2*KillCauseWindow + 2*time.Minute)
+	late := t0.Add(time.Minute + 2*TerminationCauseWindow + 2*time.Minute)
 	h.clock.set(late)
 	ev := consequence("ev-late", reasonBack, appPath, late)
 	ev.Series = nil
@@ -177,13 +177,13 @@ func TestIssue432TwoFaultsOpenTwoIncidents(t *testing.T) {
 	h.reconcileEvent("ev-late")
 	for _, o := range h.drain() {
 		if o.CauseFingerprint != "" {
-			t.Errorf("BackOff past KillCauseWindow of the last crash links to %q, want none", o.CauseFingerprint)
+			t.Errorf("BackOff past TerminationCauseWindow of the last crash links to %q, want none", o.CauseFingerprint)
 		}
 	}
 }
 
 // TestIssue432LinkWindow is the window of a termination cause (P1, P2): a non-zero exit links within
-// KillCauseWindow on either side of the consequence's time, an OOM kill only after its finish (ADR-0039 point 5).
+// TerminationCauseWindow on either side of the consequence's time, an OOM kill only after its finish (ADR-0039 point 5).
 func TestIssue432LinkWindow(t *testing.T) {
 	cases := []struct {
 		reason string
@@ -191,17 +191,22 @@ func TestIssue432LinkWindow(t *testing.T) {
 		want   bool
 	}{
 		{reasonError, 0, true},
-		{reasonError, KillCauseWindow, true},
-		{reasonError, KillCauseWindow + time.Second, false},
-		{reasonError, -KillCauseWindow, true},
-		{reasonError, -KillCauseWindow - time.Second, false},
+		{reasonError, TerminationCauseWindow, true},
+		{reasonError, TerminationCauseWindow + time.Second, false},
+		{reasonError, -TerminationCauseWindow, true},
+		{reasonError, -TerminationCauseWindow - time.Second, false},
 		{ReasonOOMKilled, 0, true},
-		{ReasonOOMKilled, KillCauseWindow, true},
-		{ReasonOOMKilled, KillCauseWindow + time.Second, false},
+		{ReasonOOMKilled, TerminationCauseWindow, true},
+		{ReasonOOMKilled, TerminationCauseWindow + time.Second, false},
 		{ReasonOOMKilled, -time.Second, false},
 	}
 	for _, c := range cases {
-		if got := linksAt(termination{reason: c.reason, finished: t0}, t0.Add(c.at)); got != c.want {
+		got := exitLinksAt(termination{reason: c.reason, finished: t0}, t0.Add(c.at))
+		if c.reason == ReasonOOMKilled {
+			st := corev1.ContainerStatus{State: corev1.ContainerState{Terminated: terminated("oom", c.reason, exitOOM, t0)}}
+			got = killOf(st, t0.Add(c.at)) != nil
+		}
+		if got != c.want {
 			t.Errorf("%s at %v: links %t, want %t", c.reason, c.at, got, c.want)
 		}
 	}

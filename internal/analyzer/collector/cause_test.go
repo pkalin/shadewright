@@ -256,9 +256,9 @@ func TestCauseFingerprintKillWindow(t *testing.T) {
 	cases := []tc{
 		{"at finishedAt", at(0), true},
 		{"one minute after", at(time.Minute), true},
-		{"ten minutes after", at(KillCauseWindow), true},
+		{"ten minutes after", at(TerminationCauseWindow), true},
 		{"one second before", at(-time.Second), false},
-		{"ten minutes and one second after", at(KillCauseWindow + time.Second), false},
+		{"ten minutes and one second after", at(TerminationCauseWindow + time.Second), false},
 		{"no kubelet time", nil, false},
 	}
 	for _, reason := range []string{reasonBack, ReasonUnhealthy} {
@@ -304,7 +304,7 @@ func TestCauseFingerprintSeriesTime(t *testing.T) {
 	h.reconcilePod(pod.Name)
 	kill := h.one()
 	ev := consequence("series", reasonBack, "spec.containers{"+containerApp+"}", finished)
-	ev.Series = &eventsv1.EventSeries{Count: 3, LastObservedTime: metav1.NewMicroTime(finished.Add(KillCauseWindow + time.Minute))}
+	ev.Series = &eventsv1.EventSeries{Count: 3, LastObservedTime: metav1.NewMicroTime(finished.Add(TerminationCauseWindow + time.Minute))}
 	h.create(ev)
 	h.reconcileEvent(ev.Name)
 	if got := h.one(); got.CauseFingerprint != "" {
@@ -365,7 +365,7 @@ func TestWaitingCauseOfAnInitContainer(t *testing.T) {
 }
 
 // TestNonZeroExitIsACause checks that a crash (a non-zero exit) is a cause read from pod status, and that a
-// BackOff of its container within KillCauseWindow links to it (ADR-0039 point 3, amended 2026-11-20, #432)
+// BackOff of its container within TerminationCauseWindow links to it (ADR-0039 point 3, amended 2026-11-20, #432)
 // once the Incident controller confirmed it saw the crash (decided 2026-11-21): CauseSeen answers true for it.
 func TestNonZeroExitIsACause(t *testing.T) {
 	d, rs, _ := workload()

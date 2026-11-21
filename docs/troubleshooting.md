@@ -493,12 +493,14 @@ For an enabled module, the analyzer must also be allowed to read the add-on's ki
 
 ## A crash loop opens a second Incident
 
-A `BackOff` or `Unhealthy` event of a container that exited with a non-zero code counts on the exit's Incident only once the Incident controller confirmed it has seen that exit ([ADR-0039](adr/0039-consequence-symptoms-attach-to-their-causes-incident.md) point 3). When it is not confirmed, the event counts on an out-of-memory kill of the same container in the window if there is one, or goes on as an event with no cause and can open an Incident of its own. Two outcomes of `shadewright_analyzer_held_consequences_total` ([metrics](reference/metrics.md)) count each such removal:
+A `BackOff` event of a container that exited with a non-zero code counts on the exit's Incident only once the Incident controller confirmed it has seen that exit ([ADR-0039](adr/0039-consequence-symptoms-attach-to-their-causes-incident.md) point 3). When it is not confirmed, the event counts on an out-of-memory kill of the same container in the window if there is one, or goes on as an event with no cause and can open an Incident of its own. The same happens when the analyzer holds too many consequences to hold one more: the exit is asked about once, usually before its Incident exists (`overflow` in the same metric). Two outcomes of `shadewright_analyzer_held_consequences_total` ([metrics](reference/metrics.md)) count each such verdict, once per event:
 
 - `cause_unconfirmed`: the controller answered that it has not seen the exit yet, or the analyzer runs without it. The analyzer logs `Went on without the non-zero exit cause of a consequence, the Incident controller has not confirmed it` at info level. A steady rate means the exit's Incident opens later than the 2 minute hold of the event, for example when the Incident gate waits for a second sighting of it.
 - `cause_unanswered`: the question failed or ran out of time when the decision was due. The analyzer logs `Went on without the non-zero exit cause of a consequence, the Incident controller did not answer` at error level, with `causeFingerprint` and the error, and the event does not wait longer. Look for the Incident controller's own errors in the same log (for example a failed load of its Incidents after a start).
 
-Both log lines name the exit's fingerprint (`causeFingerprint`) and, under `fallbackFingerprint`, the out-of-memory kill the event counts on instead, empty when none. The two Incidents of such a crash loop resolve by the usual rules.
+Both log lines name the exit's fingerprint (`causeFingerprint`) and, under `fallbackFingerprint`, the out-of-memory kill or wait the event counts on instead, empty when none. The two Incidents of such a crash loop resolve by the usual rules.
+
+An `Unhealthy` event never counts on a non-zero exit, so a liveness probe failure and the exit 137 or 143 the kubelet's restart gave keep an Incident each, each with its own analysis. This is by design: the pod status does not tell whether the probe failed because the container was failing or the exit came from the probe. Nor does a `BackOff` count on an exit of a pod whose `status.reason` is set (evicted, a node shutdown, a deadline).
 
 ## A component Pod stays not Ready
 

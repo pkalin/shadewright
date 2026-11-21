@@ -147,16 +147,14 @@ func (t termination) slot() string {
 	return t.container
 }
 
-// podReasonEvicted is the status.reason of a pod its kubelet evicted.
-const podReasonEvicted = "Evicted"
-
 // class is the part of t, a symptom read from pod's status, in the consequence rule (ADR-0039 point 3, amended
-// 2026-11-20): an OOM kill, a non-zero exit or a waiting reason is a cause. A termination of an evicted pod
-// (status.reason Evicted) that is not an OOM kill has no class, as before the crash loop link: evictions are
-// designed apart (#1077). It is the one place that decides it, for the observation of t and for the cause a
-// consequence links to.
+// 2026-11-20 and narrowed 2026-11-21): an OOM kill, a non-zero exit or a waiting reason is a cause. A termination
+// that is not an OOM kill has no class when the pod's status.reason is set, whatever its value (Evicted, a node
+// shutdown, a deadline, or any other): the kubelet stopped the pod, so its exits are not a crash loop. That is as
+// before the crash loop link; evictions are designed apart (#1077). It is the one place that decides it, for the
+// observation of t and for the cause a consequence links to.
 func (t termination) class(pod *corev1.Pod) Class {
-	if !t.waiting && t.reason != ReasonOOMKilled && pod.Status.Reason == podReasonEvicted {
+	if !t.waiting && t.reason != ReasonOOMKilled && pod.Status.Reason != "" {
 		return ClassNone
 	}
 	return ClassCause

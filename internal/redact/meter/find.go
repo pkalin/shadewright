@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"regexp/syntax"
 	"unicode/utf8"
 )
 
@@ -35,6 +36,10 @@ type Expr struct {
 	// character, then re's unanchored search as a capture group, so the assertions of re (^, \b, \B) see the
 	// character before the start as FindAll sees it, and a match never starts before the start.
 	cont *regexp.Regexp
+	// readsToEnd is set when the engine, searching re from the start of a text with a reader, reads the whole
+	// text when it finds no match: re can match and is not anchored at the start of the text. The search from a
+	// later start (cont) always reads to the end without a match, since its `(?s:.)*?` takes every character.
+	readsToEnd bool
 }
 
 // NewExpr returns re as an Expr. It panics where [CompileExpr] fails: on the built-in expressions, which do not,
@@ -53,7 +58,24 @@ func CompileExpr(re *regexp.Regexp) (*Expr, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the search of %q from a later start: %w", re.String(), err)
 	}
-	return &Expr{re: re, cont: cont}, nil
+	return &Expr{re: re, cont: cont, readsToEnd: readsToEnd(re)}, nil
+}
+
+// readsToEnd reports whether the reader search of re from the start of a text reads the whole text when it finds
+// no match: the engine stops early only when re cannot match at all or is anchored at the start of the text
+// (regexp.(*machine).match, onepass needs that anchor too). A pattern that does not parse here reads as false,
+// which keeps the reader search.
+func readsToEnd(re *regexp.Regexp) bool {
+	parsed, err := syntax.Parse(re.String(), syntax.Perl)
+	if err != nil {
+		return false
+	}
+	prog, err := syntax.Compile(parsed.Simplify())
+	if err != nil {
+		return false
+	}
+	cond := prog.StartCond()
+	return cond != ^syntax.EmptyOp(0) && cond&syntax.EmptyBeginText == 0
 }
 
 // Regexp returns the expression.
@@ -131,7 +153,48 @@ func (e *Expr) FindAll(s string, spend func(n int)) [][]int {
 
 // attempt returns the leftmost match of e in s that starts at pos or later, as the search of FindAll from pos
 // finds it, with its submatches as indexes into s.
+//
+// Most attempts find nothing: most patterns match no line of a text, so the attempt from the start of the text
+// is the only one, and the reader search reads the whole text with the slowest engine (the one that tracks
+// submatches and cannot skip to a literal prefix). The search from from reads the whole of s[from:] when it
+// finds no match (readsToEnd), so where re.MatchString finds none, attempt charges what that search would read,
+// in the same pieces, without running it (#873, 2026-11-21: the reader search on every attempt made redaction
+// about three times slower per byte than before). re.MatchString on s[from:] can only find more than the search
+// from pos: every match starting after from is checked with the same characters around it.
 func (e *Expr) attempt(s string, pos int, spend func(n int)) []int {
+	from := 0
+	if pos > 0 {
+		_, w := utf8.DecodeLastRuneInString(s[:pos])
+		from = pos - w
+	}
+	if (pos > 0 || e.readsToEnd) && !e.re.MatchString(s[from:]) {
+		chargeRead(s[from:], spend)
+		return nil
+	}
+	return e.attemptRead(s, pos, spend)
+}
+
+// chargeRead passes the bytes of s to spend as a reader that reads all of s does: one piece each time the bytes
+// read reach chunk at a character boundary, and the rest at the end.
+func chargeRead(s string, spend func(n int)) {
+	pending := 0
+	for i := 0; i < len(s); {
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		pending += size
+		if pending >= chunk {
+			n := pending
+			pending = 0
+			spend(n)
+		}
+	}
+	if pending > 0 {
+		spend(pending)
+	}
+}
+
+// attemptRead is attempt with the reader search on every call.
+func (e *Expr) attemptRead(s string, pos int, spend func(n int)) []int {
 	if pos == 0 {
 		r := &reader{s: s, spend: spend}
 		m := e.re.FindReaderSubmatchIndex(r)

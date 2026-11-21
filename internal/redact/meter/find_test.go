@@ -20,8 +20,10 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // findExprs are expressions with every kind of assertion and empty match FindAll treats specially: the start of
@@ -93,5 +95,49 @@ func TestFindAllStopsOnTheMeter(t *testing.T) {
 	}()
 	if !over || m.Spent() > 100_000+chunk {
 		t.Errorf("over %v, spent %d", over, m.Spent())
+	}
+}
+
+// Each attempt returns and charges what the reader search returns and charges, in the same pieces, from every
+// start FindAll can give it: the shortcut of an attempt that finds nothing changes neither.
+func TestAttemptIsTheReaderSearch(t *testing.T) {
+	rng := rand.New(rand.NewPCG(873, 20261121)) //nolint:gosec // a fixed seed keeps the texts the same on every run
+	exprs := append(slices.Clone(findExprs), `[^\x00-\x{10FFFF}]`, `\A`, `(?i)password\s*[:=]\s*\S+`, `AKIA[0-9A-Z]{4}`)
+	for _, expr := range exprs {
+		e := NewExpr(regexp.MustCompile(expr))
+		for range 60 {
+			var b strings.Builder
+			// Long enough for the charge to come in more than one piece.
+			for range rng.IntN(700) {
+				b.WriteString(findAlphabet[rng.IntN(len(findAlphabet))])
+			}
+			s := b.String()
+			for pos := 0; pos <= len(s); pos += 1 + rng.IntN(97) {
+				if pos < len(s) && !utf8.RuneStart(s[pos]) {
+					continue
+				}
+				var got, want []int
+				gm := e.attempt(s, pos, func(n int) { got = append(got, n) })
+				wm := e.attemptRead(s, pos, func(n int) { want = append(want, n) })
+				if !reflect.DeepEqual(gm, wm) || !slices.Equal(got, want) {
+					t.Fatalf("%q from %d on %q: match %v charged %v, the reader search %v charged %v",
+						expr, pos, s, gm, got, wm, want)
+				}
+			}
+		}
+	}
+}
+
+// An attempt that finds nothing does not run the reader search, which allocates on every call.
+func TestAttemptWithoutAMatchSkipsTheReaderSearch(t *testing.T) {
+	e := NewExpr(regexp.MustCompile(`(?i)password\s*[:=]\s*\S+`))
+	s := strings.Repeat("level=info msg=\"request served\" path=/api/v1/items\n", 64)
+	spent := 0
+	spend := func(n int) { spent += n }
+	if allocs := testing.AllocsPerRun(20, func() { e.FindAll(s, spend) }); allocs != 0 {
+		t.Errorf("a search with no match allocated %v times per run, want 0", allocs)
+	}
+	if spent != 21*len(s) {
+		t.Errorf("charged %d bytes in 21 runs, want %d", spent, 21*len(s))
 	}
 }

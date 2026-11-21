@@ -185,7 +185,8 @@ func TestWriteBuildCorpusTable(t *testing.T) {
 }
 
 // Every generated metric block comes out byte for byte as the build before the second round of #873 wrote it, no
-// context shows a secret of its case, and a plain value of a series without the other kinds is shown.
+// context shows a secret of its case, and a plain value of a series without the other kinds is shown. Under -race
+// it checks a seeded sample of the cases (racesample_test.go), without it all of them.
 func TestBuildCorpusUnchanged(t *testing.T) {
 	f, err := os.Open(buildCorpusTable)
 	if err != nil {
@@ -207,6 +208,9 @@ func TestBuildCorpusUnchanged(t *testing.T) {
 		t.Fatalf("the table has %d rows for %d cases", len(want), len(cases))
 	}
 	for i, c := range cases {
+		if !raceKeeps(t.Name(), i) {
+			continue
+		}
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			t.Parallel()
 			text := buildCaseText(t, c)

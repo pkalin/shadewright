@@ -47,8 +47,8 @@ func TestJudgeReplyBlocksAreCheckedAsSent(t *testing.T) {
 			StatusQuarantined, KindUnreadableBlock},
 		{"a key twice", `[{"type":"text","text":"ok","text":"x"},` + call + `]`, StatusQuarantined, KindUnreadableBlock},
 		{"not a list", `{"type":"text","text":"ok"}`, StatusQuarantined, KindUnreadableBlock},
-		{"thinking is not read", `[{"type":"thinking","thinking":"token=` + fakeToken + `","signature":"s"},` +
-			`{"type":"text","text":"Checking the limit."},` + call + `]`, StatusScored, ""},
+		{"thinking is read", `[{"type":"thinking","thinking":"token=` + fakeToken + `","signature":"s"},` +
+			`{"type":"text","text":"Checking the limit."},` + call + `]`, StatusQuarantined, KindThinkingBlock},
 	}
 	for i, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

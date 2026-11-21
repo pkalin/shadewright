@@ -25,6 +25,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// plainValue is the value of the map key the encoder writes as itself.
+const plainValue = "plain"
+
 // Two map keys that encoding/json writes alike (an invalid byte and U+FFFD) are two members of the answer:
 // get_resource reads each back with its own key and value, in the encoder's order, instead of failing to read the
 // answer back (#873, review of 2026-11-21). The secret value under one of them is still redacted.
@@ -34,7 +37,7 @@ func TestGetResourceKeysWrittenAlike(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: testNS},
 		Spec: corev1.PodSpec{NodeSelector: map[string]string{
-			"\xff": "first-value", "\ufffd": "second-value " + secret, "ok": "plain",
+			"\xff": "first-value", "\ufffd": "second-value " + secret, "ok": plainValue,
 		}},
 	}
 	r := src.run(set, diffScene{pod: pod}, NameGetResource,
@@ -42,7 +45,7 @@ func TestGetResourceKeysWrittenAlike(t *testing.T) {
 	if r.Status != StatusOK {
 		t.Fatalf("status %q, labels %v: want ok", r.Status, r.Labels)
 	}
-	for _, want := range []string{"first-value", "second-value", "plain"} {
+	for _, want := range []string{"first-value", "second-value", plainValue} {
 		if !strings.Contains(r.Text, want) {
 			t.Errorf("the answer lacks %q:\n%s", want, r.Text)
 		}
@@ -65,7 +68,7 @@ func TestGetResourceKeysWrittenAlike(t *testing.T) {
 		first += strings.Count(v, "first-value")
 		second += strings.Count(v, "second-value")
 	}
-	if len(got) != 3 || got["ok"] != "plain" || first != 1 || second != 1 {
+	if len(got) != 3 || got["ok"] != plainValue || first != 1 || second != 1 {
 		t.Errorf("nodeSelector read back as %q: want three entries, ok: plain and each other value under its own key", got)
 	}
 }

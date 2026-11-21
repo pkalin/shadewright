@@ -246,7 +246,7 @@ func TestHeapOfAHiddenPieceIsBounded(t *testing.T) {
 	if raceDetector {
 		t.Skip("measures the heap of the product build")
 	}
-	ps := []Piece{{Text: "password: "}, {Text: repeatTo("\x01", largestObject-10), Data: true, Form: JSON, Key: "password"}}
+	ps := []Piece{{Text: "password: "}, {Text: repeatTo("\x01", largestObject-10), Data: true, Form: JSON, Key: passwordKey}}
 	var ok bool
 	peak := peakLiveHeap(func() { _, ok = defaultRedactor.PiecesWithin(ps, -1) })
 	bound := heapBound(largestObject)

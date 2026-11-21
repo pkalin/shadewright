@@ -24,6 +24,13 @@ import (
 	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
+// The units of the known expensive shapes that more than one test builds.
+const (
+	passwordFlagUnit = "-password,"
+	gluedAuthUnit    = `auth="a"`
+	gluedTokenUnit   = `token="a"`
+)
+
 // withholdShape is one of the known shapes whose work per byte passes WorkPerByte from some size on (decision of
 // 2026-11-21 on #873): before, then unit repeated, then after.
 type withholdShape struct {
@@ -49,12 +56,12 @@ func (s withholdShape) units(size int) (int, bool) {
 // repeated before a blank line of 4 KiB; and the glued quoted pairs (gluedQuotedPairs), with and without a tail.
 var withholdShapes = map[string]withholdShape{
 	"--token,}":        {unit: tokenEndRun + "}"},
-	"-password,":       {unit: "-password,"},
+	passwordFlagUnit:   {unit: passwordFlagUnit},
 	"TOKEN-blank-line": {unit: `TOKEN="a"`, after: "\"\n" + strings.Repeat(" ", 4096) + "\"："},
-	"glued-auth":       {unit: `auth="a"`},
-	"glued-auth-tail":  {unit: `auth="a"`, after: "：x"},
-	"glued-token":      {unit: `token="a"`},
-	"glued-token-tail": {unit: `token="a"`, after: "：x"},
+	"glued-auth":       {unit: gluedAuthUnit},
+	"glued-auth-tail":  {unit: gluedAuthUnit, after: "：x"},
+	"glued-token":      {unit: gluedTokenUnit},
+	"glued-token-tail": {unit: gluedTokenUnit, after: "：x"},
 }
 
 // withholdSizes are, for each known expensive shape and entry point, the largest size of the text in bytes that is

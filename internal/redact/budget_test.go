@@ -181,7 +181,7 @@ func corpusShapes(n int) map[string]string {
 	out["repeated quoted keys"] = repeatedQuotedKeys(n / len(repeatedQuotedKeys(1)))
 	maps.Copy(out, gluedQuotedPairs(n))
 	maps.Copy(out, budgetShapes(n))
-	out[passwordFlagRun] = strings.Repeat("-password,", n/len("-password,"))
+	out[passwordFlagRun] = strings.Repeat(passwordFlagUnit, n/len(passwordFlagUnit))
 	out[`TOKEN="a" before a blank line`] = strings.Repeat(`TOKEN="a"`, n/len(`TOKEN="a"`)) + "\"\n" +
 		strings.Repeat(" ", 4096) + "\"："
 	return out
@@ -197,7 +197,7 @@ const passwordFlagRun = "-password, repeated"
 // found by FuzzDiffGetPodLogs).
 func gluedQuotedPairs(n int) map[string]string {
 	out := map[string]string{}
-	for _, unit := range []string{`auth="a"`, `token="a"`} {
+	for _, unit := range []string{gluedAuthUnit, gluedTokenUnit} {
 		for _, tail := range []string{"", "：x"} {
 			out[fmt.Sprintf("glued %s tail %q", unit, tail)] = strings.Repeat(unit, n/len(unit)) + tail
 		}

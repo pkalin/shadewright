@@ -57,7 +57,7 @@ const (
 	defaultMaxCallTokens  = 40_000
 	defaultMaxRunTokens   = 100_000
 	defaultMaxMonthTokens = 4_000_000
-	// callTimeout bounds one model call, retries included; three fit in intake.RunTimeout.
+	// callTimeout bounds one model call (one attempt); three fit in intake.RunTimeout.
 	callTimeout = 2 * time.Minute
 )
 
@@ -173,13 +173,12 @@ func buildModels(o options) (map[intake.Family]intake.Model, error) {
 	if o.anthropicModel == "" || o.anthropicKF == "" || o.openaiModel == "" || o.openaiKF == "" {
 		return nil, errors.New("both families need a model and a key file (or --dry-run)")
 	}
-	a, err := anthropic.New(anthropic.Config{Model: o.anthropicModel, KeyFile: o.anthropicKF,
-		OtherKeyFiles: []string{o.openaiKF}, Timeout: callTimeout})
+	ac, oc := adapterConfigs(o)
+	a, err := anthropic.New(ac)
 	if err != nil {
 		return nil, err
 	}
-	oa, err := openaicompatible.New(openaicompatible.Config{Endpoint: o.openaiEndpoint, Deployment: o.openaiModel,
-		KeyFile: o.openaiKF, OtherKeyFiles: []string{o.anthropicKF}, Timeout: callTimeout})
+	oa, err := openaicompatible.New(oc)
 	if err != nil {
 		return nil, err
 	}
@@ -187,6 +186,16 @@ func buildModels(o options) (map[intake.Family]intake.Model, error) {
 		intake.FamilyAnthropic: {Provider: a, Name: o.anthropicModel},
 		intake.FamilyOpenAI:    {Provider: oa, Name: o.openaiModel},
 	}, nil
+}
+
+// adapterConfigs returns the configuration of each family's adapter. Each makes one attempt per call: the
+// intake reserves every call once at its maximum (ADR-0047 section 6), and an automatic retry would be a second
+// billed attempt under that one reservation. A failed call ends the run with exit code 1 for the next run.
+func adapterConfigs(o options) (anthropic.Config, openaicompatible.Config) {
+	return anthropic.Config{Model: o.anthropicModel, KeyFile: o.anthropicKF, OtherKeyFiles: []string{o.openaiKF},
+			Timeout: callTimeout, MaxAttempts: 1},
+		openaicompatible.Config{Endpoint: o.openaiEndpoint, Deployment: o.openaiModel, KeyFile: o.openaiKF,
+			OtherKeyFiles: []string{o.anthropicKF}, Timeout: callTimeout, MaxAttempts: 1}
 }
 
 // writeOut writes the score to standard output or creates the file; a file that exists is never replaced.

@@ -110,17 +110,22 @@ type judgeInput struct {
 	ToolCalls      int      `json:"toolCalls"`
 }
 
-// judgeMessages returns the judge's first two messages. The record's fields are JSON in a delimited block:
-// json.Marshal escapes "<" and ">", so no text of the record can close the block.
-func judgeMessages(rec analysis.Record) ([]providers.Message, error) {
+// judgeInputOf returns the values of rec the judge is given.
+func judgeInputOf(rec analysis.Record) judgeInput {
 	missing := rec.MissingData
 	if missing == nil {
 		missing = []string{}
 	}
-	data, err := json.Marshal(judgeInput{
+	return judgeInput{
 		IncidentReason: rec.Incident.Reason, SubjectKind: rec.Incident.SubjectKind, Summary: rec.Summary,
 		MissingData: missing, Escalated: rec.Escalated, Calls: rec.Calls, ToolCalls: rec.ToolCalls,
-	})
+	}
+}
+
+// judgeMessages returns the judge's first two messages. The record's fields are JSON in a delimited block:
+// json.Marshal escapes "<" and ">", so no text of the record can close the block.
+func judgeMessages(rec analysis.Record) ([]providers.Message, error) {
+	data, err := json.Marshal(judgeInputOf(rec))
 	if err != nil {
 		return nil, err
 	}
@@ -171,9 +176,26 @@ func question(r *redact.Redactor, args json.RawMessage) (string, bool) {
 	return q, true
 }
 
-// parseAnswer decodes the judge's answer strictly: every field present, scores 0 to 5, a known verdict, a note
-// of at most MaxNoteBytes bytes. The note is kept only when the redactor finds nothing in it.
+// answerNames are the answer's property names, matched exactly (encoding/json alone matches them in any case).
+var answerNames = map[string]bool{"specific": true, "consistent": true, "causeSupported": true, "missingData": true,
+	"verdict": true, "note": true}
+
+// parseAnswer decodes the judge's answer strictly: no key twice, every property name exactly as in the schema,
+// every score present and 0 to 5, a known verdict, and an optional note of at most MaxNoteBytes bytes
+// (ADR-0047 section 4). The note is kept only when the redactor finds nothing in it.
 func parseAnswer(r *redact.Redactor, content string) (Answer, bool) {
+	if checkKeys([]byte(content)) != nil {
+		return Answer{}, false
+	}
+	var names map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(content), &names); err != nil {
+		return Answer{}, false
+	}
+	for k := range names {
+		if !answerNames[k] {
+			return Answer{}, false
+		}
+	}
 	var a struct {
 		Specific       *int    `json:"specific"`
 		Consistent     *int    `json:"consistent"`
@@ -195,11 +217,14 @@ func parseAnswer(r *redact.Redactor, content string) (Answer, bool) {
 			return Answer{}, false
 		}
 	}
-	if a.Verdict == nil || !verdicts[*a.Verdict] || a.Note == nil || len(*a.Note) > MaxNoteBytes {
+	if a.Verdict == nil || !verdicts[*a.Verdict] || a.Note != nil && len(*a.Note) > MaxNoteBytes {
 		return Answer{}, false
 	}
 	out := Answer{Specific: *a.Specific, Consistent: *a.Consistent, CauseSupported: *a.CauseSupported,
 		MissingData: *a.MissingData, Verdict: *a.Verdict}
+	if a.Note == nil || *a.Note == "" {
+		return out, true
+	}
 	if ok, _ := redactorClean(r, *a.Note, nil); ok && utf8.ValidString(*a.Note) {
 		out.Note = *a.Note
 	} else {

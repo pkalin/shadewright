@@ -128,8 +128,23 @@ func TestFlagErrors(t *testing.T) {
 		})
 	}
 	var stdout, stderr bytes.Buffer
-	missing := filepath.Join(dir, "0a-20261120t090000z.json")
+	missing := filepath.Join(dir, "0f8e2a4c-1b3d-4e5f-8a9b-0c1d2e3f4a5c-20261120t090000z.json")
 	if code := run([]string{recordFlag, missing, spendFlag, dir, dryRun}, &stdout, &stderr); code != exitRetry {
 		t.Fatalf("a missing record: exit %d, want %d", code, exitRetry)
+	}
+}
+
+// Finding (d) of 2026-11-21: the intake reserves each call once at its maximum, so its adapters must not retry
+// a call by themselves (a 200 whose body read fails was sent again under the same reservation).
+func TestAdaptersMakeOneAttempt(t *testing.T) {
+	dir := t.TempDir()
+	o := options{anthropicModel: "claude-opus-5-5", anthropicKF: filepath.Join(dir, "a"), openaiModel: "gpt-5.1",
+		openaiKF: filepath.Join(dir, "o"), openaiEndpoint: "https://api.openai.com/v1"}
+	a, oa := adapterConfigs(o)
+	if a.MaxAttempts != 1 || oa.MaxAttempts != 1 {
+		t.Fatalf("attempts: anthropic %d, openai %d; want 1 each", a.MaxAttempts, oa.MaxAttempts)
+	}
+	if _, err := buildModels(o); err != nil {
+		t.Fatalf("the adapters refuse the configuration: %v", err)
 	}
 }

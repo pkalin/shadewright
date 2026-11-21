@@ -19,11 +19,14 @@ package intake
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
+	"unicode"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/analysis"
@@ -44,25 +47,116 @@ const (
 
 var (
 	// blobNamePattern is "<record ID>.json" with the ID the analyzer makes (recordID in internal/analysis): the
-	// Incident UID, a dash and the UTC time as 20060102t150405z, from 0-9, a-f, "-", "t" and "z" only. The
-	// length (at most 64 bytes for the ID) is checked apart.
-	blobNamePattern = regexp.MustCompile(`^([0-9a-f][0-9a-f-]*-[0-9]{8}t[0-9]{6}z)\.json$`)
+	// Incident UID as a lower-case UUID, a dash and the UTC time as 20060102t150405z. The time is parsed apart,
+	// and decodeRecord checks that the UID is the record's incident.uid.
+	blobNamePattern = regexp.MustCompile(
+		`^(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-([0-9]{8}t[0-9]{6}z))\.json$`)
 	// fingerprintShape is an Incident fingerprint.
 	fingerprintShape = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	// requestShape is a name RequestName gives.
 	requestShape = regexp.MustCompile(`^remediation-[0-9a-f]{24}$`)
 )
 
-// maxRecordID bounds the ID in the blob name.
-const maxRecordID = 64
+// recordTimeLayout is the time of a record ID.
+const recordTimeLayout = "20060102t150405z"
+
+// uidLength is the length of the UUID at the start of a record ID.
+const uidLength = 36
 
 // recordIDFromName returns the record ID of a blob name, and false for any other name.
 func recordIDFromName(name string) (string, bool) {
 	m := blobNamePattern.FindStringSubmatch(name)
-	if m == nil || len(m[1]) > maxRecordID {
+	if m == nil {
+		return "", false
+	}
+	if _, err := time.Parse(recordTimeLayout, m[3]); err != nil {
 		return "", false
 	}
 	return m[1], true
+}
+
+// maxJSONDepth bounds the nesting of objects and arrays in a record or an answer. A record of the analyzer
+// nests three levels deep.
+const maxJSONDepth = 16
+
+// reasonDuplicateKey is the schema refusal of a record that checkKeys refuses.
+const reasonDuplicateKey = "the record has a key twice in one object (as written, escaped or in another case), " +
+	"or nests deeper than 16 levels"
+
+var (
+	errDuplicateKey = errors.New("a key appears twice in one object")
+	errTooDeep      = errors.New("the document nests too deeply")
+	errTrailing     = errors.New("data after the JSON value")
+)
+
+// checkKeys walks the tokens of one JSON value and refuses a key that appears twice in one object, compared
+// after unescaping and under the case folding encoding/json uses to match field names, so that every decoder
+// reads the same members; and nesting deeper than maxJSONDepth. Any other syntax error is returned as it is.
+func checkKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	type frame struct {
+		object  bool
+		wantKey bool
+		keys    map[string]bool
+	}
+	var stack []*frame
+	started := false
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			if len(stack) > 0 || !started {
+				return io.ErrUnexpectedEOF
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if started && len(stack) == 0 {
+			return errTrailing
+		}
+		started = true
+		if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].wantKey {
+			if k, ok := tok.(string); ok {
+				f := foldKey(k)
+				if stack[n-1].keys[f] {
+					return errDuplicateKey
+				}
+				stack[n-1].keys[f] = true
+				stack[n-1].wantKey = false
+				continue
+			}
+		}
+		switch tok {
+		case json.Delim('{'), json.Delim('['):
+			if len(stack) >= maxJSONDepth {
+				return errTooDeep
+			}
+			stack = append(stack, &frame{object: tok == json.Delim('{'), wantKey: true, keys: map[string]bool{}})
+			continue
+		case json.Delim('}'), json.Delim(']'):
+			stack = stack[:len(stack)-1]
+		}
+		// A value ended: the object around it, if any, wants its next key.
+		if n := len(stack); n > 0 && stack[n-1].object {
+			stack[n-1].wantKey = true
+		}
+	}
+}
+
+// foldKey maps each rune of k to the smallest rune of its simple case folding orbit, so that two keys fold to
+// the same string exactly when strings.EqualFold holds, the equality encoding/json uses for field names.
+func foldKey(k string) string {
+	var b strings.Builder
+	for _, r := range k {
+		m := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			m = min(m, f)
+		}
+		b.WriteRune(m)
+	}
+	return b.String()
 }
 
 // refusal is a check that quarantined a record, with a fixed reason.
@@ -72,9 +166,10 @@ type refusal struct {
 }
 
 // decodeRecord checks the schema: the bytes are one JSON object whose schemaVersion the intake knows (checked
-// first, so a record of a newer version is refused for that and nothing else), which decodes into the record
-// type with no unknown field and nothing after it, and whose id is the one of the blob name. The reasons are
-// fixed text: the decoder's own errors quote the input and never leave this function.
+// first, so a record of a newer version is refused for that and nothing else), with no key twice in one object
+// and no deep nesting (checkKeys), which decodes into the record type with no unknown field and nothing after it,
+// whose id is the one of the blob name, and whose incident.uid is the UID in that id. The reasons are fixed
+// text: the decoder's own errors quote the input and never leave this function.
 func decodeRecord(data []byte, id string) (analysis.Record, *refusal) {
 	schema := func(reason string) *refusal { return &refusal{check: CheckSchema, reason: reason} }
 	var head struct {
@@ -85,6 +180,11 @@ func decodeRecord(data []byte, id string) (analysis.Record, *refusal) {
 	}
 	if head.SchemaVersion == nil || *head.SchemaVersion != analysis.RecordSchemaVersion {
 		return analysis.Record{}, schema("the record's schemaVersion is missing or not one the intake knows")
+	}
+	if err := checkKeys(data); errors.Is(err, errDuplicateKey) || errors.Is(err, errTooDeep) {
+		return analysis.Record{}, schema(reasonDuplicateKey)
+	} else if err != nil {
+		return analysis.Record{}, schema("the record is not one JSON object")
 	}
 	var rec analysis.Record
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -97,6 +197,9 @@ func decodeRecord(data []byte, id string) (analysis.Record, *refusal) {
 	}
 	if rec.ID != id {
 		return analysis.Record{}, schema("the record's id is not the one of its name")
+	}
+	if len(id) < uidLength || rec.Incident.UID != id[:uidLength] {
+		return analysis.Record{}, schema("the record's incident.uid is not the UID of its id")
 	}
 	return rec, nil
 }
@@ -150,6 +253,16 @@ func checkRedaction(r *redact.Redactor, data []byte, keep []string) ([]string, b
 	}
 	slices.Sort(out)
 	return out, clean
+}
+
+// checkJudgeInput runs the same check over the values the judge is given, built from the decoded record, so
+// that what the check read and what the judge reads cannot differ.
+func checkJudgeInput(r *redact.Redactor, rec analysis.Record, keep []string) ([]string, bool) {
+	data, err := json.Marshal(judgeInputOf(rec))
+	if err != nil {
+		return []string{"unknown"}, false
+	}
+	return checkRedaction(r, data, keep)
 }
 
 // walk calls f with each string of v, each key, and "key: value" for each member with a scalar value.

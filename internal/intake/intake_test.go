@@ -120,9 +120,9 @@ func TestOversizeOrUnknownSchemaIsRefused(t *testing.T) {
 		{"an unknown field", &memSource{name: good.name, data: withField("token_"+fakeToken, `"x"`)}, CheckSchema, 1},
 		{"data after the object", &memSource{name: good.name, data: append(bytes.Clone(good.data), []byte(` {}`)...)}, CheckSchema, 1},
 		{"not an object", &memSource{name: good.name, data: []byte(`["` + fakeToken + `"]`)}, CheckSchema, 1},
-		{"an id other than the name's", &memSource{name: "0a-20261120t090000z.json", data: good.data}, CheckSchema, 1},
+		{"an id other than the name's", &memSource{name: "0f8e2a4c-1b3d-4e5f-8a9b-0c1d2e3f4a5b-20261120t090000z.json", data: good.data}, CheckSchema, 1},
 		{"a name that is not an ID", &memSource{name: "../quarantine/" + good.name, data: good.data}, CheckName, 0},
-		{"an ID over 64 bytes", &memSource{name: strings.Repeat("a", 60) + "-20261120t090000z.json", data: good.data}, CheckName, 0},
+		{"an ID that is not a UUID", &memSource{name: strings.Repeat("a", 40) + "-20261120t090000z.json", data: good.data}, CheckName, 0},
 		{"an upper-case ID", &memSource{name: strings.ToUpper(rec.ID[:8]) + rec.ID[8:] + ".json", data: good.data}, CheckName, 0},
 	}
 	for _, c := range cases {

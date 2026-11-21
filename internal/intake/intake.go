@@ -225,6 +225,9 @@ func (r *run) do(ctx context.Context, src Source) (Score, error) {
 	if kinds, clean := checkRedaction(r.Redactor, data, keep); !clean {
 		return r.quarantine(CheckRedactor, "the redactor found text it would remove; nothing was sent to a model", kinds)
 	}
+	if kinds, clean := checkJudgeInput(r.Redactor, rec, keep); !clean {
+		return r.quarantine(CheckRedactor, "the redactor found text it would remove; nothing was sent to a model", kinds)
+	}
 
 	// The judge is of the other family than the record's model.
 	fam, why := recordFamily(rec)
@@ -234,6 +237,11 @@ func (r *run) do(ctx context.Context, src Source) (Score, error) {
 	r.score.Family = fam
 	return r.judge(ctx, rec, fam.Other())
 }
+
+// billedAttempts is the attempts of one call the service may bill: one, because each call is reserved once at
+// its maximum. The adapters are also built with one attempt (cmd/intake); a failed call is an error for the
+// next run, which reserves again.
+const billedAttempts = 1
 
 // reserve counts a call at its maximum before it is made: it returns false, with the cap's name, when the call
 // would pass a cap, and an error when the month's sum cannot be read or the reservation cannot be created.
@@ -273,7 +281,7 @@ func (r *run) judge(ctx context.Context, rec analysis.Record, judgeFam Family) (
 		return Score{}, fmt.Errorf("building the judge's request: %w", err)
 	}
 	req := providers.CompletionRequest{Messages: msgs, Tools: []providers.ToolDefinition{crossCheckDefinition},
-		ResponseSchema: answerSchema, MaxOutputTokens: judgeOutputTokens}
+		ResponseSchema: answerSchema, MaxOutputTokens: judgeOutputTokens, MaxBilledAttempts: billedAttempts}
 	if ok, why, err := r.reserve(ctx, judgeFam, 1, req); err != nil || !ok {
 		if err != nil {
 			return Score{}, err
@@ -326,7 +334,8 @@ func (r *run) crossCheck(ctx context.Context, fam Family, args []byte) (string, 
 		r.score.CrossCheck = CrossCheckNotSent
 		return refusalQuestion, nil
 	}
-	req := providers.CompletionRequest{Messages: crossCheckMessages(q), MaxOutputTokens: crossOutputTokens}
+	req := providers.CompletionRequest{Messages: crossCheckMessages(q), MaxOutputTokens: crossOutputTokens,
+		MaxBilledAttempts: billedAttempts}
 	ok, _, err := r.reserve(ctx, fam, 2, req)
 	if err != nil {
 		return "", err

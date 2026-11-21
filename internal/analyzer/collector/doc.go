@@ -62,7 +62,10 @@ limitations under the License.
 // to stay within the capacity), it asks a HandledFunc from the Incident controller how much of that
 // occurrence the Incident already counted; without one it emits the observation with Count 0, the
 // cluster's Total and MayRepeat, and the consumer decides. Restarts are thus absorbed by state the Incident
-// controller persists per occurrence, not by memory alone.
+// controller persists per occurrence, not by memory alone. An event of the informer's initial list that has not
+// changed since (listed.go), last occurred more than StaleOnStart before the start and whose regarding Pod is
+// gone is marked FoldOnly: its consumer counts it only on an Incident that exists, so a restart opens no
+// Incident the running collector would not have opened (#996).
 //
 // Owner correlation follows controller owner references from Pod to ReplicaSet to Deployment and from Pod
 // to StatefulSet. Owner references are untrusted: each hop is a get through the API reader, with a

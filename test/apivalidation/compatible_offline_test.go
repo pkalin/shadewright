@@ -135,5 +135,4 @@ func TestCompatibleSchemaOffline(t *testing.T) {
 			}
 		})
 	}
-
 }

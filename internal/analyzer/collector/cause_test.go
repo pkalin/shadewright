@@ -111,7 +111,7 @@ func TestNamedContainerCorpus(t *testing.T) {
 		func(p string) string { return strings.Replace(p, "{", "", 1) },         // brace missing
 		func(p string) string { return strings.TrimSuffix(p, "}") },             // brace missing
 		func(p string) string { return strings.NewReplacer("{", "[", "}", "]").Replace(p) },
-		func(p string) string { return strings.ToUpper(p) },                                      // not a DNS label
+		strings.ToUpper, // not a DNS label
 		func(p string) string { return strings.Replace(p, "{", "{-", 1) },                        // not a DNS label
 		func(p string) string { return strings.Replace(p, "}", "-}", 1) },                        // not a DNS label
 		func(p string) string { return strings.Replace(p, "{", "{a_", 1) },                       // not a DNS label

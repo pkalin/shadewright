@@ -47,6 +47,24 @@ const (
 	ksFile    = "apps/orders/kustomization.yaml"
 )
 
+// fromMarker returns s from the first marker on, and beforeMarker the part before it. The marker is part of a
+// fixture of this file: a missing one is a broken fixture, not a case to test.
+func fromMarker(s, marker string) string {
+	_, after, ok := strings.Cut(s, marker)
+	if !ok {
+		panic("fixture lacks " + marker)
+	}
+	return marker + after
+}
+
+func beforeMarker(s, marker string) string {
+	before, _, ok := strings.Cut(s, marker)
+	if !ok {
+		panic("fixture lacks " + marker)
+	}
+	return before
+}
+
 const scaledObjectYAML = `apiVersion: v1
 kind: Service
 metadata:
@@ -707,7 +725,7 @@ func TestResolveStops(t *testing.T) {
 			f.files[ksFile] = "resources:\n  - deployment.yaml\n"
 		}, ni, sourcemap.ReasonDeclarationNotFound},
 		{"two documents in one file declare the object", func(f *fixture) {
-			f.files[soFile] = scaledObjectYAML + scaledObjectYAML[strings.Index(scaledObjectYAML, "# The worker"):]
+			f.files[soFile] = scaledObjectYAML + fromMarker(scaledObjectYAML, "# The worker")
 		}, ni, sourcemap.ReasonAmbiguousDeclaration},
 		{"two files declare the object", func(f *fixture) {
 			f.files[ksFile] += "  - copy.yaml\n"
@@ -1021,7 +1039,7 @@ func TestResolveNeverPicksAnotherDocument(t *testing.T) {
 	for _, d := range decoys {
 		t.Run("decoy alone: "+d.name, func(t *testing.T) {
 			f := newFixture()
-			f.files[soFile] = scaledObjectYAML[:strings.Index(scaledObjectYAML, "---")] + d.doc(live)
+			f.files[soFile] = beforeMarker(scaledObjectYAML, "---") + d.doc(live)
 			res, _, err := f.run(t)
 			if err != nil {
 				t.Fatal(err)
@@ -1329,7 +1347,7 @@ func TestResolveBoundsWhatItParses(t *testing.T) {
 			map[string]int{"apps/orders/copy0.yaml": 1, "apps/orders/copy1.yaml": 0}},
 		// The document after the second declaration is not valid YAML: it is never decoded.
 		{"a file that declares the object many times", func(f *fixture) {
-			doc := scaledObjectYAML[strings.Index(scaledObjectYAML, "# The worker"):]
+			doc := fromMarker(scaledObjectYAML, "# The worker")
 			f.files[soFile] = scaledObjectYAML + strings.Repeat(doc, 1000) + "a: [\n"
 		}, sourcemap.NeedsIntervention, sourcemap.ReasonAmbiguousDeclaration, nil},
 		{"a declaration without a namespace before many large files", func(f *fixture) {

@@ -96,7 +96,7 @@ func TestCompatibleChartSelectorAgreesWithAnalyzer(t *testing.T) {
 			t.Fatal(err)
 		}
 		args := append(helmArgsWith(t, []string{"-f", testValues(t), "-f", file}), "--skip-schema-validation")
-		out, chartErr := exec.Command(helm, args...).Output()
+		out, chartErr := exec.CommandContext(t.Context(), helm, args...).Output()
 		if (chartErr == nil) != (analyzerErr == nil) {
 			t.Fatalf("selector %q: chart error %v, analyzer error %v", sel, chartErr, analyzerErr)
 		}

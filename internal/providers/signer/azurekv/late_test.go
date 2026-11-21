@@ -103,7 +103,7 @@ func TestGuardTransportAnswerAfterContextEnd(t *testing.T) {
 				}
 				if entra {
 					cause, _ := entraCause(tr.transportErr)
-					if cause != end.want || tr.status != 0 {
+					if !errors.Is(cause, end.want) || tr.status != 0 {
 						t.Errorf("%s: recorded %+v, class %v; want %v and no status", name, tr, cause, end.want)
 					}
 				}
@@ -118,7 +118,7 @@ func assertAnswerInTimeIsRefused(t *testing.T) {
 	t.Helper()
 	for _, a := range lateAnswers() {
 		for _, entra := range []bool{false, true} {
-			if entra && a.refusal == errMalformedChallenge {
+			if entra && errors.Is(a.refusal, errMalformedChallenge) {
 				continue // Entra ID sends no Key Vault challenge, so none is checked.
 			}
 			got, _, err := guardDo(t, context.Background(), entra, a.make(nil))

@@ -67,6 +67,30 @@ var boundedLoops = map[string]string{
 	// and a step counted there would be one no budget holds.
 	"(*Redactor).StringsChecked#0": entrySize,
 	"(*Redactor).meteredPieces#0":  entrySize,
+	// The heap of one redaction (#873, decision of 2026-11-21 on the heap): lookups in the maps kept as checkpoints
+	// or segments, and passes that size a buffer or group what a counted loop found.
+	"(*lineKinds).next#0":        "kindBlock bytes, in a match counted by its caller",
+	"(*lineKinds).next#1":        "kindBlock bytes, in a match counted by its caller",
+	"written.unitOfText#0":       "unitStep bytes of the text from the checkpoint before, for a span counted by its caller",
+	"written.unitOfValue#0":      "unitStep bytes of the value from the checkpoint before, for a span counted by its caller",
+	"written.unitOfValue#1":      "unitStep bytes of the value from the checkpoint before, for a span counted by its caller",
+	"write#2":                    "the checkpoints a unit passes, one for each unitStep bytes it holds and one more, counted with its bytes",
+	"write#3":                    "the checkpoints a unit passes, one for each unitStep bytes it holds and one more, counted with its bytes",
+	"written.eachUnit#0":         "the units of the value, each counted by f (endAtValueLines)",
+	"written.eachUnit#1":         "the units of the value, each counted by f (endAtValueLines)",
+	"written.eachUnit#2":         "the bytes of a run of invalid bytes, each counted by f (endAtValueLines)",
+	"writtenLen#0":               "the bytes of the piece, counted again by write on the same piece",
+	"writtenLen#1":               "the bytes of a run of invalid bytes, counted again by write on the same piece",
+	"plain#0":                    "the bytes of the value, counted by write on the same value",
+	"newAnswerLayout#0":          "the pieces, counted by the loop after it",
+	"(*Redactor).piecesWithin#0": "the pieces, counted by the loop after it",
+	"jsonTrace#0":                "the characters of the text, counted by the loop after it",
+	"(*traceBuilder).copy#0":     "the segments of the bytes copied, at most one a byte, counted by the tick of those bytes",
+	"trace.index#0":              "four segments from the one found last",
+	"trace.index#1":              "the halvings of the segments, at most 32",
+	"(*answerLayout).group#0":    "the spans found, each counted where it was found",
+	"(*answerLayout).group#1":    "the data pieces, counted by the loops over the pieces",
+	"(*answerLayout).group#2":    "the spans found, each counted where it was found",
 }
 
 // entrySize is the bound of a loop that adds up the lengths of the strings or pieces of one entry.

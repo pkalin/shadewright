@@ -41,50 +41,6 @@ import (
 // because its own code says so, whatever this package's rules do. The reading and package released are retired
 // together, by their own issue, once a release has run with both.
 
-// trace is a text as the release before held it at one of its passes, traced back to the text decided on: byte
-// i stands for the bytes [lo[i], hi[i]) of that text. A marker stands for all the bytes it replaced. lo and hi
-// never decrease along the text.
-type trace struct {
-	text   string
-	lo, hi []int32
-}
-
-// traceOf returns s, which starts at byte at of the text decided on, as a trace of itself.
-func traceOf(wm *meter.Meter, s string, at int) trace {
-	t := trace{text: s, lo: make([]int32, len(s)), hi: make([]int32, len(s))}
-	for i := range len(s) {
-		tick(wm, 1)
-		t.lo[i], t.hi[i] = int32(at+i), int32(at+i+1) // #nosec G115 -- a text is far below 2 GiB
-	}
-	return t
-}
-
-// traceBuilder writes a trace.
-type traceBuilder struct {
-	b      strings.Builder
-	lo, hi []int32
-}
-
-// add writes s, every byte of which stands for [lo, hi).
-func (tb *traceBuilder) add(wm *meter.Meter, s string, lo, hi int32) {
-	tb.b.WriteString(s)
-	for range len(s) {
-		tick(wm, 1)
-		tb.lo, tb.hi = append(tb.lo, lo), append(tb.hi, hi)
-	}
-}
-
-// copy writes the bytes [from, to) of t with what they stand for.
-func (tb *traceBuilder) copy(wm *meter.Meter, t trace, from, to int) {
-	tick(wm, to-from)
-	tb.b.WriteString(t.text[from:to])
-	tb.lo, tb.hi = append(tb.lo, t.lo[from:to]...), append(tb.hi, t.hi[from:to]...)
-}
-
-func (tb *traceBuilder) trace(_ *meter.Meter) trace {
-	return trace{text: tb.b.String(), lo: tb.lo, hi: tb.hi}
-}
-
 // releasedReading applies the redactor of the release before and collects what its passes hide, as spans of
 // the text decided on. The callers widen those spans to whole characters (onRunes) before they return them: that
 // release cut a value at a byte bound (maxValueExtent) and could end a span inside a character, which left the
@@ -131,7 +87,7 @@ func (x *releasedReading) pass(wm *meter.Meter, t trace) trace {
 	for _, f := range found {
 		tick(wm, 1)
 		tb.copy(wm, t, pos, f.Start)
-		lo, hi := t.lo[f.Start], t.hi[f.End-1]
+		lo, hi := t.lo(f.Start), t.hi(f.End-1)
 		if hi > lo {
 			x.hidden = append(x.hidden, span{start: int(lo), end: int(hi), kind: f.Kind, rule: x.rule})
 		}
@@ -173,7 +129,7 @@ func validTrace(wm *meter.Meter, t trace) trace {
 			}
 			j++
 		}
-		tb.add(wm, "?", t.lo[i], t.hi[j-1])
+		tb.add(wm, "?", t.lo(i), t.hi(j-1))
 		i, pos = j, j
 	}
 	tb.copy(wm, t, pos, len(t.text))
@@ -190,7 +146,7 @@ const maxShownBytes = 1024
 func shownTrace(wm *meter.Meter, t trace) trace {
 	if len(t.text) > maxShownBytes {
 		var tb traceBuilder
-		tb.add(wm, "("+strconv.Itoa(len(t.text))+" bytes left out)", t.lo[0], t.hi[len(t.text)-1])
+		tb.add(wm, "("+strconv.Itoa(len(t.text))+" bytes left out)", t.lo(0), t.hi(len(t.text)-1))
 		return tb.trace(wm)
 	}
 	var tb traceBuilder
@@ -200,7 +156,7 @@ func shownTrace(wm *meter.Meter, t trace) trace {
 		c, size := utf8.DecodeRuneInString(t.text[i:])
 		if unicode.IsControl(c) || c == ' ' || c == ' ' {
 			tb.copy(wm, t, pos, i)
-			tb.add(wm, " ", t.lo[i], t.hi[i+size-1])
+			tb.add(wm, " ", t.lo(i), t.hi(i+size-1))
 			pos = i + size
 		}
 		i += size
@@ -213,13 +169,20 @@ func shownTrace(wm *meter.Meter, t trace) trace {
 // each character's escape standing for the character.
 func jsonTrace(wm *meter.Meter, t trace) trace {
 	var tb traceBuilder
-	var unit strings.Builder
+	n := 0
+	for i := 0; i < len(t.text); {
+		c, size := utf8.DecodeRuneInString(t.text[i:])
+		n += unitWidth(JSON, c, size)
+		i += size
+	}
+	tb.b.Grow(n) // sized once, so the text is not held twice while it grows
 	for i := 0; i < len(t.text); {
 		tick(wm, 1)
 		c, size := utf8.DecodeRuneInString(t.text[i:])
-		unit.Reset()
-		writeUnit(wm, &unit, JSON, t.text[i:i+size], c, size)
-		tb.add(wm, unit.String(), t.lo[i], t.hi[i+size-1])
+		at := tb.b.Len()
+		writeUnit(wm, &tb.b, JSON, t.text[i:i+size], c, size) // each unit written in place, as add writes it
+		tick(wm, tb.b.Len()-at)
+		tb.push(at, t.lo(i), int32(tb.b.Len()-at), t.hi(i+size-1)-t.lo(i)) // #nosec G115 -- a unit is at most six bytes
 		i += size
 	}
 	return tb.trace(wm)
@@ -284,7 +247,7 @@ func (r *Redactor) releasedString(wm *meter.Meter, s string, twice bool, cut fun
 	t := x.redact(wm, traceOf(wm, s, 0))
 	if cut != nil {
 		from := min(max(cut(t.text), 0), len(t.text))
-		x.redact(wm, trace{text: t.text[from:], lo: t.lo[from:], hi: t.hi[from:]})
+		x.redact(wm, t.from(from))
 	}
 	return onRunes(wm, s, x.hidden)
 }
@@ -321,7 +284,7 @@ func (r *Redactor) releasedExcerpt(wm *meter.Meter, s string, from int, drop fun
 	ex := x.pass(wm, validTrace(wm, tb.trace(wm)))
 	if drop != nil {
 		d := min(max(drop(ex.text), 0), len(ex.text))
-		x.redact(wm, x.redact(wm, trace{text: ex.text[d:], lo: ex.lo[d:], hi: ex.hi[d:]}))
+		x.redact(wm, x.redact(wm, ex.from(d)))
 	}
 	return onRunes(wm, s, x.hidden)
 }

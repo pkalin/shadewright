@@ -1160,6 +1160,9 @@ func (r *Redactor) StringsChecked(items []string) (out []string, ok bool) {
 	for _, it := range items {
 		size += len(it)
 	}
+	if size <= MaxEntry && tooManyParts(len(items), size, ItemBytes) {
+		return withheldStrings(len(items)), false
+	}
 	if out, ok := metered(size, func(wm *meter.Meter) []string { return r.strings(wm, items) }); ok {
 		return out, true
 	}

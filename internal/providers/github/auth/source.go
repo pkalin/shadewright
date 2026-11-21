@@ -506,7 +506,7 @@ func validToken(t string) bool {
 	if t == "" || len(t) > maxTokenLen {
 		return false
 	}
-	for i := 0; i < len(t); i++ {
+	for i := range len(t) {
 		if t[i] <= ' ' || t[i] >= 0x7f {
 			return false
 		}

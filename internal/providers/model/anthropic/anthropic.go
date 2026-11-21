@@ -409,7 +409,7 @@ func (p *Provider) readKey() (string, error) {
 	if len(key) > maxKeyBytes {
 		return "", malformed("the key is too long")
 	}
-	for i := 0; i < len(key); i++ {
+	for i := range len(key) {
 		if c := key[i]; c <= ' ' || c > '~' {
 			return "", malformed("the key holds a character a header cannot carry")
 		}

@@ -142,7 +142,7 @@ func TestOrphanedBlockScalarSecretIsDropped(t *testing.T) {
 	}
 	whole := "loading config\npassword: |\n  " + secret + "\nlistening on :8080\n"
 	// The source cut its byte bound at the start of the value line.
-	excerpt := whole[strings.Index(whole, "  "+secret):]
+	_, excerpt, _ := strings.Cut(whole, "password: |\n")
 	if !strings.Contains(red.String(excerpt), secret) {
 		t.Fatal("precondition: the redactor alone keeps the orphaned value")
 	}

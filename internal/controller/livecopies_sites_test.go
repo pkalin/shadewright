@@ -213,7 +213,7 @@ func TestHandoffHoldsReadsTheReplacementLive(t *testing.T) {
 func TestTakenOverMergeReadsThePredecessorLive(t *testing.T) {
 	r, _, p, rr, cr, _ := handoffAppendedWorld(t, nil)
 	laggingLive(r, map[string]*api.RemediationRequest{oldName: nil})
-	got, ok, err := r.takenOverMerge(context.Background(), rr, &api.GitWaitPullRequest{Number: cr.Number})
+	got, ok, err := r.takenOverMerge(context.Background(), rr, &api.GitWaitPullRequest{Number: cr.Number}, false)
 	if err != nil || !ok || got == nil || got.UID != p.UID {
 		t.Fatalf("takenOverMerge = %+v, %v, %v; want the predecessor as stored", got, ok, err)
 	}

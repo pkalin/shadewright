@@ -28,11 +28,12 @@ stateDiagram-v2
     PolicyChecked --> Superseded: a plan input changed
     PRCreated --> Superseded: a plan input changed
     AwaitingApproval --> Superseded: a plan input changed
-    AwaitingApproval --> Superseded: its pull request merged with its replacement's commit, once the replacement records the merge (MergedForReplacement, #786)
+    AwaitingApproval --> Superseded: its pull request merged with its replacement's commit, or with another head while the replacement holds the lock, once the replacement records the merge (MergedForReplacement, #786, #870)
     NeedsIntervention --> Superseded: the same, after a stop (MergedForReplacement, #786)
     PRCreated --> Superseded: a replacement that took the pull request over, merged with its predecessor's commit put back, once the predecessor records the merge (MergedForPredecessor, #786)
     AwaitingApproval --> Superseded: the same (MergedForPredecessor, #786)
     NeedsIntervention --> Superseded: the same, after a stop (MergedForPredecessor, #786)
+    PolicyChecked --> Superseded: a replacement that holds the lock before its takeover, once the predecessor records the merge of its own head (MergedForPredecessor, #870)
     Pending --> Cancelled: spec.cancel (CancelRequested)
     PolicyChecked --> Cancelled: spec.cancel (CancelRequested)
     PRCreated --> Cancelled: spec.cancel, pull request closed (CancelRequested)
@@ -47,7 +48,10 @@ stateDiagram-v2
     NeedsIntervention --> Merged: a stopped holder whose own pull request is found merged later (#771, #808)
     NeedsIntervention --> Merged: a replacement whose watch after a refused recovery ended sees its commit merged later (#786)
     NeedsIntervention --> PRCreated: the same, while the merge commit or the check at the merge is awaited (#786)
-    NeedsIntervention --> Cancelled: that pull request merged with a head that is not its commit (HandoffAborted, #786)
+    NeedsIntervention --> Cancelled: that pull request merged with the predecessor's own head, once the predecessor holds the record of that merge (HandoffAborted, #786, #870)
+    PolicyChecked --> NeedsIntervention: a replacement that holds the lock before its takeover sees that pull request merged with another head than its commit, or with the predecessor's own once the predecessor is gone or being deleted: it records the merge (MergedWithForeignChange, MergeContentUnreadable, #870)
+    NeedsIntervention --> NeedsIntervention: the same after the end of its watch (#870)
+    Expired --> NeedsIntervention: the same (#870)
     Cancelled --> Merged: a replacement that ended before its takeover sees its commit merged later (#786)
     Cancelled --> PRCreated: the same, while the merge commit or the check at the merge is awaited (#786)
     Expired --> Merged: its own pull request of a lost open found merged by the cleanup after the deadline (#771), a stopped holder's found merged later (#808), or a replacement that ended before its takeover sees its commit merged later (#786)

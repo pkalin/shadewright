@@ -38,6 +38,7 @@ const (
 	opParents      = "Parents"
 	opCountAhead   = "CountAhead"
 	opCheckBetween = "CheckBetween"
+	opCheckCommit  = "CheckCommit"
 )
 
 // mergeMethod is how a person merged the retargeted pull request on the fake.

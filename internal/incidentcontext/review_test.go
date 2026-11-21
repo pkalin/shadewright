@@ -261,9 +261,8 @@ func TestRenderLogBudgetsTheHeaderFirst(t *testing.T) {
 		fmt.Fprintf(&body, "line %03d\n", i)
 	}
 	body.WriteString("newest\n")
-	id := func(s string) string { return s }
 	ex := providers.LogExcerpt{Text: body.String(), Instance: providers.LogInstance{ContainerID: strings.Repeat("c", 400)}}
-	v := RenderLog(RedactFunc(id), false, "pod p container c, current instance", ex, nil, 1000, 1000)
+	v := RenderLog(noRedaction{}, false, "pod p container c, current instance", ex, nil, 1000, 1000)
 	if len(v.Text) > 1000 || !strings.HasSuffix(v.Text, "newest\n") || !v.Cut || v.HeadLen < 400 ||
 		!strings.HasPrefix(v.Text, "pod p container c") {
 		t.Fatalf("%d bytes, header %d, cut %t:\n%s", len(v.Text), v.HeadLen, v.Cut, v.Text)

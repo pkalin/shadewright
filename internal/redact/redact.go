@@ -275,6 +275,11 @@ func StringKeeping(s string, keep ...string) string {
 	return defaultRedactor.StringKeeping(s, keep...)
 }
 
+// StringKeepingChecked is the package's StringKeepingChecked with the built-in rules.
+func StringKeepingChecked(s string, keep ...string) (out string, ok bool) {
+	return defaultRedactor.StringKeepingChecked(s, keep...)
+}
+
 // Clean is the package's Clean with the built-in rules.
 func Clean(s string, keep ...string) bool {
 	return defaultRedactor.Clean(s, keep...)
@@ -282,8 +287,14 @@ func Clean(s string, keep ...string) bool {
 
 // StringKeeping is the package's StringKeeping with r's rules.
 func (r *Redactor) StringKeeping(s string, keep ...string) string {
-	out, _ := meteredText(len(s), func(wm *meter.Meter) string { return r.stringKeeping(wm, s, keep) })
+	out, _ := r.StringKeepingChecked(s, keep...)
 	return out
+}
+
+// StringKeepingChecked is StringKeeping with a flag: ok is false when it withholds s (budget.go), and out is then
+// Withheld. A caller that shows a withheld value apart (the body of a pull request) reads the flag, never the text.
+func (r *Redactor) StringKeepingChecked(s string, keep ...string) (out string, ok bool) {
+	return meteredText(len(s), func(wm *meter.Meter) string { return r.stringKeeping(wm, s, keep) })
 }
 
 // stringKeeping is StringKeeping on the budget wm.

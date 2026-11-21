@@ -2980,15 +2980,15 @@ func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string
 }
 
 // redactBodyValue redacts one value of a pull request body with the built-in rules, keeping whole occurrences of
-// keep. ok false means the redactor withheld the value whole; the redactor does not withhold yet, and the work
-// budget of #873 is to report it with its flag here, never by comparing the text with a marker.
+// keep. ok false means the redactor withheld the value whole (its work budget ran out, #873): it says so with its
+// flag (redact.StringKeepingChecked), never by a comparison of the text with a marker.
 func redactBodyValue(s string, keep ...string) (out string, ok bool) {
-	return redact.StringKeeping(s, keep...), true
+	return redact.StringKeepingChecked(s, keep...)
 }
 
 // withheldValue is the text a withheld value of the body stands as, the redactor's fixed marker for a withheld
 // entry.
-const withheldValue = "[REDACTED:withheld]"
+const withheldValue = redact.Withheld
 
 // bodyWithheld is the paragraph a body with a withheld value carries before its marker. It is fixed text: it
 // names no value.

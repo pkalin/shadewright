@@ -60,6 +60,9 @@ type noRedaction struct{}
 
 func (noRedaction) String(s string) string { return s }
 
+// StringChecked never withholds.
+func (noRedaction) StringChecked(s string) (string, bool) { return s, true }
+
 // unbounded returns a builder whose summary and total bounds are the largest allowed, redacting with r.
 func unbounded(t *testing.T, r Redactor) *Builder {
 	t.Helper()
@@ -282,6 +285,12 @@ func (r shrinkOccurrences) String(s string) string {
 	return strings.ReplaceAll(r.Redactor.String(s), " occurrences,", ",")
 }
 
+// StringChecked is String with the flag of the redactor it wraps.
+func (r shrinkOccurrences) StringChecked(s string) (string, bool) {
+	out, ok := r.Redactor.StringChecked(s)
+	return strings.ReplaceAll(out, " occurrences,", ","), ok
+}
+
 // The tally is redacted before it is placed: a redactor that changes it gives the redacted tally, whole and
 // last, and the summary stays within its bound whatever the lines' length.
 func TestAbsorbedTallyFitUsesTheRedactedText(t *testing.T) {
@@ -303,6 +312,9 @@ func (r *damagedNotes) String(s string) string {
 	r.calls++
 	return strings.ReplaceAll(s, "bytes cut)", "hidden)")
 }
+
+// StringChecked never withholds.
+func (r *damagedNotes) StringChecked(s string) (string, bool) { return r.String(s), true }
 
 func TestFitSummarySettlesAnEmptyCutDamagedByRedaction(t *testing.T) {
 	for _, value := range []string{"first second third", "single"} {

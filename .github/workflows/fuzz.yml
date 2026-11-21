@@ -1,12 +1,14 @@
 name: Fuzz
 
 # Runs every Go fuzz target (FUZZ_TARGETS in the Makefile) for a few minutes each, one matrix job per target, weekly
-# and by hand. No target needs build tags (`make fuzz` passes none). Pull
+# and by hand. A target in a package with a file built only with the tag redactwork (internal/redact, its kept
+# reading of the release before and internal/incidentcontext) runs with that tag, which `make fuzz` passes itself
+# (hack/fuzz-targets.sh --tags). Pull
 # requests run only the seed corpora, inside `make test`. Not part of the pull request graph of ci.yml, so a
 # finding here never blocks a pull request: it fails this run and leaves the failing input as an artifact.
 # Reproduce one with `go test -run '<FuzzName>/<file>' ./<package>` after copying the file to the package's
-# testdata/fuzz/<FuzzName>/ (add `-tags redactwork` for internal/redact, as make fuzz does, or a failure of the work
-# bound does not show), and commit it there with the fix as a regression seed.
+# testdata/fuzz/<FuzzName>/ (add `-tags redactwork` where make fuzz does, or a failure of the work bound does not
+# show), and commit it there with the fix as a regression seed.
 on:
   schedule:
     - cron: "29 4 * * 2" # Tuesdays 04:29 UTC

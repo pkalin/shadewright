@@ -185,8 +185,8 @@ func TestTokenEndRunWithheldFrom(t *testing.T) {
 	// The largest size decided, by entry point, as one text so that the names of budgetEntries stay literals
 	// there alone.
 	decided := map[string]int{}
-	for field := range strings.FieldsSeq(`String=4608 StringKeeping=4608 Clean=4608 StringTwice=4608
-		ReplaceFrom=4608 Replace=4608 ReleasedText=4608 Strings=2304 PiecesWithin=4608 PiecesFitting=4608`) {
+	for field := range strings.FieldsSeq(`String=18432 StringKeeping=18432 Clean=18432 StringTwice=18432
+		ReplaceFrom=18432 Replace=18432 ReleasedText=18432 Strings=9216 PiecesWithin=18432 PiecesFitting=18432`) {
 		name, size, _ := strings.Cut(field, "=")
 		n, err := strconv.Atoi(size)
 		if err != nil {

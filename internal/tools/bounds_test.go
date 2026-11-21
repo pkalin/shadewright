@@ -38,6 +38,9 @@ type growing struct{}
 
 func (growing) String(s string) string { return strings.ReplaceAll(s, "grow", "grow+") }
 
+// StringChecked never withholds.
+func (g growing) StringChecked(s string) (string, bool) { return g.String(s), true }
+
 func (g growing) PiecesWithin(ps []redact.Piece, _ int) ([]string, bool) {
 	return eachPiece(g, ps), true
 }

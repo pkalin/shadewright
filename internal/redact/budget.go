@@ -35,8 +35,12 @@ import (
 
 const (
 	// WorkPerByte is the steps the budget gives each byte of an entry: the largest cost per byte measured on the
-	// corpus tables (TestBudgetFactorCoversTheCorpus), with headroom.
-	WorkPerByte = 1024
+	// corpus tables and the cost shapes (TestBudgetFactorCoversTheCorpus) times 1.5, rounded up. The largest is
+	// Strings on one line of glued quoted pairs (auth="a" repeated, then a fullwidth colon): 2,369 steps per byte
+	// at 64 KiB and 2,581 at 1 MiB (2,283, 2,448 and 2,491 at 64 KiB, 256 KiB and 1 MiB with no tail: flat past
+	// 64 KiB), as Strings reads the release before on the line joined and on its pieces; that reading alone takes
+	// 1,098, 1,180 and 1,201 (decision of 2026-11-21 on #873).
+	WorkPerByte = 4000
 	// WorkFixed is the steps the budget gives every entry besides WorkPerByte per byte: the fixed cost of a call
 	// on a short entry.
 	WorkFixed = 64 << 10

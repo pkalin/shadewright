@@ -58,8 +58,12 @@ const maxValueBytes = 1024
 
 // Redactor redacts text: in the analyzer, a *redact.Redactor with the built-in rules (operator patterns are
 // planned; nothing configures them yet). Its output must never be longer than its input, as package redact guarantees.
+// StringChecked is String with the flag of a withheld text (false: redaction withheld s whole, #873): the builder
+// reads that flag for every section it shows, so a redactor without it, or a wrapper that drops it, does not
+// compile (decision of 2026-11-21 on #873).
 type Redactor interface {
 	String(s string) string
+	StringChecked(s string) (string, bool)
 }
 
 // Config configures a [Builder].

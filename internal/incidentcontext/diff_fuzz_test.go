@@ -68,6 +68,9 @@ func (m mainBuildRedactor) String(s string) string {
 	return once(strings.ToValidUTF8(once(s), "?"))
 }
 
+// StringChecked never withholds: main had no work budget.
+func (m mainBuildRedactor) StringChecked(s string) (string, bool) { return m.String(s), true }
+
 // buildScene is what the sources answer for one input.
 type buildScene struct {
 	objects []client.Object

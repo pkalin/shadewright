@@ -156,7 +156,9 @@ test: manifests generate fmt vet setup-envtest gotestsum test-scripts ## Run tes
 	@# internal/redact with the tag took about 555 s in one binary on a laptop, so on a hosted runner (2.4 times
 	@# slower on main) it would pass -timeout 20m: it runs in six binaries (test-redactwork-*). The first five select
 	@# the heaviest tests by name (REDACT_SHARD_*), the last runs every other test with -skip, so a test renamed out
-	@# of a shard runs in the last binary and none drops out. They and the run of the other three packages go side by
+	@# of a shard runs in the last binary and none drops out. The tools and the meter run without -race only in
+	@# test-redactwork-other (some of their checks sample under -race, and the meter's allocation test needs a build
+	@# without it). They and the run of the other packages go side by
 	@# side (hack/side-by-side.sh: one process each, each output printed whole when all are done, any failure fails
 	@# make test); one after the other they took about 1,800 s of the test job on a hosted runner, and side by side on
 	@# its four cores about 1,300 s, two of them past their 20 minutes (2026-11-21). CI therefore runs make test with
@@ -179,7 +181,7 @@ test-redactwork-1 test-redactwork-2 test-redactwork-3 test-redactwork-4 test-red
 test-redactwork-rest:
 	$(REDACTWORK_TEST) -skip '^($(REDACT_SHARD_1)|$(REDACT_SHARD_2)|$(REDACT_SHARD_3)|$(REDACT_SHARD_4)|$(REDACT_SHARD_5))$$' ./internal/redact
 test-redactwork-other:
-	$(REDACTWORK_TEST) ./internal/redact/released ./internal/providers/logs/kube ./internal/incidentcontext
+	$(REDACTWORK_TEST) ./internal/redact/released ./internal/redact/meter ./internal/providers/logs/kube ./internal/incidentcontext ./internal/tools
 
 # One line of JSON for the matrix of the redactwork jobs of .github/workflows/test.yml: every entry of
 # REDACTWORK_TARGETS, so that a run added to make test is a job in CI as well.
@@ -205,7 +207,7 @@ eval-model: ## Evaluate a real model through EVAL_MODEL (foundry, anthropic or o
 
 # Fuzz targets as <package dir>:<FuzzName>. hack/fuzz-targets.sh checks this list against the tree both ways, so a
 # new target cannot be left out of the weekly Fuzz workflow and a stale entry cannot fuzz nothing and pass.
-FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/gitops/gityaml:FuzzNodes internal/gitops/gityaml:FuzzMappingKeys internal/redact:FuzzString internal/redact:FuzzMonotonicAgainstMain internal/redact:FuzzReplacementBoundaries internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/gitops/semdiff:FuzzDocuments internal/gitops/sourcemap:FuzzFieldEquals internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/openaicompatible:FuzzCredentialEcho internal/providers/model/anthropic:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponses internal/tools:FuzzArguments internal/redact:FuzzDiffString internal/redact:FuzzDiffStringTwice internal/redact:FuzzDiffStrings internal/redact:FuzzDiffReplaceFrom internal/tools:FuzzDiffGetResource internal/tools:FuzzDiffGetPodLogs internal/tools:FuzzDiffListEvents internal/tools:FuzzDiffQueryMetrics internal/tools:FuzzDiffDeliveryStatus internal/tools:FuzzDiffCheckMissingReference internal/tools:FuzzDiffGitTools internal/incidentcontext:FuzzDiffBuild
+FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/gitops/gityaml:FuzzNodes internal/gitops/gityaml:FuzzMappingKeys internal/redact:FuzzString internal/redact:FuzzMonotonicAgainstMain internal/redact:FuzzReplacementBoundaries internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/gitops/semdiff:FuzzDocuments internal/gitops/sourcemap:FuzzFieldEquals internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/openaicompatible:FuzzCredentialEcho internal/providers/model/anthropic:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponses internal/tools:FuzzArguments internal/redact:FuzzDiffString internal/redact:FuzzDiffStringTwice internal/redact:FuzzDiffStrings internal/redact:FuzzDiffReplaceFrom internal/tools:FuzzDiffGetResource internal/tools:FuzzDiffGetPodLogs internal/tools:FuzzDiffListEvents internal/tools:FuzzDiffQueryMetrics internal/tools:FuzzDiffDeliveryStatus internal/tools:FuzzDiffCheckMissingReference internal/tools:FuzzDiffGitTools internal/incidentcontext:FuzzDiffBuild internal/redact/released:FuzzReleasedMatchesKeptCopy
 FUZZ ?= $(FUZZ_TARGETS)
 FUZZTIME ?= 30s
 

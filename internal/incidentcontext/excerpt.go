@@ -29,7 +29,7 @@ import (
 // RedactFunc redacts text. Its output must never be longer than its input, as package redact guarantees.
 type RedactFunc func(string) string
 
-// String calls f, so that a RedactFunc is a [Redactor].
+// String calls f. A RedactFunc has no flag for a withheld text, so it is not a [Redactor].
 func (f RedactFunc) String(s string) string { return f(s) }
 
 // twicer is a [Redactor] that also applies the reading of the release before #845 where that release redacted a
@@ -38,24 +38,15 @@ type twicer interface {
 	StringTwiceChecked(s string, cut func(string) int) (string, bool)
 }
 
-// checkedRedactor is a [Redactor] that says with a flag when it withholds a text (*redact.Redactor's
-// StringChecked).
-type checkedRedactor interface {
-	StringChecked(s string) (string, bool)
-}
-
 // checkedTwice redacts s as [Twice] of r does (with cut, as StringTwice takes it, when r is a twicer) and reports
 // false when redaction withheld it whole. Withheld is told by the redactor's flag, never by the text, so a value
-// from the cluster that spells redact.Withheld is text like any other (#873, decision of 2026-11-20). A redactor
-// with no flag (a test's) never withholds.
+// from the cluster that spells redact.Withheld is text like any other (#873, decision of 2026-11-20). Every
+// [Redactor] has the flag (StringChecked), so none is taken for one that never withholds.
 func checkedTwice(r Redactor, s string, cut func(string) int) (string, bool) {
 	if t, ok := r.(twicer); ok {
 		return t.StringTwiceChecked(s, cut)
 	}
-	if c, ok := r.(checkedRedactor); ok {
-		return c.StringChecked(s)
-	}
-	return r.String(s), true
+	return r.StringChecked(s)
 }
 
 // checkedValue is [Value] of s with [checkedTwice]: false when redaction withheld s whole.

@@ -62,28 +62,16 @@ import (
 var knownDiffFailures = map[string]map[string]redacttest.KnownFailure{
 	"FuzzDiffString":      {string(seedTokenRepeat): knownTokenRepeat},
 	"FuzzDiffStringTwice": {string(seedTokenRepeat): knownTokenRepeat},
-	"FuzzDiffStrings": {
-		string(seedTokenRepeat):           knownTokenRepeat,
-		string(seedPairsBeforeABlankLine): knownPairsBeforeABlankLine,
-	},
-	"FuzzDiffReplaceFrom": {
-		string(seedTokenRepeat): knownTokenRepeat,
-		// found-845-0fe50aa1ef3f463b in testdata/fuzz: "-password," repeated, 10,250 bytes.
-		"10\x060\x052<12": knownTokenRepeat,
-	},
+	"FuzzDiffStrings":     {string(seedTokenRepeat): knownTokenRepeat},
+	"FuzzDiffReplaceFrom": {string(seedTokenRepeat): knownTokenRepeat},
 }
 
-// knownTokenRepeat is a flag and a comma repeated ("--token,}", "-password,"): the release's reading reads each
-// value to the end of the run (released.tokenEnd), about 950 steps per byte at 4 KiB and more with the size (#962).
+// knownTokenRepeat is "--token,}" repeated: the release's reading reads each value to the end of the run
+// (released.tokenEnd), about 950 steps per byte at 4 KiB and more with the size (#962); at 36 KiB it outgrows
+// the budget of every entry point. "-password," repeated (TestReplaceFromWorkOnGluedFlags) and TOKEN="a" repeated
+// before a long blank line (TestDiffPairsBeforeABlankLine) grow the same way and were known failures at 10 and
+// 13 KB, inside the budget since its factor was set to 4,000 (decision of 2026-11-21 on #873).
 var knownTokenRepeat = redacttest.KnownFailure{Property: "P6", Reason: "#962, the release's reading of a flag repeated"}
-
-// knownPairsBeforeABlankLine is TOKEN="a" repeated before a long blank line, as Strings reads it: the release's
-// reading takes 53, 237 and 868 steps per byte at 3, 6 and 13 KB (measured 2026-11-20 with -tags redactwork, #962).
-// The steps per byte grow about four times for twice the text, so the total work about eight times (9 times from
-// 3 to 6 KB, 7.9 times from 6 to 13 KB): faster than the square of the text over these sizes.
-var knownPairsBeforeABlankLine = redacttest.KnownFailure{
-	Property: "P6", Reason: "#962, the release's reading of key pairs before a long blank line",
-}
 
 // seedTokenRepeat is "--token,}" repeated to 36 KiB, a seed of diffSeeds.
 var seedTokenRepeat = redacttest.RawSeed(0, strings.Repeat("--token,}", 4096))
@@ -415,7 +403,7 @@ func TestStringTwiceWorkOnALineWithNoBlank(t *testing.T) {
 // Found by FuzzDiffReplaceFrom in its three and ten minute runs (#845, fifteenth decision): "-password,"
 // repeated, 10,250 bytes with no blank. Each flag read its value, the rest of the run, to the first blank, so the
 // own work grew with the square of the run (1,060 steps per byte here). The release's reading of it still grows
-// so (#962): the budget withholds it, the known P6 failure of knownDiffFailures, and any other property fails.
+// so (#962), but inside the budget at this size (decision of 2026-11-21 on #873): every property holds.
 func TestReplaceFromWorkOnGluedFlags(t *testing.T) {
 	skipUncounted(t)
 	data := []byte("10\x060\x052<12")
@@ -475,10 +463,6 @@ func TestDiffPairsBeforeABlankLine(t *testing.T) {
 					data := []byte{0xf1, 0, 240, key, n, m, sep}
 					for _, target := range slices.Sorted(maps.Keys(diffBodies)) {
 						fails, _ := diffBodies[target](data)
-						// P6 is the known failure of this class (knownPairsBeforeABlankLine): the release's
-						// reading grows about eight times per doubling of the text, faster than its square, and the
-						// budget withholds it.
-						fails = slices.DeleteFunc(fails, func(f string) bool { return strings.HasPrefix(f, "P6:") })
 						if len(fails) > 0 {
 							t.Errorf("%s(%v): %s", target, data, strings.Join(fails, "\n"))
 						}

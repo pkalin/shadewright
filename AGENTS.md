@@ -149,8 +149,8 @@ Every issue names the ADRs it is tied to:
   `trivy-config` job of `chart-test.yml`, so it runs only when the `chart` group changed; HIGH and CRITICAL
   findings fail it unless `.trivyignore.yaml` lists them with a statement of why.
 - **Tests.** Every bug fix gets a test that fails without it; every new API rule gets a refusal test.
-  `make test` runs with the race detector (`-race`), then runs `internal/redact`, the log source and the context
-  builder, and the kept reading of the release before (`internal/redact/released`), once more without it and with
+  `make test` runs with the race detector (`-race`), then runs `internal/redact`, its meter, the log source, the context
+  builder and the read tools, and the kept reading of the release before (`internal/redact/released`), once more without it and with
   the build tag `redactwork` (CI runs `make test REDACTWORK_IN_TEST=no` and each of those runs in a job of its
   own, the list from `make redactwork-list`): the timing tests skip under `-race`, the generated corpora (block values, connection
   strings, and those compared with main or with the release before) check a seeded sample there and every input
@@ -160,8 +160,8 @@ Every issue names the ADRs it is tied to:
   analysis is the race detector and the Go fuzz targets: a `Fuzz` function in a parser or matcher of untrusted
   input goes into `FUZZ_TARGETS` in the Makefile (`make fuzz` fails when one is missing or an entry names no
   such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a few minutes weekly, one job per target; a
-  target in a package with a file built only with `redactwork` (the differential targets of `internal/redact` and
-  of the context builder) runs with that tag. The budget stops the work of an entry where it would pass its bound and withholds
+  target in a package with a file built only with `redactwork` (the differential targets of `internal/redact`, of
+  its kept reading of the release before and of the context builder) runs with that tag. The budget stops the work of an entry where it would pass its bound and withholds
   the entry, so a fuzz target finds a reading whose work grows faster than the text by its withhold: every target
   that reaches redaction fails an input under 64 KiB that redaction withholds for work (P6,
   `redacttest.SmallInput`, any build), and the fuzzer keeps that input. A failing input it finds is committed to

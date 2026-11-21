@@ -30,6 +30,10 @@ type flagged struct {
 
 var flaggedEntries = []flagged{
 	{"StringChecked", func(in string) ([]string, bool) { out, ok := StringChecked(in); return []string{out}, ok }},
+	{"StringKeepingChecked", func(in string) ([]string, bool) {
+		out, ok := StringKeepingChecked(in, "api")
+		return []string{out}, ok
+	}},
 	{"StringTwiceChecked", func(in string) ([]string, bool) {
 		out, ok := StringTwiceChecked(in, nil)
 		return []string{out}, ok

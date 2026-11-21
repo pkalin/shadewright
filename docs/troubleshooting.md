@@ -476,6 +476,15 @@ A diagnosis or a stored record shows `[REDACTED:...]` (or `[credential]`, `***`)
 
 None of this can be turned off; patterns supplied by the operator only add to it.
 
+## Withheld by redaction
+
+Symptoms: a read tool's result in an analysis is "could not fetch: withheld by redaction", a context block is "could not fetch" with the label `withheld by redaction`, the analysis escalates with that section among its failed sources, or a pull request body shows `[REDACTED:withheld]` with a **Withheld** paragraph. The counter `shadewright_redaction_withheld_total` rises, by `reason`:
+
+- `work`: the redaction of that text ran out of its work budget (4,000 steps per byte of the text plus a fixed amount). Text no secret needs that much work for: a value or a log line of one shape repeated many thousand times, such as a flag and a comma (`--token,}`) over tens of KiB. Nothing of the text is shown, never part of it.
+- `size`: the text is longer than 4 MiB, withheld before any work.
+
+What to do: find the source the block or tool names (the pod's log, the object, the metric) and look at it with your own access. A workload that writes such text in its logs or status makes the analyses of its own Incidents escalate each time; this is bounded by the daily analysis budget, and the counter shows how often. A steady rise of `work` with no such source is worth an issue: it can be a new shape whose redaction work grows faster than its text ([design 10.3](design/10-security.md#103-redaction)).
+
 ## The Incident cap is reached
 
 Symptoms: `shadewright_incident_observations_refused_total` rises, a Warning event with reason `IncidentCapReached` on the analyzer's Pod, and a new problem produces no Incident, nor does a symptom of a `Resolved` Incident seen again more than 24 hours after its resolution (its next occurrence is a new Incident too). The cap is `--max-incidents` (500) and counts every Incident, `Resolved` ones included. Before it is reached, at 80% of the cap (400 Incidents), the gauge `shadewright_incident_cap_near` turns 1 and the analyzer's Pod gets a Warning event `IncidentCapNear`; watch `shadewright_incidents` by `phase` to see how many are `Resolved` and safe to clear. The analyzer resolves an Incident after an hour with nothing new and no active request, or when its request `Succeeded`; a request in `Merged` counts as ended until verification is built (#92). An Incident whose newest occurrence is a lasting state of a module never goes quiet, so it leaves only by a request or a person.

@@ -387,3 +387,27 @@ func TestPullRequestBodyWithheldContainerKeepsTheFieldWords(t *testing.T) {
 		t.Errorf("the operator's text changed:\n%s", body)
 	}
 }
+
+// TestPullRequestBodyValueOverItsBudgetIsWithheld: a value of the body whose redaction uses up its work budget
+// (#873, decision of 2026-11-21) is told by the redactor's flag, so the body shows the marker in its place and the
+// fixed Withheld paragraph, and no text of the value.
+func TestPullRequestBodyValueOverItsBudgetIsWithheld(t *testing.T) {
+	rr := bodyRequest()
+	run := strings.Repeat("--token,}", 8192)
+	rr.Status.Source.Path = remediationv1alpha1.GitFilePath(run)
+
+	body := pullRequestBody(rr, "", nil)
+
+	if !strings.Contains(body, "**Scope:** one value in `"+withheldValue+"` on `"+mainBranch+"`.") {
+		t.Errorf("the withheld value is not the marker in its own place:\n%.2000s", body)
+	}
+	if !strings.Contains(body, bodyWithheld) {
+		t.Errorf("the body does not say a value was withheld:\n%.2000s", body)
+	}
+	if strings.Contains(body, "--token,}--token") {
+		t.Errorf("text of the withheld value reached the body")
+	}
+	if !skeleton(rr, "").MatchString(strings.Replace(body, bodyWithheld, "", 1)) {
+		t.Errorf("the operator's text changed:\n%.2000s", body)
+	}
+}

@@ -17,6 +17,7 @@ limitations under the License.
 package incidentcontext
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -31,7 +32,7 @@ import (
 // 2026-11-20). "--token,}" repeated costs the reading of the release before more than the budget of redaction
 // (released.tokenEnd), so every entry point withholds it.
 func TestWithheldSectionsAreFailedSources(t *testing.T) {
-	run := strings.Repeat("--token,}", 4096)
+	run := strings.Repeat("--token,}", 8192)
 	d := deployment()
 	d.Status.Conditions[0].Message = run
 	rs := replicaSet("web-abc", "uid-rs-abc", d, longAgo)
@@ -71,7 +72,7 @@ func TestRenderLogWithheldHeaderValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := strings.Repeat("--token,}", 4096)
+	run := strings.Repeat("--token,}", 8192)
 	const body = "starting server on port 8080\n"
 	for _, field := range []string{"ContainerID", "PodUID"} {
 		in := providers.LogInstance{PodUID: "uid-1", ContainerID: "containerd://abc"}
@@ -118,5 +119,23 @@ func TestRenderLogMarkerTextIsNotWithheld(t *testing.T) {
 				t.Errorf("%s spells the marker, refit %v: read %d, text %q", field, refit, v.Read, v.Text)
 			}
 		}
+	}
+}
+
+// A Redactor has the flag of a withheld text (decision of 2026-11-21 on #873): a redactor with String alone, or a
+// wrapper that keeps only String, cannot be a Redactor, so the builder never takes a withheld text for redacted
+// text. Before, such a redactor was read with String and a section it withheld was shown as read.
+func TestRedactorRequiresTheCheckedForm(t *testing.T) {
+	m, ok := reflect.TypeFor[Redactor]().MethodByName("StringChecked")
+	if !ok {
+		t.Fatal("Redactor has no StringChecked: a redactor without the flag of a withheld text would be accepted")
+	}
+	if want := reflect.TypeFor[func(string) (string, bool)](); m.Type != want {
+		t.Errorf("StringChecked is %v, want %v", m.Type, want)
+	}
+	type stringOnly interface{ String(s string) string }
+	if reflect.TypeFor[RedactFunc]().Implements(reflect.TypeFor[Redactor]()) ||
+		!reflect.TypeFor[RedactFunc]().Implements(reflect.TypeFor[stringOnly]()) {
+		t.Error("a function of String alone is a Redactor")
 	}
 }

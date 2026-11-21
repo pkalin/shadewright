@@ -55,6 +55,9 @@ type redactorFunc func(string) string
 
 func (f redactorFunc) String(s string) string { return f(s) }
 
+// StringChecked never withholds: origin/main had no work budget.
+func (f redactorFunc) StringChecked(s string) (string, bool) { return f(s), true }
+
 // once is the redactor of origin/main (s.redactor.String there).
 func (m mainTools) once(s string) string { return m.rec.Wrap(released.String)(s) }
 

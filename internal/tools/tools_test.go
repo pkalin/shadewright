@@ -640,6 +640,9 @@ const canaryMark = "CANARY-7f3a"
 
 func (canary) String(s string) string { return strings.ReplaceAll(s, canaryMark, "[x]") }
 
+// StringChecked never withholds.
+func (c canary) StringChecked(s string) (string, bool) { return c.String(s), true }
+
 func (c canary) PiecesWithin(ps []redact.Piece, _ int) ([]string, bool) {
 	return eachPiece(c, ps), true
 }

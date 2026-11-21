@@ -49,6 +49,7 @@ import (
 // answer shows (a key's signal for the value after it, a match that runs across pieces).
 type pieceRedactor interface {
 	Redactor
+	StringChecked(s string) (string, bool)
 	PiecesWithin(ps []redact.Piece, limit int) ([]string, bool)
 	PiecesFitting(ps []redact.Piece, fits func(out []string) bool) ([]string, bool)
 }

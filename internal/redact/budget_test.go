@@ -37,8 +37,9 @@ import (
 //	B3: an entry is either decided whole, as without a budget, or withheld whole (Withheld, nothing of it),
 //	    wherever its budget runs out; and an entry longer than MaxEntry is withheld before any work.
 
-// budgetHeadroom is how many times its work the budget of every entry of the corpus tables must be at least.
-const budgetHeadroom = 2
+// budgetHeadroom is how many times its work the budget of every entry of the corpus tables must be at least: the
+// margin of a half WorkPerByte is set with (decision of 2026-11-21 on #873).
+const budgetHeadroom = 1.5
 
 // budgetEntry is one entry point as the budget sees it: run decides on in with the meter wm (nil: none) and
 // returns the output joined, size is the size of the entry its budget is set from, and public is the exported
@@ -191,8 +192,8 @@ func checkBudget(t *testing.T, e budgetEntry, what, in string, cost *budgetCost)
 	t.Helper()
 	spent, size := spentOn(e, in), e.size(in)
 	cost.add(what, spent, size)
-	if budgetHeadroom*spent > budgetOf(size) {
-		t.Errorf("B1: %s on %s: %d steps on %d bytes, more than 1/%d of its budget %d", e.name, what, spent, size,
+	if budgetHeadroom*float64(spent) > float64(budgetOf(size)) {
+		t.Errorf("B1: %s on %s: %d steps on %d bytes, more than 1/%.1f of its budget %d", e.name, what, spent, size,
 			budgetHeadroom, budgetOf(size))
 	}
 }
@@ -215,6 +216,22 @@ func budgetMeasures() map[string]string {
 	}
 	for _, n := range []int{512, 2048} {
 		out[fmt.Sprintf("repeated quoted keys %d", n)] = repeatedQuotedKeys(n)
+	}
+	maps.Copy(out, gluedQuotedPairs(64<<10))
+	return out
+}
+
+// gluedQuotedPairs are lines of quoted pairs glued with no separator (auth="a" repeated), with and without a
+// tail, of about n bytes each: the release before reads each pair's value again for every key before it on the
+// line, up to a window, so the cost per byte rises to about 1,200 steps of that reading at 64 KiB and stays
+// there (1,201 at 1 MiB), and Strings, which takes that reading twice, to about 2,500 (decision of 2026-11-21 on
+// #873; found by FuzzDiffGetPodLogs).
+func gluedQuotedPairs(n int) map[string]string {
+	out := map[string]string{}
+	for _, unit := range []string{`auth="a"`, `token="a"`} {
+		for _, tail := range []string{"", "\uff1ax"} {
+			out[fmt.Sprintf("glued %s tail %q", unit, tail)] = strings.Repeat(unit, n/len(unit)) + tail
+		}
 	}
 	return out
 }

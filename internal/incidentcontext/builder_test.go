@@ -452,6 +452,9 @@ func (canary) String(s string) string {
 	return strings.ReplaceAll(s, canaryMark, "[x]")
 }
 
+// StringChecked never withholds.
+func (c canary) StringChecked(s string) (string, bool) { return c.String(s), true }
+
 // Acceptance: redaction is always applied, to every section, the summary included, whatever the source.
 func TestRedactionIsAlwaysApplied(t *testing.T) {
 	d := deployment()

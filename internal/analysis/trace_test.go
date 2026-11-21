@@ -344,7 +344,8 @@ type cancelingBuilder struct {
 	b      *fakeBuilder
 }
 
-func (c cancelingBuilder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) (*incidentcontext.Context, error) {
+func (c cancelingBuilder) BuildWithin(ctx context.Context, inc *remediationv1alpha1.Incident,
+	total int) (*incidentcontext.Context, error) {
 	c.cancel()
-	return c.b.Build(ctx, inc)
+	return c.b.BuildWithin(ctx, inc, total)
 }

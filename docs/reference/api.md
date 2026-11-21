@@ -283,7 +283,7 @@ Used by: [RemediationSettingsSpec](#remediationsettingsspec).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `maxAnalysesPerDay` | integer | No | maxAnalysesPerDay limits model-backed analyses per UTC day, across all Incidents; 0 disables the model. 0 to 10000. Defaulted to 100 also when spec.analysis is left out. Read today by the analysis trigger: 0 marks every Incident not due (AnalysisDisabled). The analysis loop reserves one unit per attempt before its first model call (ADR-0025), so the count is enforced while it runs. Replaces the deprecated spec.maxAnalysesPerDay; while that is still set, the lower of the two applies.<br>Default: `100`<br>Maximum: 10000<br>Minimum: 0 |
-| `maxContextBytes` | integer | No | maxContextBytes is the most bytes of redacted cluster context (events, pod status, log excerpts, metrics) the context builder puts into one analysis, before the fixed system part of the prompt. 4096 to 262144; the default of 32768 is roughly 8,000 tokens. A context cut at this bound is marked truncated, which is an escalation trigger (ADR-0023).<br>Default: `32768`<br>Maximum: 262144<br>Minimum: 4096 |
+| `maxContextBytes` | integer | No | maxContextBytes is the most bytes of redacted cluster context (events, pod status, log excerpts, metrics) the context builder puts into one analysis. It bounds the text of the context blocks before the prompt escapes it and wraps each block in its tags, not the context message sent: escaping can make that several times larger. 4096 to 49152; the default and maximum of 49152 (48 KiB) of context text is roughly 12,000 tokens before escaping and wrapping. The bounds of the sections (summary, status, logs, metrics, Git, policy) stay fixed and add up to 48 KiB, so a larger value would add no context; a value below it cuts the context to it. A context cut at this bound is marked truncated, which is an escalation trigger (ADR-0023).<br>Default: `49152`<br>Maximum: 49152<br>Minimum: 4096 |
 | `maxToolSteps` | integer | No | maxToolSteps is the most read tool calls one escalated analysis may make. The triage call has no tools (ADR-0023), so this only bounds escalation. 0 to 16; 0 means escalation gets no tools.<br>Default: `4`<br>Maximum: 16<br>Minimum: 0 |
 | `maxOutputTokens` | integer | No | maxOutputTokens is the most output tokens one model call may produce, sent as the request's MaxOutputTokens, so the provider stops there. An analysis makes at most 3 + maxToolSteps model calls: the triage call, one retry after invalid output, and maxToolSteps + 1 escalated turns (an invalid escalated result gets no retry; it is handed off). That bounds its output. 256 to 16384.<br>Default: `2048`<br>Maximum: 16384<br>Minimum: 256 |
 | `maxConcurrentAnalyses` | integer | No | maxConcurrentAnalyses is the most analyses that call a model at once. 1 to 8.<br>Default: `1`<br>Maximum: 8<br>Minimum: 1 |
@@ -1254,7 +1254,7 @@ Used by: [RemediationRequestStatus](#remediationrequeststatus).
 | `mergeCommitSHA` | string | No | mergeCommitSHA is the commit the Git host reports the pull request was merged as, recorded when Shadewright sees the merge of the pull request it pushed. Delivery is checked against it: the GitOps controller must report this commit, or a later commit of the target branch containing it, as applied. Empty until then, and when the host reported none. Once set it never changes.<br>Maximum length: 40<br>Minimum length: 40<br>Pattern: `^[0-9a-f]{40}$` |
 | `appliedObservedAt` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | appliedObservedAt is when the executor first saw the GitOps controller report mergeCommitSHA, or a later commit of the target branch that holds it, as applied and Ready. It is set once and never moved, so a deadline measured from it (the rollout check, condition RolledOut) cannot be pushed back. Written only for a Deployment or StatefulSet target delivered by a Flux Kustomization, within an hour of the merge. |
 | `mergedAt` | [MicroTime](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#microtime-v1-meta) | No | mergedAt is when the executor first recorded the request Merged, set in the status write that sets the phase and never moved, unlike lastPhaseTransitionTime, which every later phase moves. A duplicate of the same Incident and target created before it ends Superseded (reason AnotherRequestMerged, #556). Empty on a request merged before the field existed. |
-| `reviewCheck` | [ReviewCheck](#reviewcheck) | No | reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge gate), written only with reviewer hints on. On each caught-up look while the request waits for approval the executor reads the reviews and the App's own check run on headSHA, writes the Git host when it shows another state than the reviews call for, then records that state here (#748): InProgress while no approval of that head by someone who wrote no hint in the chain stands, Passed while one does, Failed when the executor could not read every review of the pull request and completed it with failure (it fails closed; condition Approved False with reason ReviewListTooLong; final on that head but for Stale), Refused when the Git host refused for good to write it (condition Approved then says so and what the host shows; asked again after a backoff), Stale when the freshness check found the plan stale and the executor completed it with failure, whether or not the close of the pull request went through (#713); the request then never writes the check again, and does not end Superseded before it is recorded. It always names headSHA: a new head starts without it, so a state never outlives its head. Once a merge receipt exists it never changes.<br>Rule: on one head a Failed check run changes only to Stale<br>Rule: a Stale check run never changes<br>Rule: refusals and refusedAt are recorded only on a Refused check run |
+| `reviewCheck` | [ReviewCheck](#reviewcheck) | No | reviewCheck is the state of the check run shadewright/review on headSHA (ADR-0028 section 5, the merge gate), written only with reviewer hints on. On each caught-up look while the request waits for approval the executor reads the reviews and the App's own check run on headSHA, writes the Git host when it shows another state than the reviews call for, then records that state here (#748): InProgress while no approval of that head by someone who wrote no hint in the chain stands, Passed while one does, Failed when the executor could not read every review of the pull request and completed it with failure (it fails closed; condition Approved False with reason ReviewListTooLong; final on that head but for Stale), Refused when the Git host refused for good to write it (condition Approved then says so and what the host shows; asked again after a backoff), Stale when the freshness check found the plan stale and the executor completed it with failure, whether or not the close of the pull request went through (#713), when the request was cancelled with spec.cancel (#289), or when it stopped while its own pull request is open, on the target branch or on another base (#925; condition ReviewCheckNotFailed says while that write fails); the request then never writes the check again, and does not end Superseded before it is recorded. It always names headSHA: a new head starts without it, so a state never outlives its head. Once a merge receipt exists it never changes.<br>Rule: on one head a Failed check run changes only to Stale<br>Rule: a Stale check run never changes<br>Rule: refusals and refusedAt are recorded only on a Refused check run |
 | `conflictSeen` | [ConflictSeen](#conflictseen) | No | conflictSeen records the first read in which the Git host reported this pull request open with a merge conflict while the plan was fresh. GitHub computes mergeability lazily and may report a stale conflict, so one read does not end the request: it ends NeedsIntervention with reason ChangeRequestConflict only on a later conflicted read, with the plan still fresh, at least two minutes after at, on the same head and target branch head. Any read that finds no conflict (an unknown answer included) removes it, and a new target branch head starts the wait again. Only the executor writes it. |
 | `incidentStopped` | [IncidentCountReading](#incidentcountreading) | No | incidentStopped is the reading of the Incident's status.count with which the executor found the Incident stopped while the pull request waited for review: the same count, of spec.incidentRef.uid, read by one executor process over at least an hour. It is the source of condition IncidentStopped (#715), which is derived from it in the same status patch, and it is what a restarted executor reads so that it marks once. A later read of another count, or an Incident that is gone, removes both. Its readAt is only shown, never compared. Only the executor writes it. |
 
@@ -1497,9 +1497,9 @@ Used by: [RemediationRequestSpec](#remediationrequestspec).
 
 ResetReason says why a verification window was reset (ADR-0030 section 4). The verifier sets Restarted,
 PodNotReady, PartialRollout, EvidenceMissing, ScaledToZero and ObservationGap in its report, the only reasons
-the enum of WindowReset.reason accepts. NotAvailable, StaleReport and ReportMismatch are the executor's
-reasons for its own window; with PartialRollout they are the reasons of status.verification.lastReset of a
-RemediationRequest (VerificationReset), never of a report.
+the enum of WindowReset.reason accepts. NotAvailable, StaleReport, ReportMismatch and ExecutorRestarted are
+the executor's reasons for its own window; with PartialRollout they are the reasons of
+status.verification.lastReset of a RemediationRequest (VerificationReset), never of a report.
 
 - Underlying type: string
 
@@ -1516,6 +1516,7 @@ Used by: [VerificationReset](#verificationreset), [WindowReset](#windowreset).
 | `NotAvailable` | ResetNotAvailable: the target reports other available replicas than desired, fewer or more (executor). No evidence. |
 | `StaleReport` | ResetStaleReport: the report is missing or its sample counter stopped rising (executor). No evidence. |
 | `ReportMismatch` | ResetReportMismatch: the report's spec names another request, merge commit, target or template revision (executor). No evidence. |
+| `ExecutorRestarted` | ResetExecutorRestarted: a new executor process (a restart or a leader change) found the window open and opened by no check of its own, a span no check of its own covers (the executor). No evidence. |
 
 ### ResolvedSource
 
@@ -1575,8 +1576,8 @@ pinned to that head: a state recorded for one head never counts for another. Eve
 or adopts starts without one, and the executor creates the check in progress on it. On one head a Failed check
 changes only to Stale; every other state may follow any other, as the reviews and the Git host's answers change
 (#748), or become Stale (#713). A Stale check never changes, neither its state nor its head: the request records
-it only while the plan's cleanup runs, nothing pushes to the pull request then, and the request never writes the
-check again on any head (#713).
+it only when nothing pushes to the pull request any more (the plan's cleanup, a cancel, or a stop while the pull
+request is open, #925), and the request never writes the check again on any head (#713).
 
 
 Validation rules:
@@ -1610,7 +1611,14 @@ the plan stale (#713, ADR-0028 amendment of 2026-11-15); the executor writes it,
 pull request goes through, until it is recorded, and never changes it, so the request never sets the check green
 again. A Failed check may still become Stale on its head, so the run says why the plan must not be merged. The
 executor writes the same failed state, with a run that says so, for a request cancelled with spec.cancel (#289),
-before it closes the pull request.
+before it closes the pull request, and for any request that stops while its own pull request is open, on the
+target branch or on a base a person moved it to (#925): in the step that stops it for a pull request open on
+another base, and at each later look of the stopped request until it is recorded (condition ReviewCheckNotFailed
+says while it cannot be written); once recorded, a look of the stopped request that finds another state last on
+the head writes it again. Before the merge gate writes the check (InProgress, Passed, or Failed on too many reviews),
+the executor reads the request live, so a reconcile that worked from an older copy writes nothing over a stop, a
+release or a deletion; the failed check of a stale plan, a cancel or a stop is written without that read, as
+nothing it can go over passes a merge.
 
 - Underlying type: string
 - One of `InProgress`, `Passed`, `Failed`, `Refused`, `Stale`
@@ -1834,15 +1842,17 @@ Used by: [VerificationWindow](#verificationwindow).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `reason` | [ResetReason](#resetreason) | Yes | reason says why the window was reset: NotAvailable (the target reports other available replicas than desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision or container) or PartialRollout (the report does not cover every desired replica, or a revert is checked before RolledOut is True). Every one is a reset of the no-evidence class.<br>One of `NotAvailable`, `StaleReport`, `ReportMismatch`, `PartialRollout` |
+| `reason` | [ResetReason](#resetreason) | Yes | reason says why the window was reset: NotAvailable (the target reports other available replicas than desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision or container), PartialRollout (the report does not cover every desired replica, or a revert is checked before RolledOut is True) or ExecutorRestarted (a new executor process, after a restart or a leader change, found the window open and opened by no check of its own; its time is the second before it began reconciling, or windowStart when that is later). Every one is a reset of the no-evidence class.<br>One of `NotAvailable`, `StaleReport`, `ReportMismatch`, `PartialRollout`, `ExecutorRestarted` |
 | `time` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | time is when the reset was recorded, on the executor's clock. It is never earlier than windowStart at that moment or the previous reset, so the window is open only while windowStart is later than it. |
 
 ### VerificationWindow
 
 VerificationWindow is the executor's own stable window of a Verifying request (ADR-0030 section 4), kept next
 to the verifier's window in the VerificationReport. Every time in it is on the executor's clock, and it is
-never compared with a time of the report. No window counts time from before the executor process began reconciling, so after a restart or a leader change every open window needs a full stableFor again. A lastReset is
-counted: resets is at least 1 when it is set.
+never compared with a time of the report. No window counts time from before the executor process began
+reconciling: after a restart or a leader change the first check resets every open window no check of the new
+process opened, with ExecutorRestarted, so it needs a full stableFor again and the window stored is the one
+that decides. A lastReset is counted: resets is at least 1 when it is set.
 
 
 Validation rules:

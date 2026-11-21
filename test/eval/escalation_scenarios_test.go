@@ -72,7 +72,7 @@ type escalationScenario struct {
 	Signal escalationSignal `json:"signal,omitempty"`
 	// ContextBytes is the builder's total bound on the context, the others staying at their defaults; it is
 	// required with signal truncated and refused otherwise. The default bounds add up to the default total, so
-	// only a total below their sum (one maxContextBytes allows, 4096 to 262144) can cut the context.
+	// only a total below their sum (one maxContextBytes allows, 4096 to 49152) can cut the context.
 	ContextBytes int `json:"contextBytes,omitempty"`
 	// MetricsSource "down" configures a metrics source that fails every query, a Prometheus that is down. It
 	// is required with signal failedSource and refused with a metrics.yaml.

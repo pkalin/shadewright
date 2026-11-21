@@ -45,8 +45,8 @@
   <text class="s" x="822" y="154">its ConfigMap, /openid/v1/jwks</text>
   <text class="s" x="822" y="170">writes: update on that ConfigMap</text>
   <text class="no" x="822" y="190">never: Secrets, Git, model key</text>
-  <text class="s" x="822" y="210">egress: port 443; host pinned in code</text>
-  <text class="s" x="822" y="228">token audience names this hub</text>
+  <text class="s" x="822" y="210">egress: port 443, pinned host</text>
+  <text class="s" x="822" y="228">token audience: this hub</text>
   <text class="lbl" x="44" y="266">as invariant 6 lists today, unchanged</text>
   <rect class="lane" x="24" y="330" width="1072" height="284" rx="12"/>
   <text class="lanet" x="44" y="358">HUB</text>

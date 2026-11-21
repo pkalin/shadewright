@@ -122,7 +122,10 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -timeout 20m -coverprofile cover.out
+	@# -timeout applies to each package's test binary. internal/controller (the plain tests, then the envtest suite
+	@# TestControllers) took 14 to 15 minutes under -race on a hosted runner before #838 and ran past 20 after it (#961),
+	@# so the limit is 30 minutes; the packages still run side by side.
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -timeout 30m -coverprofile cover.out
 	@# The redact timing tests and the 100,000 seeded keys skip under -race, and the generated corpora check a seeded
 	@# sample there (internal/redact/race_test.go, racesample_test.go): run the whole package again without it, so
 	@# that no test is selected by name and a renamed one cannot drop out. The
@@ -162,6 +165,17 @@ fuzz: ## Run each fuzz target (FUZZ, default all) for FUZZTIME (default 30s); a 
 		echo "fuzz ./$${t%%:*} $${t##*:} for $(FUZZTIME)"; \
 		go test -run '^$$' -fuzz "^$${t##*:}\$$" -fuzztime "$(FUZZTIME)" "./$${t%%:*}" || exit 1; \
 	done
+
+# One line of JSON for the matrix of .github/workflows/fuzz.yml: every entry of FUZZ_TARGETS as <package dir>:<FuzzName>.
+.PHONY: fuzz-list
+fuzz-list: ## Print FUZZ_TARGETS as a JSON array (the Fuzz workflow matrix).
+	@hack/fuzz-targets.sh "$(CURDIR)" $(FUZZ_TARGETS)
+	@printf '[%s]\n' "$$(printf '"%s",' $(FUZZ_TARGETS) | sed 's/,$$//')"
+
+.PHONY: fuzz-one
+fuzz-one: ## Run one fuzz target, TARGET=<package dir>:<FuzzName> from FUZZ_TARGETS, for FUZZTIME (a Fuzz workflow job).
+	@$(if $(filter $(TARGET),$(FUZZ_TARGETS)),,echo "TARGET must be one of FUZZ_TARGETS, got '$(TARGET)'" >&2; exit 1)
+	@$(MAKE) --no-print-directory fuzz FUZZ="$(TARGET)" FUZZTIME="$(FUZZTIME)"
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The kind target installs the pinned Kind (KIND_VERSION) into bin/. The setup builds/loads the Manager Docker image locally.

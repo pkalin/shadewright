@@ -302,6 +302,8 @@ func TestBackfillNeverClearsAHeldLock(t *testing.T) {
 		for _, recorded := range []bool{false, true} {
 			for _, closed := range []string{"", ReasonChangeRequestClosed, ReasonChangeRequestMerged} {
 				t.Run(fmt.Sprintf("%s/recorded=%t/closed=%q", phase, recorded, closed), func(t *testing.T) {
+					// Each case builds its own world (#961).
+					t.Parallel()
 					r, _, rr := settlementWorld(t, phase)
 					ctx := context.Background()
 					rr.Status.HoldsTarget = nil

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 450" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 436" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">RemediationRequest phases</title>
   <desc id="d">Main path: Pending, PolicyChecked, PRCreated, then AwaitingApproval or AutoMergeQueued (planned), Merged, WaitingForDelivery, Verifying and Succeeded, which needs a fresh verifier report of a quiet window (Cleared True). The steps after Merged run only with the executor flag --verify-outcomes, off by default, and without it a merged request stays Merged and one found in WaitingForDelivery or Verifying ends Inconclusive. A merged request without a merge receipt ends Inconclusive, and so does a plan a person merged after Shadewright knew it was stale (StalePlanMerged), where it would otherwise end Succeeded or, without the flag, stay Merged, whatever its rollout report says; with the flag a failure still ends Failed. A stopped request that still holds the lock on its target (NeedsIntervention, Expired, Cancelled or a Superseded stale plan) moves on to Merged when its own pull request is found merged afterwards, and is capped the same way, so the circuit breaker never counts it as a success. WaitingForDelivery ends Failed when Flux failed on the merge commit at the end of the delivery window, and Inconclusive when the delivery was not seen, was blocked or suspended, or the target is gone. Verifying ends Failed at once on an OOM kill the report records, Inconclusive at once on a changed value, template or target, and at the timeout Failed when the rollout is stuck, a ScaledObject is not ready or the report recorded a restart, otherwise Inconclusive. Before the merge any step can instead end in Denied, Failed, Expired, Cancelled, Superseded or NeedsIntervention; a request stopped NeedsIntervention because the target branch changed in the settings moves on to Merged when a person merges its pull request later, and ends Inconclusive (StalePlanMerged); a replacement whose handoff was aborted at a refused read of its recovery stays PolicyChecked for 24 hours, moves on to Merged if its commit is merged in that time, and otherwise ends NeedsIntervention (RecoveryWaitExpired) with the lock kept, where a later merge of its commit is still recorded (Merged, or PRCreated while the merge commit or the check at the merge is awaited); any replacement that ends before its takeover keeps the lock the same way while its commit may be on the open pull request (TargetHeld says so when a person's commit is on it), reads that pull request on the branch the plan recorded when the settings name another one, and releases the lock when its repository leaves the settings; the request it replaces ends Superseded (MergedForReplacement) when that commit is merged and the replacement records the merge (with or without a receipt), and a replacement that took the pull request over ends Superseded (MergedForPredecessor) when a person put the predecessor's commit back and merged it and the predecessor records that merge; after the merge a deadline never ends a request Expired. A stopped request releases its target lock only after the common read checks both target branches and finds no pull request that can still merge, except a merge the status records (design 6.6.1). Git read failures wait the poll interval or the host's delay, never past the bound of their step, with GitReadRetry; successful content reads remove their wait.</desc>
   <defs>
@@ -18,7 +18,7 @@
       .plan{stroke-dasharray:6 5}
     </style>
   </defs>
-  <rect width="1120" height="450" rx="18" fill="#0e0e16"/>
+  <rect width="1120" height="436" rx="18" fill="#0e0e16"/>
   <text class="lanet" x="40" y="44">MAIN PATH</text>
   <rect class="box" x="40" y="92" width="130" height="44" rx="22"/><text class="h" x="105" y="119" text-anchor="middle">Pending</text>
   <rect class="box" x="200" y="92" width="160" height="44" rx="22"/><text class="h" x="280" y="119" text-anchor="middle">PolicyChecked</text>
@@ -50,22 +50,13 @@
   <text class="lbl" x="395" y="214" text-anchor="end">(off by default)</text>
   <path class="f" d="M510 244H554" marker-end="url(#a)"/>
   <path class="f" d="M710 244H754" marker-end="url(#a)"/>
-  <text class="lbl" x="930" y="242">fresh report of a quiet</text>
-  <text class="lbl" x="930" y="258">window, Cleared True</text>
-  <text class="lbl" x="414" y="288">end of the delivery window</text>
+  <text class="lbl" x="930" y="242">Cleared True</text>
+  
+  <text class="lbl" x="414" y="288">delivery window ends</text>
   <text class="lbl" x="644" y="288">timeout</text>
   <rect class="bad" x="300" y="306" width="410" height="44" rx="22"/><text class="badt" x="505" y="333" text-anchor="middle">Failed · Inconclusive</text>
   <path class="f" d="M405 266V300" marker-end="url(#a)"/>
   <path class="f" d="M635 266V300" marker-end="url(#a)"/>
-  <text class="lbl" x="40" y="292">not delivered, blocked,</text>
-  <text class="lbl" x="40" y="308">suspended, Flux failed on</text>
-  <text class="lbl" x="40" y="324">the merge commit, target gone</text>
-  <text class="lbl" x="730" y="300">OOM kill (Failed); value or template</text>
-  <text class="lbl" x="730" y="316">changed, target gone; at the timeout</text>
-  <text class="lbl" x="730" y="332">rollout stuck, ScaledObject not ready</text>
-  <text class="lbl" x="730" y="348">or restarts (Failed), or no evidence</text>
-  <rect class="bad" x="40" y="372" width="1040" height="70" rx="12"/>
-  <text class="badt" x="62" y="398">Before the merge any step can end in: Denied · Failed · Expired · Cancelled · Superseded · NeedsIntervention</text>
-  <text class="lbl" x="62" y="416">A stopped request that holds the lock moves on to Merged if its own pull request (or its commit, for a replacement that ended before its takeover: Merged or PRCreated) is merged later</text>
-  <text class="lbl" x="62" y="434">Its pull request merged with the other request's commit of a handoff, recorded there (with or without a receipt): it ends Superseded (MergedForReplacement, MergedForPredecessor)</text>
+  <rect class="bad" x="40" y="372" width="1040" height="44" rx="22"/>
+  <text class="badt" x="560" y="399" text-anchor="middle">Before the merge, any step can end: Denied · Failed · Expired · Cancelled · Superseded · NeedsIntervention</text>
 </svg>

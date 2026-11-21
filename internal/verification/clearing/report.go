@@ -250,6 +250,26 @@ type Timeout struct {
 	Expected Expected
 	// Executor is the executor's own window.
 	Executor Window
+	// Restart is what the executor read of the report at the check of this process that recorded its restart
+	// (ExecutorRestarted), nil when this process recorded none.
+	Restart *Restart
+}
+
+// Restart is the report as the executor read it at the check that recorded its restart: the report's UID (empty
+// when it was missing) and its reset count. A reset of the report is after the restart when the report counted
+// one since, by its own counter: no time of the report is compared with one of the executor.
+type Restart struct {
+	Report types.UID
+	Resets int64
+}
+
+// resetSince reports whether the report r counted a reset since the read rs. A report recreated since (another
+// UID) counted one when its count is above zero; resets never decreases on one report (CEL).
+func (rs Restart) resetSince(r *v1alpha1.VerificationReport) bool {
+	if r == nil || r.Status.Resets == 0 {
+		return false
+	}
+	return r.UID != rs.Report || r.Status.Resets > rs.Resets
 }
 
 // AtTimeout returns the verdict at the timeout (ADR-0030 section 4): Failed when the rollout is stuck, when a
@@ -258,7 +278,9 @@ type Timeout struct {
 // Restarted reset per restart and PodNotReady resets in between, so the last reset alone would hide it. A
 // Restarted reset that is not recorded as trouble (before the window first opened, or shown only by a node's
 // termination time, see [Window.Reset]) does not fail the request. Otherwise Inconclusive with the reason that
-// holds the window closed. Recorded state decides, never an order of times from two clocks: first the
+// holds the window closed. Recorded state decides, never an order of times from two clocks: first
+// ExecutorRestarted when it is the executor's last reset and the report, by its own reset counter, counted no
+// reset since the check that recorded the restart (Timeout.Restart; the newest reset gives the reason); then the
 // executor's own reset when its window is closed by a report that is no evidence (StaleReport,
 // ReportMismatch); then the report's reset when the report's window is closed (the verifier's pod-level reason,
 // such as PodNotReady, names why the target is not available); then the executor's reset of a closed window
@@ -286,7 +308,15 @@ func AtTimeout(t Timeout) (Verdict, string) {
 	}
 	exec := t.Executor
 	execClosed := exec.LastReset != nil && !exec.Open()
+	var matched *v1alpha1.VerificationReport
+	if report != nil {
+		matched = t.Report
+	}
 	switch {
+	case exec.LastReset != nil && exec.LastReset.Reason == v1alpha1.ResetExecutorRestarted && t.Restart != nil &&
+		!t.Restart.resetSince(matched):
+		// The restart is the newest reset of both windows.
+		return VerdictInconclusive, string(v1alpha1.ResetExecutorRestarted)
 	case execClosed && untrusted(exec.LastReset.Reason):
 		// The report is missing, stale or not this request's: what it says is no reason.
 		return VerdictInconclusive, string(exec.LastReset.Reason)

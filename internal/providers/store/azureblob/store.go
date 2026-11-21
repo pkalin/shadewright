@@ -354,9 +354,13 @@ func (s *Store) try(ctx context.Context, blob *url.URL, data []byte) (time.Durat
 	}
 	if err := tctx.Err(); err != nil {
 		// The try was given up before this answer was read: its own timeout ended while the write still has time.
-		// The answer decides nothing (a server can send the empty 200 of a handler that gave up); the try counts
-		// as one that timed out with no answer, retried and paced like it. A blob it did store answers the
-		// retry with 409 BlobAlreadyExists, as after any try that timed out.
+		// Only the success classify accepts (201 Created) still counts: the server says the record is stored.
+		// Any other late answer decides nothing (a server can send the empty 200 of a handler that gave up); the
+		// try counts as one that timed out with no answer, retried and paced like it, its Retry-After ignored. A
+		// blob it did store answers the retry with 409 BlobAlreadyExists, as after any try that timed out.
+		if _, cerr := classify(resp, s.now()); cerr == nil {
+			return 0, nil
+		}
 		return 0, s.transportError(ctx, err)
 	}
 	return classify(resp, s.now())
@@ -435,7 +439,8 @@ func (s *Store) transportError(ctx context.Context, err error) error {
 	if errors.As(err, &certErr) || errors.As(err, &unknownAuth) || errors.As(err, &hostErr) || errors.As(err, &invalid) {
 		return fmt.Errorf("%w: %w", errTLS, providers.ErrForbidden)
 	}
-	// The try's own timeout (also an answer read only after it), a reset or a DNS failure: worth another try.
+	// The try's own timeout (also an answer other than 201 read only after it), a reset or a DNS failure: worth
+	// another try.
 	return &providers.RetryableError{Err: errNoAnswer}
 }
 

@@ -402,8 +402,9 @@ func (a tryLateAnswer) RoundTrip(r *http.Request) (*http.Response, error) {
 		Body: io.NopCloser(strings.NewReader("<Error><Message>body text " + testToken + "</Message></Error>"))}, nil
 }
 
-// An answer read after its try timed out, the write's context still live, decides nothing: the try is retried
-// like one that timed out with no answer, with the same pacing and the same final error (#1064).
+// An answer read after its try timed out, the write's context still live: a 201 is a success, on any try; any
+// other answer decides nothing, and the try is retried like one that timed out with no answer, with the same
+// pacing and the same final error (#1064).
 func TestPutAnswerAfterTryTimeout(t *testing.T) {
 	for _, code := range []int{http.StatusOK, http.StatusCreated, http.StatusConflict, http.StatusInternalServerError} {
 		for _, late := range []int{1, maxTries} {
@@ -425,14 +426,23 @@ func TestPutAnswerAfterTryTimeout(t *testing.T) {
 				}
 				st.tryTimeout = 5 * time.Millisecond
 				_, err = st.Put(t.Context(), testRecord())
-				if late < maxTries {
+				switch {
+				case code == http.StatusCreated:
+					// The one late answer that counts: the server says the record is stored.
+					if err != nil {
+						t.Fatalf("Put = %v, want a late 201 to be a success", err)
+					}
+					if n != 1 {
+						t.Errorf("%d round trips, want 1", n)
+					}
+				case late < maxTries:
 					if err != nil {
 						t.Fatalf("Put = %v after %d round trips, want the retry to create", err, n)
 					}
 					if n != late+1 {
 						t.Errorf("%d round trips, want %d", n, late+1)
 					}
-				} else {
+				default:
 					if !errors.Is(err, errNoAnswer) || !providers.IsRetryable(err) {
 						t.Fatalf("Put = %v, want no answer, retryable", err)
 					}

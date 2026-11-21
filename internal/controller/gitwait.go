@@ -720,7 +720,7 @@ func (r *RemediationRequestReconciler) endAfterLastRead(ctx context.Context, key
 	case m.answered:
 		// The read answered and its answers agree, yet the wait stands: nothing the answer shows records the merge the
 		// wait is about (it is not on a branch the plan or the settings name, or it is gone).
-		why = "the read after the wait answered without settling it"
+		why = lastReadAnsweredUnsettled
 	default:
 		log.Info("Kept the Git wait of RemediationRequest past its end: the reconcile made no read that answered, " +
 			"failed or could not start (a path that read nothing)")
@@ -729,6 +729,11 @@ func (r *RemediationRequestReconciler) endAfterLastRead(ctx context.Context, key
 	res, _, err := r.endWait(ctx, rr, left[0], now, why)
 	return r.lookAgainWhileHeld(rr, res, err), lastReadEnded, err
 }
+
+// lastReadAnsweredUnsettled is why endAfterLastRead ends a wait for a read whose last read answered, with answers
+// that agree, and settled nothing. The end of a claim on a merge of another head reads it to say that the reads
+// answered and nothing matched the claim (endContentUnreadable), not that they kept failing.
+const lastReadAnsweredUnsettled = "the read after the wait answered without settling it"
 
 // keptPace is the time to run again of a reconcile whose wait for a read stands past its end with no evidence about
 // its last read (lastReadKept): the reconcile's own time when it lies between a second and the poll interval (the
@@ -922,8 +927,14 @@ func (r *RemediationRequestReconciler) endContentUnreadable(ctx context.Context,
 		pr := w.PullRequest
 		cr := providers.ChangeRequest{Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA,
 			BaseBranch: string(pr.BaseBranch), MergeCommit: pr.MergeCommitSHA, State: providers.ChangeRequestMerged}
-		return r.endOtherHeadMerge(ctx, rr, pred, cr, ReasonMergeContentUnreadable,
-			"it could not be read: "+contentUnreadableMessage(last))
+		brought := "it could not be read: " + contentUnreadableMessage(last)
+		if last == lastReadAnsweredUnsettled {
+			// The reads answered and nothing matched the claim (decision of 2026-11-21 on #870, narrow): no read
+			// kept failing at the end.
+			brought = fmt.Sprintf("it was not read: the read of the Git host after the wait of %s answered and "+
+				"nothing it found matched pull request #%d, the merge this request claims", mergeContentWait, pr.Number)
+		}
+		return r.endOtherHeadMerge(ctx, rr, pred, cr, ReasonMergeContentUnreadable, brought)
 	}
 	if rr.Status.PullRequest == nil && w.PullRequest != nil {
 		recordFound(rr, providers.ChangeRequest{Number: w.PullRequest.Number, URL: w.PullRequest.URL,

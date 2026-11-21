@@ -2367,6 +2367,12 @@ func (m *hmWorld) checkEndedOnOtherBase(after *api.RemediationRequest) {
 // holding a claim on a merge of another head (otherHeadClaim) while the predecessor is gone: P5 checks that the claim
 // still ends at its own end (#870, seed 45273).
 func (m *hmWorld) noteClaimWithPredGone(who string, before *api.RemediationRequest) {
+	if who == hmRepl && before != nil && endedBeforeTakeover(before) && otherHeadClaim(before) &&
+		ptr.Deref(before.Status.HoldsTarget, false) && m.get(hmPred) == nil && m.stored(hmPred) != nil {
+		// After the end of the watch, the predecessor made again while the claim stands (decision of 2026-11-21 on
+		// #870, narrow): the look at stopped holders sends the claim through the claim rule (P12, P13, seed 398).
+		m.reach["other-head-claim-after-watch-pred-made-again"] = true
+	}
 	if who != hmRepl || before == nil || !abortedOnRefusal(before) || !otherHeadClaim(before) || m.get(hmPred) != nil {
 		return
 	}
@@ -2419,15 +2425,15 @@ func (m *hmWorld) reconcileMadeAgain(who string) {
 	}
 }
 
-// remakeArmedPred carries out an armed hRemakePred: once the replacement's watch after a refusal holds a claim on a
-// merge of another head (otherHeadClaim), a person deletes the predecessor (if it is not gone or being deleted), and
+// remakeArmedPred carries out an armed hRemakePred: once the replacement's watch after a refusal, or the replacement
+// after the end of that watch (endedBeforeTakeover), holds a claim on a merge of another head (otherHeadClaim), a person deletes the predecessor (if it is not gone or being deleted), and
 // once nothing is stored under its name a request is made there with the predecessor's spec, spec.cancel set, and
 // another UID. The replacement's next reconcile then meets a predecessor made again while it holds the claim, which
 // must still end at its own end (P5, decision of 2026-11-21 on #870).
 func (m *hmWorld) remakeArmedPred() {
 	if m.remakeArmed {
 		repl := m.get(hmRepl)
-		if repl == nil || !abortedOnRefusal(repl) || !otherHeadClaim(repl) {
+		if repl == nil || !abortedOnRefusal(repl) && !endedBeforeTakeover(repl) || !otherHeadClaim(repl) {
 			return
 		}
 		m.remakeArmed, m.remakePending = false, true
@@ -2965,8 +2971,11 @@ func hmSeeds(t *testing.T) []uint64 {
 // (its MergeContent wait, the Git host reporting no merge commit ID) when the predecessor is gone; the claim stood
 // about a day past its end (P5) while the watch read nothing with the predecessor gone. The same seed then makes the
 // predecessor again under its name (hRemakePred), the claim still standing: the watch reads it on (decision of
-// 2026-11-21 on #870).
-var hmFixedSeeds = []uint64{45273}
+// 2026-11-21 on #870). 398 (#870, narrow decision of 2026-11-21): the claim starts after the end of the watch and the
+// predecessor is made again under its name (hRemakePred, armed for that shape too); P12 and P13 fail when the look at
+// stopped holders sends that claim to the generic look, which releases the lock with no record (seeds 911 and 2464
+// too, in the run of 1 to 6,000).
+var hmFixedSeeds = []uint64{45273, 398}
 
 func TestHandoffModel(t *testing.T) {
 	schema := requestStatusSchema(t)
@@ -3048,8 +3057,10 @@ var hmP12Reach = []string{"pred-head-merge-pred-left", "pred-head-recorded-then-
 var hmP13Reach = []string{"release-on-merge-before-takeover"}
 
 // hmP5Reach are the shapes of P5 the default seed set (with hmFixedSeeds) must reach: a claim on a merge of another
-// head held by the watch after a refusal once the predecessor is gone, and once it is made again under its name (#870).
-var hmP5Reach = []string{"other-head-claim-pred-gone", "other-head-claim-pred-made-again"}
+// head held by the watch after a refusal once the predecessor is gone, and once it is made again under its name, and
+// such a claim held after the end of the watch with the predecessor made again (#870).
+var hmP5Reach = []string{"other-head-claim-pred-gone", "other-head-claim-pred-made-again",
+	"other-head-claim-after-watch-pred-made-again"}
 
 // hmDirected runs a scripted sequence and fails with the violations.
 func hmDirected(t *testing.T, start string, steps []hmStep) *hmWorld {

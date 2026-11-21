@@ -260,7 +260,7 @@ func TestStoppedHolderWritesItsFailedCheckAgain(t *testing.T) {
 				looks = 2
 			}
 			for range looks {
-				err := r.failStoppedCheck(ctx, p, nil, string(api.PhaseNeedsIntervention))
+				err := r.failStoppedCheck(ctx, p, false, string(api.PhaseNeedsIntervention))
 				if err != nil && (!c.note || c.unread) {
 					t.Fatalf("failStoppedCheck: %v", err)
 				}
@@ -444,6 +444,10 @@ func TestStoppedHolderFailsItsCheckWhileAnotherPullRequestHoldsAfterItsOwnClosed
 					Type: api.ConditionReviewCheckNotFailed, Status: metav1.ConditionTrue, Reason: ReasonGitFailed,
 					Message: notWrittenYet})
 			}
+			// Stored, as afterLook reads it: the check's gate decides on its own read (writeStoppedCheck).
+			if err := r.Status().Update(ctx, p); err != nil {
+				t.Fatal(err)
+			}
 			runs := len(g.CheckRuns(head))
 			if err := r.failCheckAfterLook(ctx, p); err != nil {
 				t.Fatal(err)
@@ -531,6 +535,10 @@ func TestStoppedHolderLookOnGoneFailsItsCheck(t *testing.T) {
 			if tc.reinstalled {
 				reinstallLive(t, r, p)
 			}
+			// Stored, as afterLook reads it: the check's gate decides on its own read (writeStoppedCheck).
+			if err := r.Status().Update(ctx, p); err != nil {
+				t.Fatal(err)
+			}
 			for i, l := range tc.looks {
 				g.SetFail(func(op string) error {
 					if l.failWrite && op == opCreateCheckRun {
@@ -602,7 +610,7 @@ func TestStoppedCheckWrittenAsItsTimeRunsOutIsRecorded(t *testing.T) {
 		}
 		return nil
 	})
-	if err := r.failStoppedCheck(ctx, p, nil, string(api.PhaseNeedsIntervention)); err != nil {
+	if err := r.failStoppedCheck(ctx, p, false, string(api.PhaseNeedsIntervention)); err != nil {
 		t.Fatalf("failStoppedCheck: %v", err)
 	}
 	if rc := p.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale {

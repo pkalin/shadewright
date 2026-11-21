@@ -750,7 +750,14 @@ func acquire(rr *remediationv1alpha1.RemediationRequest) {
 func (r *RemediationRequestReconciler) checkHeld(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	if inLook(ctx) {
-		res, _, err := r.heldLookOnce(ctx, rr)
+		res, rule, err := r.heldLookOnce(ctx, rr)
+		if rule && err == nil {
+			// The exit runs once per look, in the outer call, which returns no "may write" for a merge it followed:
+			// the rule this nested look reached (a failed check, or the end of its condition) waits for the next look.
+			logf.FromContext(ctx).Info("Did not run the rule of the failed review check of a stopped "+
+				"RemediationRequest for a look inside another look; the next look runs it", "remediationRequest",
+				client.ObjectKeyFromObject(rr))
+		}
 		return res, err
 	}
 	ctx = context.WithValue(ctx, heldLookKey{}, true)
@@ -1451,8 +1458,8 @@ func (r *RemediationRequestReconciler) afterLook(ctx context.Context, rr *remedi
 					// Cancelled: no status write with a cancelled context.
 					return err
 				}
-				return fmt.Errorf("read the settings for the failed review check of RemediationRequest %s/%s: %w",
-					rr.Namespace, rr.Name, err)
+				// err names the read that failed: the settings, or the gate's read of the request.
+				return fmt.Errorf("fail the review check of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 			}
 			want = live.Status.DeepCopy()
 			if equality.Semantic.DeepEqual(base.Status, live.Status) {
@@ -1594,8 +1601,9 @@ func logCheckNoteEnd(ctx context.Context, rr *remediationv1alpha1.RemediationReq
 // lockverdict.Release). The stop's summary promises no close (stoppedCheckRun), so it is the same on any base. Only a
 // failure of the Kubernetes API is returned, for the error backoff, and so is the caller's cancellation, so that no
 // status write follows with a cancelled context; any other failure is said in status and does not hold the look,
-// whose pace stays heldRecheckInterval. rr is the request as afterLook just read it from the API server, and it is
-// the read the write's gate decides on (writeStoppedCheck): no second read of the request is made.
+// whose pace stays heldRecheckInterval. rr is the request as afterLook just read it from the API server; it decides
+// only whether the look goes on to the write. The write's gate (writeStoppedCheck) reads the request again after the
+// look's other calls (the read of the check on the head), immediately before the write, and decides on that read.
 func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) error {
 	pr := rr.Status.PullRequest
@@ -1604,7 +1612,7 @@ func (r *RemediationRequestReconciler) failCheckAfterLook(ctx context.Context,
 		endCheckNoteLogged(ctx, rr, "the pull request is merged or the target lock is released")
 		return nil
 	}
-	switch err := r.failStoppedCheck(ctx, rr, rr, string(rr.Status.Phase)); {
+	switch err := r.failStoppedCheck(ctx, rr, false, string(rr.Status.Phase)); {
 	case isClusterError(err):
 		return err
 	case ctx.Err() != nil:

@@ -702,7 +702,7 @@ func TestRefuseOpenedMergedOnMovedBaseStops(t *testing.T) {
 		t.Fatal(err)
 	}
 	cr := g.ChangeRequests()[n-1]
-	err := r.refuseOpened(ctx, g, rr, cr, &renderRefusal{reason: ReasonHeadMoved, message: "The head is not the planned one"})
+	err := r.refuseOpened(ctx, g, rr, cr, &renderRefusal{reason: ReasonHeadMoved, message: headNotPlanned})
 	if !errors.Is(err, errStopped) {
 		t.Fatalf("refuseOpened: %v, want the request stopped", err)
 	}
@@ -1155,7 +1155,7 @@ func TestStopOnMovedBaseSaysTheCheckWasNotFailed(t *testing.T) {
 			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
 				t.Fatal(err)
 			}
-			if err := r.stopOpenElsewhere(ctx, live, cr); !errors.Is(err, errStopped) {
+			if err := r.stopOpenElsewhere(ctx, live, cr, false); !errors.Is(err, errStopped) {
 				t.Fatalf("stopOpenElsewhere: %v; want the stop", err)
 			}
 			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {

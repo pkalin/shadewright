@@ -186,6 +186,10 @@ func TestStoppedCheckRefusalIsNotGitFailed(t *testing.T) {
 			plainWaiting(t, r, p, head)
 			p.Status.Phase = api.PhaseNeedsIntervention
 			p.Status.HoldsTarget = new(true)
+			// Stored: the check's gate decides on its own read of the request (writeStoppedCheck).
+			if err := r.Status().Update(ctx, p); err != nil {
+				t.Fatal(err)
+			}
 			g.SetFail(func(op string) error {
 				if op == opCreateCheckRun {
 					return c.fail
@@ -193,7 +197,7 @@ func TestStoppedCheckRefusalIsNotGitFailed(t *testing.T) {
 				return nil
 			})
 			r.Recorder = record.NewFakeRecorder(10)
-			if err := r.failStoppedCheck(ctx, p, p, string(api.PhaseNeedsIntervention)); err == nil {
+			if err := r.failStoppedCheck(ctx, p, false, string(api.PhaseNeedsIntervention)); err == nil {
 				t.Fatal("a failed write of the stopped check returned no error")
 			}
 			cond := meta.FindStatusCondition(p.Status.Conditions, api.ConditionReviewCheckNotFailed)

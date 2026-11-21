@@ -236,56 +236,66 @@ func stoppedCheckRun(reason string) providers.CheckRun {
 			"plan, so it must not be merged on an earlier check. This check stays failed."}
 }
 
-// stoppedCheckRefusal is the gate's decision (writeStoppedCheck) on live, the request as read from the API server
-// just before the write, for the write on rr's recorded head: the cause of a refusal, or "" when the write may go.
-// The zero value of live refuses (no UID). The order only picks which cause the log names.
-func (r *RemediationRequestReconciler) stoppedCheckRefusal(rr, live *remediationv1alpha1.RemediationRequest) string {
+// stoppedCheckRefusal is the gate's decision (writeStoppedCheck) on live, the request as the gate just read it from the
+// API server, for the write on pr, the pull request the caller names for this write: the cause of a refusal, or ""
+// when the write may go. recordsNow says the caller records pr in this step's status write (a stop that adopts its
+// lost pull request, or refuses one it opened, records it in memory only): then a stored request that records no pull
+// request yet does not refuse; one that records another pull request or head always does. The zero value of live
+// refuses (no UID). The order only picks which cause the log names.
+func (r *RemediationRequestReconciler) stoppedCheckRefusal(rr, live *remediationv1alpha1.RemediationRequest,
+	pr *remediationv1alpha1.PullRequestStatus, recordsNow bool) string {
+	stored := live.Status.PullRequest
 	switch {
 	case live.UID != rr.UID:
 		return "the request was deleted and created again"
 	case !live.DeletionTimestamp.IsZero():
 		return "the request is being deleted"
-	case !samePullRequest(live.Status.PullRequest, rr.Status.PullRequest):
+	case pr == nil:
+		return "the caller names no pull request"
+	case stored == nil && !recordsNow:
+		return "the request records no pull request"
+	case stored != nil && !samePullRequest(stored, pr):
 		return "the request records another pull request or head"
 	case mergeRecorded(live):
 		return "the request records the merge of its pull request"
 	case !ptr.Deref(live.Status.HoldsTarget, false):
 		return "the request no longer holds the target lock"
-	case !r.ownsReviewCheck(live):
+	case !r.ReviewerHints || handedOff(live) || intent(live) != nil:
+		// ownsReviewCheck without its recorded pull request, which pr stands for here.
 		return "the request owns no review check: reviewer hints off or a handoff"
 	}
 	return ""
 }
 
 // writeStoppedCheck is the gate of the failed review check of a stopped request (failStoppedCheck), and the only
-// function that writes it (decision of 2026-11-21 on #1008, ADR-0046): it decides on live, the request as its caller
-// just read it from the API server (afterLook's read), or reads it itself when live is nil, and writes the failed run
-// on rr's recorded head only when that request still exists with rr's UID, is not being deleted, records the same pull
-// request and head, records no merge, holds the target lock and owns the review check (stoppedCheckRefusal). A step
-// that decides the check may be written (a stop exception's "may write", the stop of a pull request open elsewhere or
-// gone) is the first condition; this gate is the second, and both must hold. A refusal writes nothing, is logged at
-// Info with its cause, and returns false with no error: no look owes the check in any of those cases. A failed read of
-// the request is a failure of the Kubernetes API, returned for the error backoff with nothing written. A change of the
-// request between the gate's read and the write is not seen (the one limit left, ADR-0046). ctx is the reconcile's,
-// stepCtx the step's bounded one, for naming a failed write (boundErr).
+// function that writes it (decisions of 2026-11-21 on #1008, ADR-0046). It is called after every other call of the
+// step, and it reads the request from the API server itself, immediately before the write, at a look's exit as at a
+// stop: no earlier read of the request decides. It writes the failed run on the head of pr, the pull request the
+// caller names for this write, only when that request still exists with rr's UID, is not being deleted, records pr
+// (or no pull request yet, when the caller records pr in this step: recordsNow), records no merge, holds the target
+// lock and owns the review check (stoppedCheckRefusal). A step that decides the check may be written (a stop
+// exception's "may write", the stop of a pull request open elsewhere or gone) is the first condition; this gate is the
+// second, and both must hold. A refusal writes nothing, is logged at Info with its cause, and returns false with no
+// error: in each of those cases the request is going away, records a merge or another pull request, no longer holds
+// the lock or no longer owns the check, so no check is owed. A failed read of the request is a failure of the
+// Kubernetes API, returned for the error backoff with nothing written. A change of the request between the gate's read
+// and the write is not seen (the one limit left, ADR-0046). ctx is the reconcile's, stepCtx the step's bounded one,
+// for naming a failed write (boundErr).
 func (r *RemediationRequestReconciler) writeStoppedCheck(ctx, stepCtx context.Context, git providers.GitProvider,
-	rr, live *remediationv1alpha1.RemediationRequest, reason string) (bool, error) {
-	pr := rr.Status.PullRequest
+	rr *remediationv1alpha1.RemediationRequest, pr *remediationv1alpha1.PullRequestStatus, recordsNow bool,
+	reason string) (bool, error) {
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest",
-		pr.Number, "head", pr.HeadSHA)
+		prNumber(pr), "head", prHead(pr))
+	live := &remediationv1alpha1.RemediationRequest{}
 	cause := ""
-	if live == nil {
-		live = &remediationv1alpha1.RemediationRequest{}
-		switch err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); {
-		case apierrors.IsNotFound(err):
-			cause = "the request is gone"
-		case err != nil:
-			return false, &clusterError{err: fmt.Errorf("read RemediationRequest %s/%s before the failed review "+
-				"check: %w", rr.Namespace, rr.Name, err)}
-		}
-	}
-	if cause == "" {
-		cause = r.stoppedCheckRefusal(rr, live)
+	switch err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); {
+	case apierrors.IsNotFound(err):
+		cause = "the request is gone"
+	case err != nil:
+		return false, &clusterError{err: fmt.Errorf("read RemediationRequest %s/%s before the failed review "+
+			"check: %w", rr.Namespace, rr.Name, err)}
+	default:
+		cause = r.stoppedCheckRefusal(rr, live, pr, recordsNow)
 	}
 	if cause != "" {
 		log.Info("Did not write the failed review check of a stopped RemediationRequest", "cause", cause)
@@ -333,13 +343,15 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // a head recorded Stale that cannot read the check leaves it as it is and records the Warning Event
 // StoppedCheckUnread once (stoppedCheckUnread). A repository entry that names another target branch writes nothing,
 // since a branch change permits reads only (#771): that is said the same way, until the entry names the branch again. A cancelled reconcile is only returned, and so is a
-// failure of the Kubernetes API (reading the settings), for the error backoff.
+// failure of the Kubernetes API (reading the settings, or the gate's read of the request), for the error backoff.
 //
 // The write itself goes through one gate, writeStoppedCheck, the only caller of the Git host's check write for this
-// purpose (TestStoppedCheckWrittenOnlyByItsGate). live is the request as its caller just read it from the API server
-// (afterLook's read), or nil, and the gate reads it then.
+// purpose (TestStoppedCheckWrittenOnlyByItsGate). It names rr.Status.PullRequest as the caller holds it, and reads the
+// request itself after the other calls of this step. recordsNow says the caller records that pull request in this
+// step's status write (the adoption of a lost pull request found open on another base, and the refused open found
+// moved there): the stored request then may record none yet.
 func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	live *remediationv1alpha1.RemediationRequest, reason string) error {
+	recordsNow bool, reason string) error {
 	if !r.ownsReviewCheck(rr) {
 		endCheckNoteLogged(ctx, rr, "the request owns no review check: reviewer hints off or a handoff")
 		return nil
@@ -363,10 +375,10 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 		var wrote bool
 		// A write the Git host accepted is written, also when the step's time ran out as it returned: only a failed
 		// write is named for the deadline or the cancel.
-		if wrote, err = r.writeStoppedCheck(ctx, stepCtx, git, rr, live, reason); err == nil && !wrote {
+		if wrote, err = r.writeStoppedCheck(ctx, stepCtx, git, rr, pr, recordsNow, reason); err == nil && !wrote {
 			// Refused by the gate, which logged why: nothing is recorded, deliberately. The request is going away,
-			// records a merge, no longer holds the lock or no longer owns the check, and in each case no look owes
-			// the check any more; condition ReviewCheckNotFailed is left as it is for the write that ends the looks.
+			// records a merge or another pull request, no longer holds the lock or no longer owns the check, so this
+			// check is not owed; condition ReviewCheckNotFailed is left as it is for the write that ends the looks.
 			return nil
 		}
 	}
@@ -380,7 +392,9 @@ func (r *RemediationRequestReconciler) failStoppedCheck(ctx context.Context, rr 
 	case ctx.Err() != nil:
 		return err
 	case isClusterError(err):
-		log.Error(err, "Could not read the settings to fail the review check of a stopped RemediationRequest")
+		// err names the read that failed: the settings, or the request read by the gate just before the write.
+		log.Error(err, "Could not read from the Kubernetes API to fail the review check of a stopped "+
+			"RemediationRequest")
 		return err
 	}
 	why, text := checkNotFailed(err)

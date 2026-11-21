@@ -801,7 +801,7 @@ func (r *RemediationRequestReconciler) adoptFound(ctx context.Context, git provi
 		// Recorded in the write that stops the request, so the watch, the lock and the finalizer read it by its
 		// number from then on. A lost write is found again by the next look.
 		recordFound(rr, v.pr)
-		return true, r.stopOpenElsewhere(ctx, rr, v.pr)
+		return true, r.stopOpenElsewhere(ctx, rr, v.pr, true)
 	case adoptMergedElsewhere:
 		// Recorded in the write that stops the request, as the watch has it, without a merge: nothing reached the
 		// target branch. A lost write is found again by the next look.
@@ -925,8 +925,9 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 			return err
 		}
 	case refuseMoved:
-		// A person moved it to another base since the open (#892): nothing is closed there.
-		return r.stopOpenElsewhere(ctx, rr, v.pr)
+		// A person moved it to another base since the open (#892): nothing is closed there. The pull request is
+		// recorded in this step's write only.
+		return r.stopOpenElsewhere(ctx, rr, v.pr, true)
 	case refuseMergedElsewhere:
 		// Moved to another base and merged there: nothing to close (the close to the target branch would be refused),
 		// and the request stops with the pull request named, as the watch stops it.
@@ -1828,7 +1829,7 @@ func (r *RemediationRequestReconciler) watchOtherBase(ctx context.Context, rr *r
 	if v.rule().watch == watchMergedElsewhere {
 		return r.stopMergedElsewhere(ctx, rr, v.pr)
 	}
-	return r.stopOpenElsewhere(ctx, rr, v.pr)
+	return r.stopOpenElsewhere(ctx, rr, v.pr, false)
 }
 
 // stopOpenElsewhere is the watch's answer to the request's own pull request, cr, read by its number open on another
@@ -1839,13 +1840,15 @@ func (r *RemediationRequestReconciler) watchOtherBase(ctx context.Context, rr *r
 // #925): moved back to the target branch, the pull request cannot merge on a check written before the stop. A failed
 // write of the check does not hold the stop: the stop's status write carries condition ReviewCheckNotFailed, which
 // says why (failStoppedCheck), and the stopped holder's next look tries it again. A cancelled reconcile and a failure
-// of the Kubernetes API are returned, for the error backoff, before anything is written.
+// of the Kubernetes API are returned, for the error backoff, before anything is written. recordsNow is set by the
+// callers that record cr in this step only (the adoption of a lost pull request, refuseOpened): the check's gate then
+// accepts a stored request that records no pull request yet (failStoppedCheck).
 func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	cr providers.ChangeRequest) error {
+	cr providers.ChangeRequest, recordsNow bool) error {
 	if cancelRequested(rr) {
 		return errOpenElsewhere
 	}
-	if err := r.failStoppedCheck(ctx, rr, nil, ReasonChangeRequestOnOtherBase); ctx.Err() != nil ||
+	if err := r.failStoppedCheck(ctx, rr, recordsNow, ReasonChangeRequestOnOtherBase); ctx.Err() != nil ||
 		isClusterError(err) {
 		return err
 	}
@@ -1863,7 +1866,7 @@ func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr
 // a failure of the Kubernetes API are returned, for the error backoff, before anything is written.
 func (r *RemediationRequestReconciler) stopGone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	v changeVerdict) error {
-	if err := r.failStoppedCheck(ctx, rr, nil, ReasonChangeRequestGone); ctx.Err() != nil ||
+	if err := r.failStoppedCheck(ctx, rr, false, ReasonChangeRequestGone); ctx.Err() != nil ||
 		isClusterError(err) {
 		return err
 	}

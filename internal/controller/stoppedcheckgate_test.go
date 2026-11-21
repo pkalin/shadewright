@@ -24,10 +24,8 @@ import (
 	"go/token"
 	"strings"
 	"testing"
-	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -79,41 +77,66 @@ func TestStoppedHolderLookOnARequestBeingDeleted(t *testing.T) {
 }
 
 // TestStoppedCheckGate is the table of the gate of the failed review check of a stopped request (writeStoppedCheck,
-// decision of 2026-11-21 on #1008): one row per refusal, each changing only the condition it names, and one row that
-// writes. A row that passes live as nil makes the gate read the request itself.
+// decisions of 2026-11-21 on #1008): one row per refusal, each changing only the condition it names in the stored
+// request (the gate's own read) or in the caller's copy, and the rows that write. recordsNow is the caller recording
+// the pull request it names in this step (the adoption of a lost pull request, the refused open moved elsewhere).
 func TestStoppedCheckGate(t *testing.T) {
 	cases := []struct {
 		name string
-		// change changes live, a copy of the stored request, before the gate decides; nil keeps it.
-		change func(live *api.RemediationRequest)
-		// read makes the gate read the request itself, after prepare.
-		read    bool
-		prepare func(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest)
-		hints   *bool
-		write   bool
-		err     bool
+		// stored changes the stored request before the gate reads it; nil keeps it.
+		stored func(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest)
+		// caller changes the caller's copy, whose pull request the gate is asked to write on.
+		caller     func(rr *api.RemediationRequest)
+		recordsNow bool
+		hints      *bool
+		write      bool
+		err        bool
 	}{
 		{name: "writes", write: true},
-		{name: "writes after its own read", read: true, write: true},
-		{name: "zero value", change: func(live *api.RemediationRequest) { *live = api.RemediationRequest{} }},
-		{name: "UID differs", change: func(live *api.RemediationRequest) { live.UID = "another" }},
-		{name: "being deleted", change: func(live *api.RemediationRequest) {
-			live.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+		{name: "writes when the caller records the same pull request", recordsNow: true, write: true},
+		{name: "writes when the caller records the pull request in this step", recordsNow: true, write: true,
+			stored: storedStatus(func(st *api.RemediationRequestStatus) { st.PullRequest = nil })},
+		{name: "UID differs", caller: func(rr *api.RemediationRequest) { rr.UID = "another" }},
+		{name: "being deleted", stored: func(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
+			t.Helper()
+			stored := &api.RemediationRequest{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(rr), stored); err != nil {
+				t.Fatal(err)
+			}
+			stored.Finalizers = append(stored.Finalizers, FinalizerName)
+			if err := r.Update(context.Background(), stored); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Delete(context.Background(), stored); err != nil {
+				t.Fatal(err)
+			}
 		}},
-		{name: "another head", change: func(live *api.RemediationRequest) {
-			live.Status.PullRequest.HeadSHA = strings.Repeat("b", 40)
-		}},
-		{name: "pull request missing", change: func(live *api.RemediationRequest) { live.Status.PullRequest = nil }},
-		{name: "merge recorded", change: func(live *api.RemediationRequest) {
-			live.Status.MergeReceipt = &api.MergeReceipt{}
-		}},
-		{name: "lock released", change: func(live *api.RemediationRequest) { live.Status.HoldsTarget = new(false) }},
-		{name: "lock never recorded", change: func(live *api.RemediationRequest) { live.Status.HoldsTarget = nil }},
+		{name: "another head", stored: storedStatus(func(st *api.RemediationRequestStatus) {
+			st.PullRequest.HeadSHA = strings.Repeat("b", 40)
+		})},
+		{name: "another head, recorded in this step", recordsNow: true,
+			stored: storedStatus(func(st *api.RemediationRequestStatus) { st.PullRequest.HeadSHA = strings.Repeat("b", 40) })},
+		{name: "another pull request, recorded in this step", recordsNow: true,
+			stored: storedStatus(func(st *api.RemediationRequestStatus) { st.PullRequest.Number++ })},
+		{name: "pull request missing", stored: storedStatus(func(st *api.RemediationRequestStatus) { st.PullRequest = nil })},
+		{name: "caller names none", recordsNow: true, caller: func(rr *api.RemediationRequest) { rr.Status.PullRequest = nil }},
+		{name: "merge recorded", stored: storedStatus(func(st *api.RemediationRequestStatus) {
+			st.MergeReceipt = &api.MergeReceipt{}
+		})},
+		{name: "lock released", stored: storedStatus(func(st *api.RemediationRequestStatus) { st.HoldsTarget = new(false) })},
+		{name: "lock never recorded", stored: storedStatus(func(st *api.RemediationRequestStatus) { st.HoldsTarget = nil })},
 		{name: "owns no check: reviewer hints off", hints: new(false)},
-		{name: "owns no check: handed over", change: func(live *api.RemediationRequest) {
-			live.Status.Handoff = &api.Handoff{To: &api.OutgoingHandoff{Name: "next-request", Phase: api.HandoffDone}}
-		}},
-		{name: "request deleted", read: true, prepare: func(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
+		{name: "owns no check: reviewer hints off, recorded in this step", hints: new(false), recordsNow: true,
+			stored: storedStatus(func(st *api.RemediationRequestStatus) { st.PullRequest = nil })},
+		{name: "owns no check: handed over", stored: storedStatus(func(st *api.RemediationRequestStatus) {
+			st.Handoff = &api.Handoff{To: &api.OutgoingHandoff{Name: nextRequestName, Phase: api.HandoffDone}}
+		})},
+		{name: "owns no check: handed over, recorded in this step", recordsNow: true,
+			stored: storedStatus(func(st *api.RemediationRequestStatus) {
+				st.PullRequest = nil
+				st.Handoff = &api.Handoff{To: &api.OutgoingHandoff{Name: nextRequestName, Phase: api.HandoffDone}}
+			})},
+		{name: "request deleted", stored: func(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
 			t.Helper()
 			stored := &api.RemediationRequest{}
 			if err := r.Get(context.Background(), client.ObjectKeyFromObject(rr), stored); err != nil {
@@ -127,8 +150,8 @@ func TestStoppedCheckGate(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		{name: "read fails", read: true, err: true,
-			prepare: func(_ *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
+		{name: "read fails", err: true,
+			stored: func(_ *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
 				r.APIReader = failingRequestReader{Reader: r.Client, name: rr.Name}
 			}},
 	}
@@ -146,21 +169,19 @@ func TestStoppedCheckGate(t *testing.T) {
 				t.Fatalf("the stored request must hold the lock with an open pull request: %+v", rr.Status)
 			}
 			head := rr.Status.PullRequest.HeadSHA
-			var live *api.RemediationRequest
-			if !c.read {
-				live = rr.DeepCopy()
-				if c.change != nil {
-					c.change(live)
-				}
-			}
-			if c.prepare != nil {
-				c.prepare(t, r, rr)
-			}
 			git, _, _, err := r.openPlanRepositoryFor(ctx, rr)
 			if err != nil {
 				t.Fatal(err)
 			}
-			wrote, err := r.writeStoppedCheck(ctx, ctx, git, rr, live, string(api.PhaseNeedsIntervention))
+			caller := rr.DeepCopy()
+			if c.caller != nil {
+				c.caller(caller)
+			}
+			if c.stored != nil {
+				c.stored(t, r, rr)
+			}
+			wrote, err := r.writeStoppedCheck(ctx, ctx, git, caller, caller.Status.PullRequest, c.recordsNow,
+				string(api.PhaseNeedsIntervention))
 			if (err != nil) != c.err {
 				t.Fatalf("error %v, want one: %v", err, c.err)
 			}
@@ -172,6 +193,29 @@ func TestStoppedCheckGate(t *testing.T) {
 				t.Errorf("wrote %v, check runs on the head %+v: want a write %v", wrote, runs, c.write)
 			}
 		})
+	}
+	r := &RemediationRequestReconciler{ReviewerHints: true}
+	rr := &api.RemediationRequest{}
+	rr.UID = "one"
+	pr := &api.PullRequestStatus{Number: 1, HeadSHA: strings.Repeat("a", 40)}
+	if cause := r.stoppedCheckRefusal(rr, &api.RemediationRequest{}, pr, true); cause == "" {
+		t.Error("the zero value of the gate's read did not refuse")
+	}
+}
+
+// storedStatus changes the status of the stored request with change, for a row of TestStoppedCheckGate.
+func storedStatus(change func(st *api.RemediationRequestStatus)) func(*testing.T, *RemediationRequestReconciler,
+	*api.RemediationRequest) {
+	return func(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
+		t.Helper()
+		stored := &api.RemediationRequest{}
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(rr), stored); err != nil {
+			t.Fatal(err)
+		}
+		change(&stored.Status)
+		if err := r.Status().Update(context.Background(), stored); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -185,10 +229,15 @@ func TestStoppedCheckRefusalLeavesStatus(t *testing.T) {
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
 	}
-	live := rr.DeepCopy()
-	live.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+	rr.Finalizers = append(rr.Finalizers, FinalizerName)
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, rr.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
 	before := rr.Status.DeepCopy()
-	if err := r.failStoppedCheck(ctx, rr, live, string(api.PhaseNeedsIntervention)); err != nil {
+	if err := r.failStoppedCheck(ctx, rr, false, string(api.PhaseNeedsIntervention)); err != nil {
 		t.Fatal(err)
 	}
 	if runs := g.CheckRuns(rr.Status.PullRequest.HeadSHA); len(runs) != 0 {

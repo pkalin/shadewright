@@ -686,7 +686,8 @@ func endAtValueLines(wm *meter.Meter, ps []Piece, ws func(i int) written, answer
 // text) that reaches into a data piece the object hides whole (hiddenByObject) at that piece's end: the object
 // says where the value ends, so a block or a flow collection that the value opens, or a key inside it, takes no
 // later piece (#845, sixth decision of 2026-11-18, point 2). The spans are changed in place and returned. The work
-// and the allocation are linear in the length of the text and the number of spans.
+// is linear in the number of pieces and, for each span, logarithmic in the number of hidden pieces; the
+// allocation is linear in the number of hidden pieces.
 func endAtObjectValues(wm *meter.Meter, ps []Piece, size func(i int) int, spans []span) []span {
 	var starts, ends []int // the hidden pieces, in order
 	off := 0
@@ -700,20 +701,20 @@ func endAtObjectValues(wm *meter.Meter, ps []Piece, size func(i int) int, spans 
 	if len(starts) == 0 {
 		return spans
 	}
-	// first[x] is the first hidden piece that ends after byte x, len(starts) for none.
-	first := make([]int, off+1)
-	j := len(starts)
-	for x := off; x >= 0; x-- {
-		tick(wm, 1)
-		for j > 0 && ends[j-1] > x {
-			tick(wm, 1)
-			j--
-		}
-		first[x] = j
-	}
 	for i := range spans {
 		tick(wm, 1)
-		if h := first[min(spans[i].start, off)]; h < len(starts) && starts[h] < spans[i].end {
+		// The first hidden piece that ends after the span's start: the pieces are in order, so their ends are
+		// sorted, and a search holds nothing for each byte of the answer.
+		lo, hi := 0, len(ends)
+		for lo < hi {
+			tick(wm, 1)
+			if m := int(uint(lo+hi) >> 1); ends[m] > spans[i].start {
+				hi = m
+			} else {
+				lo = m + 1
+			}
+		}
+		if h := lo; h < len(starts) && starts[h] < spans[i].end {
 			spans[i].end = min(spans[i].end, ends[h])
 		}
 	}

@@ -31,10 +31,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/pkalin/shadewright/internal/incidentcontext"
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 // limitSweepTable records, for each pod of limitSweep, whether the release before #845 (origin/main at 0701cd3a)
-// answered get_resource with valid JSON. It is written on that release with LIMIT_SWEEP_WRITE=1.
+// answered get_resource with valid JSON. LIMIT_SWEEP_WRITE=1 writes it again from that release's get_resource as
+// rebuilt in diff_main_test.go (mainTools.getResource), every row measured.
 const limitSweepTable = "testdata/limit-sweep-main.tsv"
 
 // limitSweepSecrets are the arguments before the filler, each with a replacement that is longer, as long as or
@@ -89,16 +91,23 @@ func TestGetResourceFitsWhereTheReleaseBeforeFit(t *testing.T) {
 				t.Fatal(err)
 			}
 			mid := resourceBytes - len(base)
-			valid := map[int]bool{}
+			valid := func(n int) bool {
+				m := mainTools{rec: redacttest.NewRecorder()}
+				text, err := m.getResource(minimalPod(append(append([]string{}, limitSweepSecrets[name]...), limitFiller(n))))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return json.Valid([]byte(text))
+			}
 			last := mid
 			for n := mid - 120; n <= mid+20; n++ {
-				if valid[n] = json.Valid([]byte(limitAnswer(t, name, n))); valid[n] {
+				if valid(n) {
 					last = n
 				}
 			}
 			for n := last - 12; n <= last+12; n++ {
 				state := "cut"
-				if valid[n] {
+				if valid(n) {
 					state = "valid"
 				}
 				fmt.Fprintf(&b, "%s\t%d\t%s\n", name, n, state)

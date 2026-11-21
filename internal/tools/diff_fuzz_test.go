@@ -229,6 +229,8 @@ var diffToolSeeds = [][]byte{
 	redacttest.RawSeed(0, slices.Repeat([]string{strings.Repeat("--token,}", 4096)}, 6)...),
 	// The same with the knob 0x10, so that get_pod_logs reads it through the log source, which withholds it.
 	redacttest.RawSeed(0x10, slices.Repeat([]string{strings.Repeat("--token,}", 4096)}, 6)...),
+	// A path and a ref the Git tools accept, so that they reach the answer that they are not available.
+	redacttest.RawSeed(0, "deploy/app.yaml", ""),
 }
 
 // toolBodies are the checks of the fuzz targets of this file over one tool set, by target: the failures of one
@@ -347,7 +349,14 @@ func diffGetResource(set *Set, src *sceneSources) func([]byte) ([]string, bool) 
 		if err != nil {
 			return nil, false
 		}
-		return answerFails(NameGetResource, r, m.rec, mainText), false
+		fails := answerFails(NameGetResource, r, m.rec, mainText)
+		if r.Status != StatusOK {
+			// The object is there and origin/main answered it: any other answer than the object, withheld aside, is
+			// a read that failed for no reason the source gives.
+			fails = append(fails, fmt.Sprintf("P4: get_resource answered %s where origin/main answered the object: %q", r.Status,
+				redacttest.Clip(r.Text)))
+		}
+		return fails, false
 	}
 }
 
@@ -376,7 +385,6 @@ func diffGetPodLogs(set *Set, src *sceneSources) func([]byte) ([]string, bool) {
 			if sourceErr != nil && !errors.Is(sourceErr, providers.ErrWithheld) {
 				return []string{fmt.Sprintf("P4: the log source failed: %v", sourceErr)}, false
 			}
-			theirs.Text, theirs.Truncated = m.excerpt([]byte(text), endMissing, maxBytes)
 		}
 		// A log source that withholds the excerpt returns providers.ErrWithheld, and the tool must withhold its
 		// answer whole.
@@ -390,6 +398,9 @@ func diffGetPodLogs(set *Set, src *sceneSources) func([]byte) ([]string, bool) {
 		}
 		if withheld {
 			return wfails, false // nothing of the answer is shown: P1 holds, and the oracle is not run
+		}
+		if in.Knob&0x10 != 0 {
+			theirs.Text, theirs.Truncated = m.excerpt([]byte(text), endMissing, maxBytes)
 		}
 		mainText := m.podLogs(podName, container, previous, theirs, maxBytes)
 		return answerFails(NameGetPodLogs, r, m.rec, mainText), false
@@ -552,10 +563,9 @@ func diffGitTools(set *Set, src *sceneSources) func([]byte) ([]string, bool) {
 		in := redacttest.Decode(data, 2)
 		var fails []string
 		for _, name := range []string{NameReadGitFile, NameGetRecentChanges} {
+			// Neither tool has a source whose text redaction could withhold: a withheld answer fails the status check
+			// below like any other, and the other tool is checked as well.
 			r := src.run(set, diffScene{}, name, map[string]any{argPath: in.Fields[0], argRef: in.Fields[1]})
-			if wfails, withheld := withheldResult(name, r); withheld {
-				return append(fails, wfails...), false // nothing of the answer is shown: P1 holds, and the oracle is not run
-			}
 			if r.Status != StatusNotAvailable && r.Status != StatusRefused {
 				fails = append(fails, fmt.Sprintf("P4: %s answered %s: it shows text from a source now, give it a target of its own", name, r.Status))
 			}

@@ -17,6 +17,7 @@ limitations under the License.
 package tools
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -48,5 +49,23 @@ func TestGetResourceKeysWrittenAlike(t *testing.T) {
 	}
 	if strings.Contains(r.Text, secret) {
 		t.Errorf("the answer shows the token:\n%s", r.Text)
+	}
+	// Read back as JSON, the map keeps three entries, each value under a key of its own.
+	var back struct {
+		Spec struct {
+			NodeSelector map[string]string `json:"nodeSelector"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal([]byte(r.Text), &back); err != nil {
+		t.Fatalf("the answer is not JSON: %v\n%s", err, r.Text)
+	}
+	got := back.Spec.NodeSelector
+	var first, second int
+	for _, v := range got {
+		first += strings.Count(v, "first-value")
+		second += strings.Count(v, "second-value")
+	}
+	if len(got) != 3 || got["ok"] != "plain" || first != 1 || second != 1 {
+		t.Errorf("nodeSelector read back as %q: want three entries, ok: plain and each other value under its own key", got)
 	}
 }

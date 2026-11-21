@@ -52,7 +52,9 @@ const (
 	// HeapPerByte and HeapFixed bound the heap one redaction may hold (#873, decision of 2026-11-21 on the heap): at
 	// most HeapPerByte bytes for each byte of the entry plus HeapFixed, 46 MiB for the largest entry a caller passes
 	// (an object of about 1.5 MiB), inside the 48 MiB the decision allows and well inside the analyzer's limit of
-	// 128 Mi. TestHeapOfOneEntryIsBounded measures it at the largest entry of every entry point, on the worst shapes.
+	// 128 Mi. TestHeapOfOneEntryIsBounded measures it at the largest entry of every entry point, on the worst shapes;
+	// text dense in secrets is held only under a ceiling of 112 MiB there, and nothing bounds the heap of several
+	// redactions at once (#1087).
 	HeapPerByte = 28
 	HeapFixed   = 4 << 20
 	// FreePieces is how many pieces an answer (Pieces), or strings a sequence (Strings), may hold whatever its
@@ -84,7 +86,7 @@ const (
 	ReasonHeap = "heap"
 )
 
-// withheldTotal counts the entries withheld, by reason; both series start at zero.
+// withheldTotal counts the entries withheld, by reason (work, size, heap); all three series start at zero.
 var withheldTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "shadewright_redaction_withheld_total",
 	Help: "Entries redaction withheld whole, by reason (work: the work budget ran out; size: longer than the bound; " +

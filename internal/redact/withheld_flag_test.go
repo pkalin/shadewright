@@ -77,7 +77,10 @@ func TestWithheldIsAFlagNotAText(t *testing.T) {
 			}
 		}
 		out, ok := e.run(over)
-		if want := withheldStrings(e.parts(over)); ok || !slices.Equal(out, want) {
+		// The marker in the first string and nothing in the others, written here, not taken from the package.
+		want := make([]string, e.parts(over))
+		want[0] = Withheld
+		if ok || !slices.Equal(out, want) {
 			t.Errorf("%s on %d bytes over the budget: ok %v, %d strings %.80q; want ok false and %q", e.name, len(over),
 				ok, len(out), out, want)
 		}

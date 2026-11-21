@@ -98,7 +98,7 @@ func TestDeliveryMessageThatSpellsTheMarkerIsText(t *testing.T) {
 	set, src := diffSet(t)
 	r := src.run(set, diffScene{delivery: providers.DeliveryStatus{Message: redact.Withheld}},
 		NameGetDeliveryStatus, map[string]any{argKind: kustomization, argNamespace: fluxNS, argName: unitName})
-	if r.Status == StatusCouldNotFetch || slices.Contains(r.Labels, LabelWithheld) ||
+	if r.Status != StatusOK || slices.Contains(r.Labels, LabelWithheld) ||
 		!strings.Contains(r.Text, "message: "+redact.Withheld) {
 		t.Errorf("status %q, labels %v, text %q; want the message shown as text", r.Status, r.Labels, r.Text)
 	}

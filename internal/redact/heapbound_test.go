@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -44,9 +45,11 @@ const (
 type heapShape struct {
 	name string
 	text func(n int) string
-	// over, when set, says why the shape is measured but held only under heapCeiling, not under the bound: the
-	// heap it holds grows with its matches, not with its bytes, in code this change did not touch.
-	over string
+	// over, when set, says why the shape is measured but held only under heapCeiling, not under the bound, at the
+	// entry points overAt names: the heap it holds grows with its matches, not with its bytes, in code this change
+	// did not touch. Every other entry point is held to the bound on it.
+	over   string
+	overAt []string
 }
 
 // heapCeiling is what a shape that is over the bound (heapShape.over) may hold at the largest entry: well inside
@@ -73,7 +76,8 @@ var heapShapes = []heapShape{
 	// Many short lines, each with a secret: as many matches as lines. Each match holds its spans in every reading
 	// (this package's rules, each pass of the release before's) for the whole decision: over the bound at the
 	// largest entry for StringTwiceChecked, StringsChecked and the Pieces entry points.
-	{name: "secrets", text: func(n int) string { return repeatTo("password=hunter2\n", n) }, over: "spans held per match"},
+	{name: "secrets", text: func(n int) string { return repeatTo("password=hunter2\n", n) }, over: "spans held per match",
+		overAt: []string{"Redactor.StringTwiceChecked", "Redactor.StringsChecked", epPiecesWithin, epPiecesWithin + "/values", epPiecesFitting}},
 }
 
 // heapEntryPoint is an entry point of the package, with the largest entry it can get.
@@ -217,7 +221,7 @@ func TestHeapOfOneEntryIsBounded(t *testing.T) {
 				bound := heapBound(size)
 				t.Logf("%s on %s, an entry of %d bytes: peak %.1f MiB (bound %.1f MiB), decided %v", ep.name, sh.name,
 					size, mib(peak), mib(bound), ok)
-				if sh.over != "" {
+				if sh.over != "" && slices.Contains(sh.overAt, ep.name) {
 					if peak > heapCeiling {
 						t.Errorf("%s on an entry of %d bytes of %s held %.1f MiB, above the ceiling of %.0f MiB (%s)", ep.name,
 							size, sh.name, mib(peak), mib(heapCeiling), sh.over)
@@ -234,3 +238,21 @@ func TestHeapOfOneEntryIsBounded(t *testing.T) {
 }
 
 func mib(n uint64) float64 { return float64(n) / (1 << 20) }
+
+// A data piece the object hides whole (a secret key) of characters JSON writes as six-byte escapes, at the largest
+// entry: the answer is six times the value, and cutting the spans at the hidden piece's end holds no index of
+// every byte of the answer.
+func TestHeapOfAHiddenPieceIsBounded(t *testing.T) {
+	if raceDetector {
+		t.Skip("measures the heap of the product build")
+	}
+	ps := []Piece{{Text: "password: "}, {Text: repeatTo("\x01", largestObject-10), Data: true, Form: JSON, Key: "password"}}
+	var ok bool
+	peak := peakLiveHeap(func() { _, ok = defaultRedactor.PiecesWithin(ps, -1) })
+	bound := heapBound(largestObject)
+	t.Logf("a hidden piece of %d bytes: peak %.1f MiB (bound %.1f MiB), decided %v", largestObject, mib(peak), mib(bound), ok)
+	if peak > bound {
+		t.Errorf("a hidden piece of %d bytes of escapes held %.1f MiB, above the bound of %.1f MiB", largestObject,
+			mib(peak), mib(bound))
+	}
+}

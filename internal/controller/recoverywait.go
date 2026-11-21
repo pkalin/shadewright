@@ -367,10 +367,10 @@ func (r *RemediationRequestReconciler) recordRefusalEntry(ctx context.Context, r
 // request is read again after the poll interval, never later than the end of its waits, which ends it
 // (endPassedWait). With spec.cancel set, a read that works and finds no merge of its commit returns done false, so the
 // cancel finishes. A predecessor that is gone, made again, or no longer names this request has nothing to read: the
-// request waits for the end. The one exception is a claim on a merge of another head (otherHeadClaim, the content
-// wait recordOtherHeadMerge started) once the predecessor is gone: that merge is read on through the chain's branch
-// (recordMergeAlone), so the claim's read wait ends at its own end (endAfterLastRead) and not at the end of the watch.
-// A failure is returned (observeFailed).
+// request waits for the end. A claim on a merge of another head (otherHeadClaim, the content wait recordOtherHeadMerge
+// started) is read on through the chain's branch (recordMergeAlone, readClaimedMerge) in each of those cases, decided
+// from the claim and not from the predecessor's state (decision of 2026-11-21 on #870), so the claim's read wait ends
+// at its own end (endAfterLastRead) and not at the end of the watch. A failure is returned (observeFailed).
 func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, bool, error) {
 	if res, err := r.abortPredecessor(ctx, rr); err != nil || res.RequeueAfter > 0 {
@@ -393,24 +393,21 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 		}
 		return wait()
 	}
+	// No predecessor to read through: a claim on a merge of another head is read on through the chain's branch
+	// (readClaimedMerge), anything else waits with nothing to read.
+	alone := func() (reconcile.Result, bool, error) {
+		if !otherHeadClaim(rr) {
+			return idle()
+		}
+		res, done, err := r.readClaimedMerge(ctx, rr)
+		if err != nil || done {
+			return res, true, err
+		}
+		return idle()
+	}
 	switch err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred); {
-	case apierrors.IsNotFound(err) && otherHeadClaim(rr):
-		// A claim on a merge of another head (the content wait recordOtherHeadMerge started, often while the
-		// predecessor was being deleted) is read on through the chain's branch: a read wait ends only after a read
-		// made once its end passed (endAfterLastRead), so going idle here would hold it until the end of the watch.
-		git, err := r.openRecovery(ctx, rr)
-		if err != nil {
-			return reconcile.Result{}, true, err
-		}
-		switch _, recorded, err := r.recordMergeAlone(ctx, git, rr); {
-		case err != nil:
-			return reconcile.Result{}, true, err
-		case recorded:
-			return reconcile.Result{RequeueAfter: stepDelay}, true, nil
-		}
-		return idle()
 	case apierrors.IsNotFound(err):
-		return idle()
+		return alone()
 	case err != nil:
 		return reconcile.Result{}, true, &clusterError{err: fmt.Errorf("get the RemediationRequest %s replaces: %w",
 			rr.Name, err)}
@@ -421,7 +418,8 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 	}
 	if pred.UID != types.UID(from.UID) || to == nil || to.UID != remediationv1alpha1.UID(rr.UID) ||
 		pred.Status.PullRequest == nil {
-		return idle()
+		// Made again under the same name, or no longer handing over to rr: as gone, for the claim too.
+		return alone()
 	}
 	git, err := r.openRecovery(ctx, rr)
 	if err != nil {
@@ -449,6 +447,36 @@ func (r *RemediationRequestReconciler) observeStep(ctx context.Context, rr *reme
 		return reconcile.Result{}, true, err
 	}
 	return wait()
+}
+
+// readClaimedMerge reads on the merge rr holds a claim on (otherHeadClaim) while no predecessor that hands over to rr
+// can be read (gone, made again under the same name, or no longer naming rr): the pull requests of the chain's branch
+// through recordMergeAlone, each step until the claim ends. A record ends it (done, a short requeue). Any other verdict
+// (no merge of another head found, merged elsewhere, closed, open, gone) writes nothing and keeps the claim and the
+// lock, logged at Info: the read answered, so the claim's read wait ends at its own end (endAfterLastRead, which
+// records the merge as MergeContentUnreadable), never later; the lock is never released without a record (decision of
+// 2026-11-21 on #870). A failure is returned (observeFailed).
+func (r *RemediationRequestReconciler) readClaimedMerge(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	reconcile.Result, bool, error) {
+	git, err := r.openRecovery(ctx, rr)
+	if err != nil {
+		return reconcile.Result{}, true, err
+	}
+	v, recorded, err := r.recordMergeAlone(ctx, git, rr)
+	switch {
+	case err != nil:
+		return reconcile.Result{}, true, err
+	case recorded:
+		return reconcile.Result{RequeueAfter: stepDelay}, true, nil
+	}
+	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr), "verdict",
+		v.state.String())
+	if claim := gitWait(rr, waitMergeContent); claim != nil && claim.PullRequest != nil {
+		log = log.WithValues("pullRequest", claim.PullRequest.Number, "claimEnds", claim.Ends)
+	}
+	log.Info("Kept the claim of RemediationRequest on a merge of another head: the read of its branch recorded " +
+		"nothing; read again until the claim ends")
+	return reconcile.Result{}, false, nil
 }
 
 // otherHeadClaim reports whether rr, a replacement that watches after a refusal (observeStep), holds a content wait

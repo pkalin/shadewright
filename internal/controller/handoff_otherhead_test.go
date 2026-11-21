@@ -543,11 +543,11 @@ func TestPredecessorRecordUnderPauseEndsTheReplacementLater(t *testing.T) {
 	}
 }
 
-// A failed status write of the replacement (here a conflict) while the predecessor ends it on its record of the merge
-// of its own head (endReplacementAfterRecord) keeps the predecessor's answer: no error replaces it, a wait of its own
-// is kept, and a reconcile with none is requeued within freshRecheckDelay, so the step is tried again. The replacement
-// keeps the lock until a later attempt ends it.
-func TestPredecessorRecordFailedReplacementWriteKeepsTheAnswer(t *testing.T) {
+// A status write of the replacement that keeps failing (here a conflict on every attempt) while the predecessor ends
+// it on its record of the merge of its own head (endReplacementAfterRecord) is returned as the error of the reconcile,
+// for the controller's error backoff, whatever wait the reconcile had (decision of 2026-11-21 on #870): it is never
+// logged and requeued as if it went through. The replacement keeps the lock until a later attempt ends it.
+func TestPredecessorRecordFailedReplacementWriteReturnsTheError(t *testing.T) {
 	r, p, rr, _, _ := predecessorHeadMerged(t)
 	recorded := storedRR(t, r, p)
 	now := metav1.NowMicro()
@@ -563,14 +563,11 @@ func TestPredecessorRecordFailedReplacementWriteKeepsTheAnswer(t *testing.T) {
 			return c.SubResource(sub).Update(ctx, obj, opts...)
 		},
 	})
-	for _, c := range []struct {
-		in, want time.Duration
-	}{{in: 30 * time.Second, want: 30 * time.Second}, {in: time.Hour, want: freshRecheckDelay},
-		{in: 0, want: freshRecheckDelay}} {
-		res, err := reconcile.Result{RequeueAfter: c.in}, error(nil)
+	for _, in := range []time.Duration{30 * time.Second, time.Hour, 0} {
+		res, err := reconcile.Result{RequeueAfter: in}, error(nil)
 		r.endReplacementAfterRecord(t.Context(), recorded, &res, &err)
-		if err != nil || res.RequeueAfter != c.want {
-			t.Fatalf("wait %v: result %+v, error %v; want a requeue after %v without an error", c.in, res, err, c.want)
+		if !apierrors.IsConflict(err) || res.RequeueAfter != 0 {
+			t.Fatalf("wait %v: result %+v, error %v; want the conflict returned for the error backoff", in, res, err)
 		}
 	}
 	if held := storedRR(t, r, rr); !ptr.Deref(held.Status.HoldsTarget, false) {
@@ -624,4 +621,86 @@ func TestEndOnOtherMergeLogsTheReleaseAfterItsWrite(t *testing.T) {
 		t.Fatalf("lock %v, log %q: want the lock released and the release logged", ptr.Deref(got.Status.HoldsTarget,
 			false), *lines)
 	}
+}
+
+// claimWithPredecessorChanged is watchingAfterRefusal with a person's commit merged on top of the replacement's and the
+// Git host reporting no merge commit ID, so the replacement's watch holds a claim on that merge (its MergeContent wait,
+// otherHeadClaim); then change alters the predecessor so that the watch can no longer read through it.
+func claimWithPredecessorChanged(t *testing.T, change func(*RemediationRequestReconciler, *api.RemediationRequest)) (
+	*RemediationRequestReconciler, *api.RemediationRequest, providers.ChangeRequest, func(time.Duration)) {
+	t.Helper()
+	r, g, p, rr, cr, move := watchingAfterRefusal(t)
+	if _, err := g.Push("shadewright/"+string(chainRootOf(p)), "person.yaml", []byte("by: a person\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.MergeWithCommit(cr.Number); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetMergeCommit(cr.Number, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := reconcileOnce(t, r, rr); !otherHeadClaim(got) || !abortedOnRefusal(got) {
+		t.Fatalf("phase %q, waits %+v: want the watch after a refusal holding a claim on the merge", got.Status.Phase,
+			got.Status.GitWaits)
+	}
+	change(r, storedRR(t, r, p))
+	return r, rr, cr, move
+}
+
+// claimEndsAtItsEnd checks that the claim of rr ends at its own end, a step after it passed: the merge recorded on the
+// replacement (MergeContentUnreadable, the merge commit was never reported), the claim gone and the lock released;
+// the watch, a day long, is far from its end.
+func claimEndsAtItsEnd(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest,
+	cr providers.ChangeRequest, move func(time.Duration)) {
+	t.Helper()
+	var got *api.RemediationRequest
+	for range 2 {
+		move(mergeContentWait)
+		got, _ = reconcileOnce(t, r, rr)
+	}
+	c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionApproved)
+	if got.Status.Phase != api.PhaseNeedsIntervention || c == nil || c.Reason != ReasonMergeContentUnreadable ||
+		got.Status.PullRequest == nil || got.Status.PullRequest.Number != cr.Number || otherHeadClaim(got) {
+		t.Fatalf("phase %q, Approved %+v, waits %+v: want the claim ended at its own end with the merge recorded as "+
+			"MergeContentUnreadable", got.Status.Phase, c, got.Status.GitWaits)
+	}
+	move(heldRecheckInterval)
+	if got, _ = reconcileOnce(t, r, rr); ptr.Deref(got.Status.HoldsTarget, false) {
+		t.Fatalf("replacement %q: the recorded merge did not settle its lock", got.Status.Phase)
+	}
+}
+
+// The replacement's watch holds a claim on a merge of another head, and the predecessor is deleted and made again
+// under the same name with another UID (decision of 2026-11-21 on #870): the watch reads the claimed merge on, so the
+// claim ends at its own end. Before, the watch went idle and the claim stood until the end of the watch, a day later.
+func TestOtherHeadClaimEndsWithThePredecessorMadeAgain(t *testing.T) {
+	r, rr, cr, move := claimWithPredecessorChanged(t, func(r *RemediationRequestReconciler, p *api.RemediationRequest) {
+		ctx := t.Context()
+		p.Finalizers = nil
+		if err := r.Update(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Delete(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		again := &api.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Namespace: p.Namespace, Name: p.Name,
+			UID: "0ad0ff00-0000-4000-8000-000000000003"}, Spec: *p.Spec.DeepCopy()}
+		again.Spec.Cancel = true
+		if err := r.Create(ctx, again); err != nil {
+			t.Fatal(err)
+		}
+	})
+	claimEndsAtItsEnd(t, r, rr, cr, move)
+}
+
+// The same claim when the predecessor stays but no longer hands over to the replacement (its outgoing handoff names
+// another request): the watch reads the claimed merge on and the claim ends at its own end.
+func TestOtherHeadClaimEndsWhenThePredecessorNoLongerHandsOver(t *testing.T) {
+	r, rr, cr, move := claimWithPredecessorChanged(t, func(r *RemediationRequestReconciler, p *api.RemediationRequest) {
+		p.Status.Handoff.To.UID = "0ad0ff00-0000-4000-8000-000000000004"
+		if err := r.Status().Update(t.Context(), p); err != nil {
+			t.Fatal(err)
+		}
+	})
+	claimEndsAtItsEnd(t, r, rr, cr, move)
 }

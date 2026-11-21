@@ -876,12 +876,12 @@ func (r *RemediationRequestReconciler) endOnPredecessorRecord(ctx context.Contex
 // endReplacementAfterRecord runs supersedeReplacementAfterMerge at the end of a reconcile of rr that went through
 // (err nil), so the reconcile that stored rr's record of the merge of its own head ends rr's replacement in the same
 // pass, and any later one tries again while that replacement still stands. A request being deleted takes the step in
-// its finalizer (beginFinalize). A failure leaves it to the next reconcile, and the answer of the reconcile is kept: a
-// pause of the kill switch, or a failed read or write of the replacement (a conflict, the API server unavailable), is
-// logged at Info with what failed, the replacement keeps its lock meanwhile, and the reconcile is requeued after
+// its finalizer (beginFinalize). A pause of the kill switch leaves it to the next reconcile and keeps the answer of
+// the reconcile: it is logged at Info, the replacement keeps its lock meanwhile, and the reconcile is requeued after
 // freshRecheckDelay at the latest (a shorter wait of the reconcile, its backoff or poll, is kept, never shortened
-// further). The step needs no error backoff of its own: it reads and writes the replacement only, and every reconcile
-// of rr runs it again until the replacement ended or is gone.
+// further). A failed read or write of the replacement (a conflict, the API server unavailable) is returned as the
+// error of the reconcile, for the controller's error backoff, which logs it, as any failed Kubernetes API call
+// (decision of 2026-11-21 on #870); the replacement keeps its lock until a later attempt ends it.
 func (r *RemediationRequestReconciler) endReplacementAfterRecord(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, res *reconcile.Result, err *error) {
 	if *err != nil || ctx.Err() != nil || rr.UID == "" || !rr.DeletionTimestamp.IsZero() {
@@ -891,15 +891,14 @@ func (r *RemediationRequestReconciler) endReplacementAfterRecord(ctx context.Con
 	if serr == nil {
 		return
 	}
-	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr),
-		"replacement", rr.Status.Handoff.To.Name)
-	if errors.Is(serr, freshness.ErrPaused) {
-		log.Info("Left the end of the replacement of RemediationRequest, which records the merge of its own head, " +
-			"to a later reconcile: Git writes are paused")
-	} else {
-		log.Info("Could not end the replacement of RemediationRequest, which records the merge of its own head; "+
-			"tried again in a later reconcile", "error", serr.Error())
+	if !errors.Is(serr, freshness.ErrPaused) {
+		*res, *err = reconcile.Result{}, fmt.Errorf("end the replacement %s of RemediationRequest %s/%s, which records "+
+			"the merge of its own head: %w", rr.Status.Handoff.To.Name, rr.Namespace, rr.Name, serr)
+		return
 	}
+	logf.FromContext(ctx).Info("Left the end of the replacement of RemediationRequest, which records the merge of its "+
+		"own head, to a later reconcile: Git writes are paused", "remediationRequest", client.ObjectKeyFromObject(rr),
+		"replacement", rr.Status.Handoff.To.Name)
 	if res.RequeueAfter <= 0 || res.RequeueAfter > freshRecheckDelay {
 		res.RequeueAfter = freshRecheckDelay
 	}

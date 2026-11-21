@@ -1021,7 +1021,7 @@ func TestStoppedHolderSaysTheCheckWasNotFailed(t *testing.T) {
 	}
 }
 
-// #925, #1008: the status write of a look's failed review check (checkHeld's exit, recordCheckOutcome) whose request
+// #925, #1008: the status write of a look's failed review check (checkHeld's exit, afterLook) whose request
 // changed between its read and its write (an annotation) is not lost: on the conflict the request is read again and
 // the outcome carried over, so a condition ReviewCheckNotFailed is stored by that look, and so is Stale once the check
 // is written, which removes the condition. Before the single exit the conflict was returned and the outcome waited for

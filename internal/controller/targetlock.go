@@ -1346,57 +1346,55 @@ func unsettledRuleApplies(v changeVerdict, err error, said bool) bool {
 }
 
 // afterLook is checkHeld's single exit for a look that reached the failed review check's rule (heldLookOnce): it runs
-// the rule (failCheckAfterLook) on the status the look's steps left, the looks a stop exception takes over included
-// (#1008), and writes what the rule changed (state Stale on the head, or condition ReviewCheckNotFailed) in a status
-// write of its own (recordCheckOutcome). Only a failure of the Kubernetes API is returned, for the error backoff: the
-// check run is then written already, but Stale is not recorded, so the retry looks again and writes the same failed
-// run once more without reading it first (ADR-0046 limit (g)).
+// the rule (failCheckAfterLook) once, the looks a stop exception takes over included (#1008), on the request as stored
+// after the look's steps, read again from the API server (reader): a step can leave changes in memory that it did not
+// write (a release decided before the record of a merge failed), and the rule decides from recorded state only. What
+// the rule changed (state Stale on the head, or condition ReviewCheckNotFailed) is written in a status write of its
+// own; on a conflict the request is read again and that outcome carried over (carryCheckOutcome), without a second
+// check write. rr takes the outcome, and the new resourceVersion when it was the stored version. A request gone or
+// replaced gets nothing. Only a failure of the Kubernetes API is returned, for the error backoff: the check run is then
+// written already, but Stale is not recorded, so the retry looks again and writes the same failed run once more without
+// reading it first (ADR-0046 limit (g)).
 func (r *RemediationRequestReconciler) afterLook(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	before := rr.Status.DeepCopy()
-	if err := r.failCheckAfterLook(ctx, rr); err != nil {
-		return err
-	}
-	if equality.Semantic.DeepEqual(before, &rr.Status) {
-		return nil
-	}
-	return r.recordCheckOutcome(ctx, rr)
-}
-
-// recordCheckOutcome writes rr's status as afterLook left it. On a conflict it reads the request again (reader) and
-// carries the rule's outcome over to that copy (carryCheckOutcome), then writes again; a request that records another
-// pull request or head now gets nothing carried, and rr takes the copy read. A read that fails, or a request replaced
-// under the same name, is a cluster error.
-func (r *RemediationRequestReconciler) recordCheckOutcome(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest) error {
-	want := rr.Status.DeepCopy()
-	obj := rr
+	var want *remediationv1alpha1.RemediationRequestStatus
+	var written *remediationv1alpha1.RemediationRequest
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		if err := r.Status().Update(ctx, obj); err != nil {
-			if !apierrors.IsConflict(err) {
+		live := &remediationv1alpha1.RemediationRequest{}
+		switch err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); {
+		case apierrors.IsNotFound(err):
+			return nil
+		case err != nil:
+			return &clusterError{err: fmt.Errorf("read RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)}
+		case live.UID != rr.UID:
+			return nil
+		}
+		current := live.ResourceVersion == rr.ResourceVersion
+		if want == nil {
+			base := live.DeepCopy()
+			if err := r.failCheckAfterLook(ctx, live); err != nil {
 				return err
 			}
-			live := &remediationv1alpha1.RemediationRequest{}
-			if gerr := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); gerr != nil {
-				return &clusterError{err: gerr}
-			}
-			if live.UID != rr.UID {
-				return &clusterError{err: errors.New("RemediationRequest was replaced")}
-			}
-			if !carryCheckOutcome(live, want) {
-				live.DeepCopyInto(rr)
-				obj = rr
+			want = live.Status.DeepCopy()
+			if equality.Semantic.DeepEqual(base.Status, live.Status) {
 				return nil
 			}
-			obj = live
+		} else if !carryCheckOutcome(live, want) {
+			return nil
+		}
+		if err := r.Status().Update(ctx, live); err != nil {
 			return err
 		}
-		if obj != rr {
-			obj.DeepCopyInto(rr)
+		if current {
+			rr.ResourceVersion = live.ResourceVersion
 		}
+		written = live
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	if written != nil {
+		carryCheckOutcome(rr, &written.Status)
 	}
 	return nil
 }

@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	api "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -216,5 +217,54 @@ func TestStopExceptionLookUnderAPauseWritesNoCheck(t *testing.T) {
 	}
 	if last := lastReviewCheck(g.CheckRuns(head)); last == nil || last.Status != providers.CheckRunSuccess {
 		t.Fatalf("check runs %+v: want nothing written under the pause", g.CheckRuns(head))
+	}
+}
+
+// #1008: the exit's status write that records Stale meets a conflict (an annotation written between its read and its
+// write): it reads the request again and carries the outcome over, so Stale is recorded in that look, the annotation
+// is kept, and the failed check run is written once, not again for the retry.
+func TestStopExceptionExitCarriesItsOutcomeOverAConflict(t *testing.T) {
+	r, g, get, head := stoppedHolderWorld(t, ownClosed)
+	inner, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("the test client is not a client.WithWatch")
+	}
+	touched := false
+	r.Client = interceptor.NewClient(inner, interceptor.Funcs{SubResourceUpdate: func(ctx context.Context,
+		c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+		if rr, ok := obj.(*api.RemediationRequest); ok && !touched && rr.Status.PullRequest != nil &&
+			rr.Status.PullRequest.ReviewCheck != nil && rr.Status.PullRequest.ReviewCheck.State == api.ReviewCheckStale {
+			touched = true
+			other := &api.RemediationRequest{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(rr), other); err != nil {
+				return err
+			}
+			other.Annotations = map[string]string{"example.com/touched": "yes"}
+			if err := c.Update(ctx, other); err != nil {
+				return err
+			}
+		}
+		return c.SubResource(sub).Update(ctx, obj, opts...)
+	}})
+	r.APIReader = inner
+	if _, err := r.checkHeld(context.Background(), get()); err != nil {
+		t.Fatalf("checkHeld: %v", err)
+	}
+	live := get()
+	if !touched {
+		t.Fatal("no status write recorded Stale: the case does not reach the exit's write")
+	}
+	if !staleOnHead(live) || live.Annotations["example.com/touched"] != "yes" {
+		t.Fatalf("Stale on head %t, annotations %v: want Stale recorded over the conflict and the annotation kept",
+			staleOnHead(live), live.Annotations)
+	}
+	failed := 0
+	for _, run := range g.CheckRuns(head) {
+		if run.Status == providers.CheckRunFailure {
+			failed++
+		}
+	}
+	if failed != 1 {
+		t.Fatalf("check runs %+v: want the failed check written once", g.CheckRuns(head))
 	}
 }

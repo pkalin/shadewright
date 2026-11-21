@@ -240,8 +240,14 @@ var modelUnsettledSeeds = []uint64{1456, 3796, 3895}
 // adds them in every run, so the exception is reached there. A change of the model's draws can move them.
 var modelExceptionSeeds = []uint64{90477, 175302}
 
-// modelSeeds is the fixed seed set: 1 to n, modelGoneSeeds under the race detector or -short, modelUnsettledSeeds
-// and modelExceptionSeeds.
+// modelExitSeeds are seeds whose sequence makes checkHeld's exit run after a step that left changes in memory it did
+// not write (a release decided before the record of a merge failed): property "lock merge" fails on them when the exit
+// writes the request from memory instead of from a read of what is stored (afterLook, #1008). Found by a run of seeds
+// 1 to 200000 on the first build of #1008.
+var modelExitSeeds = []uint64{8177, 69062}
+
+// modelSeeds is the fixed seed set: 1 to n, modelGoneSeeds under the race detector or -short, modelUnsettledSeeds,
+// modelExceptionSeeds and modelExitSeeds.
 func modelSeeds(t *testing.T) []uint64 {
 	if s := os.Getenv("SHADEWRIGHT_MODEL_SEED"); s != "" {
 		seed, err := strconv.ParseUint(s, 10, 64)
@@ -255,7 +261,8 @@ func modelSeeds(t *testing.T) []uint64 {
 		// Each order of the fourth decision of 2026-11-18 on #771 is found in this range on the build before its fix.
 		n = 90
 	}
-	seeds := make([]uint64, 0, n+len(modelGoneSeeds)+len(modelUnsettledSeeds)+len(modelExceptionSeeds))
+	seeds := make([]uint64, 0, n+len(modelGoneSeeds)+len(modelUnsettledSeeds)+len(modelExceptionSeeds)+
+		len(modelExitSeeds))
 	for i := range n {
 		seeds = append(seeds, uint64(i+1))
 	}
@@ -266,6 +273,7 @@ func modelSeeds(t *testing.T) []uint64 {
 	}
 	seeds = append(seeds, modelUnsettledSeeds...)
 	seeds = append(seeds, modelExceptionSeeds...)
+	seeds = append(seeds, modelExitSeeds...)
 	if s := os.Getenv("SHADEWRIGHT_MODEL_SEED_RANGE"); s != "" {
 		from, to, _ := strings.Cut(s, "-")
 		a, errA := strconv.ParseUint(from, 10, 64)

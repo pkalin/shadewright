@@ -606,10 +606,13 @@ func (w *windowed) findAllIn(wm *meter.Meter, s string, runs []longRun, ids *win
 		id := ids.of(wm, s, r, lead)
 		found, ok := ids.found[windowFound{w, id}]
 		if !ok {
+			// The matches are kept up to the end of the text read, not to r.end: the same bytes can end another
+			// long run at another place (a chunk before a start character that opens a long window, and the same
+			// chunk at the end of a text, which takes that character), and keep applies each run's end.
 			n := len(lead)
 			for _, m := range read(lead + s[r.start:r.next]) {
 				tick(wm, 1)
-				if m[0] >= n && m[0] < n+r.end-r.start {
+				if m[0] >= n {
 					found = append(found, shifted(wm, m, -n))
 				}
 			}

@@ -62,8 +62,8 @@ func unmetered(wm *meter.Meter, n int) {
 // Unmetered runs f and returns the steps of redaction it took on no budget: work of an entry point that its
 // budget (package meter) does not see.
 func Unmetered(f func()) int64 {
-	_, _, _ = WorkOfExpressions(f)
-	return unmeteredSteps.Load()
+	_, _, _, n := workCounts(f)
+	return n
 }
 
 // Work runs f and returns the steps of redaction it took. It exists only with the build tag redactwork. Calls
@@ -87,6 +87,13 @@ func WorkOfReleased(f func()) (total, release int64) {
 // alive there, far more than one step, so the tests that keep the reading of a repeated text to one count these
 // bytes on their own (#873, third round).
 func WorkOfExpressions(f func()) (total, release, expressions int64) {
+	total, release, expressions, _ = workCounts(f)
+	return total, release, expressions
+}
+
+// workCounts runs f and returns its counts, read while it holds workMu: a count started after it cannot reset them
+// before they are read.
+func workCounts(f func()) (total, release, expressions, unmetered int64) {
 	workMu.Lock()
 	defer workMu.Unlock()
 	steps.Store(0)
@@ -96,7 +103,7 @@ func WorkOfExpressions(f func()) (total, release, expressions int64) {
 	counting.Store(true)
 	defer counting.Store(false)
 	f()
-	return steps.Load(), releasedSteps.Load(), expressionSteps.Load()
+	return steps.Load(), releasedSteps.Load(), expressionSteps.Load(), unmeteredSteps.Load()
 }
 
 // tickExpression counts n bytes handed to a regular expression of this package: in the total and on their own.

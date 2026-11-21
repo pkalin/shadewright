@@ -53,8 +53,14 @@ func NewExpr(re *regexp.Regexp) *Expr {
 }
 
 // CompileExpr returns re as an Expr, or an error when the search of re from a later start does not compile.
+// The group is written from the parsed expression, not from the pattern's text: a pattern ending in a literal
+// (`\Qexample`) would take the closing parenthesis into it.
 func CompileExpr(re *regexp.Regexp) (*Expr, error) {
-	cont, err := regexp.Compile(`\A(?s:.)(?s:.)*?(` + re.String() + `)`)
+	parsed, err := syntax.Parse(re.String(), syntax.Perl)
+	if err != nil {
+		return nil, fmt.Errorf("the search of %q from a later start: %w", re.String(), err)
+	}
+	cont, err := regexp.Compile(`\A(?s:.)(?s:.)*?(` + parsed.String() + `)`)
 	if err != nil {
 		return nil, fmt.Errorf("the search of %q from a later start: %w", re.String(), err)
 	}

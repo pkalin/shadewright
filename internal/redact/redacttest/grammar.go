@@ -31,8 +31,17 @@ import (
 // ProbePrefix starts every probe secret: a probe is ProbePrefix and four digits, unique in one input.
 const ProbePrefix = "SECRETPROBE"
 
-// Probe returns the probe secret with number n.
-func Probe(n int) string { return fmt.Sprintf("%s%04d", ProbePrefix, n%10000) }
+// MaxProbes is how many probes four digits number: an input holds at most that many, so no two probes of it are
+// written alike.
+const MaxProbes = 10000
+
+// Probe returns the probe secret with number n, below MaxProbes.
+func Probe(n int) string {
+	if n < 0 || n >= MaxProbes {
+		panic(fmt.Sprintf("probe number %d out of range", n))
+	}
+	return fmt.Sprintf("%s%04d", ProbePrefix, n)
+}
 
 // FieldSep separates the fields of an input in raw mode, and ProbeByte stands for a fresh probe there.
 const (
@@ -133,7 +142,11 @@ type builder struct {
 	last []int
 }
 
+// probe returns a fresh probe, or nothing once the input holds MaxProbes of them.
 func (b *builder) probe() string {
+	if len(b.probes) >= MaxProbes {
+		return ""
+	}
 	p := Probe(len(b.probes))
 	b.probes = append(b.probes, p)
 	return p

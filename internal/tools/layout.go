@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/bits"
 	"reflect"
 	"slices"
 	"strconv"
@@ -270,8 +271,10 @@ type frame struct {
 	// JSON, where every object is read as entries and every key as a value.
 	val   reflect.Value
 	mapID int // entriesOf: the map's number for distinctKeys
-	// keys are the keys of a map with string keys, by the text encoding/json writes for them (written).
-	keys map[string]reflect.Value
+	// keys are the keys of a map with string keys, by the text encoding/json writes for them (written). Keys that
+	// are written alike (an invalid byte and U+FFFD) share a name, in the order the encoder writes them (sorted by
+	// the key), and each member of that name takes the next.
+	keys map[string][]reflect.Value
 	// An object: whether the next string is a key, the key of the member being read, the value it was encoded from
 	// (not valid when unknown), and the first piece of that value. A list: the index of the next item.
 	wantKey bool
@@ -434,10 +437,21 @@ func (k *walker) open(c byte) {
 		f.kind, f.mapID = entriesOf, k.w.maps
 		k.w.maps++
 		if v.IsValid() && v.Kind() == reflect.Map && v.Type().Key().Kind() == reflect.String {
-			f.val, f.keys = v, make(map[string]reflect.Value, v.Len())
+			f.val, f.keys = v, make(map[string][]reflect.Value, v.Len())
+			shared := false
 			for it := v.MapRange(); it.Next(); {
 				redact.Tick(1)
-				f.keys[written(it.Key().String())] = it.Key()
+				w := written(it.Key().String())
+				shared = shared || len(f.keys[w]) > 0
+				f.keys[w] = append(f.keys[w], it.Key())
+			}
+			if shared {
+				for _, ks := range f.keys {
+					if len(ks) > 1 {
+						redact.Tick(len(ks) * bits.Len(uint(len(ks))))
+						slices.SortFunc(ks, func(a, b reflect.Value) int { return strings.Compare(a.String(), b.String()) })
+					}
+				}
 			}
 		}
 	}
@@ -494,10 +508,12 @@ func (k *walker) key(f *frame, i, end int, v string) error {
 	case f.kind == fieldsOf:
 		f.member = field(f.val, v)
 	case f.keys != nil:
-		mk, ok := f.keys[v]
-		if !ok {
+		ks := f.keys[v]
+		if len(ks) == 0 {
 			return errUnwritten
 		}
+		mk := ks[0]
+		f.keys[v] = ks[1:]
 		f.key, f.member = mk.String(), direct(f.val.MapIndex(mk))
 		k.piece(i+1, end, redact.Piece{Text: f.key, Data: true, Form: redact.JSON, MapKey: true}, f.mapID)
 	default:

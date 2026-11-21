@@ -156,9 +156,9 @@ func withholdBoundary(e budgetEntry, s withholdShape, from int) int {
 
 // The sizes from which each known expensive shape is withheld, at each entry point, are those of withholdSizes:
 // the test finds the boundary itself (withholdBoundary) and compares it with the table, and checks that the public
-// entry point returns the entry withheld whole at the first size withheld. A change to the budget, to the rules or
-// to the reading of the release before that moves a boundary fails here, and the pages that cite this test must
-// change with it.
+// entry point returns the entry decided at the last size decided (as it is decided without a budget) and withheld
+// whole at the first size withheld. A change to the budget, to the rules or to the reading of the release before
+// that moves a boundary fails here, and the pages that cite this test must change with it.
 func TestBudgetWithholdSizes(t *testing.T) {
 	if raceDetector {
 		t.Skip("it spends the whole budget of texts of up to 100 KiB, 10 to 20 times slower under -race; make test " +
@@ -185,6 +185,10 @@ func TestBudgetWithholdSizes(t *testing.T) {
 			if decided != row.decided || withheld != row.withheld {
 				t.Errorf("%s on %s: decided up to %d bytes and withheld from %d, the table says %d and %d", e.name,
 					row.shape, decided, withheld, row.decided, row.withheld)
+			}
+			if got, want := e.public(s.text(k)), e.run(nil, s.text(k)); got != want {
+				t.Errorf("%s on %s of %d bytes returned %q, not the entry decided without a budget %q", e.name,
+					row.shape, decided, redacttest.Clip(got), redacttest.Clip(want))
 			}
 			if got := e.public(s.text(k + 1)); !withheldOut(got) {
 				t.Errorf("%s on %s of %d bytes returned %q, not withheld", e.name, row.shape, withheld,

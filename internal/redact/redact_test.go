@@ -1048,6 +1048,18 @@ func TestNewRefusesAPatternWhoseSearchCannotBeWrapped(t *testing.T) {
 	}
 }
 
+// A pattern that ends inside a quoted literal (`\Q...` without `\E`) is a valid operator rule: New accepts it and
+// its search from a later start finds what the pattern finds (#873, review of 2026-11-21).
+func TestNewAcceptsAPatternEndingInAQuotedLiteral(t *testing.T) {
+	r, err := New(Pattern{Kind: "quoted", Expr: `\Qprobe-value)`})
+	if err != nil {
+		t.Fatalf("New refused a valid pattern: %v", err)
+	}
+	if out := r.String("a probe-value) b"); strings.Contains(out, "probe-value") {
+		t.Errorf("String(...) = %q, want the quoted literal redacted", out)
+	}
+}
+
 // StringKeeping keeps only whole occurrences of the verified strings; everything else is redacted as String
 // redacts it (#264).
 func TestStringKeeping(t *testing.T) {

@@ -33,6 +33,7 @@ var findExprs = []string{
 	`a`, `a*`, `a*?`, `^a`, `(?m)^a`, `a$`, `(?m)a$`, `\ba`, `\Ba`, `a\b`, `\b`, `\B`, `^`, `$`, `(?m)^`, `x*`,
 	`(a)|(b)`, `(a)?b`, `(?i)ab`, `(?i:a)b`, `a.*z|a`, `(?s)a.*?z`, `[^ ]+`, `\w+`, `(?U)a+`, `é`, `\x{FFFD}`,
 	`(\w+)=(\S*)`, `\Aa`, `a\z`, `(?m)$\n?`, `.`, `(?s).`, `[[:^alpha:]]`,
+	`\Qa`, `\Qa=*`, `(a)\Q)b`, `\Qa\E|b`,
 }
 
 // findAlphabet makes texts with word and non-word characters, line breaks, a multi-byte character and bytes

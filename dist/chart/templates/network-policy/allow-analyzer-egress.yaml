@@ -64,7 +64,8 @@ spec:
           kubernetes.io/metadata.name: {{ .namespace | quote }}
       podSelector:
         matchLabels:
-          {{- toYaml .podLabels | nindent 10 }}
+          {{- /* A set value replaces the default whole, null keys are dropped, and nothing left means the default: Helm merges maps, so the default lives here, not in values.yaml (#985). */}}
+          {{- toYaml (include "shadewright.egressPodLabels" (dict "set" .podLabels "default" (dict "app.kubernetes.io/name" "prometheus" "app.kubernetes.io/component" "server")) | fromYaml) | nindent 10 }}
   {{- end }}
   {{- end }}
   {{- if and (.Values.analyzer.tracing | default dict).endpoint (not .Values.networkPolicy.analyzer.traceCollector.enabled) }}
@@ -84,7 +85,8 @@ spec:
           kubernetes.io/metadata.name: {{ .namespace | quote }}
       podSelector:
         matchLabels:
-          {{- toYaml .podLabels | nindent 10 }}
+          {{- /* As above (#985). */}}
+          {{- toYaml (include "shadewright.egressPodLabels" (dict "set" .podLabels "default" (dict "app.kubernetes.io/name" "opentelemetry-collector")) | fromYaml) | nindent 10 }}
   {{- end }}
   {{- end }}
   {{- range .Values.analyzer.analysis.openAICompatible.endpoints }}

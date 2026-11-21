@@ -231,4 +231,109 @@ Scores need a read because the run decides from them (section 2 and section 6), 
 
 ## Amendments
 
-None.
+### 2026-11-21 (#1093): opaque values become placeholders before a model is sent anything
+
+Decision of the maintainer, 2026-11-21 (issue [#1093](https://github.com/pkalin/shadewright/issues/1093)). It adds a second layer to sections 3 and 4. It changes no sentence of them, it removes no check, and it is not a reason to relax one. The build tasks of #1093 start once this change is merged.
+
+**About the references.** The intake is not on `main` yet. References to `internal/intake`, `docs/reference/intake.md` and `redact.ReplaceWhole` are to the branch `989-intake-score-one-record` (pull request [#1092](https://github.com/pkalin/shadewright/pull/1092)) at commit `2d24454f`, and move when that branch changes. Other `internal/redact` and `internal/providers` references are to `main`. They say what the code does today. Sentences with no reference are decisions: what the build will do.
+
+**Why.** Three times a way was found for text to reach a model that the check did not judge as a whole: a key twice in one object (`internal/intake/check.go:79-147`), values split across fields, and the judge's own reply sent back in its second request, where the judge can join pieces that the record held apart (`internal/intake/check.go:355-393`, `internal/intake/intake.go:402-407`). Each was closed case by case. The judge scores the quality of a diagnosis: it needs to see that the same value appears in two places, not the value.
+
+**What it widens: nothing.** It reads the same record fields: the allowlist of section 4 (`internal/intake/judge.go:101-111`). It writes nothing new: the score holds no record text (`docs/reference/intake.md`, "Output and exit codes"), and the mapping below is never written. It grants nothing: no identity, role, key or network path changes. Less of the record leaves than today: every value of a class below is replaced before it can be sent. Invariant 4 is strengthened, and invariants 1, 2, 3 and 6 are not touched.
+
+### A1. The classes of opaque value
+
+A value is replaced wherever it occurs in a text built from the record for a model, glued to other characters or not. An occurrence is a maximal run of the characters of its class, so `uid=<value>` and `<value>,` are replaced and a value inside a longer word is replaced with its run. Each class has a rule that a generated corpus can build answers for. The minimum lengths are named constants in the build and a change of one is not an amendment, as in limit (j), unless it removes a class.
+
+1. **Hex runs and digests.** A maximal run of `0-9`, `a-f` and `A-F` of at least 12 characters with at least one digit and at least one letter. This covers the hex of a `sha256:` digest, container and commit IDs. Same value, same word, whatever the case. `sha256:`, `@` and a suffix such as `-amd64` stay. Twelve is a judgement: long enough that a hit is rarely a word or a number, short enough to take the short IDs people paste. Shorter pieces in cluster text, such as generated name suffixes, stay. A run of digits only is a number and stays.
+2. **UUIDs and Kubernetes UIDs.** Five groups of 8, 4, 4, 4 and 12 hex digits joined by hyphens, any case. A Kubernetes UID is a UUID (the intake already reads the Incident's UID as one, `internal/intake/check.go:53-54`), so there is no separate rule. The UUID rule is tried before the hex rule, so a UUID is one value, never a hex tail and three leftovers.
+3. **Runs that look random.** A maximal run of `A-Z`, `a-z`, `0-9`, `+`, `/`, `_` and `-`, with trailing `=`, of at least 32 characters with at least one upper-case letter, one lower-case letter and one digit. Kubernetes names are lower case, so they are not in this class. The redactor already refuses what its long-token rule judges random (`internal/redact/redact.go:1485-1497`); this class is for runs it keeps.
+4. **Token-shaped strings.** One of the prefixes of the redactor's token rule (`internal/redact/redact.go:2838-2853`) followed by at least 16 characters of `A-Z`, `a-z`, `0-9`, `_`, `.` and `-`. The redactor's own rule needs between 10 and 50 characters after the prefix, depending on the prefix (the same lines). Where its minimum is longer than 16, this class also takes a string a few characters short of it; where it is shorter, the redactor refuses first.
+5. **IP addresses.** A dotted quad with each part 0 to 255, and an IPv6 candidate that `net/netip` parses, as the redactor's rules do (`internal/redact/redact.go:2933-2939`). The same value in another written form (IPv6) is the same word. This class has no input today: the first layer refuses any record, question or answer that holds an address, so none reaches the replacement. It is listed so that the matcher is complete if the first layer is ever changed by its own amendment, which this one does not do.
+6. **Hosts of URLs and `host:port`.** In `scheme://host[:port]/...`, the host (a name, an IPv4 address or a bracketed IPv6 address) is replaced; the scheme, port and path stay. A URL with user information is refused by the first layer (`internal/redact/redact.go:2871-2872`). Also `host:port`, where the host is a dotted name whose last label is alphabetic and the port is 1 to 5 digits. Names compare in lower case.
+
+Where two classes overlap, the occurrence that starts first wins, the longest where two start together (as `redact.ReplaceWhole` does, `internal/redact/redact.go:291-314` on the branch).
+
+**Deliberately not replaced**, each a judgement about what the rubric needs (section 4) and so a limit of this layer, not a claim that the thing is harmless:
+
+- Resource kinds, namespaces, object names, labels and the short generated suffixes of Pod and ReplicaSet names: the diagnosis is about those objects, and the redactor keeps Kubernetes names too (`internal/redact/redact.go:1485-1497`).
+- Reasons, phases, condition types, verbs: fixed vocabulary.
+- Exit codes, counts, durations, ports, times and any run of digits: "restarted 14 times" and "exit code 137" are evidence the rubric's `specific` and `causeSupported` look for, and a number alone names nothing.
+- Image names and tags (`registry/path/name:tag`): a wrong or floating tag is often the evidence. The digest after `@sha256:` is replaced; the name, the tag and `@sha256:` are not.
+- Bare dotted names: file names, API groups (`remediation.shadewright.io`), annotation keys, service DNS names, a registry host in an image reference. A rule cannot tell them from a host by shape, and replacing them would remove names the judge reads. This is the largest gap of the layer (limit (q)).
+- Hex runs under 12, random-looking runs under 32, words.
+
+### A2. The placeholder scheme
+
+- A placeholder is `[v` and a decimal number and `]`, from `[v1]`. The same value, by the key of its class (A1), is always the same word within one run, and two values never share one.
+- Numbers are given in order of first occurrence over the texts in the order the intake builds them: `incidentReason`, `subjectKind`, `summary`, then each `missingData` entry (the order of `internal/intake/judge.go:129-136`). The texts the judge or the cross-check model later writes into the run, the question and the answer, continue the numbering. The same record bytes give the same placeholders and the same request on a retry (invariant 5), and no decision uses a clock or a second source.
+- **The mapping** is one Go map in the state of the run (like `words`, `internal/intake/intake.go:193-201`), from value to word. It lives in memory for the run. It is never written to a score, a log line, an error, a reservation name, a quarantine entry or a request. There is no map from word to value anywhere: nothing after the replacement needs a value back, because a score holds numbers, a verdict and a note of at most 300 bytes (`internal/intake/judge.go:44`, `:203-251`), and a note that says `[v2]` stays `[v2]`. The keys of the map are the values, so the map is as sensitive as the record, and it is gone when the process ends.
+- **The four names stay fixed words.** The record ID, the Incident's name, the request's name and the fingerprint keep `[record-id]`, `[incident-name]`, `[request-name]` and `[fingerprint]` (`internal/intake/check.go:395-424`). They are constants that need no map, they come from values whose shape the intake checked (`internal/intake/check.go:211-228`), and the judge's prompt tells the judge what each stands for (`internal/intake/judge_prompt.txt:9-12`), which a number would lose. They are replaced first, so the 64 hex digits of a fingerprint are never numbered.
+- **A placeholder cannot collide with record text.** Before any replacement, every string of the allowlist that holds text of the shape `[v<digits>]`, or one of the four fixed words, quarantines the record: check `redactor`, kind `placeholder-collision`, a kind that is not a rule of the redactor, as `unreadable-provider-block` is (`internal/intake/check.go:342-345`). It is not repaired or escaped: a record that already says `[v1]` would make "the same word is the same value" false for the judge. The rule covers text built from the record only. A question the judge writes may use the words it was given.
+- The judge's prompt gets a paragraph that says what `[v1]` means (an opaque value, the same word is the same value, not a defect of the analysis), and `PromptVersion` changes (`internal/intake/judge.go:31-33`), so scores before and after are never mixed.
+
+### A3. Where it runs
+
+In this order, and none of it moves a check:
+
+1. The checks of section 3 on the raw record and on the raw judge input (`internal/intake/intake.go:270-275`). Unchanged and first, so a record is refused for what it holds, as today.
+2. The collision check of A2, on the same strings.
+3. The four names become fixed words (`redact.ReplaceWhole` in `internal/intake/judge.go:127-138`).
+4. The classes of A1 on the same strings, from one matcher in `internal/intake`, with the one map.
+5. `checkRequest` over every text of each request as it is sent, with nothing kept (`internal/intake/intake.go:359`, `:407`; `internal/intake/check.go:285-340`). It takes the request and nothing else (`internal/intake/check.go:292`), so no decision reads the map, and a test keeps its signature that way.
+
+The cross-check follows the same order. The judge's question is checked as it came (`internal/intake/judge.go:174-194`) and then gets the names (`internal/intake/intake.go:435`) and the classes. The cross-check model's answer is checked as it came, and refused on any hit (`internal/intake/intake.go:454`); only then does it get the classes, before it is cut and delimited for the judge (`internal/intake/judge.go:166-170`). In both, the replacement runs after the check of what came in, never before, so it cannot hide a value from that check.
+
+**The judge's reply is never mapped back**, not before the cross-check and not after. The question goes to the cross-check model with its placeholders. The cross-check model sees `[v7]` and nothing behind it.
+
+### A4. The judge's own reply in its second request
+
+What it is today. The request sends no thinking setting, so the model runs with its own: adaptive thinking on the current models, which on some cannot be turned off (`internal/providers/model/anthropic/doc.go:51-52`). A reply with a tool call comes back as provider blocks, and the second request sends exactly those blocks (`internal/providers/model/anthropic/doc.go:56-59`, `internal/intake/intake.go:405-406`). `checkRequest` reads the text and tool-call blocks and does not read thinking blocks (decision of 2026-11-21, `internal/intake/check.go:355-360`, `:379-381`). The blocks are not rewritten by this amendment: they are the provider's.
+
+What the replacement closes. The judge's thinking is made from what the judge was sent. For every value of a class, what was sent is a placeholder, so the thinking cannot hold that value. Values joined from split pieces cannot appear either, when each piece is in a class: the pieces never left the process, and a join of placeholders is a join of placeholders.
+
+What it does not close. A piece shorter than the minimum of its class, or in none, is sent, and the judge can join such pieces when it reasons: a 40-digit digest cut into four pieces of ten is not replaced. A value the classes miss is sent. The judge can also write a string that came from its own weights and not from the record. Thinking blocks stay unread, so the reply's thinking is still not checked when it goes back; the layer makes it hold less. The text and tool-call blocks are checked as before.
+
+### A5. Acceptance
+
+Generated corpus tests come first, before the matcher, with answers known by construction (a test builds each text from the value and its context, so it knows what must come out). Each one is shown to fail without the matcher.
+
+1. **Replacement.** For each class, seeded values at and above the minimum, placed alone, between words, after `key=` and `key: `, in a URL, after `sha256:`, glued to letters and punctuation: the output holds no byte of the value, holds one placeholder where it was, and is unchanged around it.
+2. **Words.** The same value, in any case where the class ignores case, in two fields gets one word; two values never share one; numbering follows first occurrence.
+3. **Controls.** Generated text in none of the classes comes out unchanged: words, counts, durations, exit codes, ports, runs of digits of any length, hex under 12, lower-case hyphenated names of 32 or more characters, Pod names with a generated suffix, `name:tag`, API groups and bare dotted names.
+4. **Edges.** Each minimum minus one stays, the minimum is replaced.
+5. **No residue, idempotent.** A separate oracle in the test, not the matcher's own rule, finds no maximal run of a class in the output, and a second pass changes nothing.
+6. **Collisions.** Records with `[v<n>]` or a fixed word in each allowlisted field are quarantined with the kind, and the same records without them pass.
+7. **Order.** Records the branch's first layer refuses today (the redactor's generated corpora) are still quarantined with the same kinds, and no request reaches a model. Texts the first layer accepts are still accepted by `checkRequest` after the replacement; a miss is a false quarantine and is reported.
+8. **End to end.** A recording fake provider holds every request of a run, the judge's, the cross-check's and the second, and none holds a generated value, with values in every allowlisted field and in the judge's question. A fake judge that answers with thinking blocks gets its blocks back unchanged in the second request.
+9. **Nothing kept.** A score, a log line, an error and every reservation name of a run hold none of the generated values.
+
+Then the comparison. The same records, scored by the intake without and with the replacement: the records of the 2026-11-20 blind runs, as for limit (d), with the maintainer's own keys, locally and inside the caps. Each record is scored twice without (the judge's own run-to-run spread) and once with. What is compared is the whole change as it will ship: the replacement and the prompt paragraph of A2. The bar is stated here, before any run:
+
+- No record is quarantined with the replacement that was not without, apart from `placeholder-collision`, which is listed by name. The share of `unjudged` and `invalid` is not higher.
+- Take the share of (record, criterion) pairs on which the two runs without differ by more than 1 point; call it N. The share of pairs on which the run with differs by more than 1 point from the mean of the two without is at most the larger of 10% and N plus 5 points.
+- The verdict of the run with equals the verdict of at least one run without on at least 90% of records.
+- For each criterion, the mean score with differs from the mean without by at most 0.5.
+
+[NEEDS CLARIFICATION: the rubric of section 4 and the hand scores of 2026-11-20 give no basis for these numbers. They are proposed; the maintainer sets them before the first run with the replacement. The number of records is not known to this ADR either.]
+
+A run that misses the bar is a reason to narrow a class, a decision of the maintainer with its own dated comment. It is never a reason to drop the request check. A good result is not a truth score (limit (a)): a replacement that costs the judge something only a truth file would show.
+
+### A6. Alternatives considered
+
+- **Refuse any record whose judge reply holds thinking.** Thinking is on by default on current models (`internal/providers/model/anthropic/doc.go:51-52`), so on those models any reply that carries thinking would end the record without a score, and the judge's one tool of section 4 would stop working for them. It also leaves the other two cases open. Rejected.
+- **Turn thinking off for the judge.** Not possible on every model (`doc.go:51-52`), it changes the scores for the sake of one path, and it leaves the values in the request. Not chosen. It widens nothing, so the build may add it later as one more measure.
+- **An answer store or cache.** It is about state: whether a run reuses an earlier run's answers, which it does not (`docs/reference/intake.md`, "Token caps") and which would add a place where model text is written. It changes nothing about what is sent. Rejected here; it needs its own ADR if wanted.
+- **The redactor's markers (`[REDACTED:token]`) instead of numbered words.** A marker removes equality: the judge could no longer see that two places hold one value. Rejected for this purpose. "Redact and score anyway" of the section above stays rejected for records.
+- **Keep more of the record once placeholders exist** (UUIDs, addresses, digests at the first layer). Rejected: this is a second layer.
+
+### A7. Known limits added
+
+- (q) **The classes are judgements.** What they miss reaches the model, and the request check is the only judge of it, as today. The largest gaps are bare dotted names, image names and tags, and pieces under the minimums. A value that these keep can still identify an installation (a private registry path, a namespace name).
+- (r) **Equality is shown on purpose.** The judge, and the cross-check model through the question, learn which places hold one value and how many distinct values there are. Not what they are, nor how long.
+- (s) **Thinking is made to hold less, not read** (A4).
+- (t) **Memory, not storage.** "Never written" means by the intake. This ADR says nothing about a crash dump or swap of the platform it runs on.
+- (u) **False quarantines grow a little.** A record that holds `[v1]`-shaped text or a fixed word is refused, and a text the first layer accepted may be flagged after the replacement. The share is measured with the one of limit (d).
+- (v) **Less fidelity.** The judge reads placeholders where a person reads values. A criterion may score lower for it; A5 measures that, and cannot tell a loss of quality from a loss of noise.
+- (w) **The address class has no input today** (A1, item 5).
+- (x) **Docs and code follow.** `docs/reference/intake.md`, the judge's prompt and `PromptVersion` change in the build, not in this amendment.

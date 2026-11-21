@@ -1,98 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 600" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1130 410" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Render check in a limited child process</title>
   <desc id="d">The executor's container, 640 Mi of memory and 500m of CPU, holds the executor and at most one render process. The executor validates the input of semdiff.Check, waits for the one render slot and starts its own binary again with one fixed argument and an empty environment, then reads the render process's resident size every millisecond on Linux and kills it past 192 MiB. The render process sets its limits before it reads any input: 20 s of CPU time, 384 MiB of data mappings on Linux (a partial guard: the Go runtime's heap mappings pass it unchecked), 128 MiB of Go memory sampled every millisecond, and an OOM score adjustment of 1000. It writes a ready line, reads the input as JSON on stdin, renders before and after the change and writes one answer on stdout. The executor reads three kinds of end. An answer: a result, or a refusal with a known reason and a detail cut at 2 KiB. A TooLarge refusal: the render process's own exit at the memory sampling or the CPU limit, the executor's kill at the resident limit when the process ended by that SIGKILL, or the fifth end in a row without an answer for the same request and plan. An error for a retry: no ready line; a kill by a signal the executor did not send such as an OOM killer's, the Go runtime's out of memory exit, any other crash or an unreadable answer, which the executor counts; or the step's context ending, which kills the process and is not counted. Before it starts the render process the executor marks the request in its status (status.unfinishedRenders, a count per plan digest) and removes the mark when the check returns, so a render that takes the whole container down is counted across restarts: after 3 unfinished renders in a row of the same plan the request ends in NeedsIntervention with reason RenderNeverFinished and no further render starts. The render process has no token in its environment and reads only its stdin. Memory: 230.4 MiB for the executor, 192 MiB for the render process and a 128 MiB margin make 550.4 MiB of the 640 Mi; on cgroup v2 a container OOM ends both processes.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
-    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
     <style>
-      .lane{fill:#13121c;stroke:#2a2740}
-      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
       .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
       .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .no{fill:#241a22;stroke:#6b3a4a;stroke-width:1.2}
       .h{fill:#f1edff;font-size:15px;font-weight:650}
       .s{fill:#a9a4c4;font-size:12.5px}
       .f{stroke:#a879ff;stroke-width:1.8;fill:none}
-      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
-      .lbl{fill:#c6a8ff;font-size:11.5px}
-      .no{fill:#ff8fa3;font-size:11.5px;font-weight:600}
-      .ok{fill:#7fd6c2;font-size:11.5px;font-weight:600}
+      .l{fill:#c6a8ff;font-size:12.5px;font-weight:600}
+      .n{fill:#7d7999;font-size:12.5px}
     </style>
   </defs>
 
-  <rect width="1120" height="600" rx="18" fill="#0e0e16"/>
+  <rect width="1130" height="410" rx="18" fill="#0e0e16"/>
 
-  <!-- lanes -->
-  <rect class="lane" x="24" y="24" width="660" height="552" rx="14"/>
-  <text class="lanet" x="44" y="54">EXECUTOR CONTAINER (640Mi, 500m CPU)</text>
-  <rect class="lane" x="702" y="24" width="394" height="552" rx="14"/>
-  <text class="lanet" x="722" y="54">HOW THE CHECK ENDS</text>
-
-  <!-- executor -->
-  <rect class="box" x="48" y="80" width="290" height="200" rx="12"/>
-  <text class="h" x="68" y="110">Executor</text>
-  <text class="s" x="68" y="136">semdiff.Check</text>
-  <text class="s" x="68" y="162">1. validate the input</text>
-  <text class="s" x="68" y="184">2. wait for the one render slot</text>
-  <text class="s" x="68" y="206">3. start its own binary again,</text>
-  <text class="s" x="84" y="226">one fixed argument, empty env</text>
-  <text class="s" x="68" y="248">4. kill it past 192 MiB resident</text>
-  <text class="s" x="68" y="270">Go soft limit 230.4 MiB (36 percent)</text>
-
-  <!-- render process -->
-  <rect class="key" x="374" y="80" width="290" height="200" rx="12"/>
-  <text class="h" x="394" y="110">Render process</text>
-  <text class="s" x="394" y="136">limits set before any input:</text>
-  <text class="s" x="394" y="162">CPU time 20 s (RLIMIT_CPU)</text>
-  <text class="s" x="394" y="184">data mappings 384 MiB (partial)</text>
-  <text class="s" x="394" y="206">Go memory 128 MiB, sampled</text>
-  <text class="s" x="394" y="228">oom_score_adj 1000</text>
-  <text class="s" x="394" y="254">walk, render before and after,</text>
-  <text class="s" x="394" y="272">compare</text>
-
-  <!-- arrows between them -->
-  <path class="f" d="M338 140 H372" marker-end="url(#a)"/>
-  <path class="f" d="M374 230 H340" marker-end="url(#a)"/>
-  <text class="lbl" x="48" y="310">stdin: the input as JSON</text>
-  <text class="lbl" x="48" y="330">stdout: a ready line once the limits are set, then one answer (at most 64 KiB)</text>
-  <text class="lbl" x="48" y="350">stderr: only the first "fatal error:" line of the Go runtime is kept</text>
-  <text class="lbl" x="48" y="370">status: marked before each start, unmarked at its end; 3 unfinished: NeedsIntervention</text>
-
-  <!-- what the limits do not bound -->
-  <rect class="box" x="48" y="392" width="616" height="170" rx="12"/>
-  <text class="h" x="68" y="422">Same container, same user</text>
-  <text class="s" x="68" y="448">The limits bound memory and CPU time. The render process shares the</text>
-  <text class="s" x="68" y="470">executor's user, file system and network, so they do not bound what an</text>
-  <text class="s" x="68" y="492">exploited render could read. No token in its environment; it reads stdin.</text>
-  <text class="s" x="68" y="522">Memory: 230.4 MiB (executor) + 192 MiB (render process) + 128 MiB</text>
-  <text class="s" x="68" y="544">margin = 550.4 MiB of 640 Mi. Measured, not a kernel guarantee.</text>
-
-  <!-- ends -->
-  <rect class="box" x="722" y="80" width="354" height="128" rx="12"/>
-  <text class="ok" x="742" y="106">ANSWER</text>
-  <text class="s" x="742" y="132">a result, or a refusal with a reason the</text>
-  <text class="s" x="742" y="152">package gives and a detail cut at 2 KiB</text>
-  <text class="s" x="742" y="180">the check passes or refuses</text>
-  <text class="s" x="742" y="198">as it did in process</text>
-
-  <rect class="box" x="722" y="224" width="354" height="148" rx="12"/>
-  <text class="no" x="742" y="250">REFUSAL · TOOLARGE</text>
-  <text class="s" x="742" y="276">only ends a limit chose: its exits</text>
-  <text class="s" x="742" y="298">at the memory sampling and the CPU</text>
-  <text class="s" x="742" y="318">time limit, the executor's kill at</text>
-  <text class="s" x="742" y="338">192 MiB resident (ended by SIGKILL);</text>
-  <text class="s" x="742" y="358">5 ends in a row without an answer</text>
-
-  <rect class="box" x="722" y="388" width="354" height="164" rx="12"/>
-  <text class="lbl" x="742" y="414">ERROR FOR A RETRY</text>
-  <text class="s" x="742" y="440">no ready line (did not start)</text>
-  <text class="s" x="742" y="462">a signal the executor did not send,</text>
-  <text class="s" x="742" y="482">out of memory exit, any other crash,</text>
-  <text class="s" x="742" y="504">no readable answer: counted per plan</text>
-  <text class="s" x="742" y="526">the step's context ended: the</text>
-  <text class="s" x="742" y="546">process is killed, not counted</text>
-
-  <path class="r" d="M664 150 H718" marker-end="url(#m)"/>
-  <path class="r" d="M664 250 C690 250 694 298 718 298" marker-end="url(#m)"/>
-  <path class="r" d="M664 270 C682 300 690 460 718 460" marker-end="url(#m)"/>
+  <rect class="box" x="30" y="90" width="230" height="120" rx="12"/>
+  <text class="h" x="145.0" y="126.5" text-anchor="middle">Executor</text>
+  <text class="s" x="145.0" y="147.5" text-anchor="middle">semdiff.Check</text>
+  <text class="s" x="145.0" y="166.5" text-anchor="middle">one render slot</text>
+  <text class="s" x="145.0" y="185.5" text-anchor="middle">kills past 192 MiB</text>
+  <rect class="key" x="330" y="90" width="230" height="120" rx="12"/>
+  <text class="h" x="445.0" y="126.5" text-anchor="middle">Render process</text>
+  <text class="s" x="445.0" y="147.5" text-anchor="middle">CPU 20 s, data 384 MiB,</text>
+  <text class="s" x="445.0" y="166.5" text-anchor="middle">Go memory 128 MiB,</text>
+  <text class="s" x="445.0" y="185.5" text-anchor="middle">oom_score_adj 1000</text>
+  <rect class="box" x="650" y="20" width="230" height="90" rx="12"/>
+  <text class="h" x="765.0" y="60.5" text-anchor="middle">Answer</text>
+  <text class="s" x="765.0" y="81.5" text-anchor="middle">result or a refusal</text>
+  <rect class="box" x="650" y="140" width="230" height="90" rx="12"/>
+  <text class="h" x="765.0" y="171.0" text-anchor="middle">TooLarge</text>
+  <text class="s" x="765.0" y="192.0" text-anchor="middle">a limit it chose</text>
+  <text class="s" x="765.0" y="211.0" text-anchor="middle">5 ends in a row</text>
+  <rect class="box" x="650" y="260" width="230" height="90" rx="12"/>
+  <text class="h" x="765.0" y="300.5" text-anchor="middle">Error for a retry</text>
+  <text class="s" x="765.0" y="321.5" text-anchor="middle">no ready line, a crash</text>
+  <rect class="no" x="30" y="260" width="230" height="90" rx="12"/>
+  <text class="h" x="145.0" y="291.0" text-anchor="middle">NeedsIntervention</text>
+  <text class="s" x="145.0" y="312.0" text-anchor="middle">RenderNeverFinished</text>
+  <text class="s" x="145.0" y="331.0" text-anchor="middle">3 unfinished in a row</text>
+  <path class="f" d="M260 130H330" marker-end="url(#a)"/>
+  <text class="l" x="295" y="122" text-anchor="middle">stdin</text>
+  <path class="f" d="M330 180H260" marker-end="url(#a)"/>
+  <text class="l" x="295" y="200" text-anchor="middle">answer</text>
+  <path class="f" d="M560 120H600V65H650" marker-end="url(#a)"/>
+  <path class="f" d="M560 160H650" marker-end="url(#a)"/>
+  <path class="f" d="M560 190H600V300H650" marker-end="url(#a)"/>
+  <path class="f" d="M145 210V260" marker-end="url(#a)"/>
+  <text class="n" x="30" y="385">Container 640Mi: executor 230.4 MiB, render process 192 MiB, margin 128 MiB.</text>
 </svg>

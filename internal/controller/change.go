@@ -117,6 +117,11 @@ type changeQuery struct {
 	// reinstalled is a read through a new installation of the GitHub App for the plan's repository (#290): every
 	// failed read that is not an answer of the Git host sets condition PullRequestUnreadable (noteRead, #797).
 	reinstalled bool
+	// goneAnswered notes a first look that finds the number missing (errGoneUnconfirmed: a 404 by number that no
+	// listing contradicts) as a read that answered, not as answers that disagree (endAfterLastRead): the read of a
+	// claim on a merge of another head (settleClaim), whose end must say the reads answered and nothing matched
+	// whichever look of the confirmation falls on it.
+	goneAnswered bool
 }
 
 // changeVerdict is changeOf's answer.
@@ -256,7 +261,7 @@ func (r *RemediationRequestReconciler) changeOf(ctx context.Context, git provide
 	// Evidence about the last read of an open wait for a read (endAfterLastRead): the read of the pull request
 	// answered, or its answers disagree, which outweighs any answer of the same reconcile.
 	switch {
-	case v.state != changeUnknown:
+	case v.state != changeUnknown, q.goneAnswered && errors.Is(v.err, errGoneUnconfirmed):
 		r.gitRetries().noteAnswered(key)
 	case answeredUnknown(v.err):
 		r.gitRetries().noteDisagreed(key)

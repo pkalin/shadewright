@@ -288,8 +288,9 @@ func analyzerMetrics() map[string]metricguard.Labels {
 		"shadewright_incident_cap":                        {},
 		"shadewright_incident_cap_near":                   {},
 		// Registered by package collector, which this package imports; checked there too.
-		"shadewright_analyzer_probe_decisions_pending": {},
-		"shadewright_analyzer_consequences_held":       {},
+		"shadewright_analyzer_probe_decisions_pending":     {},
+		"shadewright_analyzer_consequences_held":           {},
+		"shadewright_analyzer_stale_on_start_folded_total": {},
 	}
 }
 

@@ -106,7 +106,8 @@ limitations under the License.
 // default). Existing Incidents keep their records, so nothing is counted again. A batch the API server
 // refuses as invalid, or meant for an Incident whose name holds another fingerprint, is dropped, not
 // retried, and counted in shadewright_incident_batches_dropped_total by reason; so is a batch still
-// unwritten when a stop's deadline passes.
+// unwritten when a stop's deadline passes, and a FoldOnly observation with no Incident to fold into
+// (reason stale_on_start, #996).
 //
 // The controller also marks which Incidents are due for analysis (design 3.2): every TriggerInterval (10 s)
 // it decides each one with [Due] and sets the condition AnalysisDue, with a reason, when the decision turns

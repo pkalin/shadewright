@@ -18,7 +18,7 @@ In the cluster its ServiceAccount is read-only ([2.2.2](2-architecture.md#222-an
 
 **Why.** The analyzer talks to a model and writes records.
 
-**Limits.** The token audience must match the endpoint. The deployed role can still overwrite the records, so the adapter sends every write with `If-None-Match: *`: Blob Storage then refuses to replace an existing blob (409 or 412), and the adapter never retries that answer. That protects against the analyzer's own mistakes, not against a stolen token, which can still send a write without the header. Versioning is the recovery evidence until [#154](https://github.com/pkalin/shadewright/issues/154) makes the role create-only (planned).
+**Limits.** The token audience must match the endpoint. The deployed role can still overwrite the records, so the adapter sends every write with `If-None-Match: *`: Blob Storage then refuses to replace an existing blob (409 or 412), and the adapter never retries that answer. A try that reaches its own 10 second timeout is retried within the write's 30 seconds, also when an answer arrives only after that timeout: such a late answer decides nothing, and a blob that try did store answers the retry with 409 `BlobAlreadyExists`, which the analyzer records as its own record (its IDs are unique per run). That protects against the analyzer's own mistakes, not against a stolen token, which can still send a write without the header. Versioning is the recovery evidence until [#154](https://github.com/pkalin/shadewright/issues/154) makes the role create-only (planned).
 
 ## 9.2. Executor and the GitHub App key
 

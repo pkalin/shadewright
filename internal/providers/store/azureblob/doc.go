@@ -37,8 +37,9 @@ limitations under the License.
 // tries with exponential backoff and jitter. Only throttling (429), a timeout (408), transient server errors
 // (500, 502, 503, 504), a network failure and a token request that got no answer are retried, within the
 // deadline and honouring Retry-After; a refused certificate, a refused identity (401, 403), a missing
-// container (404), an existing blob and any other answer are final. A canceled context ends the write at
-// once. Redirects are never followed. Errors are fixed text with the kind from package providers, the status
+// container (404), an existing blob and any other answer are final. An answer read after its try's own timeout
+// ended decides nothing: that try is retried like one that timed out with no answer. A canceled context ends
+// the write at once, whatever answer arrived. Redirects are never followed. Errors are fixed text with the kind from package providers, the status
 // code and Blob Storage's short error code; they never carry the token, the URL, the record or a response body.
 //
 // This package and package azurekv are the only ones allowed to import the Azure SDK.

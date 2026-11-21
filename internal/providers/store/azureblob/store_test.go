@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -347,16 +348,23 @@ func TestPutAnswerAfterContextEnd(t *testing.T) {
 }
 
 // A try that times out on its own is retried while the write has time left.
+// The first handler gives up when the server sees the client go away and returns, which sends an empty 200 the
+// client may or may not read before its try ends: either way the try is retried (#1064).
 func TestPutRetriesATryThatTimedOut(t *testing.T) {
 	var n int
 	var mu sync.Mutex
+	release := make(chan struct{})
+	defer close(release)
 	s := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		n++
 		first := n == 1
 		mu.Unlock()
 		if first {
-			<-r.Context().Done()
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
@@ -369,6 +377,82 @@ func TestPutRetriesATryThatTimedOut(t *testing.T) {
 	}
 	if got := len(s.requests()); got != 2 {
 		t.Errorf("%d requests, want 2", got)
+	}
+}
+
+// tryLateAnswer is a transport whose first late tries answer only once the try's own context ended, while the
+// write's context stays live; later tries answer 201. The late answer carries a Retry-After and body text that
+// must not reach the write's pacing or its error.
+type tryLateAnswer struct {
+	code int
+	late int
+	n    *int
+}
+
+func (a tryLateAnswer) RoundTrip(r *http.Request) (*http.Response, error) {
+	*a.n++
+	if *a.n > a.late {
+		return &http.Response{StatusCode: http.StatusCreated, Header: http.Header{}, Body: http.NoBody, Request: r}, nil
+	}
+	<-r.Context().Done()
+	h := http.Header{}
+	h.Set("Retry-After", "7")
+	h.Set("x-ms-error-code", "BlobAlreadyExists")
+	return &http.Response{StatusCode: a.code, Header: h, Request: r,
+		Body: io.NopCloser(strings.NewReader("<Error><Message>body text " + testToken + "</Message></Error>"))}, nil
+}
+
+// An answer read after its try timed out, the write's context still live, decides nothing: the try is retried
+// like one that timed out with no answer, with the same pacing and the same final error (#1064).
+func TestPutAnswerAfterTryTimeout(t *testing.T) {
+	for _, code := range []int{http.StatusOK, http.StatusCreated, http.StatusConflict, http.StatusInternalServerError} {
+		for _, late := range []int{1, maxTries} {
+			t.Run(fmt.Sprintf("%d/late%d", code, late), func(t *testing.T) {
+				u, err := url.Parse("https://account.blob.core.windows.net")
+				if err != nil {
+					t.Fatal(err)
+				}
+				red, err := redact.New()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var n int
+				st := newStore(u.JoinPath(testContainer), &staticCredential{}, red, tryLateAnswer{code: code, late: late, n: &n})
+				var waits []time.Duration
+				st.sleep = func(ctx context.Context, d time.Duration) error {
+					waits = append(waits, d)
+					return ctx.Err()
+				}
+				st.tryTimeout = 5 * time.Millisecond
+				_, err = st.Put(t.Context(), testRecord())
+				if late < maxTries {
+					if err != nil {
+						t.Fatalf("Put = %v after %d round trips, want the retry to create", err, n)
+					}
+					if n != late+1 {
+						t.Errorf("%d round trips, want %d", n, late+1)
+					}
+				} else {
+					if !errors.Is(err, errNoAnswer) || !providers.IsRetryable(err) {
+						t.Fatalf("Put = %v, want no answer, retryable", err)
+					}
+					if n != maxTries {
+						t.Errorf("%d round trips, want %d", n, maxTries)
+					}
+					if strings.Contains(err.Error(), "body text") || strings.Contains(err.Error(), testToken) {
+						t.Errorf("error %q carries response body text", err)
+					}
+				}
+				if len(waits) != n-1 {
+					t.Errorf("%d waits for %d round trips", len(waits), n)
+				}
+				for _, w := range waits {
+					if w > maxBackoff {
+						t.Errorf("wait %s: a late answer's Retry-After paced the write", w)
+					}
+				}
+			})
+		}
 	}
 }
 

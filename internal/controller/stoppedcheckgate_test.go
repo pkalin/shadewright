@@ -96,14 +96,14 @@ func TestStoppedCheckGate(t *testing.T) {
 		{name: "writes", write: true},
 		{name: "writes after its own read", read: true, write: true},
 		{name: "zero value", change: func(live *api.RemediationRequest) { *live = api.RemediationRequest{} }},
-		{name: "another UID", change: func(live *api.RemediationRequest) { live.UID = "another" }},
+		{name: "UID differs", change: func(live *api.RemediationRequest) { live.UID = "another" }},
 		{name: "being deleted", change: func(live *api.RemediationRequest) {
 			live.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
 		}},
 		{name: "another head", change: func(live *api.RemediationRequest) {
 			live.Status.PullRequest.HeadSHA = strings.Repeat("b", 40)
 		}},
-		{name: "no pull request recorded", change: func(live *api.RemediationRequest) { live.Status.PullRequest = nil }},
+		{name: "pull request missing", change: func(live *api.RemediationRequest) { live.Status.PullRequest = nil }},
 		{name: "merge recorded", change: func(live *api.RemediationRequest) {
 			live.Status.MergeReceipt = &api.MergeReceipt{}
 		}},
@@ -111,9 +111,9 @@ func TestStoppedCheckGate(t *testing.T) {
 		{name: "lock never recorded", change: func(live *api.RemediationRequest) { live.Status.HoldsTarget = nil }},
 		{name: "owns no check: reviewer hints off", hints: new(false)},
 		{name: "owns no check: handed over", change: func(live *api.RemediationRequest) {
-			live.Status.Handoff = &api.Handoff{To: &api.OutgoingHandoff{Name: "replacement", Phase: api.HandoffDone}}
+			live.Status.Handoff = &api.Handoff{To: &api.OutgoingHandoff{Name: "next-request", Phase: api.HandoffDone}}
 		}},
-		{name: "gone", read: true, prepare: func(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
+		{name: "request deleted", read: true, prepare: func(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
 			t.Helper()
 			stored := &api.RemediationRequest{}
 			if err := r.Get(context.Background(), client.ObjectKeyFromObject(rr), stored); err != nil {
@@ -199,6 +199,9 @@ func TestStoppedCheckRefusalLeavesStatus(t *testing.T) {
 	}
 }
 
+// stoppedCheckRunName is the name of the function that builds the failed review check run of a stopped request.
+const stoppedCheckRunName = "stoppedCheckRun"
+
 // stoppedCheckGate is the one function that may build the failed review check of a stopped request, so the one that
 // writes it (TestStoppedCheckWrittenOnlyByItsGate).
 const stoppedCheckGate = "writeStoppedCheck"
@@ -207,13 +210,13 @@ const stoppedCheckGate = "writeStoppedCheck"
 // or its title outside the gate, keyed by the function it is in; the declarations of both are left out.
 func stoppedCheckWriters(fset *token.FileSet, owner string, n ast.Node) []string {
 	id, ok := n.(*ast.Ident)
-	if !ok || (id.Name != "stoppedCheckRun" && id.Name != "stoppedCheckTitle") {
+	if !ok || (id.Name != stoppedCheckRunName && id.Name != "stoppedCheckTitle") {
 		return nil
 	}
 	switch {
-	case id.Name == "stoppedCheckRun" && (owner == stoppedCheckGate || owner == "stoppedCheckRun"):
+	case id.Name == stoppedCheckRunName && (owner == stoppedCheckGate || owner == stoppedCheckRunName):
 		return nil
-	case id.Name == "stoppedCheckTitle" && (owner == "stoppedCheckRun" || owner == ""):
+	case id.Name == "stoppedCheckTitle" && (owner == stoppedCheckRunName || owner == ""):
 		// The constant's own declaration (owner "") and the one function that builds the run.
 		return nil
 	}

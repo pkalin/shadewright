@@ -317,7 +317,7 @@ func (tr *terminationTracker) commit(key types.NamespacedName, uid types.UID, t 
 		tr.seen.put(key, s)
 		return
 	}
-	ids := append(s.handled[t.slot()], t.id)
+	ids := append(s.handled[t.slot()], t.id) //nolint:gocritic // stored back into s.handled below; no other slice shares it
 	if len(ids) > idsPerContainer {
 		ids = ids[len(ids)-idsPerContainer:]
 	}

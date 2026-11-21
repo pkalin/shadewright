@@ -510,7 +510,7 @@ func chain(err error) []string {
 		return nil
 	}
 	out := []string{err.Error()}
-	switch u := err.(type) {
+	switch u := err.(type) { //nolint:errorlint // walks the chain itself, one Unwrap at a time
 	case interface{ Unwrap() error }:
 		out = append(out, chain(u.Unwrap())...)
 	case interface{ Unwrap() []error }:

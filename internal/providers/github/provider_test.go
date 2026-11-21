@@ -2072,7 +2072,8 @@ func TestCommentChangeRequest(t *testing.T) {
 // A comment deleted on page 1 during the search moves the first comment of page 2 onto page 1, which was read
 // already: page 1 is read once more at the end, so the App's reply there is found and not posted again.
 func TestCommentChangeRequestFindsAMarkerMovedOntoPageOne(t *testing.T) {
-	moved := append(fullPage(person("other"))[1:], own("note\n"+commentMarker))
+	moved := fullPage(person("other"))[1:]
+	moved = append(moved, own("note\n"+commentMarker))
 	h := newHarness(t, get("/pulls/12", "pull_open.json"), lastPage(comments(1, fullPage(person("other"))...), 2),
 		comments(2), comments(1, moved...))
 	if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker); err != nil {

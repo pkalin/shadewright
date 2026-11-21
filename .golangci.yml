@@ -8,17 +8,22 @@ linters:
     - depguard
     - dupl
     - errcheck
+    - errorlint
+    - exptostd
     - ginkgolinter
     - goconst
+    - gocritic
     - gocyclo
     - gosec
     - govet
     - ineffassign
+    - intrange
     - lll
     - logcheck
     - misspell
     - modernize
     - nakedret
+    - noctx
     - nolintlint
     - prealloc
     - revive
@@ -26,6 +31,9 @@ linters:
     - unconvert
     - unparam
     - unused
+    - usestdlibvars
+    - usetesting
+    - whitespace
   settings:
     custom:
       logcheck:
@@ -76,6 +84,10 @@ linters:
       - third_party$
       - builtin$
       - examples$
+issues:
+  # The defaults (50 per linter, 3 of the same text) hide repeats; report every finding.
+  max-issues-per-linter: 0
+  max-same-issues: 0
 formatters:
   enable:
     - gofmt

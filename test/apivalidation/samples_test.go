@@ -18,6 +18,7 @@ package apivalidation
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -60,7 +61,7 @@ var _ = Describe("config/samples", func() {
 			dec := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(data), 4096)
 			for {
 				obj := &unstructured.Unstructured{}
-				if err := dec.Decode(&obj.Object); err == io.EOF {
+				if err := dec.Decode(&obj.Object); errors.Is(err, io.EOF) {
 					break
 				} else {
 					Expect(err).NotTo(HaveOccurred(), f)

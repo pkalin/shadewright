@@ -456,7 +456,7 @@ func TestGuardTransportEmptyAnswerAfterDeadline(t *testing.T) {
 						t.Errorf("%s: resp %v, err = %v; want no response and context.DeadlineExceeded", name, got, err)
 					}
 					if entra {
-						if cause, retry := entraCause(tr.transportErr); cause != context.DeadlineExceeded || !retry || tr.status != 0 {
+						if cause, retry := entraCause(tr.transportErr); !errors.Is(cause, context.DeadlineExceeded) || !retry || tr.status != 0 {
 							t.Errorf("%s: recorded %+v, class %v, %v; want a transient deadline and no status", name, tr, cause, retry)
 						}
 					}
@@ -488,7 +488,7 @@ func TestGuardTransportEmptyAnswerAfterCancel(t *testing.T) {
 				t.Errorf("%d entra=%v: resp %v, err = %v; want no response and a final context.Canceled", status, entra, got, err)
 			}
 			if entra {
-				if cause, retry := entraCause(tr.transportErr); cause != context.Canceled || retry || tr.status != 0 {
+				if cause, retry := entraCause(tr.transportErr); !errors.Is(cause, context.Canceled) || retry || tr.status != 0 {
 					t.Errorf("%d: recorded %+v, class %v, %v; want a final cancellation and no status", status, tr, cause, retry)
 				}
 			}

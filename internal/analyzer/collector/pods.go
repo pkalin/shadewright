@@ -144,6 +144,21 @@ func (t termination) slot() string {
 	return t.container
 }
 
+// podReasonEvicted is the status.reason of a pod its kubelet evicted.
+const podReasonEvicted = "Evicted"
+
+// class is the part of t, a symptom read from pod's status, in the consequence rule (ADR-0039 point 3, amended
+// 2026-11-20): an OOM kill, a non-zero exit or a waiting reason is a cause. A termination of an evicted pod
+// (status.reason Evicted) that is not an OOM kill has no class, as before the crash loop link: evictions are
+// designed apart (#1077). It is the one place that decides it, for the observation of t and for the cause a
+// consequence links to.
+func (t termination) class(pod *corev1.Pod) Class {
+	if !t.waiting && t.reason != ReasonOOMKilled && pod.Status.Reason == podReasonEvicted {
+		return ClassNone
+	}
+	return ClassCause
+}
+
 func hasPodSymptom(o client.Object) bool {
 	pod, ok := o.(*corev1.Pod)
 	return ok && len(podSymptoms(pod)) > 0
@@ -400,9 +415,7 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		// A waiting reason is never in immediateTerminationReasons: a wait is often short while an image is
 		// pulled (ADR-0039 point 4).
 		obs.Immediate = immediateTermination(t.reason)
-		// Every symptom read from pod status is a cause: an OOM kill, a non-zero exit or a waiting reason
-		// (ADR-0039 point 3, amended 2026-11-20).
-		obs.Container, obs.Class = t.container, ClassCause
+		obs.Container, obs.Class = t.container, t.class(&pod)
 		var sent bool
 		if t.repeat {
 			// The same occurrence reported again: nothing new to count (MayRepeat, Count 0), so the Incident

@@ -76,7 +76,7 @@ func TestConsequenceLinksOnlyADeliveredTermination(t *testing.T) {
 		{"running crash loop", stoppedPod(reasonError, 2, corev1.RestartPolicyAlways, corev1.PodRunning, ""), false, true},
 		{"deleting, stopped with 143", stoppedPod(reasonError, 143, corev1.RestartPolicyAlways, corev1.PodRunning, ""), true, false},
 		{"deleting, OOM killed", stoppedPod(ReasonOOMKilled, exitOOM, corev1.RestartPolicyAlways, corev1.PodRunning, ""), true, true},
-		{"evicted", stoppedPod(reasonError, exitOOM, corev1.RestartPolicyAlways, corev1.PodFailed, "Evicted"), false, true},
+		{"evicted", stoppedPod(reasonError, exitOOM, corev1.RestartPolicyAlways, corev1.PodFailed, reasonEvicted), false, false},
 		{"restartPolicy Never", stoppedPod(reasonError, 1, corev1.RestartPolicyNever, corev1.PodFailed, ""), false, true},
 	}
 	for _, c := range cases {

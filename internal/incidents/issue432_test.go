@@ -42,10 +42,10 @@ func opened(c *Controller) []string {
 	return fps
 }
 
-// TestIssue432CrashLoopOpensTwoIncidents is cases (a) and (c) (P1): crashes of container web with exit code 2
+// TestIssue432CrashLoopOpensOneIncident is cases (a) and (c) (P1): crashes of container web with exit code 2
 // (reason Error, pod status, a cause) open the Error Incident on the second sighting, 20:27:28Z, with
 // status.cause; the BackOff, linked by the collector to the Error's fingerprint, counts on it as evidence.
-func TestIssue432CrashLoopOpensTwoIncidents(t *testing.T) {
+func TestIssue432CrashLoopOpensOneIncident(t *testing.T) {
 	c, clock := newAt(t)
 	crash := func(i int, at time.Time) {
 		clock.set(at)

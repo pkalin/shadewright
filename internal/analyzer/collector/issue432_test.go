@@ -65,13 +65,13 @@ func crashLoopPod(finished time.Time, restarts int32) *corev1.Pod {
 	return p
 }
 
-// TestIssue432CrashLoopBackOffOpensASecondIncident is cases (a) and (c) of #432 (P1): a container exits with
+// TestIssue432CrashLoopBackOffLandsOnOneIncident is cases (a) and (c) of #432 (P1): a container exits with
 // code 2 (reason Error, read from pod status) and the kubelet reports BackOff for it. On main the termination
 // was a symptom of no class and the BackOff found no cause in the pod status, so it was held for
 // ConsequenceGrace and emitted unlinked: a second Incident about 2 minutes after the first. A non-zero exit is
 // now a cause, and the BackOff links to the newest termination within KillCauseWindow of its own time, on
 // either side: here the status already shows a crash 13 seconds after the event.
-func TestIssue432CrashLoopBackOffOpensASecondIncident(t *testing.T) {
+func TestIssue432CrashLoopBackOffLandsOnOneIncident(t *testing.T) {
 	// rc.3 (a): Error Incident 20:27:28Z, BackOff Incident 20:29:15Z. t0 stands for 20:25:00Z.
 	d, rs, _ := workload()
 	ev := consequence("ev-backoff", reasonBack, appPath, t0.Add(2*time.Minute+15*time.Second))

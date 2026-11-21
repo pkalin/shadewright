@@ -31,14 +31,15 @@ limitations under the License.
 // Consequences and causes (cause.go, ADR-0039): each observation carries where it was read (Origin: pod status
 // or an event; only a pod-status origin is hashed into the fingerprint, so an Event cannot imitate one), its
 // container (a status entry's name, or the container an event's regarding field path names in the verified
-// pod) and a Class. Every pod-status symptom (an OOM kill, a non-zero exit or a waiting cause) is a cause; a
-// kubelet BackOff or Unhealthy event on a named container is a consequence, and its CauseFingerprint is the
-// cause its pod's status shows for that container: a current waiting cause, else a termination the collector
-// delivers for the pod, an OOM kill that finished at most KillCauseWindow before the event's own time or a
-// non-zero exit within KillCauseWindow of it on either side. A consequence with no cause is held (hold.go, ADR-0039 point 19): it is emitted only when,
-// ConsequenceGrace after the collector first saw it, its pod has the same UID, the container was seen failing
-// at least twice (each reconcile of the event, and each update of its pod, is a sample), and it is still failing
-// or restarted at least twice during the hold; otherwise it is handled without an observation. A consequence
+// pod) and a Class. Every pod-status symptom (an OOM kill, a non-zero exit or a waiting cause) is a cause,
+// except a termination of an evicted pod that is not an OOM kill (termination.class); a kubelet BackOff or
+// Unhealthy event on a named container is a consequence, and its CauseFingerprint is the cause its pod's status
+// shows for that container: a current waiting cause, else a termination the collector delivers for the pod as
+// a cause, an OOM kill that finished at most KillCauseWindow before the event's own time or a non-zero exit
+// within KillCauseWindow of it on either side. A consequence with no cause is held (hold.go, ADR-0039 point
+// 19): it is emitted only when, ConsequenceGrace after the collector first saw it, its pod has the same UID,
+// the container was seen failing at least twice (each reconcile of the event, and each update of its pod, is a
+// sample), and it is still failing or restarted at least twice during the hold; otherwise it is handled without an observation. A consequence
 // whose pod shows a cause that the Incident controller has not seen yet (Config.CauseSeen, asked with the hold's
 // observation at each sample; ADR-0039 point 7) is held too: it is emitted with its cause as soon as an answer
 // says the controller has seen a cause it would be counted on, asked again when the controller tells the

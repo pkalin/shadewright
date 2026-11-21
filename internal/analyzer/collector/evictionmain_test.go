@@ -33,34 +33,26 @@ import (
 )
 
 // Evictions are out of the scope of #432 (decided 2026-11-21, designed in #1077): an eviction, its
-// terminations and the kubelet's Evicted event behave as they did before the crash loop link was built.
-// TestEvictionsAsBeforeTheCrashLoopLink feeds eviction sequences through the collector and compares every
-// observation with testdata/evictions-before-432.golden. That file was written by this same test, with
-// WRITE_EVICTIONS_GOLDEN=1, on a checkout of main at 64500a78 (before #432), so its values come from the code
-// before the change, not from the code under test.
+// terminations, the kubelet's Evicted event and the BackOff and Unhealthy events of an evicted pod's containers
+// behave as they did before the crash loop link was built. TestEvictionsAsBeforeTheCrashLoopLink feeds eviction
+// sequences through the collector and compares every observation with testdata/evictions-before-432.golden.
+// That file was written by this same test, with WRITE_EVICTIONS_GOLDEN=1, on a checkout of origin/main at
+// f2d69cd7 (before #432), so its values come from the code before the change, not from the code under test.
 //
-// The one difference allowed is the crash loop link itself (ADR-0039 point 3, amended 2026-11-20): a
-// non-zero exit read from pod status is of class cause. classAsBefore maps that class back, and nothing else.
+// The one difference allowed is the crash loop link itself (ADR-0039 point 3, amended 2026-11-20): a non-zero
+// exit of a pod that is not evicted is of class cause. Only the step that delivers such a termination, before the
+// pod is evicted, maps that class back (collectNotEvicted); every observation made once the pod is evicted is
+// compared as it is.
 
 // evictionsGolden is the file of observations the sequences gave on main before #432.
 const evictionsGolden = "testdata/evictions-before-432.golden"
-
-// classAsBefore is o's class with the one change of #432 taken back: a termination read from pod status that is
-// not an OOM kill had no class before.
-func classAsBefore(o Observation) Class {
-	if o.Origin == fingerprint.SourcePodStatus && o.Reason != ReasonOOMKilled &&
-		strings.HasPrefix(o.Occurrence, "termination:") && o.Class == ClassCause {
-		return ClassNone
-	}
-	return o.Class
-}
 
 // renderObservation is one line with every field of o.
 func renderObservation(o Observation) string {
 	return fmt.Sprintf("reason=%s origin=%s class=%q container=%q fingerprint=%s cause=%q subject=%s/%s/%s "+
 		"source=%s type=%s reporter=%s occurrence=%s total=%d count=%d began=%s observed=%s mayRepeat=%t "+
 		"foldOnly=%t immediate=%t symptom=%q",
-		o.Reason, o.Origin, classAsBefore(o), o.Container, o.Fingerprint, o.CauseFingerprint, o.Subject.Kind,
+		o.Reason, o.Origin, o.Class, o.Container, o.Fingerprint, o.CauseFingerprint, o.Subject.Kind,
 		o.Subject.Name, o.Subject.UID, o.Source, o.Type, o.ReportingController, o.Occurrence, o.Total, o.Count,
 		o.Began.UTC().Format(time.RFC3339), o.ObservedAt.UTC().Format(time.RFC3339), o.MayRepeat, o.FoldOnly,
 		o.Immediate, o.Symptom)
@@ -89,6 +81,40 @@ func (s *evictionSeq) collect(step string) {
 	for _, o := range s.h.drain() {
 		s.got = append(s.got, step+": "+renderObservation(o))
 	}
+}
+
+// collectNotEvicted is collect for a step whose pod is not evicted: a non-zero exit read from its status is a
+// cause since #432 and had no class before, so that class is mapped back. Nothing else is.
+func (s *evictionSeq) collectNotEvicted(step string) {
+	for _, o := range s.h.drain() {
+		if o.Origin == fingerprint.SourcePodStatus && o.Reason != ReasonOOMKilled &&
+			strings.HasPrefix(o.Occurrence, "termination:") && o.Class == ClassCause {
+			o.Class = ClassNone
+		}
+		s.got = append(s.got, step+": "+renderObservation(o))
+	}
+}
+
+// evConsequence is the kubelet's BackOff or Unhealthy event name about the app container of pod with uid, with
+// its own time at.
+func evConsequence(name, reason, pod string, uid types.UID, at time.Time) *eventsv1.Event {
+	ev := consequence(name, reason, appPath, at)
+	ev.CreationTimestamp = metav1.NewTime(at)
+	ev.Regarding.Name, ev.Regarding.UID = pod, uid
+	return ev
+}
+
+// consequencesAround creates and reconciles a BackOff and an Unhealthy event of pod A's app container at each
+// offset from at, then collects them under step.
+func (s *evictionSeq) consequencesAround(step string, at time.Time, offsets ...time.Duration) {
+	for _, off := range offsets {
+		for _, reason := range []string{reasonBack, ReasonUnhealthy} {
+			name := fmt.Sprintf("ev-%s-%s", strings.ToLower(reason), off)
+			s.h.create(evConsequence(name, reason, evPodA, evUIDA, at.Add(off)))
+			s.h.reconcileEvent(name)
+		}
+	}
+	s.collect(step)
 }
 
 // runningPod is the web pod named name with uid, running its init, app and sidecar containers.
@@ -195,7 +221,7 @@ var evictionSequences = []struct {
 		s.h.create(p)
 		s.h.clock.set(at)
 		s.h.reconcilePod(evPodA)
-		s.collect("killed container")
+		s.collectNotEvicted("killed container")
 		s.h.clock.set(at.Add(3 * time.Second))
 		p = readPod(s.t, s.h, evPodA)
 		p.Status.Phase, p.Status.Reason, p.Status.Message = corev1.PodFailed, reasonEvicted, evictLimitMessage
@@ -263,6 +289,57 @@ var evictionSequences = []struct {
 		listAtStart(s.h, stored)
 		s.h.reconcileEvent("ev-a")
 		s.collect("listed at start")
+	}},
+	// The kubelet's BackOff and liveness failures of the evicted container, with their own times up to 10
+	// minutes (KillCauseWindow) before and after the eviction's exit 137, reconciled once the pod shows the
+	// eviction: they link to nothing, as before.
+	{"consequences around the eviction", func(s *evictionSeq) {
+		s.h.create(runningPod(evPodA, evUIDA))
+		at := t0.Add(15 * time.Minute)
+		s.h.clock.set(at)
+		p := readPod(s.t, s.h, evPodA)
+		evictStatus(p, evictLimitMessage, reasonError, at, false)
+		s.h.update(p)
+		s.h.reconcilePod(evPodA)
+		s.collect("evicted status")
+		s.h.clock.set(at.Add(10 * time.Minute))
+		s.consequencesAround("consequences", at, -10*time.Minute, -3*time.Minute, 0, 3*time.Minute,
+			10*time.Minute)
+	}},
+	// The same events reconciled while the pod still runs, then the eviction: nothing links either.
+	{"consequences then eviction", func(s *evictionSeq) {
+		s.h.create(runningPod(evPodA, evUIDA))
+		at := t0.Add(15 * time.Minute)
+		s.h.clock.set(at.Add(-time.Minute))
+		s.consequencesAround("consequences, running", at, -8*time.Minute, -time.Minute)
+		s.h.clock.set(at)
+		p := readPod(s.t, s.h, evPodA)
+		evictStatus(p, evictLimitMessage, reasonError, at, false)
+		s.h.update(p)
+		s.h.reconcilePod(evPodA)
+		s.collect("evicted status")
+		s.h.clock.set(at.Add(5 * time.Minute))
+		s.consequencesAround("consequences, evicted", at, 2*time.Minute, 4*time.Minute)
+	}},
+	// A container that exited 137 while the pod ran, then the pod is evicted: a BackOff of that container
+	// reconciled after the eviction links to nothing, as before.
+	{"crash then eviction then consequences", func(s *evictionSeq) {
+		at := t0.Add(15 * time.Minute)
+		p := runningPod(evPodA, evUIDA)
+		evictStatus(p, "", reasonError, at, false)
+		p.Status.Phase, p.Status.Reason = corev1.PodRunning, ""
+		s.h.create(p)
+		s.h.clock.set(at)
+		s.h.reconcilePod(evPodA)
+		s.collectNotEvicted("killed container")
+		s.h.clock.set(at.Add(time.Minute))
+		p = readPod(s.t, s.h, evPodA)
+		p.Status.Phase, p.Status.Reason, p.Status.Message = corev1.PodFailed, reasonEvicted, evictLimitMessage
+		s.h.update(p)
+		s.h.reconcilePod(evPodA)
+		s.collect("evicted status")
+		s.h.clock.set(at.Add(3 * time.Minute))
+		s.consequencesAround("consequences", at, -2*time.Minute, 2*time.Minute)
 	}},
 }
 

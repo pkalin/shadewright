@@ -107,7 +107,7 @@ func TestRestartedResetsWindowsNotOfThisProcess(t *testing.T) {
 				t.Fatalf("a good check at +%s left the window closed: %+v", c.opens, again)
 			}
 			// The check notes the window it left open: the next check of this process keeps it.
-			r.ownWindows.note(rr, again, false)
+			r.ownWindows.note(rr, again)
 			kept := again
 			if r.restarted(rr, &kept) || !reflect.DeepEqual(kept, again) {
 				t.Errorf("a second check changed this process's window to %+v", kept)
@@ -116,7 +116,7 @@ func TestRestartedResetsWindowsNotOfThisProcess(t *testing.T) {
 			// window this process opened, which is not taken for an earlier process's.
 			closed := again
 			closed.Reset(remediationv1alpha1.ResetNotAvailable, second.Add(c.opens+time.Minute))
-			r.ownWindows.note(rr, closed, false)
+			r.ownWindows.note(rr, closed)
 			stored := again
 			if r.restarted(rr, &stored) {
 				t.Errorf("a window of this process whose reset was lost was taken for an earlier process's")

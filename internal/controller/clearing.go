@@ -192,20 +192,24 @@ func (m sinceMarker) Start(ctx context.Context) error {
 func (sinceMarker) NeedLeaderElection() bool { return true }
 
 // ownWindows keeps, per request in Verifying, what this process knows of the executor's window from its own
-// checks: the start of the last open window a check of its own left (start), and what it read of the report at the check
-// that recorded its restart (restart). Memory only, so a new process has neither: dropped when the request ends,
-// is being deleted or is gone, like reportCounters. A request is reconciled by one worker at a time.
+// checks: the start of every open window a check of its own left (starts, at most ownWindowsBound), and what it
+// read of the report at the check that recorded its restart (restart). Memory only, so a new process has neither:
+// dropped when the request ends, is being deleted or is gone, like reportCounters. A request is reconciled by one
+// worker at a time.
 type ownWindows struct {
 	m sync.Map
 }
 
-// ownWindow is one entry of ownWindows, for the request with uid. start is the last open window this process
-// left while no reset of its own was waiting for a write; pending is a later one opened while such a reset was
-// still kept in unwrittenResets (#970), which status holds only once that write is stored.
+// ownWindowsBound is how many window starts ownWindows keeps per request (decision of 2026-11-21 on #970). Past
+// it the oldest is forgotten, and a check that then reads that window in status records a restart that did not
+// happen: the window closes and needs a full stableFor again, a longer wait, never a shorter one.
+const ownWindowsBound = 16
+
+// ownWindow is one entry of ownWindows, for the request with uid. starts holds the start of every window this
+// process opened for it, oldest first, whatever became of the status write that carried it.
 type ownWindow struct {
 	uid     types.UID
-	start   *metav1.Time
-	pending *metav1.Time
+	starts  []metav1.Time
 	restart *verification.Restart
 }
 
@@ -221,37 +225,44 @@ func (o *ownWindows) load(rr *remediationv1alpha1.RemediationRequest) ownWindow 
 	return ownWindow{uid: rr.UID}
 }
 
-// owns reports whether the open window w is one a check of this process left open: its start or, while a write
-// that would store it may still be lost, its pending one. Only starts this process stored in memory are compared
-// with w's, values it wrote itself: no time of another process is compared.
+// owns reports whether the open window w is one a check of this process opened: its start is one of the starts
+// this process remembers for rr. Only starts this process stored in memory are compared with w's, values it wrote
+// itself: no time of another process is compared.
 func (o *ownWindows) owns(rr *remediationv1alpha1.RemediationRequest, w verification.Window) bool {
 	if !w.Open() {
 		return false
 	}
-	e := o.load(rr)
-	return (e.start != nil && e.start.Equal(w.Start)) || (e.pending != nil && e.pending.Equal(w.Start))
+	for _, s := range o.load(rr).starts {
+		if s.Equal(w.Start) {
+			return true
+		}
+	}
+	return false
 }
 
-// note remembers the start of w when the check left it open, whether its write is stored or lost: a lost one
-// leaves another window in status, which is then not this process's. A check that closed w keeps the start: when
-// its write is lost, status still holds the window this process opened, which the next check must not take for
-// an earlier process's (the reset kept in unwrittenResets closes it again).
-//
-// While kept still holds a reset of this process that no write stored, the start is not replaced (#970): status
-// may still hold the window that reset closes, and a second lost write in a row would otherwise make the next
-// check take it for an earlier process's and record a restart that did not happen. The new start is pending
-// instead, owned too, since that write may also be stored; the first check after a stored write makes it the
-// start.
-func (o *ownWindows) note(rr *remediationv1alpha1.RemediationRequest, w verification.Window, kept bool) {
+// note remembers the start of w when the check left it open, whether its write is stored, lost, or stored with
+// an error returned (#970). Any of these windows may be the one status holds at a later check: a lost write
+// leaves an earlier window of this process there, and a write stored after a lost one may be read back after
+// further lost writes. So every window this process opened stays its own, not only the last one; a window
+// another process opened was never noted here and is reset by restarted. A check that closed w adds nothing:
+// the window it closed is already noted, and when its write is lost the reset kept in unwrittenResets closes it
+// again. At most ownWindowsBound starts are kept, the oldest forgotten first.
+func (o *ownWindows) note(rr *remediationv1alpha1.RemediationRequest, w verification.Window) {
 	if !w.Open() {
 		return
 	}
 	e := o.load(rr)
-	if kept {
-		e.pending = w.Start.DeepCopy()
-	} else {
-		e.start, e.pending = w.Start.DeepCopy(), nil
+	for _, s := range e.starts {
+		if s.Equal(w.Start) {
+			return
+		}
 	}
+	// A new slice on every change: a stored entry is never changed in place.
+	starts := make([]metav1.Time, 0, min(len(e.starts)+1, ownWindowsBound))
+	if len(e.starts) >= ownWindowsBound {
+		e.starts = e.starts[len(e.starts)-ownWindowsBound+1:]
+	}
+	e.starts = append(append(starts, e.starts...), *w.Start.DeepCopy())
 	o.m.Store(client.ObjectKeyFromObject(rr), e)
 }
 
@@ -281,8 +292,9 @@ func (o *ownWindows) forget(key types.NamespacedName) {
 }
 
 // restarted records, in the executor's window w read from status, the restart of the executor (ADR-0030 section
-// 4, amendments of 2026-11-20, #895): an open window that no check of this process left open (ownWindows) is
-// reset with ExecutorRestarted, and restarted reports whether it did. A reset an earlier process recorded but
+// 4, amendments of 2026-11-20 and 2026-11-21, #895, #970): an open window that no check of this process opened
+// (ownWindows, the last ownWindowsBound of them) is reset with ExecutorRestarted, and restarted reports whether it
+// did. A reset an earlier process recorded but
 // could not store is lost with its memory (unwrittenResets) and may lie in that window, and no check ran while no
 // process reconciled, so no window carries time over from before this process. The reset is stored like any
 // other, so status.verification shows it and the stored window is the one that decides; the next good check
@@ -321,8 +333,7 @@ func (r *RemediationRequestReconciler) checkWindow(rr *remediationv1alpha1.Remed
 // (unwrittenResets) and the open window that is this process's (ownWindows).
 func (r *RemediationRequestReconciler) noteWindow(rr *remediationv1alpha1.RemediationRequest, w verification.Window) {
 	r.unwrittenResets.note(rr, w)
-	_, kept := r.unwrittenResets.get(rr)
-	r.ownWindows.note(rr, w, kept)
+	r.ownWindows.note(rr, w)
 }
 
 // executorWindow returns the executor's own window from the request's status.

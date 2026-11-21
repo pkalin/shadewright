@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidents/causereason"
 	"github.com/pkalin/shadewright/internal/redact"
 )
 
@@ -529,12 +530,13 @@ func (b *Builder) state(l *lines, s corev1.ContainerState) string {
 }
 
 // tallyReasons are the Incident reasons whose summary shows the absorbed tally to the model (ADR-0039 point 18,
-// decided 2026-11-21 on #432): the reasons the block was evaluated for, with a recorded scenario run on the real
-// models (ADR-0025 decision 3). Only an OOM kill so far. An Incident of any other reason, a non-zero exit of a
-// crash loop too, gets no block even when status.absorbed holds a tally: the count stays in its status and in
-// kubectl output, and the reason joins this list once its own scenario is recorded and run (#1080). New gives each
-// builder this list (Builder.showsTally); a builder without one shows no block.
-var tallyReasons = []string{"OOMKilled"}
+// decided 2026-11-21 on #432): the ones that showed it before #432, an OOM kill and the waiting reasons the
+// collector reads as a cause (causereason.Waiting, the list behind collector.WaitingCauseReasons). An Incident of any other
+// reason, a non-zero exit of a crash loop too, gets no block even when status.absorbed holds a tally: the count
+// stays in its status and in kubectl output, and a non-zero exit joins this list once its own scenario is
+// recorded and run on the real models (#1080, ADR-0025 decision 3). New gives each builder this list
+// (Builder.showsTally); a builder without one shows no block.
+var tallyReasons = append([]string{"OOMKilled"}, causereason.Waiting...)
 
 // absorbedReasons are the consequence reasons the summary shows from status.absorbed, in the order it shows
 // them: the values of the AbsorbedReason enum (ADR-0039 point 16), the fixed table of the rule. An entry with

@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/pkalin/shadewright/internal/incidents/causereason"
 )
 
 const absorbedHeader = "consequences counted on this cause, not in its occurrences:"
@@ -88,8 +89,8 @@ func TestSummaryShowsTheAbsorbedTally(t *testing.T) {
 // reasonNonZeroExit is the reason of an Incident of a non-zero exit read from pod status.
 const reasonNonZeroExit = "Error"
 
-// The decision of 2026-11-21 on #432 (B): the tally block is shown only for a reason it was evaluated for, an
-// OOM kill. A cause Incident of a non-zero exit (reason Error, the crash loop of #432) whose status.absorbed holds
+// The decision of 2026-11-21 on #432 (B, corrected the same day): the tally block is shown only for the reasons
+// that showed it before #432 (tallyReasons), which a non-zero exit is not. A cause Incident of a non-zero exit (reason Error, the crash loop of #432) whose status.absorbed holds
 // a tally gets the summary of an Incident with none, byte for byte: the model's input does not change until #1080
 // adds the reason.
 func TestSummaryOfANonZeroExitShowsNoTally(t *testing.T) {
@@ -105,6 +106,28 @@ func TestSummaryOfANonZeroExitShowsNoTally(t *testing.T) {
 	got := one(t, build(t, b, inc), SectionSummary).Text
 	if strings.Contains(got, absorbedHeader) || got != want {
 		t.Errorf("summary of a non-zero exit with a tally:\n%s\nwant, as with none:\n%s", got, want)
+	}
+}
+
+// The decision of 2026-11-21 on #432 (corrects B): the Incidents that showed the tally block before #432 still
+// show it, byte for byte: an OOM kill and each waiting reason the collector reads as a cause (causereason.Waiting,
+// the list behind collector.WaitingCauseReasons).
+func TestSummaryShowsTheTallyForEachReasonOfMain(t *testing.T) {
+	want := append([]string{"OOMKilled"}, causereason.Waiting...)
+	b := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
+	before := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
+	anyReasonShowsTally(before)
+	for _, reason := range want {
+		inc := cause(absorbed(remediationv1alpha1.AbsorbedUnhealthy, 3, testNow.Add(-2*time.Minute)),
+			absorbed(remediationv1alpha1.AbsorbedBackOff, 12, testNow.Add(-time.Minute)))
+		inc.Spec.Reason, inc.Spec.Symptom = reason, "Container app is waiting: "+reason
+		got := one(t, build(t, b, inc), SectionSummary).Text
+		if len(tallyOf(t, got)) != 3 {
+			t.Errorf("%s: summary shows no tally:\n%s", reason, got)
+		}
+		if old := one(t, build(t, before, inc), SectionSummary).Text; got != old {
+			t.Errorf("%s: summary:\n%s\nwant, as before #432:\n%s", reason, got, old)
+		}
 	}
 }
 

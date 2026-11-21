@@ -26,6 +26,7 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	"github.com/pkalin/shadewright/internal/incidents/causereason"
 	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 )
 
@@ -54,10 +55,9 @@ const KillCauseWindow = 10 * time.Minute
 
 // WaitingCauseReasons are the waiting reasons of a container's status that are a cause (ADR-0039 point 3): an
 // image that cannot be pulled, or a configuration the kubelet cannot create the container from. Any other
-// waiting reason is not read, and the waiting message never is: it is free text.
-var WaitingCauseReasons = []string{
-	"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "CreateContainerConfigError", "CreateContainerError",
-}
+// waiting reason is not read, and the waiting message never is: it is free text. The list is
+// causereason.Waiting, which the context builder reads too.
+var WaitingCauseReasons = causereason.Waiting
 
 // consequenceReasons are the reasons of a kubelet event that is a consequence when it names a container.
 var consequenceReasons = []string{reasonBackOff, ReasonUnhealthy}

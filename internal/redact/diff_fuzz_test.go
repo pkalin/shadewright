@@ -425,6 +425,8 @@ func TestReplaceFromWorkOnGluedFlags(t *testing.T) {
 
 // checkOwnWork fails when f, the redaction of in by what, adds more than ownWorkPerByte per byte of in to the
 // release's reading. It skips without the counter (the build tag redactwork).
+//
+//nolint:unparam // what is used after the skip, which returns only in a build with the tag redactwork
 func checkOwnWork(t *testing.T, what, in string, f func()) {
 	t.Helper()
 	skipUncounted(t)

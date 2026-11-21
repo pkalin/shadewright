@@ -68,6 +68,7 @@
   <text class="s" x="592" y="384">Lock released: no look.</text>
   <text class="s" x="592" y="406">A pass on an earlier head of the branch stays.</text>
   <text class="s" x="592" y="428">Other stops after an installation change: nothing.</text>
+  <text class="s" x="592" y="450">A step that returns an error: written at the retry.</text>
 
   <rect class="box" x="36" y="488" width="1048" height="72" rx="12"/>
   <text class="no" x="54" y="516">No new read, no new grant</text>

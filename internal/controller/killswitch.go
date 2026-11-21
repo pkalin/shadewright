@@ -364,17 +364,12 @@ func (g *gatedGit) ReviewCheckRun(ctx context.Context, head string) (providers.C
 }
 
 // waitWhilePaused records that the kill switch holds the request back and checks again after
-// freshRecheckDelay. Inside a stopped holder's look it also tells checkHeld's exit, which then writes no failed review
-// check in that look (ADR-0046 limit (e)). It sets WritesPaused True, and on the change also records an Event; the phase and the rest
+// freshRecheckDelay. It sets WritesPaused True, and on the change also records an Event; the phase and the rest
 // of the status are kept, so the request goes on from where it stopped once the pause ends.
 func (r *RemediationRequestReconciler) waitWhilePaused(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	reconcile.Result, error) {
 	// No wait for a read ends on this reconcile: it met the pause, so it may have read nothing (endAfterLastRead).
 	r.gitRetries().notePaused(client.ObjectKeyFromObject(rr))
-	if look := lookOf(ctx); look != nil {
-		// A stopped holder's look writes no failed review check under a pause: WritesPaused says why (checkHeld).
-		look.paused = true
-	}
 	if meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{
 		Type:               remediationv1alpha1.ConditionWritesPaused,
 		Status:             metav1.ConditionTrue,

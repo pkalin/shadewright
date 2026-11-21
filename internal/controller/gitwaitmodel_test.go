@@ -246,8 +246,15 @@ var modelExceptionSeeds = []uint64{90477, 175302}
 // 1 to 200000 on the first build of #1008.
 var modelExitSeeds = []uint64{8177, 69062}
 
+// modelMergedExceptionSeeds are seeds whose sequence has a look a stop exception takes over while the request's own
+// pull request is merged and its step leaves the lock held (a record of the merge that waits): property "stop
+// exception merge" fails on them when checkHeld's exit writes the stop's failed check unless a failed read marked the
+// look, instead of only when the step says it may (decision of 2026-11-21 on #1008, head adcddc6a). Found by a run of
+// seeds 1 to 200000 on that build (19 failed, the lowest 5067); the fixed set adds the first two.
+var modelMergedExceptionSeeds = []uint64{5067, 20270}
+
 // modelSeeds is the fixed seed set: 1 to n, modelGoneSeeds under the race detector or -short, modelUnsettledSeeds,
-// modelExceptionSeeds and modelExitSeeds.
+// modelExceptionSeeds, modelExitSeeds and modelMergedExceptionSeeds.
 func modelSeeds(t *testing.T) []uint64 {
 	if s := os.Getenv("SHADEWRIGHT_MODEL_SEED"); s != "" {
 		seed, err := strconv.ParseUint(s, 10, 64)
@@ -262,7 +269,7 @@ func modelSeeds(t *testing.T) []uint64 {
 		n = 90
 	}
 	seeds := make([]uint64, 0, n+len(modelGoneSeeds)+len(modelUnsettledSeeds)+len(modelExceptionSeeds)+
-		len(modelExitSeeds))
+		len(modelExitSeeds)+len(modelMergedExceptionSeeds))
 	for i := range n {
 		seeds = append(seeds, uint64(i+1))
 	}
@@ -274,6 +281,7 @@ func modelSeeds(t *testing.T) []uint64 {
 	seeds = append(seeds, modelUnsettledSeeds...)
 	seeds = append(seeds, modelExceptionSeeds...)
 	seeds = append(seeds, modelExitSeeds...)
+	seeds = append(seeds, modelMergedExceptionSeeds...)
 	if s := os.Getenv("SHADEWRIGHT_MODEL_SEED_RANGE"); s != "" {
 		from, to, _ := strings.Cut(s, "-")
 		a, errA := strconv.ParseUint(from, 10, 64)
@@ -331,6 +339,14 @@ func TestGitWaitModel(t *testing.T) {
 			t.Errorf("property \"stopped holder\" never checked a look whose Git reads failed on the fixed seeds: a " +
 				"change of the model's events no longer draws a failed read of a stopped holder kept by another pull " +
 				"request (#1008)")
+		}
+		modelMergedExceptions.mu.Lock()
+		defer modelMergedExceptions.mu.Unlock()
+		t.Logf("looks a stop exception took over while the pull request was merged, checked: %d",
+			modelMergedExceptions.count)
+		if fixedSeeds && modelMergedExceptions.count == 0 && !t.Failed() {
+			t.Errorf("property \"stop exception merge\" was never reached on the fixed seeds: a change of the model's " +
+				"events no longer draws a stop exception on a merged pull request (#1008)")
 		}
 		if fixedSeeds && modelHeldChecks.exceptions == 0 && !t.Failed() {
 			t.Errorf("property \"stopped holder\" never checked a look a stop exception took over on the fixed seeds: " +
@@ -2169,6 +2185,39 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	m.stopCheckProperty(live)
 	m.goneCheckProperty(live)
 	m.stoppedHolderProperty(live, err, faulted)
+	m.mergedExceptionProperty(live)
+}
+
+// modelMergedExceptions counts, over every seed of a run, the looks a stop exception took over while the request's
+// own pull request was merged that mergedExceptionProperty checked; TestGitWaitModel fails on the fixed seed set when
+// it is 0.
+var modelMergedExceptions struct {
+	mu    sync.Mutex
+	count int
+}
+
+// mergedExceptionProperty ("stop exception merge", decision of 2026-11-21 on #1008): a look that a stop exception took
+// over writes the stop's failed review check only after a read in that look showed the request's own pull request
+// open and not merged. The model's events run between reconciles, so a pull request the host shows merged after the
+// look was merged for every read of it: such a look adds no failed check of the stop on the head the request recorded
+// before it, whatever its step did (recorded the merge, waited for its merge commit, waited for another request's
+// record, or failed a read).
+func (m *modelWorld) mergedExceptionProperty(live *api.RemediationRequest) {
+	m.mu.Lock()
+	exception := m.exceptionLook
+	m.mu.Unlock()
+	cr, found := m.pr()
+	if !exception || !found || cr.State != providers.ChangeRequestMerged || m.headBefore == "" {
+		return
+	}
+	modelMergedExceptions.mu.Lock()
+	modelMergedExceptions.count++
+	modelMergedExceptions.mu.Unlock()
+	if n := stopChecks(m.g.CheckRuns(m.headBefore)); n > m.stopChecksBefore {
+		m.fatalf("stop exception merge: a look a stop exception took over wrote the stop's failed check on %.12s "+
+			"(%d before, %d after) while its pull request #%d is merged (phase %s, merge recorded %t)", m.headBefore,
+			m.stopChecksBefore, n, cr.Number, live.Status.Phase, mergeRecorded(live))
+	}
 }
 
 // modelHeldChecks counts, over every seed of a run, the looks of a stopped holder that stoppedHolderProperty checked,

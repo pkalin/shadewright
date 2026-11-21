@@ -160,13 +160,18 @@ func cancelRecorded(rr *remediationv1alpha1.RemediationRequest, reason string) b
 //
 // The lock is released only by a later read of the branch that finds no open pull request that may deliver the
 // change (checkHeld, openHolding); the request stays Cancelled with the reason of the cancel, on Approved.
+//
+// mayWrite tells checkHeld's exit that the step leaves the pull request it found open recorded, open or closed by its
+// close, never merged, with every write of the step through (settleStopException, #1008): a merge never does.
 func (r *RemediationRequestReconciler) settleCancelled(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	v changeVerdict, reason string) (reconcile.Result, error) {
+	v changeVerdict, reason string) (res reconcile.Result, mayWrite bool, err error) {
 	switch {
 	case v.rule().stopException == stopExceptMerged:
-		return r.followCancelledMerge(ctx, rr, v.pr)
+		res, err := r.followCancelledMerge(ctx, rr, v.pr)
+		return res, false, err
 	case !cancelRecorded(rr, reason):
-		return r.recordCancelledOpen(ctx, rr, v.pr, reason)
+		res, err := r.recordCancelledOpen(ctx, rr, v.pr, reason)
+		return res, err == nil && rr.Status.PullRequest != nil, err
 	}
 	return r.closeCancelled(ctx, rr, reason)
 }
@@ -273,17 +278,20 @@ func keepCancelReason(rr *remediationv1alpha1.RemediationRequest, reason, found 
 //     asked for or with the error backoff. That write changes PullRequestNotClosed only, which wakes nothing
 //     (skipOwnMarks), so it never cuts the delay short.
 //   - any other failure (the settings or the request could not be read): returned for the error backoff.
+//
+// mayWrite (settleStopException, #1008) is true only after a close that worked, a refusal of the close itself, or a
+// pull request open on another base (closeShowedOpen), with every write of the step through.
 func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	reason string) (reconcile.Result, error) {
+	reason string) (res reconcile.Result, mayWrite bool, err error) {
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr),
 		"pullRequest", rr.Status.PullRequest.Number)
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-	err := r.closeChangeRequest(cleanCtx, rr)
+	err = r.closeChangeRequest(cleanCtx, rr)
 	// A Git read that ran out of the cleanup's time is still that read, retried as one (keepGitRead).
 	err = keepGitRead(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
 	if ctx.Err() != nil {
-		return reconcile.Result{}, err
+		return reconcile.Result{}, false, err
 	}
 	_, isCluster := errors.AsType[*clusterError](err)
 	switch {
@@ -292,29 +300,31 @@ func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *r
 		clearNotClosed(rr)
 		resume(rr)
 		if err := r.Status().Update(ctx, rr); err != nil {
-			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+			return reconcile.Result{}, false, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
+				rr.Namespace, rr.Name, err)
 		}
 		log.Info("Closed the pull request of a cancelled RemediationRequest")
-		return reconcile.Result{RequeueAfter: stepDelay}, nil
+		return reconcile.Result{RequeueAfter: stepDelay}, true, nil
 	case errors.Is(err, freshness.ErrPaused):
-		return r.waitWhilePaused(ctx, rr)
+		res, err := r.waitWhilePaused(ctx, rr)
+		return res, false, err
 	case errors.Is(err, errOpenElsewhere):
 		// Open on a base a person moved it to (#892): nothing is closed there. The lock's recheck keeps the lock
 		// while it is open, and TargetHeld says where.
 		log.Info("Closed nothing for a cancelled RemediationRequest: its pull request is open on another base branch")
-		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+		return reconcile.Result{RequeueAfter: heldRecheckInterval}, true, nil
 	case errors.Is(err, errChangeRequestNotOurs):
 		// Looked at again on the lock's recheck, as any open pull request of the branch: never at once, since the
 		// same read would find it again.
 		log.Info("Closed nothing for a cancelled RemediationRequest: its pull request is not its own any more")
-		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+		return reconcile.Result{RequeueAfter: heldRecheckInterval}, false, nil
 	case isCluster, errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged),
 		errors.Is(err, freshness.ErrRepositoryUnusable),
 		stepOf(err).step == stepOther && !errors.Is(err, context.DeadlineExceeded):
 		// Not a step of the Git host: the next read of the branch says what the repository allows
 		// (PullRequestUnreadable), and a failed read of the cluster (the settings, the request) goes to the error
 		// backoff. The cleanup's deadline is a step of the Git host that did not answer.
-		return reconcile.Result{}, err
+		return reconcile.Result{}, false, err
 	}
 	s := stepOf(err)
 	s.reason, _ = reinstalledReason(err)
@@ -323,7 +333,7 @@ func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *r
 	changed, event := r.setRefused(rr, want)
 	if changed {
 		if werr := r.Status().Update(ctx, rr); werr != nil {
-			return reconcile.Result{}, errors.Join(err, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
+			return reconcile.Result{}, false, errors.Join(err, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
 				rr.Namespace, rr.Name, werr))
 		}
 		if event {
@@ -333,9 +343,12 @@ func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *r
 	log.Info("Could not close the pull request of a cancelled RemediationRequest; kept the target lock and tried "+
 		"again", "reason", s.reason, "error", err.Error())
 	if refused {
-		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+		// Only a refusal of the close itself, after the read that found the pull request open, lets the exit write;
+		// a refused read does not (closeShowedOpen).
+		return reconcile.Result{RequeueAfter: heldRecheckInterval}, closeShowedOpen(err), nil
 	}
-	return r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
+	res, err = r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
+	return res, false, err
 }
 
 // cancelNotClosedCondition is condition PullRequestNotClosed for the recorded pull request of a request cancelled

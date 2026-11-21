@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,13 @@ const exitTouched = "test.shadewright.io/exit-touched"
 
 // setByTest is the message of a condition a test sets.
 const setByTest = "set by the test"
+
+// The names of the cases of the three stop exceptions that close the request's own pull request.
+const (
+	expiredCase = "the cleanup of an expired request whose own pull request is open"
+	staleCase   = "the retried close after a stale cleanup stopped on a refusal"
+	cancelCase  = "a cancel settled for its Incident"
+)
 
 // stopExceptionWorld is a stopped holder (lock held, reviewer hints on) whose own pull request is open on the target
 // branch with a passing review check on its recorded head, written before the stop, and another pull request from its
@@ -201,9 +209,9 @@ func TestStopExceptionLookFailsTheCheckInThatLook(t *testing.T) {
 		name string
 		stop func(r *RemediationRequestReconciler, g *fakegit.Git, rr *api.RemediationRequest)
 	}{
-		{name: "the cleanup of an expired request whose own pull request is open", stop: expiredStop},
-		{name: "the retried close after a stale cleanup stopped on a refusal", stop: staleStop},
-		{name: "a cancel settled for its Incident", stop: cancelStop},
+		{name: expiredCase, stop: expiredStop},
+		{name: staleCase, stop: staleStop},
+		{name: cancelCase, stop: cancelStop},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, g, get, head := stopExceptionWorld(t, tc.stop)
@@ -224,11 +232,11 @@ func TestStopExceptionLookWithAFailedReadWritesNoCheck(t *testing.T) {
 		// next is whether the next look, with the reads answering, still owes the check (no merge is recorded).
 		next bool
 	}{
-		{name: "the cleanup of an expired request whose own pull request is open", stop: expiredStop,
+		{name: expiredCase, stop: expiredStop,
 			fail: func(g *fakegit.Git) { failCall(g, opGet, 2) }, next: true},
-		{name: "the retried close after a stale cleanup stopped on a refusal", stop: staleStop,
+		{name: staleCase, stop: staleStop,
 			fail: func(g *fakegit.Git) { failCall(g, opGet, 2) }, next: true},
-		{name: "a cancel settled for its Incident", stop: cancelStop,
+		{name: cancelCase, stop: cancelStop,
 			fail: func(g *fakegit.Git) { failCall(g, opGet, 2) }, next: true},
 		{name: "the record of a merge whose check at the merge fails to read", stop: func(
 			_ *RemediationRequestReconciler, g *fakegit.Git, rr *api.RemediationRequest) {
@@ -428,4 +436,234 @@ func TestStopExceptionExitCarriesItsOutcomeOverAConflict(t *testing.T) {
 	if failed != 1 {
 		t.Fatalf("check runs %+v: want the failed check written once", g.CheckRuns(head))
 	}
+}
+
+// refuseCall makes the n-th call (from 1) of op on g refused (403), and every other call answer.
+func refuseCall(g *fakegit.Git, op string, n int) {
+	calls := 0
+	g.SetFail(func(got string) error {
+		if got != op {
+			return nil
+		}
+		calls++
+		if calls == n {
+			return forbidden()
+		}
+		return nil
+	})
+}
+
+// #1008, decision of 2026-11-21 (head adcddc6a): a stop exception's look writes the stopped holder's failed check only
+// when its step says it may, after its read showed the request's own pull request open and not merged. A step whose
+// read of the pull request the Git host refused (403) says nothing of it: that look writes no check, and the next look
+// whose reads answer writes it. On the build before, the expired cleanup and the cancel wrote it in the look with the
+// refused read, since no failed Git read marked that look.
+func TestStopExceptionLookWithARefusedReadWritesNoCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(r *RemediationRequestReconciler, g *fakegit.Git, rr *api.RemediationRequest)
+	}{
+		{name: expiredCase, stop: expiredStop},
+		{name: staleCase, stop: staleStop},
+		{name: cancelCase, stop: cancelStop},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, get, head := stopExceptionWorld(t, tc.stop)
+			// The look's own read answers; the step's read of the pull request before its close is refused.
+			refuseCall(g, opGet, 2)
+			wantNoStopCheck(t, g, runStopExceptionLook(t, r, get), head)
+			g.SetFail(nil)
+			if _, err := r.checkHeld(context.Background(), get()); err != nil {
+				t.Fatalf("checkHeld after the reads answer again: %v", err)
+			}
+			wantStopCheckWritten(t, g, get(), head)
+		})
+	}
+}
+
+// #1008: a refusal (403) of the close itself comes after the step's read found the pull request open, so that look
+// writes the stopped holder's failed check, one case per stop exception that closes. A close that stays refused would
+// otherwise leave the pass written before the stop last on the head for as long as the refusal lasts.
+func TestStopExceptionLookWithARefusedCloseFailsTheCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(r *RemediationRequestReconciler, g *fakegit.Git, rr *api.RemediationRequest)
+	}{
+		{name: expiredCase, stop: expiredStop},
+		{name: staleCase, stop: staleStop},
+		{name: cancelCase, stop: cancelStop},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, get, head := stopExceptionWorld(t, tc.stop)
+			refuseCall(g, opClose, 1)
+			wantStopCheckWritten(t, g, runStopExceptionLook(t, r, get), head)
+		})
+	}
+}
+
+// mergedStaleStop is the stop of a request whose stale plan's pull request was merged before its cleanup closed it:
+// the look records the merge as a stale plan's (recordStoppedMerge). withCommit says whether the host reports the
+// merge commit yet.
+func mergedStaleStop(t *testing.T, withCommit bool) func(*RemediationRequestReconciler, *fakegit.Git,
+	*api.RemediationRequest) {
+	return func(_ *RemediationRequestReconciler, g *fakegit.Git, rr *api.RemediationRequest) {
+		setFalseCondition(rr, api.ConditionApproved, ReasonPullRequestOpened)
+		n := rr.Status.PullRequest.Number
+		if _, err := g.MergeWithCommit(n); err != nil {
+			t.Fatal(err)
+		}
+		if !withCommit {
+			// A host that reports no merge commit yet.
+			if err := g.SetMergeCommit(n, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// #1008, decision of 2026-11-21: the record of a merge that waits for the merge commit writes no failed check of the
+// stop: the head is on the target branch, where neither ADR-0046 nor ADR-0028 section 5 puts a check. On the build
+// before, that look wrote the stop's failed check on the merged head while GitReadRetry said the read was retried.
+func TestStopExceptionLookWaitingForTheMergeCommitWritesNoCheck(t *testing.T) {
+	r, g, get, head := stopExceptionWorld(t, mergedStaleStop(t, false))
+	for range 2 {
+		live := runStopExceptionLook(t, r, get)
+		wantNoStopCheck(t, g, live, head)
+		if mergeRecorded(live) {
+			t.Fatalf("phase %s: the merge was recorded without its merge commit", live.Status.Phase)
+		}
+	}
+}
+
+// #1008, decision of 2026-11-21, the record of a merge and the read of who records it after a handoff: no look of
+// such a stop exception writes the failed check, also once the reads answer, since the pull request is merged. The look
+// whose reads answer records the merge (or leaves it to the request that records it) and writes nothing, and no
+// ReviewCheckNotFailed says a check is owed.
+func TestStopExceptionMergeLooksNeverWriteTheCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(r *RemediationRequestReconciler, g *fakegit.Git, rr *api.RemediationRequest)
+		fail func(g *fakegit.Git)
+	}{
+		{name: "the record of a stale plan's merge", stop: mergedStaleStop(t, true),
+			fail: func(g *fakegit.Git) { failOp(g, opCheckMerged) }},
+		{name: "who records a merge after an aborted handoff", stop: abortedHandoffMerge(t),
+			fail: func(g *fakegit.Git) { failOp(g, opParents) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, get, head := stopExceptionWorld(t, tc.stop)
+			tc.fail(g)
+			wantNoStopCheck(t, g, runStopExceptionLook(t, r, get), head)
+			g.SetFail(nil)
+			taken := 0
+			r.stopExceptionTaken = func() { taken++ }
+			if _, err := r.checkHeld(context.Background(), get()); err != nil {
+				t.Fatalf("checkHeld after the reads answer again: %v", err)
+			}
+			if taken == 0 {
+				t.Fatal("no stop exception took the look whose reads answered over")
+			}
+			live := get()
+			wantNoStopCheck(t, g, live, head)
+			if live.Status.Phase == api.PhaseNeedsIntervention && !mergeRecorded(live) &&
+				meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry) != nil {
+				t.Fatalf("conditions %v: the look whose reads answered still retries a read", live.Status.Conditions)
+			}
+		})
+	}
+}
+
+// abortedHandoffMerge is the stop of a request whose handoff to a replacement was aborted, and whose pull request was
+// merged with a commit on top of its recorded head: who records the merge is read from the branch (stoppedMergeOwner).
+func abortedHandoffMerge(t *testing.T) func(*RemediationRequestReconciler, *fakegit.Git, *api.RemediationRequest) {
+	return func(r *RemediationRequestReconciler, g *fakegit.Git, rr *api.RemediationRequest) {
+		ctx := context.Background()
+		repl := &api.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Name: rr.Name + "-replacement",
+			Namespace: rr.Namespace}, Spec: rr.Spec}
+		if err := r.Create(ctx, repl); err != nil {
+			t.Fatal(err)
+		}
+		repl.UID = "5e771e00-0000-4000-8000-000000000002"
+		if err := r.Update(ctx, repl); err != nil {
+			t.Fatal(err)
+		}
+		rr.Status.Handoff = &api.Handoff{To: &api.OutgoingHandoff{Name: api.Name(repl.Name),
+			UID: api.UID(repl.UID), Phase: api.HandoffAborted, ExpectedHead: rr.Status.PullRequest.HeadSHA}}
+		cr, err := g.GetChangeRequest(ctx, rr.Status.PullRequest.Number)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := g.Push(cr.HeadBranch, sourcePath, []byte("pushed by the replacement\n")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := g.MergeWithCommit(cr.Number); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// #1008, decision of 2026-11-21 (design 6, the handoff): a stopped replacement that took the pull request over, whose
+// pull request was merged with the head its predecessor recorded while the predecessor still holds the lock and has
+// not recorded that merge yet, waits for the predecessor's record (ownerPredecessorPending) and writes nothing to Git,
+// the failed check of its stop included. On the build before, that look wrote the stop's failed check on the
+// replacement's recorded head.
+func TestStoppedReplacementWaitingForThePredecessorsRecordWritesNoCheck(t *testing.T) {
+	r, g, get, head := stopExceptionWorld(t, func(r *RemediationRequestReconciler, g *fakegit.Git,
+		rr *api.RemediationRequest) {
+		ctx := context.Background()
+		pred := &api.RemediationRequest{ObjectMeta: metav1.ObjectMeta{Name: rr.Name + "-predecessor",
+			Namespace: rr.Namespace}, Spec: rr.Spec}
+		if err := r.Create(ctx, pred); err != nil {
+			t.Fatal(err)
+		}
+		pred.UID = "5e771e00-0000-4000-8000-000000000003"
+		if err := r.Update(ctx, pred); err != nil {
+			t.Fatal(err)
+		}
+		cr, err := g.GetChangeRequest(ctx, rr.Status.PullRequest.Number)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The predecessor's own head: a commit a person put back on the branch, then merged.
+		predHead, err := g.Push(cr.HeadBranch, sourcePath, []byte("the predecessor's change\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pred.Status = *rr.Status.DeepCopy()
+		pred.Status.PullRequest.HeadSHA = predHead
+		pred.Status.PullRequest.ReviewCheck = nil
+		pred.Status.Handoff = nil
+		if err := r.Status().Update(ctx, pred); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := g.MergeWithCommit(cr.Number); err != nil {
+			t.Fatal(err)
+		}
+		rr.Status.Handoff = &api.Handoff{From: &api.IncomingHandoff{Name: api.Name(pred.Name), UID: api.UID(pred.UID),
+			Hint:  api.HintRef{Source: api.HintSourceGitHub, CommentID: 1, Digest: strings.Repeat("a", 64)},
+			Phase: api.HandoffDone}}
+		setFalseCondition(rr, api.ConditionApproved, ReasonPullRequestOpened)
+	})
+	owner, err := r.stoppedMergeOwner(context.Background(), get(), changeVerdict{state: changeMerged,
+		pr: providers.ChangeRequest{Number: get().Status.PullRequest.Number, HeadSHA: lastHead(t, g, get()),
+			State: providers.ChangeRequestMerged, BaseBranch: mainBranch}})
+	if err != nil || owner != ownerPredecessorPending {
+		t.Fatalf("who records the merge: %v, %v; want ownerPredecessorPending, or the case does not reach its path",
+			owner, err)
+	}
+	live := runStopExceptionLook(t, r, get)
+	wantNoStopCheck(t, g, live, head)
+	if mergeRecorded(live) {
+		t.Fatalf("phase %s: the replacement recorded a merge its predecessor records", live.Status.Phase)
+	}
+}
+
+// lastHead is the head of rr's recorded pull request as the host shows it now.
+func lastHead(t *testing.T, g *fakegit.Git, rr *api.RemediationRequest) string {
+	t.Helper()
+	cr, err := g.GetChangeRequest(context.Background(), rr.Status.PullRequest.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cr.HeadSHA
 }

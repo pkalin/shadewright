@@ -280,8 +280,6 @@ func (r *RemediationRequestReconciler) retryGitRead(ctx context.Context, rr *api
 	if ctx.Err() != nil || !gitReadFailure(err) {
 		return reconcile.Result{}, err
 	}
-	// A stopped holder's look with a failed read writes no failed review check (checkHeld, ADR-0046 limit (b)).
-	markReadFailed(ctx)
 	now := r.now()
 	op := readOp(err)
 	key := client.ObjectKeyFromObject(rr)

@@ -2135,16 +2135,18 @@ func expiredUncleaned(rr *remediationv1alpha1.RemediationRequest) bool {
 // (expiredCloseFailed); a pull request found merged meanwhile is recorded (endMerged); a
 // close the Git host refuses, or one that cannot be made on this entry (the target branch changed, the repository
 // is unusable), ends the cleanup with reason PullRequestDeadlineCleanupRefused and a message that asks a person to
-// close it. The next look settles the lock.
+// close it. The next look settles the lock. mayWrite tells checkHeld's exit that the close showed the pull request
+// open or closed it, never merged (closeShowedOpen), and every write of the step went through; any other return is
+// false (settleStopException, #1008).
 func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	reconcile.Result, error) {
+	res reconcile.Result, mayWrite bool, err error) {
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-	err := r.closeChangeRequest(cleanCtx, rr)
+	err = r.closeChangeRequest(cleanCtx, rr)
 	err = keepGitRead(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
 	if done, derr := r.endUnrecordedMerge(ctx, rr, err); done {
 		if derr == nil || errors.Is(derr, errStopped) {
-			return reconcile.Result{RequeueAfter: stepDelay}, nil
+			return reconcile.Result{RequeueAfter: stepDelay}, false, nil
 		}
 		err = derr
 	}
@@ -2155,17 +2157,18 @@ func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *r
 			// The close works again: the cleanup no longer fails, and the next look settles the lock.
 			closeNoLongerFailing(rr)
 			if uerr := r.Status().Update(ctx, rr); uerr != nil {
-				return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
+				return reconcile.Result{}, false, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
 					rr.Name, uerr)
 			}
 		}
 		logf.FromContext(ctx).Info("Closed the pull request of an expired RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr))
-		return reconcile.Result{RequeueAfter: stepDelay}, nil
+		return reconcile.Result{RequeueAfter: stepDelay}, true, nil
 	case ctx.Err() != nil || isClusterError(err):
-		return reconcile.Result{}, err
+		return reconcile.Result{}, false, err
 	case errors.Is(err, freshness.ErrPaused):
-		return r.waitWhilePaused(ctx, rr)
+		res, err := r.waitWhilePaused(ctx, rr)
+		return res, false, err
 	case refused && isUnknownChange(err):
 		what = "the Git host refused (" + reason + ") to read the pull requests of the branch, so none was closed"
 	case refused:
@@ -2182,16 +2185,20 @@ func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *r
 	case gitReadFailure(err) && !expiredCleanupOver(rr, r.now()):
 		// A failed read of the cleanup: a visible retry at the pace of a stopped holder's looks. Past the cutoff it is
 		// the one more close that failed, which ends the cleanup (expiredCloseFailed).
-		return r.heldUnsettled(ctx, rr, unknownChange(err), err, false)
+		res, err := r.heldUnsettled(ctx, rr, unknownChange(err), err, false)
+		return res, false, err
 	default:
 		// A close the Git host failed to answer (a 5xx, a rate limit, a conflict, a token it does not give): retried
 		// visibly and within a bound (expiredCloseFailed).
-		return r.expiredCloseFailed(ctx, rr, err)
+		res, err := r.expiredCloseFailed(ctx, rr, err)
+		return res, false, err
 	}
-	// Decided on for good: nothing is closed by the executor; the lock stays until none is found open.
-	return reconcile.Result{}, r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
+	// Decided on for good: nothing is closed by the executor; the lock stays until none is found open. Only a refusal
+	// of the close itself, or a pull request open on another base, shows the pull request open in this look.
+	serr := r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
 		ReasonPullRequestDeadlineCleanupRefused, "The pull request was not opened before the deadline, and "+what+
 			"; if one is open, close it by hand. The target stays locked until none is found open"))
+	return reconcile.Result{}, serr == nil && closeShowedOpen(err), serr
 }
 
 // messageDeadlineCloseFailing is the message of an expired request whose close of its own pull request failed and is

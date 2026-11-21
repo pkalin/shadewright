@@ -32,6 +32,9 @@ import (
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 )
 
+// setByTest is the message of a condition a test sets.
+const setByTest = "set by the test"
+
 // stopExceptionWorld is a stopped holder (lock held, reviewer hints on) whose own pull request is open on the target
 // branch with a passing review check on its recorded head, written before the stop, and another pull request from its
 // branch, without the marker, open on the target branch too: that one keeps the lock once the own one is closed or
@@ -74,7 +77,7 @@ func stopExceptionWorld(t *testing.T, stop func(r *RemediationRequestReconciler,
 // setFalseCondition sets a False condition of type kind with reason on rr, in memory.
 func setFalseCondition(rr *api.RemediationRequest, kind, reason string) {
 	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: kind, Status: metav1.ConditionFalse,
-		Reason: reason, Message: "set by the test"})
+		Reason: reason, Message: setByTest})
 }
 
 // #1008, closing ADR-0046 limit (c): a look of a stopped holder that a stop exception takes over, and that leaves the
@@ -96,7 +99,7 @@ func TestStopExceptionLookFailsTheCheckInThatLook(t *testing.T) {
 			rr.Status.Phase = api.PhaseExpired
 			setFalseCondition(rr, api.ConditionApproved, ReasonPullRequestDeadline)
 			meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionCleanupFailing,
-				Status: metav1.ConditionTrue, Reason: ReasonCleanupFailed, Message: "set by the test",
+				Status: metav1.ConditionTrue, Reason: ReasonCleanupFailed, Message: setByTest,
 				LastTransitionTime: metav1.NewTime(time.Now().Add(-cleanupFailingBound - time.Hour))})
 		}},
 		{name: "the retried close after a stale cleanup stopped on a refusal", stop: func(
@@ -196,7 +199,7 @@ func TestStopExceptionLookUnderAPauseWritesNoCheck(t *testing.T) {
 		rr.Status.Phase = api.PhaseExpired
 		setFalseCondition(rr, api.ConditionApproved, ReasonPullRequestDeadline)
 		meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionCleanupFailing,
-			Status: metav1.ConditionTrue, Reason: ReasonCleanupFailed, Message: "set by the test",
+			Status: metav1.ConditionTrue, Reason: ReasonCleanupFailed, Message: setByTest,
 			LastTransitionTime: metav1.NewTime(time.Now().Add(-cleanupFailingBound - time.Hour))})
 	})
 	setPaused(t, r, true)

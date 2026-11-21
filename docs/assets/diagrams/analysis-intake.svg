@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 600" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1130 380" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Scoring analysis records outside the cluster</title>
-  <desc id="d">Overview of ADR-0047. The analyzer of the www cluster, which we do not run, creates a record in its records container. Blob created goes through an Event Grid system topic to a storage queue. A Container Apps job that scales to zero takes one message per execution. It checks the size and the schema, runs the redactor again and quarantines the record on any hit before any model call, ends without a model call when the record is already scored or the month's cap is reached, then makes one judge call from the other model family than the analysis, with allowlisted fields, a fixed prompt, a fixed answer schema and one tool, a cross-check by a second model asked at most once. It creates the score and deletes the message. The job runs in the intake's own small virtual network and reaches the records account through a storage service endpoint. Before each model call it creates a spend reservation named with the provider, the message, the dequeue count, the call index and the tokens; a monthly cap applies to each provider. The family of the judge is read from the model IDs of the record. The keys are put in the vault out of band and resolved by the platform, up to 30 minutes behind the vault. Anthropic a capped key; OpenAI a capped key; each capped at 40 to 50 USD a month in its provider's console and in code, paid from the providers' allowances, not Azure credits. Scores, reservations and quarantined records are in the intake's own containers with a retention period. One managed identity reads records, reads and creates scores, writes quarantine, processes one queue and reads the Key Vault secrets. It has no storage key and no cluster credential.</desc>
-  <defs>
+  <desc id="d">Overview of ADR-0047, left to right. The analyzer of the www cluster, which we do not run, creates a record in the records container. A blob created event goes through Event Grid to a storage queue. A Container Apps job takes one message at a time, makes one call to the judge model (Anthropic or OpenAI, the other family than the analysis) and creates a score in the scores container. Beside the flow, the job reads its model keys from Key Vault and puts a record it refuses in a quarantine container. The size and schema checks, the redactor, the spend reservations and monthly caps, the virtual network, the identity and its grants, and the retention periods are in the ADR text, not in the picture.</desc>
+    <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
     <style>
@@ -11,73 +11,48 @@
       .h{fill:#f1edff;font-size:15px;font-weight:650}
       .s{fill:#a9a4c4;font-size:12.5px}
       .f{stroke:#a879ff;stroke-width:1.8;fill:none}
-      .no{fill:#ff8fa3;font-size:12.5px;font-weight:600}
-      .tag{fill:#c6a8ff;font-size:12.5px;font-weight:600}
+      .l{fill:#c6a8ff;font-size:12.5px;font-weight:600}
     </style>
   </defs>
-  <rect width="1120" height="600" rx="18" fill="#0e0e16"/>
+  <rect width="1130" height="380" rx="18" fill="#0e0e16"/>
 
-  <rect class="ext" x="36" y="30" width="200" height="86" rx="12"/>
-  <text class="h" x="52" y="58">Analyzer, www cluster</text>
-  <text class="s" x="52" y="80">not run by us; creates a record</text>
-  <text class="s" x="52" y="98">(create-only), redacted</text>
-
-  <rect class="ext" x="286" y="30" width="200" height="86" rx="12"/>
-  <text class="h" x="302" y="58">Records container</text>
-  <text class="s" x="302" y="80">one container, configured;</text>
-  <text class="s" x="302" y="98">reached by service endpoint</text>
-
-  <rect class="ext" x="536" y="30" width="230" height="86" rx="12"/>
-  <text class="h" x="552" y="58">Event Grid system topic</text>
-  <text class="s" x="552" y="80">blob created, that container only;</text>
-  <text class="s" x="552" y="98">sends the event to the queue</text>
-
-  <rect class="box" x="816" y="30" width="268" height="86" rx="12"/>
-  <text class="h" x="832" y="58">Storage queue</text>
-  <text class="s" x="832" y="80">at least once; a message is deleted</text>
-  <text class="s" x="832" y="98">only after the score is written</text>
-
-  <path class="f" d="M236 73H286" marker-end="url(#a)"/>
-  <path class="f" d="M486 73H536" marker-end="url(#a)"/>
-  <path class="f" d="M766 73H816" marker-end="url(#a)"/>
-  <path class="f" d="M950 116V150H500V160" marker-end="url(#a)"/>
-
-  <rect class="key" x="36" y="160" width="728" height="236" rx="12"/>
-  <text class="tag" x="54" y="184">CONTAINER APPS JOB IN ITS OWN VNET, SCALES TO ZERO, ONE MESSAGE PER RUN, NO INGRESS</text>
-  <text class="h" x="54" y="208">Before any model call</text>
-  <text class="s" x="54" y="228">1  Name and size: bad ID or over 1 MiB, quarantine, not downloaded</text>
-  <text class="s" x="54" y="246">2  Schema: known fields and version only; otherwise quarantine</text>
-  <text class="s" x="54" y="264">3  Redactor Clean on every string and key (id, names kept by shape only); a hit quarantines</text>
-  <text class="s" x="54" y="282">4  Already scored (ID and hash) or provider's month cap reached: no model call</text>
-  <text class="h" x="54" y="312">Then</text>
-  <text class="s" x="54" y="328">5  Reserve each call's tokens, then one judge call: allowlisted fields,</text>
-  <text class="s" x="54" y="346">   fixed prompt and schema, one tool (cross_check, once, counted in code).</text>
-  <text class="s" x="54" y="366">6  Create the score (create-only), then delete the message; a failed read retries.</text>
-  <text class="s" x="54" y="382">   Cap refused: budget entry. Retries spent: error entry. Neither is a score.</text>
-
-  <path class="f" d="M764 230H800" marker-end="url(#a)"/>
-  <path class="f" d="M764 340H800" marker-end="url(#a)"/>
-
-  <rect class="ext" x="800" y="160" width="284" height="130" rx="12"/>
-  <text class="h" x="816" y="186">Judge: the other family</text>
-  <text class="s" x="816" y="208">Anthropic: a capped key</text>
-  <text class="s" x="816" y="226">OpenAI key, own project</text>
-  <text class="s" x="816" y="244">each capped 40 to 50 USD a month,</text>
-  <text class="s" x="816" y="262">paid from provider allowances</text>
-  <text class="s" x="816" y="280">cross-check: a second model, once</text>
-
-  <rect class="box" x="800" y="304" width="284" height="92" rx="12"/>
-  <text class="h" x="816" y="330">Scores and quarantine</text>
-  <text class="s" x="816" y="352">own containers and retention;</text>
-  <text class="s" x="816" y="370">also spend reservations by provider;</text>
-  <text class="s" x="816" y="386">30 and 365 days (proposed)</text>
-
-  <rect class="box" x="36" y="416" width="1048" height="80" rx="12"/>
-  <text class="tag" x="54" y="440">ONE MANAGED IDENTITY</text>
-  <text class="s" x="54" y="460">read the records container; read and create scores and reservations; write quarantine (no read); process one queue;</text>
-  <text class="s" x="54" y="478">read the Key Vault secrets (the two capped keys), each at its own scope; custom roles, no delete.</text>
-
-  <rect class="box" x="36" y="510" width="1048" height="64" rx="12"/>
-  <text class="no" x="54" y="536">Never</text>
-  <text class="s" x="54" y="556">a storage key, a write or delete on records, a cluster or Git credential, a role assignment right, any use of a score to decide an action.</text>
+  <rect class="ext" x="30" y="150" width="120" height="70" rx="12"/>
+  <text class="h" x="90.0" y="182.0" text-anchor="middle">Analyzer</text>
+  <text class="s" x="90.0" y="201.0" text-anchor="middle">www cluster</text>
+  <rect class="ext" x="220" y="150" width="120" height="70" rx="12"/>
+  <text class="h" x="280.0" y="182.0" text-anchor="middle">Records</text>
+  <text class="s" x="280.0" y="201.0" text-anchor="middle">container</text>
+  <rect class="ext" x="410" y="150" width="120" height="70" rx="12"/>
+  <text class="h" x="470.0" y="190.0" text-anchor="middle">Event Grid</text>
+  <rect class="box" x="600" y="150" width="120" height="70" rx="12"/>
+  <text class="h" x="660.0" y="190.0" text-anchor="middle">Queue</text>
+  <rect class="key" x="790" y="150" width="120" height="70" rx="12"/>
+  <text class="h" x="850.0" y="182.0" text-anchor="middle">Intake job</text>
+  <text class="s" x="850.0" y="201.0" text-anchor="middle">Container Apps</text>
+  <rect class="box" x="980" y="150" width="120" height="70" rx="12"/>
+  <text class="h" x="1040.0" y="182.0" text-anchor="middle">Scores</text>
+  <text class="s" x="1040.0" y="201.0" text-anchor="middle">container</text>
+  <rect class="ext" x="775" y="20" width="150" height="60" rx="12"/>
+  <text class="h" x="850.0" y="47.0" text-anchor="middle">Judge model</text>
+  <text class="s" x="850.0" y="66.0" text-anchor="middle">Anthropic or OpenAI</text>
+  <rect class="ext" x="585" y="20" width="150" height="60" rx="12"/>
+  <text class="h" x="660.0" y="55.0" text-anchor="middle">Key Vault</text>
+  <rect class="box" x="790" y="290" width="120" height="60" rx="12"/>
+  <text class="h" x="850.0" y="325.0" text-anchor="middle">Quarantine</text>
+  <path class="f" d="M150 185H220" marker-end="url(#a)"/>
+  <text class="l" x="185.0" y="177" text-anchor="middle">create</text>
+  <path class="f" d="M340 185H410" marker-end="url(#a)"/>
+  <text class="l" x="375.0" y="177" text-anchor="middle">created</text>
+  <path class="f" d="M530 185H600" marker-end="url(#a)"/>
+  <text class="l" x="565.0" y="177" text-anchor="middle">event</text>
+  <path class="f" d="M720 185H790" marker-end="url(#a)"/>
+  <text class="l" x="755.0" y="177" text-anchor="middle">message</text>
+  <path class="f" d="M910 185H980" marker-end="url(#a)"/>
+  <text class="l" x="945" y="177" text-anchor="middle">score</text>
+  <path class="f" d="M850 150V80" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="l" x="862" y="120">1 call</text>
+  <path class="f" d="M660 80V115H815V150" marker-end="url(#a)"/>
+  <text class="l" x="680" y="107">keys</text>
+  <path class="f" d="M850 220V290" marker-end="url(#a)"/>
+  <text class="l" x="862" y="260">on a hit</text>
 </svg>

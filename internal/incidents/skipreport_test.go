@@ -197,3 +197,96 @@ func TestDeletedIncidentForgetsItsReportedSkip(t *testing.T) {
 		t.Fatalf("the deleted Incident is still remembered: %+v", tr)
 	}
 }
+
+// A NotRecent written over an older not-due reason keeps that reason's lastTransitionTime, which can be before
+// the trigger loop began. When the answer of that write is lost, the write is remembered as pending and the
+// next pass that reads NotRecent reports it, once (#983).
+func TestLostNotRecentOverAnOlderReasonIsReportedOnce(t *testing.T) {
+	ns := namespace(t)
+	createIncident(t, ns, 1, withDueCondition(incidentStatus(35*time.Minute, 35*time.Minute, 0),
+		metav1.ConditionFalse, ReasonDebouncing))
+	createSettings(t, 2)
+	createBudget(t, ns, nil)
+	before := testutil.ToFloat64(notRecentSkips)
+	var lost atomic.Int32
+	_, rec, passes := startSkips(t, ns, func(obj client.Object) error {
+		inc := obj.(*remediationv1alpha1.Incident)
+		c := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
+		if c != nil && c.Reason == ReasonNotRecent && lost.Add(1) == 1 {
+			if !c.LastTransitionTime.Before(&metav1.Time{Time: triggerNow}) {
+				t.Errorf("transition time %v, want the older reason's, before the start", c.LastTransitionTime)
+			}
+			// The update lands, its answer does not.
+			if err := env.admin.Status().Update(context.Background(), obj); err != nil {
+				return err
+			}
+			return context.DeadlineExceeded
+		}
+		return nil
+	})
+	eventually(t, ns, 1, dueIs(false, ReasonNotRecent))
+	waitSkipEvent(t, rec)
+	passes.afterPasses(t, 3)
+	noEvent(t, rec, "a second event for one skip")
+	if lost.Load() != 1 {
+		t.Fatalf("%d NotRecent writes, want the one whose answer was lost", lost.Load())
+	}
+	if got := skipsSince(before); got != 1 {
+		t.Fatalf("skips counted %v, want 1", got)
+	}
+}
+
+// A pending NotRecent write whose next read shows another reason did not land: the pending mark is forgotten
+// without a report, so a NotRecent another process writes later (before this loop began) is not taken for it.
+func TestPendingNotRecentClearedByAnotherReason(t *testing.T) {
+	ns := namespace(t)
+	createIncident(t, ns, 1, withDueCondition(incidentStatus(35*time.Minute, 35*time.Minute, 0),
+		metav1.ConditionFalse, ReasonDebouncing))
+	createSettings(t, 2)
+	budget := createBudget(t, ns, nil)
+	before := testutil.ToFloat64(notRecentSkips)
+	var failed atomic.Int32
+	_, rec, passes := startSkips(t, ns, func(obj client.Object) error {
+		inc := obj.(*remediationv1alpha1.Incident)
+		c := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue)
+		if c == nil || c.Reason != ReasonNotRecent || failed.Add(1) != 1 {
+			return nil
+		}
+		// Without the budget ConfigMap every Incident is decided BudgetNotFound, so no later pass writes
+		// NotRecent, and this write fails without landing.
+		if err := env.admin.Delete(context.Background(), budget); err != nil {
+			t.Errorf("deleting the budget ConfigMap: %v", err)
+		}
+		return context.DeadlineExceeded
+	})
+	deadline := time.Now().Add(20 * time.Second)
+	for failed.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no NotRecent write")
+		}
+		time.Sleep(testTriggerInterval / 4)
+	}
+	// A pass reads another reason and forgets the pending mark.
+	passes.afterPasses(t, 2)
+	inc := &remediationv1alpha1.Incident{}
+	if err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(1))}, inc); err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue); c == nil || c.Reason == ReasonNotRecent {
+		t.Fatalf("condition %+v, want another not-due reason", c)
+	}
+	meta.SetStatusCondition(&inc.Status.Conditions, metav1.Condition{Type: ConditionAnalysisDue,
+		Status: metav1.ConditionFalse, Reason: ReasonNotRecent, Message: dueMessages[ReasonNotRecent],
+		ObservedGeneration: 1, LastTransitionTime: metav1.NewTime(triggerNow.Add(-time.Hour))})
+	if err := env.admin.Status().Update(t.Context(), inc); err != nil {
+		t.Fatal(err)
+	}
+	passes.afterPasses(t, 3)
+	noEvent(t, rec, "an event for a write that did not land")
+	if failed.Load() != 1 {
+		t.Fatalf("%d NotRecent writes, want the one that failed", failed.Load())
+	}
+	if got := skipsSince(before); got != 0 {
+		t.Fatalf("skips counted %v, want 0", got)
+	}
+}

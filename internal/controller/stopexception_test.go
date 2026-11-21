@@ -33,6 +33,9 @@ import (
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 )
 
+// exitTouched is the annotation a test writes between the exit's read and its write.
+const exitTouched = "test.shadewright.io/exit-touched"
+
 // setByTest is the message of a condition a test sets.
 const setByTest = "set by the test"
 
@@ -239,7 +242,7 @@ func TestStopExceptionExitCarriesItsOutcomeOverAConflict(t *testing.T) {
 			if err := c.Get(ctx, client.ObjectKeyFromObject(rr), other); err != nil {
 				return err
 			}
-			other.Annotations = map[string]string{"example.com/touched": "yes"}
+			other.Annotations = map[string]string{exitTouched: "1008"}
 			if err := c.Update(ctx, other); err != nil {
 				return err
 			}
@@ -254,7 +257,7 @@ func TestStopExceptionExitCarriesItsOutcomeOverAConflict(t *testing.T) {
 	if !touched {
 		t.Fatal("no status write recorded Stale: the case does not reach the exit's write")
 	}
-	if !staleOnHead(live) || live.Annotations["example.com/touched"] != "yes" {
+	if !staleOnHead(live) || live.Annotations[exitTouched] != "1008" {
 		t.Fatalf("Stale on head %t, annotations %v: want Stale recorded over the conflict and the annotation kept",
 			staleOnHead(live), live.Annotations)
 	}

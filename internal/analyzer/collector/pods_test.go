@@ -354,3 +354,104 @@ func TestOnlyOOMKilledFromStatusIsImmediate(t *testing.T) {
 		t.Errorf("an event with reason OOMKilled: Immediate = true, want false")
 	}
 }
+
+// deleting marks pod as being deleted, as the API server does on a delete while a finalizer holds it.
+func deleting(pod *corev1.Pod) *corev1.Pod {
+	at := metav1.NewTime(t0)
+	pod.DeletionTimestamp = &at
+	return pod
+}
+
+// A container that exits non-zero while its pod is being deleted was stopped by the deletion (137 after the
+// grace period, 143 on SIGTERM without a handler): no symptom. An OOM kill still is one (#966).
+func TestTerminationsOfADeletedPod(t *testing.T) {
+	cases := []struct {
+		name       string
+		deleted    bool
+		reason     string
+		exitCode   int32
+		wantReason string // empty: no observation
+	}{
+		{"deleted, killed after the grace period", true, reasonError, 137, ""},
+		{"deleted, exit on SIGTERM", true, reasonError, 143, ""},
+		{"deleted, any other code", true, reasonError, 1, ""},
+		{"deleted, OOMKilled", true, ReasonOOMKilled, 137, ReasonOOMKilled},
+		{"not deleted, 137", false, reasonError, 137, reasonError},
+		{"not deleted, 143", false, reasonError, 143, reasonError},
+		{"not deleted, OOMKilled", false, ReasonOOMKilled, 137, ReasonOOMKilled},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, _, pod := workload()
+			withTermination(pod, "containerd://x", c.reason, c.exitCode, t0)
+			// The current state too: status shows the stop of the deletion there until the pod is gone.
+			pod.Status.ContainerStatuses[0].State.Terminated = &corev1.ContainerStateTerminated{
+				ContainerID: "containerd://y", Reason: c.reason, ExitCode: c.exitCode, FinishedAt: metav1.NewTime(t0),
+			}
+			if c.deleted {
+				deleting(pod)
+			}
+			got := terminations(pod)
+			switch {
+			case c.wantReason == "" && len(got) != 0:
+				t.Fatalf("terminations = %+v, want none", got)
+			case c.wantReason != "" && (len(got) != 2 || got[0].reason != c.wantReason || got[1].reason != c.wantReason):
+				t.Fatalf("terminations = %+v, want two with reason %s", got, c.wantReason)
+			}
+			if hasPodSymptom(pod) != (c.wantReason != "") {
+				t.Error("the watch predicate disagrees with terminations")
+			}
+		})
+	}
+}
+
+// Two pods of one Deployment, each deleted by a rollout ten minutes apart with its container stopped at 137
+// and 143: the collector observes nothing, so no second sighting opens an Incident (#966). An OOM kill of a
+// third pod during its deletion is still observed.
+func TestRolloutStopsOfOneDeploymentObserveNothing(t *testing.T) {
+	d, rs, first := workload()
+	second := first.DeepCopy()
+	second.Name, second.UID = webPod+"-2", podUID+"-2"
+	third := first.DeepCopy()
+	third.Name, third.UID = webPod+"-3", podUID+"-3"
+	for _, p := range []*corev1.Pod{first, second, third} {
+		p.Finalizers = []string{testFinalizer}
+	}
+	h := newHarness(t, Config{}, d, rs, first, second, third)
+
+	stop := func(pod *corev1.Pod, id, reason string, code int32) {
+		t.Helper()
+		if err := h.cl.Delete(t.Context(), pod); err != nil {
+			t.Fatal(err)
+		}
+		var got corev1.Pod
+		if err := h.cl.Get(t.Context(), types.NamespacedName{Namespace: testNS, Name: pod.Name}, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.DeletionTimestamp == nil {
+			t.Fatal("the pod is not marked for deletion")
+		}
+		got.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name: containerApp,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ContainerID: id, Reason: reason, ExitCode: code, FinishedAt: metav1.NewTime(h.clock.Now()),
+			}},
+		}}
+		if err := h.cl.Status().Update(t.Context(), &got); err != nil {
+			t.Fatal(err)
+		}
+		h.reconcilePod(pod.Name)
+	}
+
+	h.clock.set(t0.Add(time.Minute))
+	stop(first, "containerd://first", reasonError, 137)
+	h.none()
+	h.clock.add(10 * time.Minute)
+	stop(second, "containerd://second", reasonError, 143)
+	h.none()
+
+	stop(third, "containerd://third", ReasonOOMKilled, 137)
+	if got := h.one(); got.Reason != ReasonOOMKilled || !got.Immediate {
+		t.Fatalf("OOM kill during deletion: %+v", got)
+	}
+}

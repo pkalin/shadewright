@@ -472,7 +472,10 @@ func (r *RemediationRequestReconciler) readClaimedMerge(ctx context.Context, rr 
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr), "verdict",
 		v.state.String())
 	if claim := gitWait(rr, waitMergeContent); claim != nil && claim.PullRequest != nil {
-		log = log.WithValues("pullRequest", claim.PullRequest.Number, "claimEnds", claim.Ends)
+		log = log.WithValues("pullRequest", claim.PullRequest.Number)
+		if claim.Ends != nil {
+			log = log.WithValues("claimEnds", claim.Ends.Time)
+		}
 	}
 	log.Info("Kept the claim of RemediationRequest on a merge of another head: the read of its branch recorded " +
 		"nothing; read again until the claim ends")

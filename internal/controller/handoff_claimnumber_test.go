@@ -241,7 +241,7 @@ func claimEndsDisagreed(t *testing.T, r *RemediationRequestReconciler, rr *api.R
 func TestClaimEndsWhenTheAnswersDisagreeByNumber(t *testing.T) {
 	r, g, _, rr, cr, move := claimAfterTheWatch(t)
 	g.SetFail(func(op string) error {
-		if op == "GetChangeRequest" {
+		if op == opGet {
 			return providers.ErrNotFound
 		}
 		return nil
@@ -255,7 +255,7 @@ func TestClaimEndsWhenTheBranchAnswerIsUntrusted(t *testing.T) {
 	r, g, p, rr, cr, move := claimAfterTheWatch(t)
 	remakePredecessor(t, r, p)
 	g.SetFail(func(op string) error {
-		if op == "ListChangeRequests" {
+		if op == opList {
 			return providers.ErrUntrustedAnswer
 		}
 		return nil

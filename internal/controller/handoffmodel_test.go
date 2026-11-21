@@ -1953,14 +1953,7 @@ func (m *hmWorld) reconcile(who string) {
 		m.fail("P7", "the reconcile of the %s asked to run again after %v, below the floor of a second", who,
 			res.RequeueAfter)
 	}
-	// P5: a claim on a merge of another head that stood past its own end is never handed to the error backoff for an
-	// answer of the Git host (decision of 2026-11-21 on #870, count 4): the reconcile ends without an error, so the
-	// claim ends there (endAfterLastRead). Only a failed Kubernetes call may return one.
-	if claimPast && err != nil && !faulted && !m.paused && !errors.Is(err, errHMCrash) && !isClusterError(err) &&
-		!apierrors.IsServiceUnavailable(err) {
-		m.fail("P5", "the claim of the %s stood past its own end and the reconcile returned %v to the error backoff",
-			who, err)
-	}
+	m.checkClaimNotBackedOff(who, claimPast, faulted, err)
 	// P5: a reconcile that could act ends every wait that stood past its own end at its start.
 	if after != nil && err == nil && !faulted && !m.paused {
 		for _, w := range before.Status.GitWaits {
@@ -2432,6 +2425,18 @@ func (m *hmWorld) noteClaimWithPredGone(who string, before *api.RemediationReque
 	if m.stored(hmPred) != nil {
 		// Made again under the same name (hRemakePred, decision of 2026-11-21 on #870).
 		m.reach["other-head-claim-pred-made-again"] = true
+	}
+}
+
+// checkClaimNotBackedOff checks P5 for the reconcile of who that returned err: a claim on a merge of another head
+// that stood past its own end at its start (claimPast) is never handed to the error backoff for an answer of the Git
+// host (decision of 2026-11-21 on #870, count 4): the reconcile ends without an error, so the claim ends there
+// (endAfterLastRead). Only a failed Kubernetes call (a lost or conflicting status write, faulted) may return one.
+func (m *hmWorld) checkClaimNotBackedOff(who string, claimPast, faulted bool, err error) {
+	if claimPast && err != nil && !faulted && !m.paused && !errors.Is(err, errHMCrash) && !isClusterError(err) &&
+		!apierrors.IsServiceUnavailable(err) {
+		m.fail("P5", "the claim of the %s stood past its own end and the reconcile returned %v to the error backoff",
+			who, err)
 	}
 }
 

@@ -425,8 +425,11 @@ type cleanupRelease struct {
 //
 // Then release is non-nil and the caller reports it (leftOpen, gaveUp) before it removes the finalizer. Until then
 // a refusal is tried again every closeRefusedRetry and any other failure as waitOrFail says, never later than the
-// end of the bound. The caller's cancellation records nothing and is returned. A failed status write is returned for
-// a retry and starts nothing.
+// end of the bound. Settings that cannot reach the repository (an entry that cannot be used, a missing settings
+// object) never go to the error backoff, where they would be retried with nothing but CleanupFailing shown (#1057):
+// they also set condition PullRequestUnreadable as the other looks set it (repositoryRead) and are retried as a failed
+// open of the repository (recoveryRead, retryGitRead). The caller's cancellation records nothing and is returned. A
+// failed status write is returned for a retry and starts nothing.
 func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, err error) (reconcile.Result, *cleanupRelease, error) {
 	if ctx.Err() != nil {
@@ -436,6 +439,15 @@ func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context
 	failing := cleanupFailingCondition(rr, err)
 	wasFailing := meta.IsStatusConditionTrue(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
 	changed, _ := r.setRefused(rr, failing)
+	// Condition PullRequestUnreadable rides the same write, with the Event every other path that sets it records
+	// (unreadableEvent), after the write.
+	wasUnreadable := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestUnreadable)
+	if wasUnreadable != nil {
+		wasUnreadable = wasUnreadable.DeepCopy()
+	}
+	unreadable := repositoryRead(rr, err)
+	unreadableChanged := unreadable != nil && putUnreadable(&rr.Status.Conditions, unreadable)
+	changed = changed || unreadableChanged
 	var want metav1.Condition
 	var refusedChanged, refusedEvent bool
 	if refused {
@@ -446,6 +458,9 @@ func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context
 		if uerr := r.Status().Update(ctx, rr); uerr != nil {
 			return reconcile.Result{}, nil, fmt.Errorf("update status of RemediationRequest %s/%s: %w",
 				rr.Namespace, rr.Name, uerr)
+		}
+		if unreadableChanged {
+			r.unreadableEvent(rr, wasUnreadable, unreadable)
 		}
 		if !wasFailing {
 			r.refusedEvent(rr, EventCleanupFailing, failing)
@@ -480,6 +495,11 @@ func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context
 		// A refused read is retried within its grace: the common retry of a failed Git read keeps this bound.
 		wait := min(refusedLeft, closeRefusedRetry, failingLeft)
 		return reconcile.Result{RequeueAfter: wait}, nil, nil
+	}
+	if repositoryRead(rr, err) != nil {
+		// Settings that cannot reach the repository: no read of the Git host could start, retried as a failed open of
+		// the repository, at a pace (#1057).
+		err = recoveryRead(err)
 	}
 	res, werr := r.waitOrFail(ctx, rr, err, paceWithin(failingLeft))
 	if res.RequeueAfter > failingLeft {

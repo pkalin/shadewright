@@ -19,6 +19,7 @@ package utils
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,14 +57,14 @@ func Run(cmd *exec.Cmd) (string, error) {
 	return string(output), nil
 }
 
-// UninstallCertManager uninstalls the cert manager
-func UninstallCertManager() {
+// UninstallCertManager uninstalls the cert manager; ctx ends the kubectl calls.
+func UninstallCertManager(ctx context.Context) {
 	manifest, err := fetchCertManagerManifest()
 	if err != nil {
 		warnError(err)
 		return
 	}
-	cmd := exec.Command("kubectl", "delete", "-f", "-")
+	cmd := exec.CommandContext(ctx, "kubectl", "delete", "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
 	if _, err := Run(cmd); err != nil {
 		warnError(err)
@@ -75,30 +76,30 @@ func UninstallCertManager() {
 		"cert-manager-controller",
 	}
 	for _, lease := range kubeSystemLeases {
-		cmd = exec.Command("kubectl", "delete", "lease", lease, // #nosec G204 -- lease names are the constants above
-			"-n", "kube-system", "--ignore-not-found", "--force", "--grace-period=0")
+		cmd = exec.CommandContext(ctx, "kubectl", "delete", "lease", // #nosec G204 -- lease names are the constants above
+			lease, "-n", "kube-system", "--ignore-not-found", "--force", "--grace-period=0")
 		if _, err := Run(cmd); err != nil {
 			warnError(err)
 		}
 	}
 }
 
-// InstallCertManager installs the cert manager bundle.
-func InstallCertManager() error {
+// InstallCertManager installs the cert manager bundle; ctx ends the kubectl calls.
+func InstallCertManager(ctx context.Context) error {
 	// Fail closed: the manifest is verified by checksum and its images are pinned by digest
 	// before anything is applied.
 	manifest, err := fetchCertManagerManifest()
 	if err != nil {
 		return fmt.Errorf("cert-manager manifest rejected: %w", err)
 	}
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd := exec.CommandContext(ctx, "kubectl", "apply", "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
 	if _, err := Run(cmd); err != nil {
 		return err
 	}
 	// Wait for cert-manager-webhook to be ready, which can take time if cert-manager
 	// was re-installed after uninstalling on a cluster.
-	cmd = exec.Command("kubectl", "wait", "deployment.apps/cert-manager-webhook",
+	cmd = exec.CommandContext(ctx, "kubectl", "wait", "deployment.apps/cert-manager-webhook",
 		"--for", "condition=Available",
 		"--namespace", "cert-manager",
 		"--timeout", "5m",
@@ -110,7 +111,7 @@ func InstallCertManager() error {
 
 // IsCertManagerCRDsInstalled checks if any Cert Manager CRDs are installed
 // by verifying the existence of key CRDs related to Cert Manager.
-func IsCertManagerCRDsInstalled() bool {
+func IsCertManagerCRDsInstalled(ctx context.Context) bool {
 	// List of common Cert Manager CRDs
 	certManagerCRDs := []string{
 		"certificates.cert-manager.io",
@@ -122,7 +123,7 @@ func IsCertManagerCRDsInstalled() bool {
 	}
 
 	// Execute the kubectl command to get all CRDs
-	cmd := exec.Command("kubectl", "get", "crds")
+	cmd := exec.CommandContext(ctx, "kubectl", "get", "crds")
 	output, err := Run(cmd)
 	if err != nil {
 		return false
@@ -142,7 +143,7 @@ func IsCertManagerCRDsInstalled() bool {
 }
 
 // LoadImageToKindClusterWithName loads a local docker image to the kind cluster
-func LoadImageToKindClusterWithName(name string) error {
+func LoadImageToKindClusterWithName(ctx context.Context, name string) error {
 	cluster := defaultKindCluster
 	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
 		cluster = v
@@ -152,7 +153,7 @@ func LoadImageToKindClusterWithName(name string) error {
 	if v, ok := os.LookupEnv("KIND"); ok {
 		kindBinary = v
 	}
-	cmd := exec.Command(kindBinary, kindOptions...) // #nosec G204 -- KIND from the test environment
+	cmd := exec.CommandContext(ctx, kindBinary, kindOptions...) // #nosec G204 -- KIND from the test environment
 	_, err := Run(cmd)
 	return err
 }

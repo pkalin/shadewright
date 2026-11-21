@@ -402,7 +402,7 @@ func budgetSweep(need int64) []int64 {
 		first, spread = 16, 40
 	}
 	var out []int64
-	for s := int64(0); s < min(need, first); s++ {
+	for s := range min(need, first) {
 		out = append(out, s)
 	}
 	for k := int64(1); k <= spread; k++ {

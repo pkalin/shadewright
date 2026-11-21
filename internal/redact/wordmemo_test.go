@@ -145,7 +145,7 @@ func TestFieldAfterCommaMatchesMain(t *testing.T) {
 		if !raceKeeps(t.Name(), n) {
 			continue // a seeded sample under -race; all of them without it
 		}
-		for i := 0; i < len(s); i++ {
+		for i := range len(s) {
 			if s[i] != ',' {
 				continue
 			}

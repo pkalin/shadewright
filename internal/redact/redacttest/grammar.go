@@ -499,7 +499,7 @@ func shapeBefore(out, probe string) string {
 func shape(s string) string {
 	var b strings.Builder
 	last := byte(0)
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		switch {
 		case c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_':

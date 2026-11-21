@@ -61,7 +61,7 @@ func chain(err error) []error {
 			continue
 		}
 		out = append(out, e)
-		switch u := e.(type) {
+		switch u := e.(type) { //nolint:errorlint // walks the chain itself, one Unwrap at a time
 		case interface{ Unwrap() error }:
 			queue = append(queue, u.Unwrap())
 		case interface{ Unwrap() []error }:
@@ -494,7 +494,7 @@ const opDial = "dial"
 // closedAddress returns an https URL on a local port nothing listens on.
 func closedAddress(t *testing.T) *url.URL {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

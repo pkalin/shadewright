@@ -195,7 +195,7 @@ func waitPullRequest(cr providers.ChangeRequest) *api.GitWaitPullRequest {
 // otherwise (a Kubernetes read, a write), and the caller's cancellation, get boundErr's answer as it is.
 func keepGitRead(parent, phase context.Context, name string, err error) error {
 	bounded := boundErr(parent, phase, name, err)
-	if bounded == err || parent.Err() != nil || !gitReadFailure(err) {
+	if bounded == err || parent.Err() != nil || !gitReadFailure(err) { //nolint:errorlint // identity: boundErr returned err itself, not a wrapper of it
 		return bounded
 	}
 	read := readFailure(readOp(err), bounded)

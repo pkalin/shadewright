@@ -80,7 +80,8 @@ const (
 	DefaultEffort = "low"
 	// DefaultMaxResponseBytes bounds the body of a reply that is read.
 	DefaultMaxResponseBytes = 1 << 20
-	// maxRequestBytes bounds the encoded request. The context the analyzer sends is at most 256 KiB.
+	// maxRequestBytes bounds the encoded request. The analyzer's context text is at most 48 KiB
+	// (maxContextBytes); escaping and the block tags can make the context message about four times that (#1054).
 	maxRequestBytes = 4 << 20
 	// maxConfigDelay, maxConfigTimeout and maxConfigResponseBytes bound what Config may ask for.
 	maxConfigDelay         = 5 * time.Minute
@@ -408,7 +409,7 @@ func (p *Provider) readKey() (string, error) {
 	if len(key) > maxKeyBytes {
 		return "", malformed("the key is too long")
 	}
-	for i := 0; i < len(key); i++ {
+	for i := range len(key) {
 		if c := key[i]; c <= ' ' || c > '~' {
 			return "", malformed("the key holds a character a header cannot carry")
 		}

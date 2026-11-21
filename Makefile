@@ -120,17 +120,28 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	python3 -I hack/docs-reasons-check.py
 	hack/check-plugin-deps_test.sh
 
+# make test runs each test line through gotestsum. Every line writes <name>.xml (junit) and <name>.json
+# (go test -json) under TEST_REPORT_DIR, which CI uploads and reads for the slowest tests. TEST_FORMAT keeps the
+# "--- FAIL", "FAIL" and "ok" lines that scripts grep for.
+TEST_REPORT_DIR ?= test-reports
+TEST_FORMAT ?= standard-verbose
+gotestsum = "$(GOTESTSUM)" --format "$(TEST_FORMAT)" --junitfile "$(TEST_REPORT_DIR)/$(1).xml" --jsonfile "$(TEST_REPORT_DIR)/$(1).json" --
+
 .PHONY: test
-test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -timeout 20m -coverprofile cover.out
+test: manifests generate fmt vet setup-envtest gotestsum test-scripts ## Run tests (junit and JSON files in TEST_REPORT_DIR).
+	@mkdir -p "$(TEST_REPORT_DIR)"
+	@# -timeout applies to each package's test binary. internal/controller (the plain tests, then the envtest suite
+	@# TestControllers) took 14 to 15 minutes under -race on a hosted runner before #838 and ran past 20 after it (#961),
+	@# so the limit is 30 minutes; the packages still run side by side.
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" $(call gotestsum,unit-race) $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -timeout 30m -coverprofile cover.out
 	@# The redact timing tests and the 100,000 seeded keys skip under -race, and the generated corpora check a seeded
 	@# sample there (internal/redact/race_test.go, racesample_test.go): run the whole package again without it, so
 	@# that no test is selected by name and a renamed one cannot drop out. The
 	@# linearity tests count redaction work only in a build with the tag redactwork (internal/redact/work_counted.go,
 	@# no counter in the product build), so this run and the log excerpt's package get it.
-	go test -timeout 20m -tags redactwork ./internal/redact ./internal/providers/logs/kube
+	$(call gotestsum,redactwork) -timeout 20m -tags redactwork ./internal/redact ./internal/providers/logs/kube
 	@# The time bound of the wide mapping refusal is checked only without -race (internal/gitops/patch/race_test.go).
-	go test -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
+	$(call gotestsum,wide-mapping) -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
 
 # The evaluation harness (test/eval, docs/evaluation.md). make test runs it too; these targets write the report.
 EVAL_REPORT_DIR ?= $(LOCALBIN)/eval
@@ -162,6 +173,17 @@ fuzz: ## Run each fuzz target (FUZZ, default all) for FUZZTIME (default 30s); a 
 		echo "fuzz ./$${t%%:*} $${t##*:} for $(FUZZTIME)"; \
 		go test -run '^$$' -fuzz "^$${t##*:}\$$" -fuzztime "$(FUZZTIME)" "./$${t%%:*}" || exit 1; \
 	done
+
+# One line of JSON for the matrix of .github/workflows/fuzz.yml: every entry of FUZZ_TARGETS as <package dir>:<FuzzName>.
+.PHONY: fuzz-list
+fuzz-list: ## Print FUZZ_TARGETS as a JSON array (the Fuzz workflow matrix).
+	@hack/fuzz-targets.sh "$(CURDIR)" $(FUZZ_TARGETS)
+	@printf '[%s]\n' "$$(printf '"%s",' $(FUZZ_TARGETS) | sed 's/,$$//')"
+
+.PHONY: fuzz-one
+fuzz-one: ## Run one fuzz target, TARGET=<package dir>:<FuzzName> from FUZZ_TARGETS, for FUZZTIME (a Fuzz workflow job).
+	@$(if $(filter $(TARGET),$(FUZZ_TARGETS)),,echo "TARGET must be one of FUZZ_TARGETS, got '$(TARGET)'" >&2; exit 1)
+	@$(MAKE) --no-print-directory fuzz FUZZ="$(TARGET)" FUZZTIME="$(FUZZTIME)"
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The kind target installs the pinned Kind (KIND_VERSION) into bin/. The setup builds/loads the Manager Docker image locally.
@@ -345,6 +367,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GOTESTSUM ?= $(LOCALBIN)/gotestsum
 GOVULNCHECK ?= $(LOCALBIN)/govulncheck
 HELM_DOCS ?= $(LOCALBIN)/helm-docs
 
@@ -364,6 +387,8 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
 GOLANGCI_LINT_VERSION ?= v2.15.0
+# Runs the test lines of make test and writes their junit and JSON files (checked through the Go checksum database).
+GOTESTSUM_VERSION ?= v1.13.0
 GOVULNCHECK_VERSION ?= v1.9.0
 # Generates dist/chart/README.md from values.yaml (checked through the Go checksum database).
 HELM_DOCS_VERSION ?= v1.14.2
@@ -411,6 +436,11 @@ $(GOVULNCHECK): $(LOCALBIN)
 helm-docs: $(HELM_DOCS) ## Download helm-docs locally if necessary.
 $(HELM_DOCS): $(LOCALBIN)
 	$(call go-install-tool,$(HELM_DOCS),github.com/norwoodj/helm-docs/cmd/helm-docs,$(HELM_DOCS_VERSION))
+
+.PHONY: gotestsum
+gotestsum: $(GOTESTSUM) ## Download gotestsum locally if necessary.
+$(GOTESTSUM): $(LOCALBIN)
+	$(call go-install-tool,$(GOTESTSUM),gotest.tools/gotestsum,$(GOTESTSUM_VERSION))
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.

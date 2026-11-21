@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -716,11 +717,11 @@ func (r *RemediationRequestReconciler) endAfterLastRead(ctx context.Context, key
 	case m.disagreed:
 		// Before the end, answers that disagree keep a wait and its bound gives them time to agree; past the end they
 		// show the read was made (eleventh decision of 2026-11-18 on #771, point 1).
-		why = "the answers about its pull request disagreed after the wait"
+		why = lastReadDisagreed
 	case m.answered:
 		// The read answered and its answers agree, yet the wait stands: nothing the answer shows records the merge the
 		// wait is about (it is not on a branch the plan or the settings name, or it is gone).
-		why = "the read after the wait answered without settling it"
+		why = lastReadAnsweredUnsettled
 	default:
 		log.Info("Kept the Git wait of RemediationRequest past its end: the reconcile made no read that answered, " +
 			"failed or could not start (a path that read nothing)")
@@ -729,6 +730,16 @@ func (r *RemediationRequestReconciler) endAfterLastRead(ctx context.Context, key
 	res, _, err := r.endWait(ctx, rr, left[0], now, why)
 	return r.lookAgainWhileHeld(rr, res, err), lastReadEnded, err
 }
+
+// lastReadAnsweredUnsettled is why endAfterLastRead ends a wait for a read whose last read answered, with answers
+// that agree, and settled nothing. The end of a claim on a merge of another head reads it to say that the reads
+// answered and nothing matched the claim (endContentUnreadable), not that they kept failing.
+const lastReadAnsweredUnsettled = "the read after the wait answered without settling it"
+
+// lastReadDisagreed is why endAfterLastRead ends a wait for a read whose last read was answered with answers about
+// the pull request that disagree (answeredUnknown). The end of a claim on a merge of another head reads it to say that
+// the Git host's answers disagreed (endContentUnreadable), not that the reads kept failing.
+const lastReadDisagreed = "the answers about its pull request disagreed after the wait"
 
 // keptPace is the time to run again of a reconcile whose wait for a read stands past its end with no evidence about
 // its last read (lastReadKept): the reconcile's own time when it lies between a second and the poll interval (the
@@ -812,7 +823,7 @@ func (r *RemediationRequestReconciler) endMergeWait(ctx context.Context, rr *api
 		message: "what the merge brought could not be checked within " + mergeCommitWait.String() + " (" + why + ")"}
 	var unreadable *metav1.Condition
 	if !ours {
-		pred, taken, err := r.takenOverMerge(ctx, rr, pr)
+		pred, taken, err := r.takenOverMerge(ctx, rr, pr, false)
 		if err != nil {
 			return err
 		}
@@ -873,15 +884,18 @@ func (r *RemediationRequestReconciler) endMergeWait(ctx context.Context, rr *api
 }
 
 // takenOverMerge reports whether pr, the pull request of rr's MergeCheck entry, is the merged pull request rr's
-// takeover found with rr's handoff commit as its head, whose record was lost: rr is a replacement before its takeover
+// takeover found with rr's handoff commit as its head, whose record was lost, or, of rr's MergeContent entry, the one
+// rr found merged with another head while it held the lock (recordOtherHeadMerge, #870): rr is a replacement before its takeover
 // (its handoff Reserved, its source recorded, no pull request of its own recorded), and pr is the pull request its
 // predecessor records. Only the takeover starts such an entry on such a request, and only on a merged head that is
 // rr's commit (afterUpdate, recordFoundMerge): the wait is the stored record of that first read (decision of
 // 2026-11-19 on #880), so its end must not take the merge for a foreign one because the takeover's own status write
 // was lost (seed 3506 of the handoff model). The predecessor is read from the API server; one gone or made again
-// counts by its name alone, as for recordFoundMerge. A failed read is the Kubernetes API's (a *clusterError).
+// counts by its name alone, as for recordFoundMerge. With claim (rr's MergeContent entry is its claim on that merge,
+// otherHeadClaim), one that records another pull request than pr counts so too, since the claim decides by its own
+// number (settleClaim, claimPredecessor); without it, such a predecessor means pr is not the merge of a takeover. A failed read is the Kubernetes API's (a *clusterError).
 func (r *RemediationRequestReconciler) takenOverMerge(ctx context.Context, rr *api.RemediationRequest,
-	pr *api.GitWaitPullRequest) (*api.RemediationRequest, bool, error) {
+	pr *api.GitWaitPullRequest, claim bool) (*api.RemediationRequest, bool, error) {
 	if pr == nil || rr.Status.PullRequest != nil || !mayCarryHandoffCommit(rr) ||
 		rr.Status.Handoff.From.Phase != api.HandoffReserved {
 		return nil, false, nil
@@ -893,10 +907,14 @@ func (r *RemediationRequestReconciler) takenOverMerge(ctx context.Context, rr *a
 	case err != nil:
 		return nil, false, &clusterError{err: fmt.Errorf("get the RemediationRequest %s replaces: %w", rr.Name, err)}
 	case pred.UID == types.UID(from.UID):
-		if pred.Status.PullRequest == nil || pred.Status.PullRequest.Number != pr.Number {
+		if pred.Status.PullRequest != nil && pred.Status.PullRequest.Number == pr.Number {
+			return pred, true, nil
+		}
+		if !claim {
 			return nil, false, nil
 		}
-		return pred, true, nil
+		// A claim decides by its own number (decision of 2026-11-21 on #870, count 4), as the watch does
+		// (settleClaim): a predecessor that records another pull request counts as gone, by its name alone.
 	}
 	gone := &api.RemediationRequest{}
 	gone.Name, gone.Namespace = string(from.Name), rr.Namespace
@@ -911,6 +929,34 @@ func (r *RemediationRequestReconciler) takenOverMerge(ctx context.Context, rr *a
 // Only a failed Kubernetes read is returned, for the error backoff.
 func (r *RemediationRequestReconciler) endContentUnreadable(ctx context.Context, rr *api.RemediationRequest,
 	w api.GitWait, last string) error {
+	// A replacement before its takeover that holds the lock started the wait on a merge of the pull request it was to
+	// take over with another head than its commit (recordOtherHeadMerge, #870): that merge is recorded on it, with the
+	// takeover in the same write, as the read would have recorded it.
+	// The entry is already dropped (endWait), so the claim is read from w: a MergeContent entry with its pull request
+	// on a request that holds the lock (otherHeadClaim).
+	claim := w.PullRequest != nil && ptr.Deref(rr.Status.HoldsTarget, false)
+	switch pred, taken, err := r.takenOverMerge(ctx, rr, w.PullRequest, claim); {
+	case err != nil:
+		return err
+	case taken:
+		pr := w.PullRequest
+		cr := providers.ChangeRequest{Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA,
+			BaseBranch: string(pr.BaseBranch), MergeCommit: pr.MergeCommitSHA, State: providers.ChangeRequestMerged}
+		brought := "it could not be read: " + contentUnreadableMessage(last)
+		switch last {
+		case lastReadAnsweredUnsettled:
+			// The reads answered and nothing matched the claim (decision of 2026-11-21 on #870, narrow): no read
+			// kept failing at the end.
+			brought = fmt.Sprintf("it was not read: the read of the Git host after the wait of %s answered and "+
+				"nothing it found matched pull request #%d, the merge this request claims", mergeContentWait, pr.Number)
+		case lastReadDisagreed:
+			// Every read answered, and the Git host's answers about the claimed pull request disagreed (decision of
+			// 2026-11-21 on #870, count 4): no read kept failing at the end.
+			brought = fmt.Sprintf("it was not read: the Git host's answers about pull request #%d, the merge this "+
+				"request claims, still disagreed after the wait of %s", pr.Number, mergeContentWait)
+		}
+		return r.endOtherHeadMerge(ctx, rr, pred, cr, ReasonMergeContentUnreadable, brought)
+	}
 	if rr.Status.PullRequest == nil && w.PullRequest != nil {
 		recordFound(rr, providers.ChangeRequest{Number: w.PullRequest.Number, URL: w.PullRequest.URL,
 			HeadSHA: w.PullRequest.HeadSHA, State: providers.ChangeRequestMerged})

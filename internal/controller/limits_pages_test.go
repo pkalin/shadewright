@@ -211,10 +211,12 @@ func TestLimitsDoNotReadRefusals(t *testing.T) {
 }
 
 // TestLimitsReadInBoundedPages checks that the lists the limits read are followed over pages of at most
-// limitsPageSize, and that what is on a later page still counts.
+// limitsPageSize, and that what is on a later page still counts. Each case builds its own world of 250 requests, so
+// they run in parallel (#961).
 func TestLimitsReadInBoundedPages(t *testing.T) {
 	const n = 2*limitsPageSize + 50
 	t.Run("ended requests on the same target are not counted", func(t *testing.T) {
+		t.Parallel()
 		others := history("ended", n, limitsTarget, remediationv1alpha1.PhaseSucceeded,
 			remediationv1alpha1.PhaseMerged, remediationv1alpha1.PhaseExpired)
 		r, base, rr, _ := limitsWorld(t, 1, others...)
@@ -225,6 +227,7 @@ func TestLimitsReadInBoundedPages(t *testing.T) {
 		p.expectBoundedPages(t, true)
 	})
 	t.Run("an active request on a later page locks the target", func(t *testing.T) {
+		t.Parallel()
 		// Requests without a plan digest are not active, but are listed with the ones that can be.
 		others := append(history("new", n, "uid-elsewhere", remediationv1alpha1.PhasePending),
 			otherRequest("zz-active", limitsTarget, remediationv1alpha1.PhasePRCreated, time.Minute))
@@ -236,6 +239,7 @@ func TestLimitsReadInBoundedPages(t *testing.T) {
 		p.expectBoundedPages(t, true)
 	})
 	t.Run("failures on later pages trip the breaker", func(t *testing.T) {
+		t.Parallel()
 		// Old failures, then a success, then three failures on the second and third page of the failures.
 		others := history("failed", n, "uid-elsewhere", remediationv1alpha1.PhaseFailed)
 		for i, at := range []int{limitsPageSize + 10, 2*limitsPageSize + 10, n - 1} {

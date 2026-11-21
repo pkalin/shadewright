@@ -394,9 +394,11 @@ func TestStatusMapping(t *testing.T) {
 		header    map[string]string
 		retryable bool
 		notFound  bool
-		after     time.Duration
+		// unauthorized: a wrong key or a deleted App (#925), its own class, never forbidden.
+		unauthorized bool
+		after        time.Duration
 	}{
-		{name: "401", status: 401},
+		{name: "401", status: 401, unauthorized: true},
 		{name: "403", status: 403},
 		{name: "403 rate limited", status: 403, header: map[string]string{retryAfterHeader: "30"}, retryable: true, after: 30 * time.Second},
 		{name: "403 quota exhausted", status: 403, header: map[string]string{rlRemaining: "0"}, retryable: true, after: time.Minute},
@@ -432,6 +434,10 @@ func TestStatusMapping(t *testing.T) {
 			}
 			if providers.IsRetryable(err) != c.retryable || providers.IsNotFound(err) != c.notFound {
 				t.Fatalf("retryable = %v notFound = %v for %v", providers.IsRetryable(err), providers.IsNotFound(err), err)
+			}
+			if providers.IsUnauthorized(err) != c.unauthorized || c.unauthorized && providers.IsForbidden(err) {
+				t.Fatalf("unauthorized = %v forbidden = %v for %v", providers.IsUnauthorized(err),
+					providers.IsForbidden(err), err)
 			}
 			if d, _ := providers.RetryAfter(err); d != c.after {
 				t.Fatalf("retry after = %v, want %v", d, c.after)

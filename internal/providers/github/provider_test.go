@@ -2072,7 +2072,8 @@ func TestCommentChangeRequest(t *testing.T) {
 // A comment deleted on page 1 during the search moves the first comment of page 2 onto page 1, which was read
 // already: page 1 is read once more at the end, so the App's reply there is found and not posted again.
 func TestCommentChangeRequestFindsAMarkerMovedOntoPageOne(t *testing.T) {
-	moved := append(fullPage(person("other"))[1:], own("note\n"+commentMarker))
+	moved := fullPage(person("other"))[1:]
+	moved = append(moved, own("note\n"+commentMarker))
 	h := newHarness(t, get("/pulls/12", "pull_open.json"), lastPage(comments(1, fullPage(person("other"))...), 2),
 		comments(2), comments(1, moved...))
 	if err := h.p.CommentChangeRequest(ctx, 12, commentMarker, "note\n"+commentMarker); err != nil {
@@ -2620,6 +2621,27 @@ func TestTokenRefusalIsForbidden(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "ghs_leaked") {
 		t.Fatalf("token source text leaked: %v", err)
+	}
+}
+
+// A token whose App JWT GitHub rejects (401: a wrong private key or a deleted App) keeps ErrUnauthorized through
+// tokenError, and so does a 401 on a call made with a token GitHub no longer takes, so the caller can say to fix
+// the App or its key (#925); it is neither forbidden nor retryable, and no text of the token source stays reachable.
+func TestTokenRejectionIsUnauthorized(t *testing.T) {
+	h := newHarness(t)
+	leak := errors.New("installation token: status 401 for https://api.github.com ghs_leaked")
+	h.p.token = func(context.Context) (string, error) {
+		return "", fmt.Errorf("%w: %w", leak, providers.ErrUnauthorized)
+	}
+	_, err := h.p.BranchHead(ctx, target)
+	if !providers.IsUnauthorized(err) || providers.IsForbidden(err) || providers.IsRetryable(err) || errors.Is(err, leak) {
+		t.Fatalf("got %v, want ErrUnauthorized only", err)
+	}
+	if strings.Contains(err.Error(), "ghs_leaked") {
+		t.Fatalf("token source text leaked: %v", err)
+	}
+	if err := statusError("op", http.StatusUnauthorized); !providers.IsUnauthorized(err) || providers.IsForbidden(err) {
+		t.Fatalf("a 401 on a call: got %v, want ErrUnauthorized", err)
 	}
 }
 

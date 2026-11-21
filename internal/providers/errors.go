@@ -46,6 +46,11 @@ var (
 	// or a rule of the repository (branch protection, a ruleset). It is permanent until a person changes the
 	// permission or the rule; a rate limit is never ErrForbidden but a [RetryableError].
 	ErrForbidden = errors.New("forbidden")
+	// ErrUnauthorized means the host rejected the identity's credentials (HTTP 401): a GitHub App whose private key
+	// is wrong or rotated without the cluster's copy, or an App that was deleted, so the JWT or the installation
+	// token it signed is refused. It is not ErrForbidden and not retryable: it holds until a person fixes the App
+	// or its key, and callers that class refusals keep treating it as a plain failure.
+	ErrUnauthorized = errors.New("unauthorized")
 	// ErrRejected means the host refused the request itself as invalid (validation failed, for example a
 	// branch name or pull request it does not accept) and the adapter could not resolve the refusal by reading
 	// the state. It is permanent: the same request fails the same way.
@@ -164,6 +169,9 @@ func IsInvalidConfig(err error) bool { return errors.Is(err, ErrInvalidConfig) }
 
 // IsForbidden reports whether err means the host refused the identity (a missing permission or a rule).
 func IsForbidden(err error) bool { return errors.Is(err, ErrForbidden) }
+
+// IsUnauthorized reports whether err is, or wraps, ErrUnauthorized.
+func IsUnauthorized(err error) bool { return errors.Is(err, ErrUnauthorized) }
 
 // IsRejected reports whether err means the host refused the request as invalid.
 func IsRejected(err error) bool { return errors.Is(err, ErrRejected) }

@@ -156,10 +156,14 @@ var gitReadSites = map[string]gitReadSite{
 			res, err := r.cancelFailed(context.Background(), rr, failedRead(), "read the pull request")
 			return mustWait(t, res, err), false
 		}},
-	helperSite:                                 {},
-	"handoff.go:retryRecovery:1":               {bound: handoffGraceBound, check: checkRecoveryBound},
-	"recoverywait.go:observeFailed:1":          {bound: handoffRecoveryBound, check: checkRecoveryWaitBound},
-	"recoverywait.go:heldRecovery:1":           {bound: heldLockBound},
+	helperSite:                        {},
+	"handoff.go:retryRecovery:1":      {bound: handoffGraceBound, check: checkRecoveryBound},
+	"recoverywait.go:observeFailed:1": {bound: handoffRecoveryBound, check: checkRecoveryWaitBound},
+	"recoverywait.go:heldRecovery:1":  {bound: heldLockBound},
+	// The bound of the path that reaches the claim (claimDuringWatch, claimAfterWatch); the claim's entry ends it.
+	"claim.go:claimReadFailed:1": {bound: callerBound},
+	// The same bound for the failed read whose condition PullRequestUnreadable could not be written.
+	"claim.go:claimReadFailed:2":               {bound: callerBound},
 	"incidentcancel.go:followCancelledMerge:1": {bound: heldLockBound},
 	"incidentcancel.go:closeCancelled:1":       {bound: heldLockBound},
 	"merge.go:mergeCheckFailed:1": {bound: mergeCheckBound,
@@ -450,8 +454,11 @@ func TestEveryGitReadRetrySiteKeepsItsBound(t *testing.T) {
 			continue
 		}
 		t.Run(site, func(t *testing.T) {
+			// Each case builds its own world and clock (#961: one after the other they took 11 s under -race).
+			t.Parallel()
 			for _, c := range cases {
 				t.Run(c.String(), func(t *testing.T) {
+					t.Parallel()
 					wait, expired := row.check(t, c)
 					rest := c.left - c.during
 					switch {

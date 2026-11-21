@@ -451,7 +451,7 @@ func (r *RemediationRequestReconciler) settleReceipt(ctx context.Context, rr *re
 			"merge can be checked", verified.Reason))
 	}
 	r.setPhase(rr, remediationv1alpha1.PhaseInconclusive)
-	r.settleRecorded(rr)
+	r.settleRecorded(ctx, rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return false, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}

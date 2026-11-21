@@ -193,7 +193,8 @@ func factoryFailure(err error) Reason {
 
 // ContextBuilder builds the context of an Incident; *incidentcontext.Builder implements it.
 type ContextBuilder interface {
-	Build(ctx context.Context, inc *remediationv1alpha1.Incident) (*incidentcontext.Context, error)
+	// BuildWithin builds the context within total bytes; zero means the builder's configured total.
+	BuildWithin(ctx context.Context, inc *remediationv1alpha1.Incident, total int) (*incidentcontext.Context, error)
 }
 
 // ToolSet is the read tools offered on escalation; *tools.Set implements it.
@@ -324,17 +325,25 @@ type Limits struct {
 	MaxToolSteps int
 	// MaxOutputTokens is sent with every call.
 	MaxOutputTokens int
+	// MaxContextBytes bounds the context the builder makes (maxContextBytes, #981); zero means the builder's
+	// configured total.
+	MaxContextBytes int
 	// Triage and Escalation are the deployments; nil means not configured.
 	Triage, Escalation *remediationv1alpha1.ModelDeployment
 }
 
 // LimitsOf reads the limits from the settings. A field the API server's defaults never leave unset is taken
-// at its lowest safe value when it is missing: no tool steps and the smallest output bound.
+// at its lowest safe value when it is missing: no tool steps and the smallest output bound. A missing
+// maxContextBytes is the CRD's default, 48 KiB, the bound the context had before it was read (#981). A set value
+// is held to the CRD's range, 4096 to 49152, so an object stored before that maximum gets no larger bound.
 func LimitsOf(s *remediationv1alpha1.RemediationSettings) Limits {
-	l := Limits{MaxOutputTokens: 256}
+	l := Limits{MaxOutputTokens: 256, MaxContextBytes: incidentcontext.DefaultTotalBytes}
 	a := s.Spec.Analysis
 	if a == nil {
 		return l
+	}
+	if a.MaxContextBytes != nil {
+		l.MaxContextBytes = int(min(max(*a.MaxContextBytes, incidentcontext.MinTotalBytes), incidentcontext.DefaultTotalBytes))
 	}
 	if a.MaxToolSteps != nil {
 		l.MaxToolSteps = int(min(max(*a.MaxToolSteps, 0), 16))
@@ -501,7 +510,7 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 func (r *run) build() (*incidentcontext.Context, error) {
 	ctx, span := r.a.tracer.Start(r.ctx, spanContext)
 	defer span.End()
-	c, err := r.a.cfg.Builder.Build(ctx, r.inc)
+	c, err := r.a.cfg.Builder.BuildWithin(ctx, r.inc, r.limits.MaxContextBytes)
 	if err != nil {
 		if r.parent.Err() != nil {
 			setCanceled(span)

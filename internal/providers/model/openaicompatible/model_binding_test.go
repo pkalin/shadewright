@@ -81,7 +81,7 @@ func TestGeneratedSettingsModelsBoundToDeclarations(t *testing.T) {
 						if body.Model != model || !slices.Contains(allowed, body.Model) {
 							t.Fatalf("undeclared body model: %q", body.Model)
 						}
-						return &http.Response{StatusCode: 400, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+						return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{}"))}, nil
 					}))
 					_, _ = p.Complete(t.Context(), providers.CompletionRequest{Messages: []providers.Message{{Role: providers.RoleUser, Content: "test"}}})
 					if calls != 1 {

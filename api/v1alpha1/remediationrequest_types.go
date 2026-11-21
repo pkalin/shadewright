@@ -473,6 +473,21 @@ const (
 	// entry; an entry past its end is ended at the start of the next reconcile. A failure of the Kubernetes API
 	// never sets it. It is removed with the last entry.
 	ConditionGitReadRetry = "GitReadRetry"
+	// ConditionReviewCheckNotFailed is True, with reviewer hints on, while a stopped request that holds the target lock
+	// could not fail the check run shadewright/review on its recorded head (#925), so a check written before the stop
+	// may still show on a pull request from its branch. The look writes it whatever the request's own pull request is
+	// (open on any base, closed, merged elsewhere or gone) while the lock is held, by that pull request or by another
+	// open one from the branch. The reason says why: TargetBranchChanged, RepositoryUnavailable, RepositoryUnusable or
+	// SettingsNotFound while the settings do not let the executor write to the repository of the plan, WritesPaused
+	// while RemediationSettings spec.paused holds Git writes, GitForbidden or GitRejected when the Git host refused the
+	// write for good, GitUnauthorized when it rejected the App's credentials (a 401), GitNotFound when it answered 404,
+	// and GitFailed for any other failure of the Git host. The message names the pull request, never the Git host's
+	// answer. The write is tried again at each look of the stopped request, every 10 minutes while it holds the lock;
+	// the condition is removed when the failed check is written and recorded as Stale, by a look that reads the failed
+	// check as the latest on the head, by the release of the lock (which logs that an earlier check may stay), a
+	// recorded merge, or the first write of a deletion. One Warning Event, ReviewCheckNotFailed, is recorded when it is
+	// set or its reason changes.
+	ConditionReviewCheckNotFailed = "ReviewCheckNotFailed"
 )
 
 // ReasonGitReadFailed is the reason of condition GitReadRetry True: a read of the Git host failed and is retried.
@@ -644,8 +659,10 @@ type PullRequestStatus struct {
 	// condition Approved False with reason ReviewListTooLong; final on that head but for Stale), Refused when the
 	// Git host refused for good to write it (condition Approved then says so and what the host shows; asked again
 	// after a backoff), Stale when the freshness check found the plan stale and the executor completed it with
-	// failure, whether or not the close of the pull request went through (#713); the request then never writes
-	// the check again, and does not end Superseded before it is recorded. It always names headSHA: a new head
+	// failure, whether or not the close of the pull request went through (#713), when the request was cancelled
+	// with spec.cancel (#289), or when it stopped while its own pull request is open, on the target branch or on
+	// another base (#925; condition ReviewCheckNotFailed says while that write fails); the request then never
+	// writes the check again, and does not end Superseded before it is recorded. It always names headSHA: a new head
 	// starts without it, so a state never outlives its head. Once a merge receipt exists it never changes.
 	// +optional
 	ReviewCheck *ReviewCheck `json:"reviewCheck,omitempty"`
@@ -763,9 +780,12 @@ type VerificationReset struct {
 	// desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the
 	// KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter
 	// stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision
-	// or container) or PartialRollout (the report does not cover every desired replica, or a revert is checked
-	// before RolledOut is True). Every one is a reset of the no-evidence class.
-	// +kubebuilder:validation:Enum=NotAvailable;StaleReport;ReportMismatch;PartialRollout
+	// or container), PartialRollout (the report does not cover every desired replica, or a revert is checked
+	// before RolledOut is True) or ExecutorRestarted (a new executor process, after a restart or a leader change,
+	// found the window open and opened by no check of its own; its time is the second before it began
+	// reconciling, or windowStart when that is later).
+	// Every one is a reset of the no-evidence class.
+	// +kubebuilder:validation:Enum=NotAvailable;StaleReport;ReportMismatch;PartialRollout;ExecutorRestarted
 	// +required
 	Reason ResetReason `json:"reason"`
 
@@ -777,8 +797,10 @@ type VerificationReset struct {
 
 // VerificationWindow is the executor's own stable window of a Verifying request (ADR-0030 section 4), kept next
 // to the verifier's window in the VerificationReport. Every time in it is on the executor's clock, and it is
-// never compared with a time of the report. No window counts time from before the executor process began reconciling, so after a restart or a leader change every open window needs a full stableFor again. A lastReset is
-// counted: resets is at least 1 when it is set.
+// never compared with a time of the report. No window counts time from before the executor process began
+// reconciling: after a restart or a leader change the first check resets every open window no check of the new
+// process opened, with ExecutorRestarted, so it needs a full stableFor again and the window stored is the one
+// that decides. A lastReset is counted: resets is at least 1 when it is set.
 // +kubebuilder:validation:XValidation:rule="!has(self.lastReset) || (has(self.resets) && self.resets >= 1)",message="lastReset requires resets of at least 1"
 type VerificationWindow struct {
 	// windowStart is when the current window opened: the first good check after the last reset. It only moves

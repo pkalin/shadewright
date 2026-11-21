@@ -274,6 +274,9 @@ type Controller struct {
 	// an Incident deleted and created again under the same name starts with nothing. Only the trigger
 	// goroutine uses it.
 	memory map[types.UID]*trace
+	// triggerStart is when the trigger loop began, truncated to the second: a NotRecent condition written
+	// before it is not reported again ([Controller.reportSkips]). Only the trigger goroutine uses it.
+	triggerStart time.Time
 	// hintRequests are the RemediationRequests the cache held when the current trigger pass began, for the
 	// reviewer hints of the Incidents it decides ([PendingHint]); nil when that listing failed. Only the
 	// trigger goroutine uses it.
@@ -811,8 +814,24 @@ func (c *Controller) consumeLocked(ctx context.Context, o collector.Observation)
 	if linked {
 		return c.absorb(ctx, o, name, spec, reason) || heldDue
 	}
+	if fp, ok := c.occurrenceIncident(o); ok {
+		// The occurrence is counted on another Incident already: it stays there, whatever subject the
+		// observation shows now (#996).
+		o.Fingerprint = fp
+		return c.count(ctx, o) || heldDue
+	}
 	if _, ok := c.names[c.nameOf(o.Fingerprint)]; ok && !c.rolls(o) {
 		return c.count(ctx, o)
+	}
+	if o.FoldOnly {
+		// An event from before the collector's start about a pod that is gone: it folds into an Incident that
+		// exists, and opens none (#996). Counted and logged with what traces it back to its event.
+		droppedBatches.WithLabelValues(dropStaleOnStart).Inc()
+		s := o.Subject
+		logf.FromContext(ctx).Info("Dropped an observation of an event from before the start about a pod that is gone",
+			"occurrence", o.Occurrence, "fingerprint", o.Fingerprint, "kind", s.Kind, "namespace", s.Namespace,
+			"name", s.Name, "reason", o.Reason, "count", o.Count)
+		return heldDue
 	}
 	if c.deletedOccurrences.has(o.Occurrence) {
 		// An occurrence a deleted Incident counted, or held unwritten when the delete was found, going on: it
@@ -834,6 +853,43 @@ func (c *Controller) consumeLocked(ctx context.Context, o collector.Observation)
 		due = c.count(ctx, h) || due
 	}
 	return due
+}
+
+// occurrenceIncident returns the fingerprint of the Incident that already counts o's occurrence, when that is
+// not the Incident of o's own fingerprint and o should be counted there instead (#996): the same event seen
+// again with a fingerprint of another owner correlation (after a restart a deleted pod's owner chain can no
+// longer be read, so its subject falls back to the pod) stays on the Incident that counted it, and never opens a
+// second one with a weaker subject. Only an event observation that is not a consequence moves, and only to an
+// Incident that exists (listed or written, not one this process is still opening), is the latest occurrence of
+// its fingerprint, counts no cause (a cause Incident holds events only as absorbed evidence) and would not roll
+// over to its next occurrence. The caller holds mu.
+func (c *Controller) occurrenceIncident(o collector.Observation) (string, bool) {
+	if o.Origin != fingerprint.SourceEvent || o.Class == collector.ClassConsequence {
+		return "", false
+	}
+	r, ok := c.records[o.Occurrence]
+	if !ok || r.incident == c.nameOf(o.Fingerprint) {
+		return "", false
+	}
+	fp, _, ok := remediationv1alpha1.ParseIncidentName(r.incident)
+	if !ok || fp == o.Fingerprint || c.nameOf(fp) != r.incident {
+		return "", false
+	}
+	if _, ok := c.names[r.incident]; !ok {
+		return "", false
+	}
+	if _, ok := c.opening[r.incident]; ok {
+		return "", false
+	}
+	if _, ok := c.causes[r.incident]; ok {
+		return "", false
+	}
+	moved := o
+	moved.Fingerprint = fp
+	if c.rolls(moved) {
+		return "", false
+	}
+	return fp, true
 }
 
 // stillWaiting moves the last seen of the Incident of a waiting cause reported again while it is still shown
@@ -1200,11 +1256,12 @@ func (c *Controller) flush(ctx context.Context, fp string) {
 		// Incident with another fingerprint the records load remembered that its status still holds. That
 		// status is not ours: it is only swept against, never remembered, so neither its records nor its drop
 		// mark enter memory at runtime.
-		if refused.conflict {
+		switch {
+		case refused.conflict:
 			c.prune(fp, name, nil, &res.inc.Status, true)
-		} else if stored != nil {
+		case stored != nil:
 			c.settle(fp, name, nil, stored, true)
-		} else {
+		default:
 			c.prune(fp, name, nil, &remediationv1alpha1.IncidentStatus{}, true)
 		}
 		if !refused.exists {

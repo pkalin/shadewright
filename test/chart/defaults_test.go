@@ -17,6 +17,7 @@ limitations under the License.
 package chart
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -231,13 +232,13 @@ func TestClusterIDNeedsAValueWithoutACluster(t *testing.T) {
 // runErr runs helm with args and returns its combined output and error, without failing the test.
 func runErr(t *testing.T, args []string) (string, error) {
 	t.Helper()
-	out, err := execCombined(tool(t, "HELM", "helm"), repoRoot(t), args...)
+	out, err := execCombined(t.Context(), tool(t, "HELM", "helm"), repoRoot(t), args...)
 	return string(out), err
 }
 
-// execCombined runs name with args in dir and returns its combined output.
-func execCombined(name, dir string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
+// execCombined runs name with args in dir and returns its combined output; ctx ends the process.
+func execCombined(ctx context.Context, name, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	return cmd.CombinedOutput()
 }

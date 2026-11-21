@@ -31,7 +31,7 @@ networkPolicy:
     traceCollector:
       enabled: true
       namespace: observability
-      # podLabels and port default to the opentelemetry-collector chart and 4317
+      # port defaults to 4317; podLabels, when set, replaces the default (the opentelemetry-collector chart's name label)
 ```
 
 `analyzer.tracing.endpoint` sets `OTEL_TRACES_EXPORTER=otlp`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `service.version` (the chart's `appVersion`) on the analyzer only. `networkPolicy.analyzer.traceCollector` adds one rule to `allow-analyzer-egress` (never to the executor's policy), to the collector Pods you name in one namespace on one port. With the NetworkPolicies on, the chart refuses an endpoint without that rule, since the default-deny policy would drop every export. If the collector's namespace has its own ingress policy, allow the analyzer there too.

@@ -24,8 +24,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// Default bounds, decided on 2026-11-05 (#70). They are the values of [DefaultLimits]; making them settings
-// is #372.
+// Default bounds, decided on 2026-11-05 (#70). They are the values of [DefaultLimits]. The analysis gives each
+// build the total from maxContextBytes of RemediationSettings ([Builder.BuildWithin], #981); making the
+// section bounds settings is #372.
 const (
 	// DefaultTotalBytes bounds the whole context, the sum of the text of every block.
 	DefaultTotalBytes = 48 << 10
@@ -64,8 +65,8 @@ type Limits struct {
 }
 
 // DefaultLimits returns the default bounds. The sections, Git and policy bounds included, add up to the total, so with these
-// bounds the total cut is a backstop; it marks the context truncated when bounds that add up to more are
-// configured (#372).
+// bounds the total cut is a backstop; it marks the context truncated when a smaller total (maxContextBytes) or
+// sections that add up to more are configured.
 func DefaultLimits() Limits {
 	return Limits{
 		Total: DefaultTotalBytes, Summary: DefaultSummaryBytes, Status: DefaultStatusBytes,

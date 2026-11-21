@@ -181,9 +181,30 @@ func windowOf(inc *remediationv1alpha1.Incident, now time.Time) window {
 	return window{start: start, end: now}
 }
 
-// Build assembles the context of inc. It returns an error only when inc is nil or ctx is done: a failed
-// source is marked in the context instead (design 3.3).
+// Build assembles the context of inc within the configured bounds. It returns an error only when inc is nil
+// or ctx is done: a failed source is marked in the context instead (design 3.3).
 func (b *Builder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) (*Context, error) {
+	return b.BuildWithin(ctx, inc, 0)
+}
+
+// BuildWithin assembles the context of inc as [Builder.Build] does, with total in place of the configured
+// [Limits.Total]: the analysis passes maxContextBytes of RemediationSettings (#981). Zero keeps the configured
+// total. The section bounds stay as configured, so a total above their sum adds no context. A total outside
+// [MinTotalBytes] to [MaxLimitBytes] is an error, before any read.
+func (b *Builder) BuildWithin(ctx context.Context, inc *remediationv1alpha1.Incident, total int) (*Context, error) {
+	if total == 0 || total == b.limits.Total {
+		return b.build(ctx, inc)
+	}
+	if total < MinTotalBytes || total > MaxLimitBytes {
+		return nil, fmt.Errorf("building the context: context bound %d is outside %d to %d bytes", total,
+			MinTotalBytes, MaxLimitBytes)
+	}
+	within := *b
+	within.limits.Total = total
+	return within.build(ctx, inc)
+}
+
+func (b *Builder) build(ctx context.Context, inc *remediationv1alpha1.Incident) (*Context, error) {
 	if inc == nil {
 		return nil, errors.New("building the context: no Incident")
 	}

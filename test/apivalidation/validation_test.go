@@ -1900,7 +1900,7 @@ var _ = Describe("RemediationSettings", func() {
 			expectAccepted(s)
 			a := s.Spec.Analysis
 			Expect(a).NotTo(BeNil())
-			Expect(*a.MaxContextBytes).To(BeEquivalentTo(32768))
+			Expect(*a.MaxContextBytes).To(BeEquivalentTo(49152))
 			Expect(*a.MaxToolSteps).To(BeEquivalentTo(4))
 			Expect(*a.MaxOutputTokens).To(BeEquivalentTo(2048))
 			Expect(*a.MaxConcurrentAnalyses).To(BeEquivalentTo(1))

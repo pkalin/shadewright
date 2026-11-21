@@ -410,7 +410,7 @@ func TestExitCauseConfirmedRandom(t *testing.T) {
 
 func exitSequence(t *testing.T, seed uint64, counts map[string]int) {
 	t.Helper()
-	rng := rand.New(rand.NewPCG(seed, 432))
+	rng := rand.New(rand.NewPCG(seed, 432)) // #nosec G404 -- a seeded corpus, not a secret
 	e := newExitHold(t, rng.IntN(8) != 0, Config{})
 	exists, deleting, restarts := true, false, int32(1)
 	delivered := []string{e.fp}
@@ -433,7 +433,7 @@ func exitSequence(t *testing.T, seed uint64, counts map[string]int) {
 			restarts++
 			p := readPod(t, e.harness, webPod)
 			p.Status = crashLoopPod(e.clock.Now(), restarts).Status
-			p.Status.ContainerStatuses[0].LastTerminationState.Terminated.ExitCode = int32(1 + rng.IntN(3))
+			p.Status.ContainerStatuses[0].LastTerminationState.Terminated.ExitCode = 1 + rng.Int32N(3)
 			e.update(p)
 			e.reconcilePod(webPod)
 			for _, o := range e.drain() {

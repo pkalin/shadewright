@@ -110,8 +110,9 @@ func linkedCase(t *testing.T, pod *corev1.Pod, deleting, confirmed, want bool) {
 	at := t0.Add(30 * time.Second)
 	h.clock.set(at)
 	h.reconcilePod(webPod)
-	var delivered []string
-	for _, o := range h.drain() {
+	drained := h.drain()
+	delivered := make([]string, 0, len(drained))
+	for _, o := range drained {
 		delivered = append(delivered, o.Fingerprint)
 		book.record(o.Fingerprint)
 	}

@@ -54,3 +54,29 @@ jobs:
           if [ -f "${RUNNER_TEMP}/eval/report.md" ]; then
             cat "${RUNNER_TEMP}/eval/report.md" >> "${GITHUB_STEP_SUMMARY}"
           fi
+
+      # The slowest tests of each test line of make test, from the JSON logs it wrote (bin/gotestsum is the pinned
+      # copy it installed). A log is missing when the run stopped before that line started.
+      - name: Slowest tests
+        if: always()
+        run: |
+          {
+            echo "### Slowest tests (over 3s, top 30)"
+            for name in unit-race redactwork wide-mapping; do
+              [ -f "test-reports/${name}.json" ] || continue
+              echo
+              echo "#### ${name}"
+              echo '```'
+              bin/gotestsum tool slowest --jsonfile "test-reports/${name}.json" --threshold 3s --num 30
+              echo '```'
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      # The junit files and JSON logs of every test line of make test, also when a test failed.
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-reports
+          path: test-reports/
+          if-no-files-found: ignore

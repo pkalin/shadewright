@@ -38,7 +38,10 @@ func TestLimitsOfReadsMaxContextBytes(t *testing.T) {
 		{"unset", &remediationv1alpha1.AnalysisSettings{}, 48 << 10},
 		{"set", &remediationv1alpha1.AnalysisSettings{MaxContextBytes: ptr.To[int32](8192)}, 8192},
 		{"below the range", &remediationv1alpha1.AnalysisSettings{MaxContextBytes: ptr.To[int32](0)}, 4096},
-		{"above the range", &remediationv1alpha1.AnalysisSettings{MaxContextBytes: ptr.To[int32](1 << 20)}, 256 << 10},
+		{"at the maximum", &remediationv1alpha1.AnalysisSettings{MaxContextBytes: ptr.To[int32](49152)}, 48 << 10},
+		{"just above the maximum", &remediationv1alpha1.AnalysisSettings{MaxContextBytes: ptr.To[int32](49153)}, 48 << 10},
+		{"the old maximum", &remediationv1alpha1.AnalysisSettings{MaxContextBytes: ptr.To[int32](262144)}, 48 << 10},
+		{"above the range", &remediationv1alpha1.AnalysisSettings{MaxContextBytes: ptr.To[int32](1 << 20)}, 48 << 10},
 	} {
 		s := &remediationv1alpha1.RemediationSettings{Spec: remediationv1alpha1.RemediationSettingsSpec{Analysis: c.a}}
 		if got := LimitsOf(s).MaxContextBytes; got != c.want {

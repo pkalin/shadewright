@@ -1945,7 +1945,7 @@ var _ = Describe("RemediationSettings", func() {
 
 		It("accepts every limit at its upper bound", func() {
 			expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
-				a.MaxContextBytes, a.MaxToolSteps = ptr.To[int32](262144), ptr.To[int32](16)
+				a.MaxContextBytes, a.MaxToolSteps = ptr.To[int32](49152), ptr.To[int32](16)
 				a.MaxOutputTokens, a.MaxConcurrentAnalyses = ptr.To[int32](16384), ptr.To[int32](8)
 				a.Models = &v1alpha1.AnalysisModels{Triage: model()}
 				a.Models.Triage.MaxTokensPerDay = ptr.To[int64](1000000000)
@@ -1960,7 +1960,7 @@ var _ = Describe("RemediationSettings", func() {
 				"spec.analysis.maxContextBytes"),
 			Entry("a context below 4096 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = ptr.To[int32](4095) },
 				"spec.analysis.maxContextBytes"),
-			Entry("a context above 262144 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = ptr.To[int32](262145) },
+			Entry("a context above 49152 bytes", func(a *v1alpha1.AnalysisSettings) { a.MaxContextBytes = ptr.To[int32](49153) },
 				"spec.analysis.maxContextBytes"),
 			Entry("negative tool steps", func(a *v1alpha1.AnalysisSettings) { a.MaxToolSteps = ptr.To[int32](-1) },
 				"spec.analysis.maxToolSteps"),

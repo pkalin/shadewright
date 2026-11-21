@@ -33,8 +33,9 @@ import (
 // maxLoggedContainer bounds the bytes of a refused container name that are logged.
 const maxLoggedContainer = 80
 
-// isCause reports whether o is a cause of the consequence rule (ADR-0039 points 2 and 8): of class cause and
-// read from pod status. Only such an observation sets status.cause; an Event never does, whatever its reason.
+// isCause reports whether o is a cause of the consequence rule (ADR-0039 points 2, 3 and 8): of class cause and
+// read from pod status, which the collector sets for an OOM kill, a non-zero exit, a waiting reason and an
+// eviction. Only such an observation sets status.cause; an Event never does, whatever its reason.
 func isCause(o collector.Observation) bool {
 	return o.Class == collector.ClassCause && o.Origin == fingerprint.SourcePodStatus
 }

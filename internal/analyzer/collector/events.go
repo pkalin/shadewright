@@ -198,6 +198,17 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			return leave("its probe settled", true)
 		}
 	}
+	if evictionEvent(&ev) {
+		// The kubelet's Evicted event about a pod whose status reports the eviction, which the pod reconciler
+		// emits as the pod's cause (ADR-0039 point 3, amended 2026-11-20, eviction.go).
+		switch verdict, wait := r.c.settleEviction(ctx, key, &ev, pod); verdict {
+		case evictionWait:
+			return ctrl.Result{RequeueAfter: wait}, nil
+		case evictionShown:
+			logf.FromContext(ctx).V(1).Info("Skipped Evicted event, its pod's status reports the eviction")
+			return leave("its pod's status reports the eviction", true)
+		}
+	}
 	// A consequence whose pod shows no cause, or a cause the Incident controller has not seen yet, is held before
 	// it is emitted (ADR-0039 points 7 and 19, hold.go).
 	hv, wait, err := r.c.holdConsequence(ctx, key, &ev, &obs, pod)

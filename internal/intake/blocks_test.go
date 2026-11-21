@@ -24,6 +24,9 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 )
 
+// plainAnswer is a cross-check answer the redactor leaves unchanged.
+const plainAnswer = "Because."
+
 // The judge's reply goes back in its provider blocks, and the check of the second request reads the text and
 // tool calls in them: what the blocks send is what is checked (decision of 2026-11-21).
 func TestJudgeReplyBlocksAreCheckedAsSent(t *testing.T) {
@@ -55,7 +58,7 @@ func TestJudgeReplyBlocksAreCheckedAsSent(t *testing.T) {
 			first.Content = "Checking the limit."
 			first.ProviderBlocks = providers.NewOpaque([]byte(c.blocks))
 			f.anthropic.replies = []providers.Completion{first, answerReply(claudeID)}
-			f.openai.replies = []providers.Completion{{Content: "Because."}}
+			f.openai.replies = []providers.Completion{{Content: plainAnswer}}
 			s, err := f.scorer.Score(context.Background(), sourceOf(t, rec))
 			if err != nil {
 				t.Fatal(err)

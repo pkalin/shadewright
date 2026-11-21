@@ -250,7 +250,9 @@ const EventReviewCheckNotFailed = "ReviewCheckNotFailed"
 // or staleCleanupStopped holds (cleanupRepository): it names the recorded head, by its full object ID from status (or
 // from the listing of the request's own branch when the same look adopted its lost pull request), and can only block
 // that commit. The write only ever names the recorded head: the gate of the provider opened through a new installation
-// (gatedGit.CreateCheckRun) lets a failed run of that name through on any head, so only this function keeps to it. A request that owns no review check (reviewer hints off, a handoff intent,
+// (gatedGit.CreateCheckRun) lets a failed run of that name through on any head, so only its two callers keep to it,
+// this function and failCheck (a stale plan's failed check, #713). A request that owns no review check (reviewer hints
+// off, a handoff intent,
 // the pull request handed over) writes nothing, and condition ReviewCheckNotFailed is removed with a line at Info when
 // it was set (endCheckNoteLogged), since no look tries the check again. Once Stale is recorded on the head, such a look
 // reads the latest review check of the head (stoppedCheckShown) and writes the failed check again only when the Git

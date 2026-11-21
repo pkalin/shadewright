@@ -2497,7 +2497,8 @@ func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *re
 	// below takes over, and says so with its own conditions when it fails (#925). A check written before the stop may
 	// stay the latest on the head, also for an open pull request from the branch the close does not take (#984, ADR-0046
 	// limit (a)): whenever condition ReviewCheckNotFailed was set or the recorded head is not known to show the failed
-	// check (checkMayStay), that is said in the log at Info once the first write of the deletion went through.
+	// check (checkMayStay), that is said in the log at Info once the first write of the deletion went through, and
+	// once per deletion (deletionNoted of the reconciler), not on every pass of the finalizer.
 	var ended *metav1.Condition
 	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed); c != nil {
 		note := *c
@@ -2514,7 +2515,12 @@ func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *re
 				rr.Name, err)
 		}
 	}
-	logCheckNoteEnd(ctx, rr, ended, "the request is being deleted")
+	if ended != nil {
+		if uid, seen := r.deletionNoted.LoadOrStore(client.ObjectKeyFromObject(rr), rr.UID); !seen || uid != rr.UID {
+			r.deletionNoted.Store(client.ObjectKeyFromObject(rr), rr.UID)
+			logCheckNoteEnd(ctx, rr, ended, "the request is being deleted")
+		}
+	}
 	if err := r.supersedeReplacementAfterMerge(ctx, rr); err != nil {
 		if errors.Is(err, freshness.ErrPaused) {
 			res, err := r.waitWhilePaused(ctx, rr)

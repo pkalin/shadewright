@@ -207,6 +207,11 @@ type RemediationRequestReconciler struct {
 	// tell whether its failed review check is still the latest (stoppedCheckUnread, #925), so they raise one Warning
 	// Event. Memory only, dropped with checked.
 	stoppedCheckLooks sync.Map
+	// deletionNoted holds, per request name, the UID of a request being deleted whose first write of the deletion
+	// said in the log that its failed review check may not be the latest on its head (beginFinalize, #925), so the
+	// line comes once per deletion, not on every pass of the finalizer. Memory only and not dropped by forget, which
+	// runs on every pass of a deletion; dropped when the request is gone. After a restart the line comes once more.
+	deletionNoted sync.Map
 	// rewritten holds, per request name, the answer of the Git host to the rewrite after a handoff whose status
 	// write has not gone through (followHandoff), so a retry records it without sending the rewrite again.
 	// Memory only, dropped with checked: after a restart the rewrite is sent again, which is idempotent.
@@ -615,6 +620,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 			r.mergeReadings.forget(req.NamespacedName)
 			r.incidentWatch.forget(req.NamespacedName)
 			r.looks().forget(req.NamespacedName)
+			r.deletionNoted.Delete(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}

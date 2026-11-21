@@ -526,3 +526,28 @@ func TestDeletionLogsAHeadNotKnownToShowTheFailedCheck(t *testing.T) {
 		}
 	}
 }
+
+// Finding F1 of the pr-pipeline run on #925: the deletion of a stopped holder whose recorded head is not known to
+// show the failed check says so in the log at Info once per deletion, not on every pass of the finalizer. Each pass
+// drops the request's memory first (forget, as reconcile does for a request being deleted), and the line still comes
+// once. Before, three passes logged it three times.
+func TestDeletionLogsACheckThatMayStayOncePerDeletion(t *testing.T) {
+	r, _, get, _ := stoppedHolderWorld(t, ownClosed)
+	ctx, lines := loggedCtx()
+	for range 3 {
+		r.forget(client.ObjectKeyFromObject(get()))
+		if _, _, err := r.beginFinalize(ctx, get()); err != nil {
+			t.Fatalf("beginFinalize: %v", err)
+		}
+	}
+	var found int
+	for _, l := range *lines {
+		if strings.Contains(l, "may stay the latest on its head") && strings.Contains(l, "being deleted") {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("%d Info lines over three passes of the deletion say a check before the stop may stay, want 1: %q",
+			found, *lines)
+	}
+}

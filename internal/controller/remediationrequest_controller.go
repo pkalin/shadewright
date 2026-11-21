@@ -2219,27 +2219,41 @@ func (e *clusterError) Unwrap() error { return e.err }
 // [errHandoffInFlight] while the intent stands), judged on the copy it was given and, right before the close,
 // on a fresh read (stillOwns).
 func (r *RemediationRequestReconciler) closeChangeRequest(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
+	_, err := r.closeOwn(ctx, rr, false)
+	return err
+}
+
+// closeChangeRequestRead is closeChangeRequest for a stop exception's closing step (#1008): shownOpen is true only when
+// the read the close made just before it closes showed the request's own pull request open, on the target branch or on
+// a base a person moved it to (errOpenElsewhere). The zero value, false, lets no look write: a pull request that read
+// shows closed, merged or gone, a read that failed or was refused, and every return before the read. The Git host
+// answers the close of a pull request a person closed meanwhile as it answers a close that worked, so the error alone
+// cannot tell the two apart. A person who closes it between that read and the close call is left open.
+func (r *RemediationRequestReconciler) closeChangeRequestRead(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (shownOpen bool, err error) {
 	return r.closeOwn(ctx, rr, false)
 }
 
 // closeOnDeleteOf is closeChangeRequest for the finalizer. With a pull request recorded it closes every open one
 // that is this request's change (closeAllOwn), and returns nil only when none is left open.
 func (r *RemediationRequestReconciler) closeOnDeleteOf(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
-	return r.closeOwn(ctx, rr, true)
+	_, err := r.closeOwn(ctx, rr, true)
+	return err
 }
 
 // closeOwn is closeChangeRequest; deleting is true for the finalizer (closeOnDeleteOf), which closes through the
 // recorded target branch when the repository's entry now names another one, instead of errTargetBranchChanged.
+// shownOpen is closeChangeRequestRead's: false on every return before the read of the pull request.
 func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	deleting bool) error {
+	deleting bool) (shownOpen bool, err error) {
 	if r.OpenRepository == nil {
-		return errors.New("cannot close the change request: no Git provider")
+		return false, errors.New("cannot close the change request: no Git provider")
 	}
 	switch {
 	case handedOff(rr):
-		return errChangeRequestNotOurs
+		return false, errChangeRequestNotOurs
 	case intent(rr) != nil:
-		return errHandoffInFlight
+		return false, errHandoffInFlight
 	}
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
@@ -2247,14 +2261,14 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 		// A failure of the cleanup for the finalizer (cleanupDone), not a repository that left the settings: the object
 		// may come back, and the request's pull request may be open (#925). CleanupFailing says so with reason
 		// SettingsNotFound until the object is back or the bound of the cleanup ends.
-		return errNoSettings
+		return false, errNoSettings
 	case apierrors.IsNotFound(err):
-		return errRepositoryGone
+		return false, errRepositoryGone
 	case err != nil:
-		return fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
+		return false, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
 	if freshness.Paused(settings) {
-		return freshness.ErrPaused
+		return false, freshness.ErrPaused
 	}
 	// The cleanup of a stale plan also reaches the plan's URL under a new installation (#290), and so does the close
 	// after a stop of that cleanup (staleCleanupStopped, #808); the finalizer does not.
@@ -2264,11 +2278,11 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 		// the end of a stale plan's cleanup stop on this error, and a wait for a read past its end ends on it
 		// (endAfterLastRead, #884).
 		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr), unstartableReads[reasonRepositoryUnavailable])
-		return errRepositoryGone
+		return false, errRepositoryGone
 	}
 	if src := rr.Status.Source; src != nil && repo.TargetBranch != src.TargetBranch {
 		if !deleting {
-			return errTargetBranchChanged
+			return false, errTargetBranchChanged
 		}
 		// The finalizer closes the request's own pull requests whatever target branch the settings name now: they are
 		// still in the plan's repository and may be open, and a deletion that let go of them would leave them open with
@@ -2282,25 +2296,26 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 		// request's marker first (changeOf, closeUnrecorded).
 		git, err := r.openGated(ctx, repo, func() bool { return true })
 		if providers.IsInvalidConfig(err) {
-			return freshness.ErrRepositoryUnusable
+			return false, freshness.ErrRepositoryUnusable
 		}
 		if err != nil {
-			return &reinstalledError{err: &stepFailure{step: stepToken, err: freshness.WrapProvider("open the repository", err)}}
+			return false, &reinstalledError{err: &stepFailure{step: stepToken, err: freshness.WrapProvider("open the repository", err)}}
 		}
-		if err := r.closeFound(ctx, git, rr, false); err != nil {
+		shownOpen, err := r.closeFound(ctx, git, rr, false)
+		if err != nil {
 			if _, ok := errors.AsType[*clusterError](err); ok {
-				return err
+				return shownOpen, err
 			}
-			return &reinstalledError{err: err}
+			return shownOpen, &reinstalledError{err: err}
 		}
-		return nil
+		return shownOpen, nil
 	}
 	git, err := r.openRepository(ctx, repo)
 	if providers.IsInvalidConfig(err) {
-		return freshness.ErrRepositoryUnusable
+		return false, freshness.ErrRepositoryUnusable
 	}
 	if err != nil {
-		return &stepFailure{step: stepToken, err: freshness.WrapProvider("open the repository", err)}
+		return false, &stepFailure{step: stepToken, err: freshness.WrapProvider("open the repository", err)}
 	}
 	return r.closeFound(ctx, git, rr, deleting)
 }
@@ -2338,9 +2353,10 @@ func (e *reinstalledError) Error() string { return e.err.Error() }
 
 func (e *reinstalledError) Unwrap() error { return e.err }
 
-// closeFound is closeOwn once the repository is open as git.
+// closeFound is closeOwn once the repository is open as git. shownOpen is true only when its read before the close
+// showed the request's own pull request open (changeOpen, or open on another base); the finalizer's returns are false.
 func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest, deleting bool) error {
+	rr *remediationv1alpha1.RemediationRequest, deleting bool) (shownOpen bool, err error) {
 	// Without a recorded pull request it is found by the request's branch: it may exist although the status
 	// write that records it failed (design section 6). A recorded one is read by its number, so a newer pull
 	// request on the same branch never stands in for it (ADR-0030 section 1), and it is closed only when it is
@@ -2352,12 +2368,12 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 	switch {
 	case deleting && recorded != nil:
 		if err := r.closeAllOwn(ctx, git, rr); err != nil {
-			return err
+			return false, err
 		}
-		return r.closeOwnOnOtherBases(ctx, git, rr)
+		return false, r.closeOwnOnOtherBases(ctx, git, rr)
 	case deleting:
 		if err := r.closeOwnOnOtherBases(ctx, git, rr); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if recorded == nil {
@@ -2369,24 +2385,27 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 		// A 404 the branch does not confirm, an answer about another pull request and any other failure are
 		// retried (#688), so a stale plan's cleanup, the deadline's and a render refusal's never end the request
 		// with its pull request open on a single read.
-		return v.err
+		return false, v.err
 	case closeRecordedNotOurs:
 		// Gone, or merged into another base (#892): nothing to close, and nothing is written to it there.
-		return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
+		return false, fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
 	case closeRecordedMoved:
 		// Open on a base a person moved it to (#892): nothing is written to it there; each caller ends its stop
 		// saying so, and the lock stays while it is open.
-		return &openElsewhereError{pr: v.pr}
+		return true, &openElsewhereError{pr: v.pr}
 	case closeRecordedNothing:
 		// Closed on a base a person moved it to: nothing to close, and the close to the target branch would be
 		// refused there.
-		return nil
+		return false, nil
 	case closeRecordedClose:
 	}
+	// Closed, merged or open: the close of a closed one answers as a close that worked, so only this read tells them
+	// apart (#1008).
+	shownOpen = v.rule().ownOpenOnTarget
 	if err := r.stillOwns(ctx, rr); err != nil {
-		return err
+		return shownOpen, err
 	}
-	return closeFailed(v.pr, git.CloseChangeRequest(ctx, v.pr.Number))
+	return shownOpen, closeFailed(v.pr, git.CloseChangeRequest(ctx, v.pr.Number))
 }
 
 // closeUnrecorded is closeOwn for a request with no recorded pull request: one may exist although the status write
@@ -2402,17 +2421,19 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 // every base (openOnOtherBase, #892): one with its marker open on another base, where a person moved it, is an
 // *openElsewhereError, so the stop that asked for the close closes nothing there and says so. The finalizer closed
 // every such one already (closeOwnOnOtherBases) and does not list them again.
+//
+// shownOpen is true once the listing showed one of its own open, there or on another base.
 func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git providers.GitProvider,
-	rr *remediationv1alpha1.RemediationRequest, deleting bool) error {
+	rr *remediationv1alpha1.RemediationRequest, deleting bool) (shownOpen bool, err error) {
 	v := r.changeOf(ctx, git, rr, changeQuery{})
 	switch v.rule().closeUnrecorded {
 	case closeUnrecordedRetry:
-		return v.err
+		return false, v.err
 	case closeUnrecordedLookElsewhere:
 		// The finalizer closed every one open on another base already (closeOwnOnOtherBases).
 		if !deleting {
 			if err := r.closeUnrecordedElsewhere(ctx, git, rr); err != nil {
-				return err
+				return errors.Is(err, errOpenElsewhere), err
 			}
 		}
 	case closeUnrecordedGoOn:
@@ -2421,20 +2442,21 @@ func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git 
 		if cr.State != providers.ChangeRequestOpen {
 			continue
 		}
+		shownOpen = true
 		if err := r.stillOwns(ctx, rr); err != nil {
-			return err
+			return shownOpen, err
 		}
 		if err := closeFailed(cr, git.CloseChangeRequest(ctx, cr.Number)); err != nil {
 			if providers.IsConflict(err) {
-				return &closeConflictError{number: cr.Number, err: err}
+				return shownOpen, &closeConflictError{number: cr.Number, err: err}
 			}
-			return err
+			return shownOpen, err
 		}
 	}
 	if merged := v.ownMerged(); merged != nil {
-		return &mergedUnrecordedError{git: git, cr: *merged}
+		return shownOpen, &mergedUnrecordedError{git: git, cr: *merged}
 	}
-	return nil
+	return shownOpen, nil
 }
 
 // closeUnrecordedElsewhere is closeUnrecorded's look at the other bases, for a stop of a request with no pull request

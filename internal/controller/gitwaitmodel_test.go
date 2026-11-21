@@ -2290,8 +2290,9 @@ func (m *modelWorld) stoppedHolderProperty(live *api.RemediationRequest, err err
 		m.noWriteWhileReadsFail(before, live, exception)
 		return
 	}
-	if len(live.Status.GitWaits) > 0 ||
-		meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry) != nil {
+	if len(live.Status.GitWaits) > 0 {
+		// A wait for a read keeps the look on that read. GitReadRetry alone does not end the check: a look whose calls
+		// all answered is checked whatever that condition still holds (decision of 2026-11-21 on #1008).
 		return
 	}
 	modelHeldChecks.mu.Lock()

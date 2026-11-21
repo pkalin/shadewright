@@ -170,8 +170,7 @@ func (r *RemediationRequestReconciler) settleCancelled(ctx context.Context, rr *
 		res, err := r.followCancelledMerge(ctx, rr, v.pr)
 		return res, false, err
 	case !cancelRecorded(rr, reason):
-		res, err := r.recordCancelledOpen(ctx, rr, v.pr, reason)
-		return res, err == nil && rr.Status.PullRequest != nil, err
+		return r.recordCancelledOpen(ctx, rr, v.pr, reason)
 	}
 	return r.closeCancelled(ctx, rr, reason)
 }
@@ -205,13 +204,17 @@ func (r *RemediationRequestReconciler) followCancelledMerge(ctx context.Context,
 // own backoff, which this write does not cut short. A pull request whose number, URL or head do not pass the
 // schema is not recorded and not closed: the lock is kept and looked at again after heldRecheckInterval. A failed
 // write is returned for a retry, which reads the branch again.
+//
+// mayWrite (settleStopException, #1008) is true only once the pull request the look read open is recorded and the
+// write went through; every other return is false.
 func (r *RemediationRequestReconciler) recordCancelledOpen(ctx context.Context,
-	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, reason string) (reconcile.Result, error) {
+	rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, reason string) (
+	res reconcile.Result, mayWrite bool, err error) {
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr), "pullRequest", cr.Number)
 	recordFound(rr, cr)
 	if rr.Status.PullRequest == nil {
 		log.Info("Kept the target lock of a cancelled RemediationRequest: its open pull request could not be recorded")
-		return reconcile.Result{RequeueAfter: heldRecheckInterval}, nil
+		return reconcile.Result{RequeueAfter: heldRecheckInterval}, false, nil
 	}
 	n := rr.Status.PullRequest.Number
 	keepCancelReason(rr, reason, "found open on the branch afterwards and is closed")
@@ -226,10 +229,11 @@ func (r *RemediationRequestReconciler) recordCancelledOpen(ctx context.Context,
 	// The read went through, so writes are not paused now; a pause found before an earlier read is over.
 	resume(rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
-		return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+		return reconcile.Result{}, false, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
+			rr.Name, err)
 	}
 	log.Info("Recorded the open pull request of a cancelled RemediationRequest; it is closed next")
-	return reconcile.Result{RequeueAfter: stepDelay}, nil
+	return reconcile.Result{RequeueAfter: stepDelay}, true, nil
 }
 
 // keepCancelReason moves the reason of a cancel because of the Incident from PullRequestOpened to Approved, in the
@@ -279,14 +283,15 @@ func keepCancelReason(rr *remediationv1alpha1.RemediationRequest, reason, found 
 //     (skipOwnMarks), so it never cuts the delay short.
 //   - any other failure (the settings or the request could not be read): returned for the error backoff.
 //
-// mayWrite (settleStopException, #1008) is true only after a close that worked, a refusal of the close itself, or a
-// pull request open on another base (closeShowedOpen), with every write of the step through.
+// mayWrite (settleStopException, #1008) is true only when the close's own read showed the pull request open and the
+// close worked, was refused itself, or found it open on another base (closeShowedOpen), with every write of the step
+// through.
 func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	reason string) (res reconcile.Result, mayWrite bool, err error) {
 	log := logf.FromContext(ctx).WithValues("remediationRequest", client.ObjectKeyFromObject(rr),
 		"pullRequest", rr.Status.PullRequest.Number)
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-	err = r.closeChangeRequest(cleanCtx, rr)
+	shownOpen, err := r.closeChangeRequestRead(cleanCtx, rr)
 	// A Git read that ran out of the cleanup's time is still that read, retried as one (keepGitRead).
 	err = keepGitRead(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
@@ -304,7 +309,7 @@ func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *r
 				rr.Namespace, rr.Name, err)
 		}
 		log.Info("Closed the pull request of a cancelled RemediationRequest")
-		return reconcile.Result{RequeueAfter: stepDelay}, true, nil
+		return reconcile.Result{RequeueAfter: stepDelay}, closeShowedOpen(shownOpen, err), nil
 	case errors.Is(err, freshness.ErrPaused):
 		res, err := r.waitWhilePaused(ctx, rr)
 		return res, false, err
@@ -312,7 +317,7 @@ func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *r
 		// Open on a base a person moved it to (#892): nothing is closed there. The lock's recheck keeps the lock
 		// while it is open, and TargetHeld says where.
 		log.Info("Closed nothing for a cancelled RemediationRequest: its pull request is open on another base branch")
-		return reconcile.Result{RequeueAfter: heldRecheckInterval}, true, nil
+		return reconcile.Result{RequeueAfter: heldRecheckInterval}, closeShowedOpen(shownOpen, err), nil
 	case errors.Is(err, errChangeRequestNotOurs):
 		// Looked at again on the lock's recheck, as any open pull request of the branch: never at once, since the
 		// same read would find it again.
@@ -345,7 +350,7 @@ func (r *RemediationRequestReconciler) closeCancelled(ctx context.Context, rr *r
 	if refused {
 		// Only a refusal of the close itself, after the read that found the pull request open, lets the exit write;
 		// a refused read does not (closeShowedOpen).
-		return reconcile.Result{RequeueAfter: heldRecheckInterval}, closeShowedOpen(err), nil
+		return reconcile.Result{RequeueAfter: heldRecheckInterval}, closeShowedOpen(shownOpen, err), nil
 	}
 	res, err = r.waitOrFail(ctx, rr, err, unboundedRead(noBoundHeldLock))
 	return res, false, err

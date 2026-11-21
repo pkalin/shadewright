@@ -2135,13 +2135,13 @@ func expiredUncleaned(rr *remediationv1alpha1.RemediationRequest) bool {
 // (expiredCloseFailed); a pull request found merged meanwhile is recorded (endMerged); a
 // close the Git host refuses, or one that cannot be made on this entry (the target branch changed, the repository
 // is unusable), ends the cleanup with reason PullRequestDeadlineCleanupRefused and a message that asks a person to
-// close it. The next look settles the lock. mayWrite tells checkHeld's exit that the close showed the pull request
-// open or closed it, never merged (closeShowedOpen), and every write of the step went through; any other return is
+// close it. The next look settles the lock. mayWrite tells checkHeld's exit that the close's own read showed the pull
+// request open and the close left it open or closed it, never merged (closeShowedOpen), and every write of the step went through; any other return is
 // false (settleStopException, #1008).
 func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	res reconcile.Result, mayWrite bool, err error) {
 	cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
-	err = r.closeChangeRequest(cleanCtx, rr)
+	shownOpen, err := r.closeChangeRequestRead(cleanCtx, rr)
 	err = keepGitRead(ctx, cleanCtx, "cleanup of the change request", err)
 	cancel()
 	if done, derr := r.endUnrecordedMerge(ctx, rr, err); done {
@@ -2163,7 +2163,7 @@ func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *r
 		}
 		logf.FromContext(ctx).Info("Closed the pull request of an expired RemediationRequest",
 			"remediationRequest", client.ObjectKeyFromObject(rr))
-		return reconcile.Result{RequeueAfter: stepDelay}, true, nil
+		return reconcile.Result{RequeueAfter: stepDelay}, closeShowedOpen(shownOpen, err), nil
 	case ctx.Err() != nil || isClusterError(err):
 		return reconcile.Result{}, false, err
 	case errors.Is(err, freshness.ErrPaused):
@@ -2198,7 +2198,7 @@ func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *r
 	serr := r.ignoreStopped(r.stop(ctx, rr, remediationv1alpha1.PhaseExpired,
 		ReasonPullRequestDeadlineCleanupRefused, "The pull request was not opened before the deadline, and "+what+
 			"; if one is open, close it by hand. The target stays locked until none is found open"))
-	return reconcile.Result{}, serr == nil && closeShowedOpen(err), serr
+	return reconcile.Result{}, serr == nil && closeShowedOpen(shownOpen, err), serr
 }
 
 // messageDeadlineCloseFailing is the message of an expired request whose close of its own pull request failed and is

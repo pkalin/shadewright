@@ -294,8 +294,8 @@ func TestStopExceptionLookWithAFailedReadWritesNoCheck(t *testing.T) {
 	}
 }
 
-// #1008, decision of 2026-11-21: the one more close of an expired request past its cutoff makes no read the check
-// could follow, so its look writes nothing; the close works, and the next look, whose reads answer and which finds
+// #1008, decisions of 2026-11-21: the look of the one more close of an expired request past its cutoff writes nothing
+// by choice (its close does read the pull request before it closes); the close works, and the next look, whose reads answer and which finds
 // another pull request from the branch open, writes the failed check.
 func TestStopExceptionOnceMoreCloseWritesAtTheNextLook(t *testing.T) {
 	r, g, get, head := stopExceptionWorld(t, pastCutoffStop)
@@ -497,6 +497,123 @@ func TestStopExceptionLookWithARefusedCloseFailsTheCheck(t *testing.T) {
 			r, g, get, head := stopExceptionWorld(t, tc.stop)
 			refuseCall(g, opClose, 1)
 			wantStopCheckWritten(t, g, runStopExceptionLook(t, r, get), head)
+		})
+	}
+}
+
+// #1008, decision of 2026-11-21 (head 6372d593): a closing step may let the look write only when its own read, the one
+// made just before it closes, showed the pull request open. A person who closes it between the look's read and that
+// read leaves it closed at the step's read, and the Git host answers the close of a closed pull request as it answers
+// a close that worked: that look writes no check, one case per stop exception that closes. On the build before, each
+// took the close's answer for its own close and wrote the failed check on the closed pull request.
+func TestStopExceptionLookWritesNoCheckOnAPullRequestAPersonClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(r *RemediationRequestReconciler, g *fakegit.Git, rr *api.RemediationRequest)
+	}{
+		{name: expiredCase, stop: expiredStop},
+		{name: staleCase, stop: staleStop},
+		{name: cancelCase, stop: cancelStop},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, get, head := stopExceptionWorld(t, tc.stop)
+			n := get().Status.PullRequest.Number
+			calls := 0
+			// The look's own read finds it open; a person closes it just before the step's read.
+			g.SetFail(func(op string) error {
+				if op != opGet {
+					return nil
+				}
+				if calls++; calls == 2 {
+					if err := g.Close(n); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			wantNoStopCheck(t, g, runStopExceptionLook(t, r, get), head)
+		})
+	}
+}
+
+// #1008: a reconcile cancelled while the exit writes the failed check returns the cancellation and makes no status
+// write with the cancelled context; the next look records the outcome. On the build before, the exit swallowed the
+// cancellation and wrote Stale with the cancelled context.
+func TestStopExceptionExitCancelledDuringTheCheckWritesNoStatus(t *testing.T) {
+	r, g, get, head := stopExceptionWorld(t, expiredStop)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g.SetAfter(func(op string) error {
+		if op == opCreateCheckRun {
+			cancel()
+		}
+		return nil
+	})
+	if _, err := r.checkHeld(ctx, get()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("checkHeld: %v, want the cancellation returned", err)
+	}
+	if live := get(); staleOnHead(live) {
+		t.Fatalf("review check %+v: want no status write after the cancel", live.Status.PullRequest.ReviewCheck)
+	}
+	g.SetAfter(nil)
+	if _, err := r.checkHeld(context.Background(), get()); err != nil {
+		t.Fatalf("checkHeld after the cancel: %v", err)
+	}
+	wantStopCheckWritten(t, g, get(), head)
+}
+
+// #1008, ADR-0046 amendment (decision of 2026-11-21): a cancel whose own pull request, from an open whose answer was
+// lost, is found open with none recorded records it (recordCancelledOpen), and that look writes the stopped holder's
+// failed check on the head it recorded. The recorded head is the one the pass was written on.
+func TestStopExceptionCancelRecordingItsOpenPullRequestFailsTheCheck(t *testing.T) {
+	r, g, get, head := stopExceptionWorld(t, func(_ *RemediationRequestReconciler, _ *fakegit.Git,
+		rr *api.RemediationRequest) {
+		rr.Status.Phase = api.PhaseCancelled
+		rr.Status.PullRequest = nil
+		meta.RemoveStatusCondition(&rr.Status.Conditions, api.ConditionApproved)
+		setFalseCondition(rr, api.ConditionPROpened, api.ReasonIncidentGone)
+	})
+	live := runStopExceptionLook(t, r, get)
+	if live.Status.PullRequest == nil || live.Status.PullRequest.HeadSHA != head {
+		t.Fatalf("pull request %+v: want the open one recorded with head %s", live.Status.PullRequest, head)
+	}
+	wantStopCheckWritten(t, g, live, head)
+}
+
+// #1008, ADR-0046 amendment (decision of 2026-11-21): the look reads the own pull request open on the target branch,
+// and a person moves it to another base before the closing step's read. The step closes nothing there
+// (errOpenElsewhere), and the look writes the stopped holder's failed check: the step's own read showed it open. One
+// case per step that ends on it: the expired cleanup and the cancel.
+func TestStopExceptionLookFindingItsPullRequestOnAnotherBaseFailsTheCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(r *RemediationRequestReconciler, g *fakegit.Git, rr *api.RemediationRequest)
+	}{
+		{name: expiredCase, stop: expiredStop},
+		{name: cancelCase, stop: cancelStop},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, get, head := stopExceptionWorld(t, tc.stop)
+			n := get().Status.PullRequest.Number
+			if err := g.CreateBranch(context.Background(), movedBranch, head); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			g.SetFail(func(op string) error {
+				if op != opGet {
+					return nil
+				}
+				if calls++; calls == 2 {
+					return g.SetBase(n, movedBranch)
+				}
+				return nil
+			})
+			live := runStopExceptionLook(t, r, get)
+			if cr, err := g.GetChangeRequest(context.Background(), n); err != nil ||
+				cr.State != providers.ChangeRequestOpen || cr.BaseBranch != movedBranch {
+				t.Fatalf("pull request %+v, %v: want it left open on %s", cr, err, movedBranch)
+			}
+			wantStopCheckWritten(t, g, live, head)
 		})
 	}
 }

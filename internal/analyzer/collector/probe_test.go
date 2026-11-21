@@ -394,7 +394,7 @@ func TestProbeFailureOfATerminatingPod(t *testing.T) {
 	d, rs, pod := workload()
 	pod = startedAt(pod, t0.Add(-time.Hour))
 	pod.DeletionTimestamp = &metav1.Time{Time: t0.Add(10 * time.Second)}
-	pod.Finalizers = []string{"test.shadewright.io/hold"}
+	pod.Finalizers = []string{testFinalizer}
 	h := newHarness(t, Config{}, d, rs, pod)
 	before := skipped("Readiness")
 

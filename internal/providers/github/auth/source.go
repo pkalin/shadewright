@@ -447,7 +447,8 @@ func (s *Source) statusError(op string, resp *http.Response) error {
 	case http.StatusNotFound:
 		return fmt.Errorf("%w: %w", msg, providers.ErrNotFound)
 	case http.StatusUnauthorized:
-		return fmt.Errorf("%w: GitHub rejected the App JWT", msg)
+		// A wrong or rotated private key, or a deleted App: final until a person fixes the App or its key.
+		return fmt.Errorf("%w: GitHub rejected the App JWT: %w", msg, providers.ErrUnauthorized)
 	case http.StatusForbidden, http.StatusTooManyRequests:
 		// A rate limit also answers 403: with Retry-After or an exhausted quota, or, for a secondary limit,
 		// with neither and a body that says so. The body is searched in a bounded read, never kept.

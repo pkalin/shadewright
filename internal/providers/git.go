@@ -67,7 +67,8 @@ type ChangeRequest struct {
 	URL        string
 	HeadBranch string
 	// BaseBranch is the branch the change request targets. It is empty only in an answer of
-	// ListChangeRequestsAnyBase whose base name the provider left out.
+	// ListChangeRequestsAnyBase or GetChangeRequest whose base name the provider left out, and never for the
+	// target branch, whose name passes the provider's rule for target branches.
 	BaseBranch string
 	// HeadSHA is the commit at the head of the change request.
 	HeadSHA string
@@ -343,7 +344,8 @@ type GitProvider interface {
 	// another branch or repository, or (with openOnly) one that is not open, is ErrUntrustedAnswer for the whole call.
 	// An entry whose base name is not valid by the provider's rule for target branches is returned with BaseBranch
 	// empty: the name is text from the code host, never shown, and the number is still the answer, so no base name
-	// fails the listing. More than MaxBranchChangeRequests, or a page past them, is ErrTooLarge, never a list cut
+	// fails the listing. An entry to the target branch always carries its name, which passes that rule: a caller
+	// takes an empty name for another base (#925). More than MaxBranchChangeRequests, or a page past them, is ErrTooLarge, never a list cut
 	// short. Any error is a failure to find out, never an answer. It only reads.
 	ListChangeRequestsAnyBase(ctx context.Context, headBranch string, openOnly bool) ([]ChangeRequest, error)
 

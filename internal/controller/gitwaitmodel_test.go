@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -115,13 +116,29 @@ import (
 //   - ending: a reconcile that starts with a RequestDeadline, HandoffGrace or HandoffRecovery wait past its end
 //     calls the Git host nothing before its first status write: the end decides from recorded state alone (fifth
 //     decision of 2026-11-18 on #771, point 5 as the sixth kept it);
+//   - stop check kept: once a reconcile leaves a stopped request whose own pull request is open with the last review
+//     check of its head failed, that check stays the last one on the head while the request stays stopped and the
+//     pull request open, also when a reconcile works from an older copy of the request, whether its live read works
+//     or fails: without the live read only a pass is taken down (decisions of 2026-11-20 on #925, the last after the
+//     fifth pass). The model fails the live read of the request in half of the reconciles that read an older copy
+//     (liveFails); it draws no approval, so no passing check, and directed tests hold that case
+//     (TestFailedLiveReadWritesOnlyOverAPass, TestFailedLiveReadStillTakesThePassDown);
 //   - schema: no status write is one the API server refuses.
 //
 // At the end the world heals (reads work, no write fails; the repository comes back in half of the runs; a pause is
 // lifted, after a few more reconciles under it in half of the runs and always under the pause focus) and, after a few
 // reconciles, the lock is free, or held by a request whose pull request is open and can still merge; a merge
 // recorded with its receipt never holds it, whether the repository came back or not; a merge is recorded; and a
-// cancelled request whose pull request is closed or gone holds no lock (settled cancel).
+// cancelled request whose pull request is closed or gone holds no lock (settled cancel). With reviewer hints on, a
+// request that stopped while its own pull request is open, with its repository in the settings, has its review check
+// failed (settled check) or, where the settings permit no write (another target branch named), says so with condition
+// ReviewCheckNotFailed (settled note, #925); a request whose own pull request is not open (closed, merged or gone,
+// on any base), while no other open pull request from its branch keeps the lock, carries no such condition (note
+// cleared). After every reconcile, no request whose failed check is
+// recorded as Stale, and still shown failed last on its head, carries it (note cleared), nor one whose lock is released or whose merge is recorded (note
+// ended); and a request that stops because its pull request is read gone (ChangeRequestGone), with reviewer hints on,
+// leaves the failed review check last on its recorded head, or condition ReviewCheckNotFailed, in that reconcile (gone
+// check).
 //
 // Each seed has a focus (seed modulo the number of focuses, modelFocuses): none, or one that makes an order of the
 // fourth or fifth decision of 2026-11-18 on #771 likely (a deadline that passes while the repository cannot be
@@ -134,12 +151,14 @@ import (
 // pause or the lift). Under the commit and pause focuses the executor is also down, now and then, for longer than a
 // wait. A focus only weights the start and the events; every event can still happen.
 //
-// Seeds: modelSeeds in CI (a fixed set, fewer under the race detector or -short); SHADEWRIGHT_MODEL_SEEDS=n runs n
+// Seeds: modelSeeds in CI (a fixed set, fewer under the race detector or -short, with modelGoneSeeds added); SHADEWRIGHT_MODEL_SEEDS=n runs n
 // more seeds from the time, SHADEWRIGHT_MODEL_SEED=s one seed and SHADEWRIGHT_MODEL_SEED_RANGE=a-b the seeds a to b
 // instead of the fixed set. A failure prints its seed and the trace; SHADEWRIGHT_MODEL_TRACE=1 prints it always.
 
 const (
 	modelSteps = 24
+	// modelGoneOdds: goneEvent deletes the pull request in one pass of this many where it can.
+	modelGoneOdds = 2
 
 	// CleanupTimeout of the model: long, but for a step that meets a read that times out (cleanupTimeout). The long
 	// one stays above the 2 s that modelGit.fail takes for a short deadline.
@@ -201,7 +220,28 @@ var (
 		focusPause, focusLastRead}
 )
 
-// modelSeeds is the fixed seed set: 1 to n.
+// modelGoneSeeds are the seeds above 90 whose sequence stops for a pull request read gone with reviewer hints on
+// (goneEvent): the fixed set under the race detector or -short adds them. A change of the model's draws can move
+// them; TestGitWaitModel then fails when no seed of the set reaches the property, and the new seeds are found with
+// SHADEWRIGHT_MODEL_SEED_RANGE=91-240 and the count it logs per run.
+var modelGoneSeeds = []uint64{165, 202, 210}
+
+// modelUnsettledSeeds are the seeds above 240 whose sequence has a stopped holder kept by another pull request from
+// its branch at a look that settles nothing yet (the first look at a missing number): property "stopped holder" fails
+// on each of them when that look does not write the failed check (failCheckAfterUnsettledLook, #925). They are the
+// only seeds of 1 to 4000 that do, so the fixed set adds them in every run. A change of the model's draws can move
+// them; the new ones are found with the call removed and SHADEWRIGHT_MODEL_SEED_RANGE.
+var modelUnsettledSeeds = []uint64{1456, 3796, 3895}
+
+// modelExceptionSeeds are seeds whose sequence has a stopped holder kept by another pull request from its branch at a
+// look a stop exception takes over (a cancel settled for its Incident that closes its own pull request after a heal):
+// property "stopped holder" lets that look go without the failed check and asks for it at the next look (ADR-0046
+// limit (c), last decision of 2026-11-21 on #925). Found by a run of seeds 1 to 200000; the fixed set adds them in
+// every run, so the exception is reached there. A change of the model's draws can move them.
+var modelExceptionSeeds = []uint64{90477, 175302}
+
+// modelSeeds is the fixed seed set: 1 to n, modelGoneSeeds under the race detector or -short, modelUnsettledSeeds
+// and modelExceptionSeeds.
 func modelSeeds(t *testing.T) []uint64 {
 	if s := os.Getenv("SHADEWRIGHT_MODEL_SEED"); s != "" {
 		seed, err := strconv.ParseUint(s, 10, 64)
@@ -215,10 +255,17 @@ func modelSeeds(t *testing.T) []uint64 {
 		// Each order of the fourth decision of 2026-11-18 on #771 is found in this range on the build before its fix.
 		n = 90
 	}
-	seeds := make([]uint64, 0, n)
+	seeds := make([]uint64, 0, n+len(modelGoneSeeds)+len(modelUnsettledSeeds)+len(modelExceptionSeeds))
 	for i := range n {
 		seeds = append(seeds, uint64(i+1))
 	}
+	if n < 240 {
+		// The seeds of 91 to 240 that reach property "gone check" (goneEvent), so a run under the race detector
+		// checks it on more than the two seeds of 1 to 90 that do.
+		seeds = append(seeds, modelGoneSeeds...)
+	}
+	seeds = append(seeds, modelUnsettledSeeds...)
+	seeds = append(seeds, modelExceptionSeeds...)
 	if s := os.Getenv("SHADEWRIGHT_MODEL_SEED_RANGE"); s != "" {
 		from, to, _ := strings.Cut(s, "-")
 		a, errA := strconv.ParseUint(from, 10, 64)
@@ -246,12 +293,33 @@ func modelSeeds(t *testing.T) []uint64 {
 
 func TestGitWaitModel(t *testing.T) {
 	schema := requestStatusSchema(t)
+	fixedSeeds := os.Getenv("SHADEWRIGHT_MODEL_SEED") == "" && os.Getenv("SHADEWRIGHT_MODEL_SEED_RANGE") == "" &&
+		os.Getenv("SHADEWRIGHT_MODEL_SEEDS") == ""
 	t.Cleanup(func() {
 		modelMoves.mu.Lock()
 		defer modelMoves.mu.Unlock()
 		t.Logf("moves to another base and back: %d, in %d sequences; deleted while moved: %d; closed or merged while "+
 			"moved before a lost write was adopted: %d", modelMoves.moves, modelMoves.sequences,
 			modelMoves.movedBeforeDelete, modelMoves.endedWhileMoved)
+		modelGoneStops.mu.Lock()
+		defer modelGoneStops.mu.Unlock()
+		t.Logf("stops for a pull request read gone with reviewer hints on, checked: %d", modelGoneStops.count)
+		if fixedSeeds && modelGoneStops.count == 0 && !t.Failed() {
+			t.Errorf("property \"gone check\" was never reached on the fixed seeds: a change of the model's events " +
+				"no longer draws a stop for a pull request read gone with reviewer hints on (goneEvent, #925)")
+		}
+		modelHeldChecks.mu.Lock()
+		defer modelHeldChecks.mu.Unlock()
+		t.Logf("looks of a stopped holder kept by another pull request from its branch, checked: %d, of which taken "+
+			"over by a stop exception and let go for one look: %d", modelHeldChecks.count, modelHeldChecks.excused)
+		if fixedSeeds && modelHeldChecks.count == 0 && !t.Failed() {
+			t.Errorf("property \"stopped holder\" was never reached on the fixed seeds: a change of the model's " +
+				"events no longer draws a stopped holder kept by another pull request (#925)")
+		}
+		if fixedSeeds && modelHeldChecks.excused == 0 && !t.Failed() {
+			t.Errorf("property \"stopped holder\" never let a look a stop exception took over go on the fixed seeds: " +
+				"a change of the model's events moved modelExceptionSeeds (ADR-0046 limit (c), #925)")
+		}
 	})
 	for _, seed := range modelSeeds(t) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -303,6 +371,18 @@ type modelWorld struct {
 	// before the reconcile that read it decides (scripted sequences only).
 	staleStart *api.RemediationRequest
 	stale      *api.RemediationRequest
+	// liveFails makes every live read of the request (APIReader) but the reconcile's first fail, in the reconcile
+	// that follows a stale copy of the cache; liveRng draws it, apart from rng, so the orders the seeds drew before it
+	// are kept. liveReads counts the live reads of the request in that reconcile.
+	liveFails bool
+	liveReads int
+	liveRng   *rand.Rand
+	// heldRng draws heldEvent, apart from rng, so the orders the seeds drew before it are kept.
+	heldRng *rand.Rand
+	// goneRng draws goneEvent, apart from rng and heldRng, so the orders the seeds drew before it are kept.
+	goneRng *rand.Rand
+	// goneQuiet counts the passes after goneEvent's delete in which event draws nothing.
+	goneQuiet int
 	// writeFaulted reports that this reconcile met an injected write fault or a stale read.
 	writeFaulted bool
 	// deleted hides the pull request from every read (gone from the host); gone are earlier pull requests of the
@@ -316,6 +396,14 @@ type modelWorld struct {
 	// second says a pull request was opened next to the request's own while that one was open (modelGit
 	// OpenChangeRequest); empty while none was.
 	secondPR string
+	// unmarked is a pull request a person opened from the request's branch to the third base without the request's
+	// marker (unmarkedEvent, #925); 0 while there is none.
+	unmarked int64
+	// reopenedAfterRelease: a person reopened the request's pull request after its lock was released. A released
+	// request does not look at its pull request any more, so the lock does not follow the reopen and a merge after it
+	// is not recorded: a known limit while point 3 of #925 waits for a decision, left out of the properties
+	// "settled merge" and "lock back".
+	reopenedAfterRelease bool
 	// noCommit makes the host report the merge without its merge commit.
 	noCommit bool
 	number   int64
@@ -344,6 +432,14 @@ type modelWorld struct {
 	lost bool
 	// lastingUntil keeps the fault as it is until then (an outage that lasts): fault events wait.
 	lastingUntil time.Time
+	// checkFails: the Git host fails every write of a check run (CreateCheckRun) with a 5xx (checkEvent): a write
+	// made to fail (writeFaulted), no failed read.
+	checkFails bool
+	// goneStopSeen says goneCheckProperty saw this sequence's stop for a pull request read gone (ChangeRequestGone).
+	goneStopSeen bool
+	// stopFailedHead is the head whose last review check a reconcile left failed while the request stopped with its
+	// own pull request open on that head (property "stop check kept"); empty otherwise.
+	stopFailedHead string
 	// history is every copy of the request the API server held after a reconcile, for the stale cache.
 	history    []*api.RemediationRequest
 	violations []string
@@ -381,6 +477,10 @@ type modelWorld struct {
 	// afterLift counts the reconciles since the last lift with reads working and no write made to fail; -1 when
 	// none is counted (no lift yet, or a fault since).
 	afterLift int
+	// exceptionLook: a stop exception of ADR-0046 limit (c) took the reconcile running over (stopExceptionTaken).
+	// excused: property "stopped holder" let the last look it reached go without the failed check for that reason,
+	// so the next look it reaches must show the check.
+	exceptionLook, excused bool
 }
 
 // pauseSpan is a pause from its start to its lift, or a time the executor was down.
@@ -461,6 +561,12 @@ func newModel(t *testing.T, seed uint64, schema *statusSchema) *modelWorld {
 func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchema, st modelStart) *modelWorld {
 	m := &modelWorld{t: t, seed: seed, rng: rng, fault: faultNone, schema: schema, configured: freshOtherBranch,
 		focus: st.focus, afterLift: -1, flap: st.flap}
+	// #nosec G404 -- a seeded generator, so a failing order can be run again from its seed.
+	m.liveRng = rand.New(rand.NewPCG(seed, seed^0x6a09e667f3bcc909))
+	// #nosec G404 -- seeded as above.
+	m.heldRng = rand.New(rand.NewPCG(seed, seed^0xbb67ae8584caa73b))
+	// #nosec G404 -- seeded as above.
+	m.goneRng = rand.New(rand.NewPCG(seed, seed^0x3c6ef372fe94f82b))
 	start := st.start
 	phase := api.PhaseNeedsIntervention
 	switch start {
@@ -473,6 +579,9 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 	}
 	r, g, rr := settlementWorld(t, phase)
 	m.r, m.g, m.key = r, g, client.ObjectKeyFromObject(rr)
+	// Reviewer hints in half of the runs: the review check of a request that stops while its pull request is open is
+	// failed (property "settled check", #925).
+	r.ReviewerHints = rng.IntN(2) == 0
 	// A third base, neither the plan's target branch nor a configured one, that a person may move the pull request to
 	// (moveEvent, #892).
 	if head, err := g.BranchHead(context.Background(), mainBranch); err != nil {
@@ -519,6 +628,10 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 	default:
 		orderStop(t, r, rr, start)
 	}
+	// In half of the runs with reviewer hints on, the Git host fails the write of check runs from the start until
+	// checkEvent or the heal: a stopped request says so with condition ReviewCheckNotFailed (GitFailed) until a later
+	// look writes the failed check (#925).
+	m.checkFails = r.ReviewerHints && rng.IntN(2) == 0
 	m.lost = start == startPolicyChecked && !m.handoff
 	r.VerifyOutcomes = st.verify
 	m.logf("start %+v", st)
@@ -564,7 +677,15 @@ func newModelFrom(t *testing.T, seed uint64, rng *rand.Rand, schema *statusSchem
 		return &modelGit{GitProvider: g.ForTarget(string(repo.TargetBranch)), m: m}, nil
 	}
 	r.CleanupTimeout = modelLongTimeout
+	r.stopExceptionTaken = m.tookStopException
 	return m
+}
+
+// tookStopException records that a stop exception took the reconcile running over (property "stopped holder").
+func (m *modelWorld) tookStopException() {
+	m.mu.Lock()
+	m.exceptionLook = true
+	m.mu.Unlock()
 }
 
 // cleanupTimeout is the time a step may take (CleanupTimeout) for the fault now. It is a real deadline inside a
@@ -834,8 +955,9 @@ func (m *modelWorld) run() {
 	}
 	m.mu.Lock()
 	m.fault, m.loseNext, m.conflictNext, m.applyNext, m.staleNext, m.noCommit = faultNone, false, false, false, false, false
+	m.liveFails, m.liveReads = false, 0
 	m.interleaveNext = false
-	m.lastingUntil, m.passWrites = time.Time{}, 0
+	m.lastingUntil, m.passWrites, m.checkFails = time.Time{}, 0, false
 	m.mu.Unlock()
 	if m.paused && (m.focus == focusPause || m.rng.IntN(2) == 0) {
 		// A pause stops everything (sixth decision of 2026-11-18 on #771): the healed world changes nothing while it
@@ -943,15 +1065,7 @@ func (m *modelWorld) pullRequestEvent(cr providers.ChangeRequest) {
 			m.logf("move the pull request to the configured branch")
 		}
 	case 2:
-		m.mu.Lock()
-		m.deleted = true
-		m.mu.Unlock()
-		if cr.BaseBranch == movedBranch {
-			modelMoves.mu.Lock()
-			modelMoves.movedBeforeDelete++
-			modelMoves.mu.Unlock()
-		}
-		m.logf("delete the pull request")
+		m.deleteEvent(cr)
 	default:
 		sha, err := m.g.Merge(m.number)
 		if err == nil {
@@ -1006,15 +1120,190 @@ func (m *modelWorld) moveEvent(cr providers.ChangeRequest) {
 	m.logf("move the pull request from %.12s to %.12s", cr.BaseBranch, to)
 }
 
+// unmarkedEvent is a person who opens a pull request from the request's branch to the third base without the
+// request's marker, or closes the one opened before (#925): open, it has the branch head and can be moved to the
+// target branch and merged, so it keeps the lock as the request's own does (property "lock unmarked").
+func (m *modelWorld) unmarkedEvent() {
+	if m.unmarked != 0 {
+		if err := m.g.Close(m.unmarked); err != nil {
+			m.t.Fatal(err)
+		}
+		m.logf("close the unmarked pull request #%d", m.unmarked)
+		m.unmarked = 0
+		return
+	}
+	n, err := m.g.AddOpenChangeRequest(freshness.BranchName(m.template), movedBranch, "a person's change")
+	if err != nil {
+		return
+	}
+	m.unmarked = n
+	m.logf("open #%d from the request's branch to %.12s without the marker", n, movedBranch)
+}
+
+// heldEvent is a person who opens a pull request from the branch of a stopped request whose own pull request is not
+// open (unmarkedEvent), in a third of the passes where that holds: the case of property "stopped holder" (decision of
+// 2026-11-20 on #925, "one rule"), which the draws of event reach too rarely to be checked on the fixed seeds. It
+// draws from heldRng, so the other events of a seed stay as they were.
+func (m *modelWorld) heldEvent() {
+	if m.unmarked != 0 || m.heldRng.IntN(3) != 0 {
+		return
+	}
+	live := m.live()
+	if progresses(live) || live.Status.PullRequest == nil || !holdsLock(live) {
+		return
+	}
+	if cr, found := m.pr(); found && !m.deleted && cr.State == providers.ChangeRequestOpen {
+		return
+	}
+	m.unmarkedEvent()
+}
+
+// deleteEvent deletes the request's open pull request cr: every read finds it gone from the host.
+func (m *modelWorld) deleteEvent(cr providers.ChangeRequest) {
+	m.mu.Lock()
+	m.deleted = true
+	m.mu.Unlock()
+	if cr.BaseBranch == movedBranch {
+		modelMoves.mu.Lock()
+		modelMoves.movedBeforeDelete++
+		modelMoves.mu.Unlock()
+	}
+	m.logf("delete the pull request")
+}
+
+// goneEvent is a person who deletes the open pull request of a request that waits for review with reviewer hints on,
+// in one pass of modelGoneOdds where that holds, with writes not paused, reads and check run writes working, and the
+// settings naming the plan's branch (main) for its repository: the case of property "gone
+// check" (decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop, ADR-0045), which the
+// draws of event reached on none of the fixed seeds (seeds 1 to 240, and 1 to 90 under the race detector). The watch
+// confirms gone over two looks, so the world stays quiet for the pass of the delete and the next one (goneQuiet):
+// any other event there (a pause, a cancel, a fault) mostly ends the sequence elsewhere. It reports whether the
+// pass is quiet, so event draws nothing else. It draws from goneRng, so the seeds where it deletes nothing keep the
+// orders they drew before it.
+func (m *modelWorld) goneEvent() bool {
+	if m.goneQuiet > 0 {
+		m.goneQuiet--
+		return true
+	}
+	if !m.r.ReviewerHints || m.deleted || m.goneStopSeen || m.paused || m.fault != faultNone || m.checkFails ||
+		m.repo != nil || m.configured != mainBranch || m.goneRng.IntN(modelGoneOdds) != 0 {
+		return false
+	}
+	live := m.live()
+	pr := live.Status.PullRequest
+	if !progresses(live) || pr == nil || handedOff(live) || intent(live) != nil {
+		return false
+	}
+	cr, found := m.pr()
+	if !found || cr.Number != pr.Number || cr.State != providers.ChangeRequestOpen {
+		return false
+	}
+	m.deleteEvent(cr)
+	m.goneQuiet = 1
+	return true
+}
+
+// unmarkedOpen reports whether the pull request of unmarkedEvent is open.
+func (m *modelWorld) unmarkedOpen() bool {
+	if m.unmarked == 0 {
+		return false
+	}
+	for _, cr := range m.g.ChangeRequests() {
+		if cr.Number == m.unmarked {
+			return cr.State == providers.ChangeRequestOpen
+		}
+	}
+	return false
+}
+
+// reopenEvent is a person who reopens the request's closed pull request (#925), on whatever base it is.
+func (m *modelWorld) reopenEvent(cr providers.ChangeRequest) {
+	if cr.State != providers.ChangeRequestClosed || m.deleted {
+		return
+	}
+	if err := m.g.Reopen(m.number); err != nil {
+		return
+	}
+	if m.released {
+		m.reopenedAfterRelease = true
+	}
+	m.restartSettlement()
+	m.logf("reopen the pull request on %.12s", cr.BaseBranch)
+}
+
+// retargetEvent is a person who changes the base of the request's open pull request to any of the three bases: the
+// recorded target branch, the one the settings name now, or the third base (#925), also from the third base to the
+// configured branch, which moveEvent never draws.
+func (m *modelWorld) retargetEvent(cr providers.ChangeRequest) {
+	if cr.State != providers.ChangeRequestOpen || m.deleted {
+		return
+	}
+	to := []string{mainBranch, m.configured, movedBranch}[m.rng.IntN(3)]
+	if to == cr.BaseBranch {
+		return
+	}
+	if to == movedBranch {
+		m.movedFrom = cr.BaseBranch
+	}
+	if err := m.g.SetBase(m.number, to); err != nil {
+		m.t.Fatal(err)
+	}
+	m.restartSettlement()
+	m.logf("retarget the pull request from %.12s to %.12s", cr.BaseBranch, to)
+}
+
+// restartSettlement starts the count of property "lift lock" again, as at a lift, after a change of the world the
+// settlement decides on: a reopened or retargeted pull request (an expired request closes a reopened one again) or
+// the repository's return to the settings (the close of an expired request's cleanup once more) takes reconciles of
+// its own (model seeds 10135, 138015 and 171640).
+func (m *modelWorld) restartSettlement() {
+	if m.afterLift > 0 {
+		m.afterLift = 0
+	}
+}
+
+// moveBackEvent is a person who moves the request's open pull request back from the third base to the base it had,
+// once the request has stopped (#925, ADR-0043 limit (e)): the stopped request keeps the lock while it is open.
+func (m *modelWorld) moveBackEvent(cr providers.ChangeRequest) {
+	if cr.State != providers.ChangeRequestOpen || m.deleted || cr.BaseBranch != movedBranch || progresses(m.live()) {
+		return
+	}
+	m.moveEvent(cr)
+	m.logf("(moved back after the request stopped)")
+}
+
+// checkEvent switches the Git host's failure of check run writes on or off (checkFails, #925).
+func (m *modelWorld) checkEvent() {
+	m.mu.Lock()
+	m.checkFails = !m.checkFails
+	on := m.checkFails
+	m.mu.Unlock()
+	m.logf("the Git host fails check run writes: %t", on)
+}
+
 // event changes the world at random before a reconcile.
 func (m *modelWorld) event() {
+	m.heldEvent()
+	if m.goneEvent() {
+		return
+	}
 	cr, _ := m.pr()
 	if m.focusEvent(cr) {
 		return
 	}
-	switch m.rng.IntN(19) {
+	switch m.rng.IntN(24) {
 	case 0, 1, 8:
 		m.pullRequestEvent(cr)
+	case 19:
+		m.unmarkedEvent()
+	case 20:
+		m.reopenEvent(cr)
+	case 21:
+		m.retargetEvent(cr)
+	case 22:
+		m.moveBackEvent(cr)
+	case 23:
+		m.checkEvent()
 	case 2, 3, 4, 9:
 		if m.clock.at.Before(m.lastingUntil) {
 			return
@@ -1371,7 +1660,17 @@ func (f *flickerReader) Get(ctx context.Context, key client.ObjectKey, obj clien
 		f.m.mu.Lock()
 		stale := f.m.staleStart
 		f.m.staleStart = nil
+		// The reconcile's first read of the request starts it (getLive); a failed live read is drawn for the reads
+		// after it, such as the one right before the merge gate writes the check.
+		fails := f.m.liveFails && f.m.liveReads > 0
+		f.m.liveReads++
+		if fails {
+			f.m.writeFaulted = true
+		}
 		f.m.mu.Unlock()
+		if fails {
+			return apierrors.NewServiceUnavailable("the API server is not available")
+		}
 		if stale != nil {
 			// The request read here changes into what the API server holds before the reconcile decides.
 			stale.DeepCopyInto(rr)
@@ -1509,10 +1808,11 @@ func (m *modelWorld) serveStale() {
 	}
 	m.mu.Lock()
 	m.stale, m.staleNext = older[m.rng.IntN(len(older))], true
+	m.liveFails, m.liveReads = m.liveRng.IntN(2) == 0, 0
 	m.interleaveNext = m.second.Name != ""
 	m.mu.Unlock()
-	m.logf("the cache serves an older copy of the request at the next read (phase %s, waits %d)",
-		m.stale.Status.Phase, len(m.stale.Status.GitWaits))
+	m.logf("the cache serves an older copy of the request at the next read (phase %s, waits %d, live read fails %t)",
+		m.stale.Status.Phase, len(m.stale.Status.GitWaits), m.liveFails)
 }
 
 // stop stops the request from outside: the kill switch, a person's cancel, or another target branch in the
@@ -1549,6 +1849,7 @@ func (m *modelWorld) restoreRepository() {
 		s.Spec.Repositories = append([]api.GitRepository{*repo}, s.Spec.Repositories...)
 	})
 	m.repo = nil
+	m.restartSettlement()
 	m.logf("the repository is back in the settings")
 }
 
@@ -1586,7 +1887,7 @@ func (m *modelWorld) restart() {
 	r := m.r
 	m.r = &RemediationRequestReconciler{Client: r.Client, APIReader: r.APIReader, Scheme: r.Scheme, Source: r.Source,
 		OpenRepository: r.OpenRepository, Now: r.Now, CleanupTimeout: r.CleanupTimeout, ReviewerHints: r.ReviewerHints,
-		VerifyOutcomes: m.rng.IntN(2) == 0}
+		VerifyOutcomes: m.rng.IntN(2) == 0, stopExceptionTaken: r.stopExceptionTaken}
 	m.logf("restart (verify outcomes %t)", m.r.VerifyOutcomes)
 }
 
@@ -1612,6 +1913,7 @@ func (m *modelWorld) step() {
 	}
 	m.mu.Lock()
 	m.writeFaulted, m.calls, m.failedCalls, m.passed, m.ended = false, 0, 0, passed, false
+	m.exceptionLook = false
 	m.mu.Unlock()
 	if m.handoff && !m.paused && (m.repo != nil || m.configured != m.planBranch) && m.refusedAt.IsZero() {
 		m.refusedAt = m.clock.at
@@ -1629,6 +1931,7 @@ func (m *modelWorld) step() {
 	// look at what is left to clear), and the properties that judge what the reconcile ended skip such a reconcile.
 	staleRead := armed && !m.staleNext
 	m.interleaveNext = false
+	m.liveFails, m.liveReads = false, 0
 	m.mu.Unlock()
 	m.mu.Lock()
 	m.passed = ""
@@ -1790,6 +2093,8 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 		m.paceProperties(live, res, err, faulted)
 		m.lockProperties(live)
 		m.recordedProperty(live, faulted)
+		m.noteProperty(live)
+		m.stopCheckProperty(live)
 		return
 	}
 	for _, w := range live.Status.GitWaits {
@@ -1831,6 +2136,268 @@ func (m *modelWorld) properties(live *api.RemediationRequest, res reconcile.Resu
 	m.paceProperties(live, res, err, faulted)
 	m.lockProperties(live)
 	m.recordedProperty(live, faulted)
+	m.noteProperty(live)
+	m.stopCheckProperty(live)
+	m.goneCheckProperty(live)
+	m.stoppedHolderProperty(live, err, faulted)
+}
+
+// modelHeldChecks counts, over every seed of a run, the looks of a stopped holder that stoppedHolderProperty checked,
+// so a run shows the property was reached; TestGitWaitModel fails on the fixed seed set when it is 0.
+var modelHeldChecks struct {
+	mu    sync.Mutex
+	count int
+	// excused counts the looks a stop exception took over that the property let go without the check.
+	excused int
+}
+
+// stoppedHolderProperty: a stopped holder whose own pull request is not open (closed, merged, gone or never found)
+// while another open pull request from its branch holds the lock leaves, after a look whose reads and writes worked,
+// the failed review check last on its recorded head, or says why not with condition ReviewCheckNotFailed (stopped
+// holder, decision of 2026-11-20 on #925, "one rule"): that pull request has the branch head and could merge it on a
+// pass written before the stop. The look decides from the lock and the check on the head, never from the verdict of
+// its own pull request. The model reaches no new installation of the App; the rule has no exception for one
+// (decision of 2026-11-21 on #925, ADR-0046), and the directed tests cover that path.
+//
+// One look is let go without the check: a look that a stop exception took over (ADR-0046 limit (c), last decision of
+// 2026-11-21 on #925; closing it is #1008), told by the step the reconcile took (exceptionLook, set through
+// stopExceptionTaken), never by the seed. The next look the property reaches must show the check, whatever took it
+// over: a second look in a row without it fails the run (excused).
+func (m *modelWorld) stoppedHolderProperty(live *api.RemediationRequest, err error, faulted bool) {
+	if !m.r.ReviewerHints || err != nil || faulted || m.lastFailedCalls > 0 || len(m.history) < 2 {
+		return
+	}
+	before := m.history[len(m.history)-2]
+	pr := live.Status.PullRequest
+	if progresses(before) || progresses(live) || !live.DeletionTimestamp.IsZero() || pr == nil ||
+		!ptr.Deref(live.Status.HoldsTarget, false) || !ptr.Deref(before.Status.HoldsTarget, false) ||
+		mergeRecorded(live) || handedOff(live) || intent(live) != nil || !m.unmarkedOpen() || m.repo != nil ||
+		meta.FindStatusCondition(live.Status.Conditions, api.ConditionPullRequestUnreadable) != nil {
+		// No look reads anything while the repository is out of the settings (PullRequestUnreadable says so).
+		return
+	}
+	if cr, found := m.pr(); found && !m.deleted && (cr.State == providers.ChangeRequestOpen ||
+		cr.State == providers.ChangeRequestMerged && cr.BaseBranch != movedBranch) {
+		// Open, or merged into a target branch: the merge path records it (its reads and waits), not this rule.
+		return
+	}
+	if len(live.Status.GitWaits) > 0 ||
+		meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry) != nil {
+		return
+	}
+	modelHeldChecks.mu.Lock()
+	modelHeldChecks.count++
+	modelHeldChecks.mu.Unlock()
+	if meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil {
+		// The write failed or the settings permit none (another target branch, a pause): the look says so.
+		m.excused = false
+		return
+	}
+	if last := lastReviewCheck(m.g.CheckRuns(pr.HeadSHA)); last == nil || last.Status != providers.CheckRunFailure {
+		if m.excuseStopException() {
+			return
+		}
+		looks := 1
+		if m.excused {
+			looks = 2
+		}
+		m.fatalf("stopped holder: the request stopped (phase %s) and keeps the lock through #%d from its branch while "+
+			"its own pull request is not open, and the last review check of its recorded head %.12s is not failed, "+
+			"and condition ReviewCheckNotFailed does not say so (looks in a row without it: %d): %+v",
+			live.Status.Phase, m.unmarked, pr.HeadSHA, looks,
+			m.g.CheckRuns(pr.HeadSHA))
+		return
+	}
+	m.excused = false
+}
+
+// TestStoppedHolderPropertyLetsGoOneStopExceptionLook drives property "stopped holder" through scripted looks of a
+// stopped holder whose own pull request is closed while an unmarked one from its branch keeps the lock and no failed
+// check is on the recorded head: only a look a stop exception took over goes without the check, and only once in a
+// row (last decision of 2026-11-21 on #925, ADR-0046 limit (c)).
+func TestStoppedHolderPropertyLetsGoOneStopExceptionLook(t *testing.T) {
+	schema := requestStatusSchema(t)
+	for _, tc := range []struct {
+		name string
+		// looks says, per look, whether a stop exception took it over; checkAt the look before which the failed
+		// check is written on the head (-1: never).
+		looks   []bool
+		checkAt int
+		fails   bool
+	}{
+		{name: "a look without an exception", looks: []bool{false}, checkAt: -1, fails: true},
+		{name: "one exception look", looks: []bool{true}, checkAt: -1},
+		{name: "an exception look, then a look without the check", looks: []bool{true, false}, checkAt: -1,
+			fails: true},
+		{name: "two exception looks in a row without the check", looks: []bool{true, true}, checkAt: -1, fails: true},
+		{name: "an exception look, then the check", looks: []bool{true, false}, checkAt: 1},
+		{name: "the check, then an exception look, then the check is gone", looks: []bool{false, true, false},
+			checkAt: 0, fails: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// #nosec G404 -- a fixed seed: the scripted looks draw nothing.
+			rng := rand.New(rand.NewPCG(1, 2))
+			m := newModelFrom(t, 1, rng, schema, modelStart{start: stopCancelled, focus: focusNone})
+			m.r.ReviewerHints, m.checkFails = true, false
+			if err := m.g.Close(m.number); err != nil {
+				t.Fatal(err)
+			}
+			m.unmarkedEvent()
+			live := m.live()
+			if !holdsLock(live) || live.Status.PullRequest == nil || !m.unmarkedOpen() {
+				t.Fatalf("the scripted world is not a stopped holder kept by an unmarked pull request: holds %t, "+
+					"pull request %v, unmarked open %t", holdsLock(live), live.Status.PullRequest, m.unmarkedOpen())
+			}
+			head := live.Status.PullRequest.HeadSHA
+			m.history = []*api.RemediationRequest{live.DeepCopy(), live.DeepCopy()}
+			for i, exception := range tc.looks {
+				status := providers.CheckRunStatus("")
+				switch {
+				case i == tc.checkAt:
+					status = providers.CheckRunFailure
+				case tc.checkAt >= 0 && i > tc.checkAt:
+					// A pass written after the failed check: the head no longer shows the stop.
+					status = providers.CheckRunSuccess
+				}
+				if status != "" {
+					if err := m.g.CreateCheckRun(context.Background(), head, providers.CheckRun{
+						Name: providers.CheckRunName, Status: status}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				m.exceptionLook = exception
+				m.stoppedHolderProperty(live, nil, false)
+			}
+			failed := slices.ContainsFunc(m.violations, func(v string) bool {
+				return strings.HasPrefix(v, "stopped holder:")
+			})
+			if failed != tc.fails {
+				t.Fatalf("property \"stopped holder\" failed: %t, want %t; violations %v; trace:\n  %s", failed, tc.fails,
+					m.violations, strings.Join(m.trace, "\n  "))
+			}
+		})
+	}
+}
+
+// excuseStopException reports whether property "stopped holder" lets the look just checked go without the failed
+// check: a stop exception took it over (exceptionLook) and the look before it that the property reached was not let
+// go too (ADR-0046 limit (c): the next look that reaches the rule writes the check).
+func (m *modelWorld) excuseStopException() bool {
+	m.mu.Lock()
+	exception := m.exceptionLook
+	m.mu.Unlock()
+	if !exception || m.excused {
+		return false
+	}
+	m.excused = true
+	modelHeldChecks.mu.Lock()
+	modelHeldChecks.excused++
+	modelHeldChecks.mu.Unlock()
+	m.logf("stopped holder: a stop exception took the look over, the check is owed at the next look")
+	return true
+}
+
+// modelGoneStops counts, over every seed of a run, the stops for a pull request read gone with reviewer hints on that
+// goneCheckProperty checked, so a run shows the property was reached; TestGitWaitModel fails on the fixed seed set
+// when it is 0.
+var modelGoneStops struct {
+	mu    sync.Mutex
+	count int
+}
+
+// goneCheckProperty: a request that stops because its pull request is read gone (ChangeRequestGone) with reviewer
+// hints on fails the review check on its recorded head in the same reconcile, or says why not with condition
+// ReviewCheckNotFailed (gone check, decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop,
+// ADR-0045): otherwise another pull request from its branch could merge that commit on a pass written before the
+// stop. The model reaches no new installation of the App; the stop writes the same check through one (decision of
+// 2026-11-21 on #925, ADR-0046), which the directed tests cover.
+func (m *modelWorld) goneCheckProperty(live *api.RemediationRequest) {
+	if m.goneStopSeen || live.Status.Phase != api.PhaseNeedsIntervention || !slices.ContainsFunc(live.Status.Conditions,
+		func(c metav1.Condition) bool { return c.Reason == ReasonChangeRequestGone }) {
+		return
+	}
+	m.goneStopSeen = true
+	pr := live.Status.PullRequest
+	if !m.r.ReviewerHints || pr == nil || handedOff(live) || intent(live) != nil ||
+		meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil {
+		return
+	}
+	modelGoneStops.mu.Lock()
+	modelGoneStops.count++
+	modelGoneStops.mu.Unlock()
+	if last := lastReviewCheck(m.g.CheckRuns(pr.HeadSHA)); last == nil || last.Status != providers.CheckRunFailure {
+		m.fatalf("gone check: the request stopped with ChangeRequestGone and the last review check of its recorded "+
+			"head %.12s is not failed, and condition ReviewCheckNotFailed does not say so: %+v", pr.HeadSHA,
+			m.g.CheckRuns(pr.HeadSHA))
+	}
+}
+
+// stopCheckProperty: after a stop, the last review check written for the head is the failed one, or the pull request
+// is no longer open (stop check kept, decision of 2026-11-20 on #925). Once a reconcile leaves a stopped request whose
+// own pull request is open with the last review check of its head failed, no later reconcile leaves another state
+// last on that head while the request stays stopped and that pull request open with that head: a reconcile working
+// from an older copy of the request (the stale cache) must not write a pending or passing check over the failed one,
+// whether its live read works or fails: without it only a pass is taken down (decision of 2026-11-20 on #925, after
+// the fifth pass). The model fails that live read in half of the stale-copy reconciles (liveFails), but it does not
+// catch a wrong rule for a failed read: with the condition reverted, seeds 1 to 20,000 pass. The directed tests
+// TestFailedLiveReadWritesOnlyOverAPass, TestReviewCheckFromAStaleCopyLeavesTheStopsCheck and
+// TestFailedLiveReadLeavesTheStopsCheckWhileAnotherPullRequestHolds are what prove it. Paused or not, with any fault: nothing the model injects writes a check run.
+func (m *modelWorld) stopCheckProperty(live *api.RemediationRequest) {
+	pr := live.Status.PullRequest
+	cr, found := m.pr()
+	if pr == nil || progresses(live) || !found || m.deleted || cr.State != providers.ChangeRequestOpen ||
+		cr.Number != pr.Number || cr.HeadSHA != pr.HeadSHA {
+		m.stopFailedHead = ""
+		return
+	}
+	last := lastReviewCheck(m.g.CheckRuns(cr.HeadSHA))
+	switch {
+	case last != nil && last.Status == providers.CheckRunFailure:
+		m.stopFailedHead = cr.HeadSHA
+	case m.stopFailedHead == cr.HeadSHA:
+		m.fatalf("stop check kept: the request stopped (phase %s) with its pull request open on %.12s and the failed "+
+			"review check written, and a later check run on the head is not failed: %+v", live.Status.Phase,
+			cr.BaseBranch, m.g.CheckRuns(cr.HeadSHA))
+		m.stopFailedHead = ""
+	}
+}
+
+// failedLast reports whether the last review check run on the head live records is failed.
+func (m *modelWorld) failedLast(live *api.RemediationRequest) bool {
+	last := lastReviewCheck(m.g.CheckRuns(live.Status.PullRequest.HeadSHA))
+	return last != nil && last.Status == providers.CheckRunFailure
+}
+
+// lastReviewCheck is the last check run named providers.CheckRunName in runs, oldest first, or nil.
+func lastReviewCheck(runs []providers.CheckRun) *providers.CheckRun {
+	var last *providers.CheckRun
+	for i := range runs {
+		if runs[i].Name == providers.CheckRunName {
+			last = &runs[i]
+		}
+	}
+	return last
+}
+
+// noteProperty: condition ReviewCheckNotFailed says the failed review check is tried again at the next look of a
+// stopped holder, so no request carries it after its lock is released or once its merge is recorded (note ended,
+// #925): the write that ends the looks removes it; nor once its failed check is recorded as Stale (note cleared):
+// the write that records it removes it, unless the Git host no longer shows that failed check last on the head: a
+// later look writes it again and says so while that write fails (decision of 2026-11-20 on #925).
+func (m *modelWorld) noteProperty(live *api.RemediationRequest) {
+	c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
+	switch {
+	case c == nil:
+	case !holdsLock(live):
+		m.fatalf("note ended: the lock is released (phase %s) and condition ReviewCheckNotFailed is still set: %s",
+			live.Status.Phase, conditionsOf(live))
+	case mergeRecorded(live):
+		m.fatalf("note ended: the merge is recorded (phase %s) and condition ReviewCheckNotFailed is still set: %s",
+			live.Status.Phase, conditionsOf(live))
+	case staleRecorded(live) && m.failedLast(live):
+		m.fatalf("note cleared: the failed review check is recorded, and condition ReviewCheckNotFailed is still "+
+			"set: %s", conditionsOf(live))
+	}
 }
 
 // recordedProperty: a request whose status records a merge that delivered the plan, in Merged, Succeeded,
@@ -2059,7 +2626,7 @@ func (m *modelWorld) pauseProperties(before, live *api.RemediationRequest, pause
 	cr, found := m.pr()
 	if m.afterLift >= liftSettleSteps && m.repo == nil && !m.handoff && found && !m.deleted &&
 		cr.State == providers.ChangeRequestClosed && holdsLock(live) && !progresses(live) &&
-		!heldForVerification(live, m.r.VerifyOutcomes) {
+		!heldForVerification(live, m.r.VerifyOutcomes) && !m.unmarkedOpen() {
 		m.fatalf("lift lock: the pull request is closed and the stopped holder keeps the lock %d reconciles "+
 			"after the lift (phase %s)", m.afterLift, live.Status.Phase)
 	}
@@ -2121,6 +2688,11 @@ func (m *modelWorld) lockProperties(live *api.RemediationRequest) {
 			m.fatalf("lock open: the lock was released while the pull request is open (on %.12s)", cr.BaseBranch)
 		case found && cr.State == providers.ChangeRequestMerged && m.delivers(live, cr) && !mergeRecorded(live):
 			m.fatalf("lock merge: the lock was released on a merge the status does not record")
+		case m.unmarkedOpen() && !progresses(live) && !mergeRecorded(live):
+			// Any open pull request from the request's branch keeps the lock, on any base, marked or not (#925), as
+			// one open on the target branch does: a release on a recorded merge reads nothing, there as here.
+			m.fatalf("lock unmarked: the lock was released while #%d from the request's branch is open on %.12s",
+				m.unmarked, movedBranch)
 		}
 		if !progresses(live) {
 			m.released = true
@@ -2157,6 +2729,8 @@ func (m *modelWorld) settled() {
 	// The request's own pull request open on any base, a third one included, can still merge and keeps the lock
 	// (decision of 2026-11-19 on #892); a closed or merged one, or none, does not.
 	open := found && cr.State == providers.ChangeRequestOpen && !m.deleted
+	// So does any open pull request from its branch without its marker (#925).
+	open = open || m.unmarkedOpen()
 	switch {
 	case live.Status.MergeReceipt != nil && holdsLock(live) && !progresses(live) &&
 		!heldForVerification(live, m.r.VerifyOutcomes):
@@ -2165,7 +2739,8 @@ func (m *modelWorld) settled() {
 	case m.repo != nil, m.handoff:
 		// The repository left the settings: no read can settle anything else. Or the pull request is the
 		// predecessor's, which holds it.
-	case live.Spec.Cancel && holdsLock(live) && (m.deleted || found && cr.State == providers.ChangeRequestClosed):
+	case live.Spec.Cancel && holdsLock(live) && !m.unmarkedOpen() &&
+		(m.deleted || found && cr.State == providers.ChangeRequestClosed):
 		// A cancel whose pull request is closed or gone settles like any other stop, also after a change of the
 		// target branch (fifth decision of 2026-11-18 on #771).
 		m.fatalf("settled cancel: the request is cancelled, its pull request is %s, and the lock is held: phase %s",
@@ -2173,10 +2748,81 @@ func (m *modelWorld) settled() {
 	case holdsLock(live) && !open && !progresses(live) && !heldForVerification(live, m.r.VerifyOutcomes):
 		m.fatalf("settled lock: the lock is held after the world healed, and the pull request cannot merge (%s): phase %s",
 			cr.State, live.Status.Phase)
+	case m.uncheckedStop(live, cr, open):
+		m.fatalf("settled check: the request stopped (phase %s) while its pull request is open on %.12s, and the "+
+			"last review check of its head is not failed: %+v", live.Status.Phase, cr.BaseBranch,
+			m.g.CheckRuns(cr.HeadSHA))
+	case m.settledNote(live, cr, found, open):
+		// Said by settledNote.
 	case found && cr.State == providers.ChangeRequestMerged && m.delivers(live, cr) && !mergeRecorded(live) && !m.deleted &&
-		!m.releasedAside:
+		!m.releasedAside && !m.reopenedAfterRelease:
 		m.fatalf("settled merge: the merge is not recorded after the world healed: phase %s", live.Status.Phase)
 	}
+}
+
+// uncheckedStop reports whether live, after the world healed, stopped while its own pull request cr is open (open)
+// on any base, with reviewer hints on and its repository entry naming its target branch, and the last review check
+// run of the head is not a failure: a person could move the pull request back to the target branch, or leave it
+// there, and merge it on a check written before the stop (#925, ADR-0043 limit (e)).
+func (m *modelWorld) uncheckedStop(live *api.RemediationRequest, cr providers.ChangeRequest, open bool) bool {
+	pr := live.Status.PullRequest
+	if !m.r.ReviewerHints || m.handoff || m.repo != nil || m.paused || pr == nil || progresses(live) ||
+		!holdsLock(live) || !open || m.deleted || cr.Number != pr.Number || cr.State != providers.ChangeRequestOpen ||
+		cr.HeadSHA != pr.HeadSHA || live.Status.Source == nil || string(live.Status.Source.TargetBranch) != m.configured ||
+		handedOff(live) || intent(live) != nil {
+		return false
+	}
+	last := lastReviewCheck(m.g.CheckRuns(cr.HeadSHA))
+	return last == nil || last.Status != providers.CheckRunFailure
+}
+
+// settledNote checks the properties "settled note" and "note cleared" (see the top of this file) after the world
+// healed, and reports whether one failed.
+func (m *modelWorld) settledNote(live *api.RemediationRequest, cr providers.ChangeRequest, found, open bool) bool {
+	pr := live.Status.PullRequest
+	switch {
+	case m.unsaidStop(live, cr, open):
+		m.fatalf("settled note: the request stopped (phase %s) while its pull request is open on %.12s, the last "+
+			"review check of its head is not failed (%+v), and condition ReviewCheckNotFailed does not say so: %s",
+			live.Status.Phase, cr.BaseBranch, m.g.CheckRuns(cr.HeadSHA), conditionsOf(live))
+		return true
+	case meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) == nil:
+	case m.repo == nil && (!found || m.deleted || pr == nil || cr.Number != pr.Number ||
+		cr.State != providers.ChangeRequestOpen) && !m.unmarkedOpen():
+		// With the repository in the settings the looks read the pull request: one that is not open ends them,
+		// unless another open pull request from the branch keeps the lock (third fix round of #925).
+		m.fatalf("note cleared: the request's pull request is not open (found %t, gone %t, #%d %s), and condition "+
+			"ReviewCheckNotFailed is still set: %s", found, m.deleted, cr.Number, cr.State, conditionsOf(live))
+		return true
+	}
+	return false
+}
+
+// unsaidStop reports whether live, after the world healed, stopped while its own pull request cr is open on any
+// base, with reviewer hints on and its repository in the settings, the last review check run of the head is not a
+// failure, and condition ReviewCheckNotFailed is not True: the request must say so where a person looks when the
+// failed check could not be written (#925). Only the settings that name another target branch keep the write from
+// happening after the world healed; uncheckedStop covers the rest.
+func (m *modelWorld) unsaidStop(live *api.RemediationRequest, cr providers.ChangeRequest, open bool) bool {
+	pr := live.Status.PullRequest
+	if !m.r.ReviewerHints || m.handoff || m.repo != nil || m.paused || pr == nil || progresses(live) ||
+		!holdsLock(live) || !open || m.deleted || cr.Number != pr.Number || cr.State != providers.ChangeRequestOpen ||
+		cr.HeadSHA != pr.HeadSHA || handedOff(live) || intent(live) != nil {
+		return false
+	}
+	last := lastReviewCheck(m.g.CheckRuns(cr.HeadSHA))
+	if last != nil && last.Status == providers.CheckRunFailure {
+		return false
+	}
+	c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
+	return c == nil || c.Status != metav1.ConditionTrue
+}
+
+// staleRecorded reports whether live records the review check of its pull request's head as Stale.
+func staleRecorded(live *api.RemediationRequest) bool {
+	pr := live.Status.PullRequest
+	return pr != nil && pr.ReviewCheck != nil && pr.ReviewCheck.Head == pr.HeadSHA &&
+		pr.ReviewCheck.State == api.ReviewCheckStale
 }
 
 // modelResolver maps the request's target to the file on the target branch the settings name now, at its head.
@@ -2338,6 +2984,21 @@ func (g *modelGit) FindChangeRequest(ctx context.Context, head string) (provider
 		return providers.ChangeRequest{}, fmt.Errorf("branch %s: %w", head, providers.ErrNotFound)
 	}
 	return g.shown(cr), err
+}
+
+// CreateCheckRun fails while the model says so (checkFails).
+func (g *modelGit) CreateCheckRun(ctx context.Context, sha string, run providers.CheckRun) error {
+	g.m.mu.Lock()
+	failing := g.m.checkFails
+	if failing {
+		// A write made to fail: a step that returns it for the backoff is no error of its own (property "errors").
+		g.m.writeFaulted = true
+	}
+	g.m.mu.Unlock()
+	if failing {
+		return errModelOutage
+	}
+	return g.GitProvider.CreateCheckRun(ctx, sha, run)
 }
 
 func (g *modelGit) ReadFile(ctx context.Context, sha, path string, limit int) (providers.File, error) {

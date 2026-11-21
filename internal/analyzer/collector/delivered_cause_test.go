@@ -17,6 +17,7 @@ limitations under the License.
 package collector
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -65,7 +66,9 @@ func deleteHeld(t *testing.T, h *harness) {
 // being deleted (a rollout or scale down stops its container with 143, or the kernel kills it for memory),
 // evicted by its node, and with restartPolicy Never. The BackOff and the liveness failure of the container
 // link only to a fingerprint the pod reconciler delivered for that pod, and link when it delivered one in the
-// window.
+// window and, for a non-zero exit, the Incident controller confirmed it (decided 2026-11-21): each case runs once
+// with a CauseSeen that has seen every delivered cause, and once with the hold off, where nothing is asked and
+// so only an OOM kill links.
 func TestConsequenceLinksOnlyADeliveredTermination(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -80,35 +83,55 @@ func TestConsequenceLinksOnlyADeliveredTermination(t *testing.T) {
 		{"restartPolicy Never", stoppedPod(reasonError, 1, corev1.RestartPolicyNever, corev1.PodFailed, ""), false, true},
 	}
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			d, rs, _ := workload()
-			h := newHarness(t, Config{}, d, rs, c.pod)
-			h.c.holdOff = true
-			if c.deleting {
-				deleteHeld(t, h)
+		for _, confirmed := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/confirmed=%t", c.name, confirmed), func(t *testing.T) {
+				linkedCase(t, c.pod.DeepCopy(), c.deleting, confirmed,
+					c.linked && (confirmed || c.pod.Status.ContainerStatuses[0].State.Terminated.Reason == ReasonOOMKilled))
+			})
+		}
+	}
+}
+
+// linkedCase runs one case of TestConsequenceLinksOnlyADeliveredTermination: with confirmed, a CauseSeen that
+// has seen every cause the pod reconciler delivered; without, the hold off. want is whether the consequences link.
+func linkedCase(t *testing.T, pod *corev1.Pod, deleting, confirmed, want bool) {
+	t.Helper()
+	book := &causeBook{}
+	d, rs, _ := workload()
+	cfg := Config{}
+	if confirmed {
+		cfg.CauseSeen = book.fn
+	}
+	h := newHarness(t, cfg, d, rs, pod)
+	h.c.holdOff = !confirmed
+	if deleting {
+		deleteHeld(t, h)
+	}
+	at := t0.Add(30 * time.Second)
+	h.clock.set(at)
+	h.reconcilePod(webPod)
+	var delivered []string
+	for _, o := range h.drain() {
+		delivered = append(delivered, o.Fingerprint)
+		book.record(o.Fingerprint)
+	}
+	for _, reason := range []string{reasonBack, ReasonUnhealthy} {
+		ev := consequence("ev-"+reason, reason, appPath, at)
+		h.create(ev)
+		h.reconcileEvent(ev.Name)
+		got := h.drain()
+		if want && len(got) == 0 {
+			t.Errorf("%s was not emitted at once, want it linked", reason)
+		}
+		for _, o := range got {
+			if o.CauseFingerprint != "" && !slices.Contains(delivered, o.CauseFingerprint) {
+				t.Errorf("%s links to %s, which the collector did not deliver (delivered %v)", reason,
+					o.CauseFingerprint, delivered)
 			}
-			at := t0.Add(30 * time.Second)
-			h.clock.set(at)
-			h.reconcilePod(webPod)
-			var delivered []string
-			for _, o := range h.drain() {
-				delivered = append(delivered, o.Fingerprint)
+			if linked := o.CauseFingerprint != ""; linked != want {
+				t.Errorf("%s linked %t, want %t", reason, linked, want)
 			}
-			for _, reason := range []string{reasonBack, ReasonUnhealthy} {
-				ev := consequence("ev-"+reason, reason, appPath, at)
-				h.create(ev)
-				h.reconcileEvent(ev.Name)
-				for _, o := range h.drain() {
-					if o.CauseFingerprint != "" && !slices.Contains(delivered, o.CauseFingerprint) {
-						t.Errorf("%s links to %s, which the collector did not deliver (delivered %v)", reason,
-							o.CauseFingerprint, delivered)
-					}
-					if linked := o.CauseFingerprint != ""; linked != c.linked {
-						t.Errorf("%s linked %t, want %t", reason, linked, c.linked)
-					}
-				}
-			}
-		})
+		}
 	}
 }
 

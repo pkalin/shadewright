@@ -153,8 +153,15 @@ type Observation struct {
 	// holds a consequence with no cause, or whose cause has no Incident yet, before it emits it (hold.go).
 	Class Class
 	// CauseFingerprint is, on a consequence, the fingerprint of the cause its pod's status shows for its
-	// container (Collector.causeFingerprint); empty when the status shows none.
+	// container (Collector.causeFingerprint); empty when the status shows none. A non-zero exit stays here only
+	// when Config.CauseSeen confirmed it (decided 2026-11-21 on #432, hold.go).
 	CauseFingerprint string
+
+	// causeExit is set, inside the collector only, when CauseFingerprint names a non-zero exit (not an OOM kill
+	// and not a waiting reason). causeConfirmed is set when Config.CauseSeen answered true for CauseFingerprint.
+	// The event reconciler delivers a non-zero exit as the cause only with both set (eventReconciler.emit), and
+	// clears both before the observation leaves the collector.
+	causeExit, causeConfirmed bool
 }
 
 // immediateTerminationReasons are the container termination reasons, read from pod status, that open an
@@ -228,7 +235,8 @@ type Config struct {
 	// CauseSeen, when set, is asked whether the Incident controller has seen the cause a consequence names. A
 	// consequence whose cause it has not seen is held (hold.go) until [Collector.ReleaseCause] is called for that
 	// cause, at the latest for ConsequenceGrace, and then emitted with its cause (ADR-0039 point 7). Nil takes
-	// every cause as seen and emits such a consequence at once.
+	// every cause as seen and emits such a consequence at once, except a non-zero exit: with no controller to
+	// confirm it, its consequence is held and judged as one with no cause (decided 2026-11-21 on #432).
 	CauseSeen CauseSeenFunc
 	// Modules, when set, returns the modules active now (detection.Detector.Selection). The collector then
 	// also watches the kinds in [SourceKinds] and evaluates on each object the symptom source an active module

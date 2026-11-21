@@ -51,6 +51,11 @@ limitations under the License.
 // those first seen with a cause and those with none in two shares apart; over the bound a consequence is
 // emitted at once.
 //
+// A non-zero exit is the exception (decided 2026-11-21 on #432): it stays the cause of an emitted consequence only
+// when Config.CauseSeen answered true for it. Every other end of the hold (no answer by the end, the pod gone,
+// replaced or deleted, an analyzer restart, no room to hold, no CauseSeen) treats the hold as one with no cause,
+// and the event reconciler removes an unconfirmed exit from the observation before it delivers it.
+//
 // Observation-level deduplication: per event the collector remembers the UID and the last handled
 // occurrence count (the series count, or the count of an older recorder, or one), and emits only the
 // increase, at most MaxCount per observation. Per pod it remembers the IDs of handled terminations and, per

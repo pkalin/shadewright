@@ -36,8 +36,24 @@ import (
 //     on the fault within the window, and a consequence past the window on none.
 //   - P3: every cause fingerprint on a consequence is the fingerprint of an observation the collector delivers
 //     for that pod (decided 2026-11-21): a pod being deleted offers only its OOM kills (#966).
+//   - P4: a non-zero exit is the cause of a consequence only once Config.CauseSeen confirmed it (decided
+//     2026-11-21, confirmed_cause_test.go). The tests here use seeingController, which has seen every cause the
+//     pod reconciler delivered, as the Incident controller has once their Incident exists.
 //
 // Evictions are not covered (decided 2026-11-21, #1077): evictionmain_test.go shows they behave as before.
+
+// seeingController returns a CauseSeen that answers true for every cause fingerprint in obs the test has passed
+// to see, as the Incident controller does for a cause whose Incident it has.
+func seeingController() (*causeBook, func(obs []Observation)) {
+	book := &causeBook{}
+	return book, func(obs []Observation) {
+		for _, o := range obs {
+			if o.Class == ClassCause {
+				book.record(o.Fingerprint)
+			}
+		}
+	}
+}
 
 // incidentKeys returns the Incident each observation lands on: the cause's fingerprint for a consequence the
 // collector linked, its own fingerprint otherwise.
@@ -76,7 +92,8 @@ func TestIssue432CrashLoopBackOffLandsOnOneIncident(t *testing.T) {
 	d, rs, _ := workload()
 	ev := consequence("ev-backoff", reasonBack, appPath, t0.Add(2*time.Minute+15*time.Second))
 	ev.Series = nil
-	h := newHarness(t, Config{}, d, rs, crashLoopPod(t0.Add(20*time.Second), 1), ev)
+	book, see := seeingController()
+	h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, crashLoopPod(t0.Add(20*time.Second), 1), ev)
 
 	got := make([]Observation, 0, 3)
 	// 20:25:20 first crash, read from pod status.
@@ -90,6 +107,7 @@ func TestIssue432CrashLoopBackOffLandsOnOneIncident(t *testing.T) {
 	h.update(cur)
 	h.reconcilePod(webPod)
 	got = append(got, h.drain()...)
+	see(got)
 	// 20:27:15 the kubelet's BackOff, then the samples of a hold, if any, to the end of ConsequenceGrace.
 	for _, at := range []time.Duration{2*time.Minute + 15*time.Second, 3*time.Minute + 15*time.Second,
 		4*time.Minute + 15*time.Second} {
@@ -112,7 +130,8 @@ func TestIssue432CrashLoopBackOffLandsOnOneIncident(t *testing.T) {
 func TestIssue432TwoFaultsOpenTwoIncidents(t *testing.T) {
 	d, rs, _ := workload()
 	pod := crashLoopPod(t0, 1)
-	h := newHarness(t, Config{}, d, rs, pod)
+	book, see := seeingController()
+	h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, pod)
 	var got []Observation
 	crash := func(exit int32, restarts int32, at time.Time) Observation {
 		h.clock.set(at)
@@ -123,6 +142,7 @@ func TestIssue432TwoFaultsOpenTwoIncidents(t *testing.T) {
 		h.reconcilePod(webPod)
 		o := h.one()
 		got = append(got, o)
+		see([]Observation{o})
 		return o
 	}
 	backOff := func(name string, at time.Time) Observation {

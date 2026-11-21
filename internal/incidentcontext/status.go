@@ -67,8 +67,8 @@ const (
 	cutValues
 )
 
-// summaryBlock describes the Incident, most relevant first. A cause Incident with a non-empty absorbed tally
-// gets the tally last and always whole (#796, decided 2026-11-16): the summary keeps room for the longest
+// summaryBlock describes the Incident, most relevant first. A cause Incident of a reason of [tallyReasons] with a
+// non-empty absorbed tally gets the tally last and always whole (#796, decided 2026-11-16): the summary keeps room for the longest
 // tally ([longestTally]) and fits its other lines in what is left. They fit by shortening values, never by
 // removing a line: the symptom, then the reporting controller, then the reason, then the subject's name, each
 // cut at a character boundary and followed by a note of the bytes cut ([fitSummary]). This holds at every
@@ -126,7 +126,9 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 	}
 	blk := Block{Section: SectionSummary, Provenance: ProvenanceIncident, Availability: Available}
 	var t lines
-	absorbedLines(&t, st.Absorbed)
+	if b.showsTally != nil && b.showsTally(s.Reason) {
+		absorbedLines(&t, st.Absorbed)
+	}
 	if t.Len() == 0 {
 		b.fitSummary(&blk, vals, render, b.limits.Summary)
 		return blk
@@ -525,6 +527,14 @@ func (b *Builder) state(l *lines, s corev1.ContainerState) string {
 	}
 	return "unknown"
 }
+
+// tallyReasons are the Incident reasons whose summary shows the absorbed tally to the model (ADR-0039 point 18,
+// decided 2026-11-21 on #432): the reasons the block was evaluated for, with a recorded scenario run on the real
+// models (ADR-0025 decision 3). Only an OOM kill so far. An Incident of any other reason, a non-zero exit of a
+// crash loop too, gets no block even when status.absorbed holds a tally: the count stays in its status and in
+// kubectl output, and the reason joins this list once its own scenario is recorded and run (#1080). New gives each
+// builder this list (Builder.showsTally); a builder without one shows no block.
+var tallyReasons = []string{"OOMKilled"}
 
 // absorbedReasons are the consequence reasons the summary shows from status.absorbed, in the order it shows
 // them: the values of the AbsorbedReason enum (ADR-0039 point 16), the fixed table of the rule. An entry with

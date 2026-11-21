@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -117,6 +118,9 @@ type Builder struct {
 	timeout          time.Duration
 	buildTimeout     time.Duration
 	now              func() time.Time
+	// showsTally reports whether the summary of an Incident of this reason shows its absorbed tally: a reason of
+	// [tallyReasons] (status.go). Nil shows it for none.
+	showsTally func(reason string) bool
 }
 
 // New returns a builder, or an error when a required field is missing or a bound is out of range.
@@ -159,6 +163,7 @@ func New(cfg Config) (*Builder, error) {
 		pods: cfg.Pods, objects: cfg.Objects, namespaces: namespaces, metrics: cfg.Metrics, logs: cfg.Logs, redactor: cfg.Redactor,
 		limits: cfg.Limits, timeout: cfg.SourceTimeout, buildTimeout: cfg.BuildTimeout, now: cfg.Now,
 		policies: maps.Clone(cfg.Policies), policyReader: cfg.PolicyReader, requestNamespace: cfg.RequestNamespace,
+		showsTally: func(reason string) bool { return slices.Contains(tallyReasons, reason) },
 	}, nil
 }
 

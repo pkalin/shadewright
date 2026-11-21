@@ -163,27 +163,29 @@ func (c *Collector) podStatusInput(pod *corev1.Pod, owner, reason, note string) 
 // Incident, not on the one it followed. Both are of the same container; that is a limit of grouping, not of
 // the evidence. Without that time (hasAt false), a termination links nothing. No clock of the collector takes
 // part. owner is the pod's verified owner UID, as for the pod's own observations. The fingerprint is the one of
-// that termination's own observation, so a consequence never names a cause the collector does not deliver.
+// that termination's own observation. exit is set when the cause is a termination that is not an OOM kill (a
+// non-zero exit): the collector then delivers it as the cause only once Config.CauseSeen confirmed it (decided
+// 2026-11-21 on #432, hold.go).
 //
 // The terminations are matched on the container's name alone, across init and app containers: the API server
 // refuses a pod whose init and app containers share a name (container names are unique across the spec, and
 // the kubelet reports a status under each spec name), so a name picks one container of either list.
 func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, init bool, at time.Time,
-	hasAt bool) string {
+	hasAt bool) (fp string, exit bool) {
 	statuses := pod.Status.ContainerStatuses
 	if init {
 		statuses = pod.Status.InitContainerStatuses
 	}
 	i := slices.IndexFunc(statuses, func(s corev1.ContainerStatus) bool { return s.Name == container })
 	if i < 0 {
-		return ""
+		return "", false
 	}
 	st := statuses[i]
 	if w := st.State.Waiting; w != nil && slices.Contains(WaitingCauseReasons, w.Reason) {
-		return fingerprint.Fingerprint(c.podStatusInput(pod, owner, w.Reason, waitingNote(container, w.Reason)))
+		return fingerprint.Fingerprint(c.podStatusInput(pod, owner, w.Reason, waitingNote(container, w.Reason))), false
 	}
 	if !hasAt {
-		return ""
+		return "", false
 	}
 	var cause *termination
 	for _, t := range terminations(pod) {
@@ -195,10 +197,10 @@ func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, i
 		}
 	}
 	if cause == nil {
-		return ""
+		return "", false
 	}
 	return fingerprint.Fingerprint(c.podStatusInput(pod, owner, cause.reason,
-		terminationNote(container, cause.exitCode)))
+		terminationNote(container, cause.exitCode))), cause.reason != ReasonOOMKilled
 }
 
 // linksAt reports whether termination t is within KillCauseWindow of at, the observation's own time: after

@@ -200,6 +200,7 @@ func cutLine(g, w string, plain map[string]string) (string, bool) {
 // schema's limit in multi-byte text: each shows the whole tally and keeps its phase line.
 func TestAbsorbedTallyNearTheSummaryBound(t *testing.T) {
 	b, ub := newBuilder(t, reader(t), sources{}, nil), unbounded(t, nil)
+	anyReasonShowsTally(b, ub)
 	extreme := wideCause(strings.Repeat("𝄞", 253), bothTally()...)
 	extreme.Spec.Subject.Kind = strings.Repeat("é", 63)
 	extreme.Spec.Reason = strings.Repeat("日", 128)
@@ -230,6 +231,7 @@ func TestAbsorbedTallyFitGenerated(t *testing.T) {
 	t.Parallel()
 	b := newBuilder(t, reader(t), sources{}, func(c *Config) { c.Redactor = noRedaction{} })
 	ub := unbounded(t, noRedaction{})
+	anyReasonShowsTally(b, ub)
 	largest := []remediationv1alpha1.AbsorbedTally{
 		absorbed(remediationv1alpha1.AbsorbedBackOff, math.MaxInt64, testNow),
 		absorbed(remediationv1alpha1.AbsorbedUnhealthy, math.MaxInt64, testNow),
@@ -286,6 +288,7 @@ func (r shrinkOccurrences) String(s string) string {
 // last, and the summary stays within its bound whatever the lines' length.
 func TestAbsorbedTallyFitUsesTheRedactedText(t *testing.T) {
 	b := newBuilder(t, reader(t), sources{}, func(c *Config) { c.Redactor = shrinkOccurrences{c.Redactor} })
+	anyReasonShowsTally(b)
 	block := strings.ReplaceAll(bothBlock, " occurrences,", ",")
 	for k := 0; k <= 700; k += 20 {
 		with := b.summaryBlock(wideCause(strings.Repeat("r", 140+k), bothTally()...))

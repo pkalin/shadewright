@@ -85,6 +85,26 @@ func TestSummaryShowsTheAbsorbedTally(t *testing.T) {
 	}
 }
 
+// The decision of 2026-11-21 on #432 (B): the tally block is shown only for a reason it was evaluated for, an
+// OOM kill. A cause Incident of a non-zero exit (reason Error, the crash loop of #432) whose status.absorbed holds
+// a tally gets the summary of an Incident with none, byte for byte: the model's input does not change until #1080
+// adds the reason.
+func TestSummaryOfANonZeroExitShowsNoTally(t *testing.T) {
+	b := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
+	bare := cause()
+	bare.Spec.Reason, bare.Spec.Symptom = "Error", "Container app terminated with exit code 2"
+	want := one(t, build(t, b, bare), SectionSummary).Text
+	inc := bare.DeepCopy()
+	inc.Status.Absorbed = []remediationv1alpha1.AbsorbedTally{
+		absorbed(remediationv1alpha1.AbsorbedUnhealthy, 3, testNow.Add(-2*time.Minute)),
+		absorbed(remediationv1alpha1.AbsorbedBackOff, 12, testNow.Add(-time.Minute)),
+	}
+	got := one(t, build(t, b, inc), SectionSummary).Text
+	if strings.Contains(got, absorbedHeader) || got != want {
+		t.Errorf("summary of a non-zero exit with a tally:\n%s\nwant, as with none:\n%s", got, want)
+	}
+}
+
 // An Incident with an empty tally gets no tally lines: its summary is the one the builder wrote before the
 // tally block, byte for byte (the whole prompt is checked against main in test/eval TestPromptGolden).
 func TestSummaryWithoutTallyIsUnchanged(t *testing.T) {

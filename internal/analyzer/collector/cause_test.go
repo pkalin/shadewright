@@ -365,13 +365,17 @@ func TestWaitingCauseOfAnInitContainer(t *testing.T) {
 }
 
 // TestNonZeroExitIsACause checks that a crash (a non-zero exit) is a cause read from pod status, and that a
-// BackOff of its container within KillCauseWindow links to it (ADR-0039 point 3, amended 2026-11-20, #432).
+// BackOff of its container within KillCauseWindow links to it (ADR-0039 point 3, amended 2026-11-20, #432)
+// once the Incident controller confirmed it saw the crash (decided 2026-11-21): CauseSeen answers true for it.
 func TestNonZeroExitIsACause(t *testing.T) {
-	h, pod := causeHarness(t, func(p *corev1.Pod) {
-		withTermination(p, "containerd://crash", reasonError, 1, t0)
-	})
+	d, rs, _ := workload()
+	pod := specPod()
+	withTermination(pod, "containerd://crash", reasonError, 1, t0)
+	book := &causeBook{}
+	h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, pod)
 	h.reconcilePod(pod.Name)
 	crash := h.one()
+	book.record(crash.Fingerprint)
 	if crash.Class != ClassCause || crash.Container != containerApp || !strings.HasPrefix(crash.Occurrence, "termination:") {
 		t.Errorf("crash: class %q, container %q, occurrence %q", crash.Class, crash.Container, crash.Occurrence)
 	}

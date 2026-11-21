@@ -227,8 +227,10 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 // delivery records the series total (consequenceHolds.decided), and a retried one whose pod shows another cause
 // (shown, the cause fromEvent read at this reconcile, empty when none or not read) delivers only those
 // occurrences, with the cause of the decision. A hold that ended with no cause delivers them with the cause
-// shown now: a delivery retry rereads the cause. Once that is delivered, the event is reconciled again at once:
-// the later occurrences are a new consequence, held for the cause shown now.
+// shown now: a delivery retry rereads the cause. Whatever path it came by, a non-zero exit stays the cause only
+// when Config.CauseSeen confirmed it (decided 2026-11-21 on #432); else it is removed here. Once that is
+// delivered, the event is reconciled again at once: the later occurrences are a new consequence, held for the
+// cause shown now.
 func (r *eventReconciler) emit(ctx context.Context, key types.NamespacedName, ev *eventsv1.Event, obs Observation,
 	shown string, delta int64, mayRepeat bool) (ctrl.Result, error) {
 	n, created := occurrences(ev), ev.CreationTimestamp.Time
@@ -236,13 +238,19 @@ func (r *eventReconciler) emit(ctx context.Context, key types.NamespacedName, ev
 	if s, ok := r.c.holds.decided(key, ev.UID, n); ok {
 		if s.cause != "" {
 			// A hold that ended with no cause keeps the cause read now, which the controller may have seen.
-			obs.CauseFingerprint = s.cause
+			obs.CauseFingerprint, obs.causeExit, obs.causeConfirmed = s.cause, s.obs.causeExit, s.obs.causeConfirmed
 		}
 		if shown != "" && shown != s.cause && n > s.total {
 			delta = max(delta-(n-s.total), 0)
 			n, split = s.total, true
 		}
 	}
+	if obs.causeExit && !obs.causeConfirmed {
+		// A non-zero exit is a cause only once the Incident controller confirmed it saw it (decided 2026-11-21 on
+		// #432): unconfirmed, the event goes without a cause, as one whose pod shows none.
+		obs.CauseFingerprint = ""
+	}
+	obs.causeExit, obs.causeConfirmed = false, false
 	obs.Occurrence, obs.Began = "event:"+string(ev.UID), r.c.notFuture(created)
 	obs.Total, obs.Count, obs.MayRepeat = n, capCount(delta), mayRepeat
 	sent, err := r.c.deliver(ctx, obs)
@@ -305,7 +313,7 @@ func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observat
 	obs.Class = eventClass(ev, obs.Container)
 	if obs.Class == ClassConsequence {
 		at, ok := kubeletTime(ev)
-		obs.CauseFingerprint = c.causeFingerprint(pod, owner, obs.Container, init, at, ok)
+		obs.CauseFingerprint, obs.causeExit = c.causeFingerprint(pod, owner, obs.Container, init, at, ok)
 	}
 	return obs, pod, subjectUsable, nil
 }

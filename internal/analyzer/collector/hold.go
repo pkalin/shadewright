@@ -77,7 +77,8 @@ const (
 // with no cause showed one it had seen: emitted with it at once), cause_unseen (the hold had a cause the
 // controller had not seen when the wait ended with the container still failing, or when the pod went, was replaced, or its template was retired: emitted with that cause), dropped (the event
 // ended the hold itself: deleted, no longer a Warning, replaced by another event of the name, or handled without
-// an observation for another reason; for a hold with a cause only an event that no longer exists), so that these
+// an observation for another reason; for a hold with a cause only an event that no longer exists; a hold of an
+// unconfirmed non-zero exit counts as one with no cause, keepsCause), so that these
 // five add up to the holds started; and overflow (no room to hold, emitted at once), a consequence that was
 // never held.
 var heldConsequences = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -104,7 +105,9 @@ type consequenceHold struct {
 	// shows no cause keeps it: a pod that is replaced or whose template is retired during the hold emits the
 	// consequence with it, as does one that recovers when the controller sees the cause (ADR-0039 point 7,
 	// decided 2026-11-17). A hold with a cause waits for the Incident controller to see it; at the end of the
-	// wait it is judged by its samples (point 19), as one without is (decided 2026-11-17, fifth).
+	// wait it is judged by its samples (point 19), as one without is (decided 2026-11-17, fifth). A non-zero exit
+	// is the exception (decided 2026-11-21 on #432, keepsCause): kept on the emitted consequence only when
+	// Config.CauseSeen confirmed it; every other end treats the hold as one with no cause.
 	cause string
 	// obs is the observation of the last sample that showed cause, without its count: what a hold with a cause
 	// emits, whatever the pod or the owner chain look like at its end.
@@ -421,11 +424,13 @@ func (c *Collector) releases() source.Source {
 var errCauseUnanswered = errors.New("the Incident controller did not answer within the deadline")
 
 // causeSeen asks Config.CauseSeen, with the deadline of a Handled call, whether the Incident controller has seen
-// the cause obs names. Without CauseSeen every cause counts as seen. An expired deadline is errCauseUnanswered;
-// any other error is returned. Neither is an answer. No lock of the collector is held across the call.
+// the cause obs names. Without CauseSeen every cause counts as seen except a non-zero exit, which counts as seen
+// only on the Incident controller's word (decided 2026-11-21 on #432): with no controller to ask, it is never
+// confirmed, and its consequence ends as one with no cause. An expired deadline is errCauseUnanswered; any other
+// error is returned. Neither is an answer. No lock of the collector is held across the call.
 func (c *Collector) causeSeen(ctx context.Context, obs Observation) (bool, error) {
 	if c.cfg.CauseSeen == nil {
-		return true, nil
+		return !obs.causeExit, nil
 	}
 	cctx, cancel := context.WithTimeout(ctx, c.cfg.LookupTimeout)
 	defer cancel()
@@ -473,7 +478,8 @@ func (c *Collector) heldEventsOf(_ context.Context, obj client.Object) []reconci
 //   - Not a consequence, and not held: holdEmit, as before.
 //   - A hold whose decision to emit is not delivered yet: holdEmit, with the observation it decided on.
 //   - A held event whose pod is gone or replaced: emitted with the last cause a sample showed (cause_unseen, or
-//     released when causeOutcome confirms a release), or, when none did, holdDrop.
+//     released when causeOutcome confirms a release), or, when none did, holdDrop. An unconfirmed non-zero exit
+//     counts as none (keepsCause).
 //   - No room to hold a new one: holdEmit at once, without a verdict, so it goes through the gate. The event is
 //     remembered until its delivery ends, so a delivery retry emits it again even once room has freed.
 //   - Otherwise the reconcile is a sample of the container. A hold with a cause is stored first, then the
@@ -482,7 +488,8 @@ func (c *Collector) heldEventsOf(_ context.Context, obj client.Object) []reconci
 //     emitted at once and was never held; seen later, it is released. Before the end of ConsequenceGrace:
 //     holdWait until that end. At the end (endOfHold), a hold with a cause that causeOutcome confirms released
 //     emits with it, even when the pod shows none now. Any other hold, with a cause or none (amended 2026-11-16
-//     and 2026-11-17, fifth): holdEmit, with the cause if any (cause_unseen), when at least minHoldSamples
+//     and 2026-11-17, fifth): holdEmit, with the cause if any (cause_unseen; an unconfirmed non-zero exit is
+//     no cause, decided 2026-11-21 on #432), when at least minHoldSamples
 //     samples were failing and either this last one is failing or the container restarted at least
 //     minHoldRestarts times during the hold, else holdDrop (not_opened).
 //
@@ -505,7 +512,9 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 		return holdEmit, 0, nil
 	case held && (pod == nil || pod.UID != s.pod):
 		if s.cause != "" {
-			return c.endWithCause(ctx, key, s, obs, c.causeOutcome(ctx, s), "its Pod is gone or replaced")
+			if outcome := c.causeOutcome(ctx, s); keepsCause(s, outcome) {
+				return c.endWithCause(ctx, key, s, obs, outcome, "its Pod is gone or replaced")
+			}
 		}
 		heldConsequences.WithLabelValues(holdNotOpened).Inc()
 		logf.FromContext(ctx).V(1).Info("Dropped held consequence, its Pod is gone or replaced",
@@ -567,6 +576,7 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 		// Seen before the first sight: emitted at once, never held.
 		c.holds.done(key)
 		*obs = stored.obs
+		obs.causeConfirmed = true
 		return holdEmit, 0, nil
 	}
 	return c.endWithCause(ctx, key, stored, obs, holdReleased, "the Incident controller saw its cause")
@@ -584,8 +594,14 @@ func (c *Collector) endOfHold(ctx context.Context, key types.NamespacedName, s c
 	failing bool) (holdVerdict, time.Duration, error) {
 	keptFailing := s.failing >= minHoldSamples && (failing || s.restarted >= minHoldRestarts)
 	if s.cause != "" {
-		if outcome := c.causeOutcome(ctx, s); outcome == holdReleased || keptFailing {
+		outcome := c.causeOutcome(ctx, s)
+		if outcome == holdReleased || (keptFailing && keepsCause(s, outcome)) {
 			return c.endWithCause(ctx, key, s, obs, outcome, "the hold ended")
+		}
+		if !keepsCause(s, outcome) {
+			// An unconfirmed non-zero exit: judged and emitted as a hold with no cause (emit removes the
+			// fingerprint).
+			s.cause, s.obs = "", Observation{}
 		}
 	}
 	if !keptFailing {
@@ -609,6 +625,9 @@ func (c *Collector) endOfHold(ctx context.Context, key types.NamespacedName, s c
 // counted once, when the hold was stored.
 func (c *Collector) endWithCause(ctx context.Context, key types.NamespacedName, s consequenceHold, obs *Observation,
 	outcome, why string) (holdVerdict, time.Duration, error) {
+	if outcome == holdReleased {
+		s.obs.causeConfirmed = true
+	}
 	*obs = s.obs
 	s.opened = true
 	if _, ok := c.holds.put(key, s); ok {
@@ -623,8 +642,8 @@ func (c *Collector) endWithCause(ctx context.Context, key types.NamespacedName, 
 // collector by another path than the hold (its template retired, its owner chain no longer usable, its probe
 // settled, no longer a Warning): the consequence is emitted with its cause all the same, so a hold with a cause
 // ends in a drop only at the end of ConsequenceGrace with its container recovered (ADR-0039 point 7, decided
-// 2026-11-17). It returns the observation to emit, and false
-// when the event has no hold with a cause.
+// 2026-11-17). It returns the observation to emit, and false when the event has no hold with a cause, or its cause
+// is a non-zero exit the Incident controller has not confirmed (keepsCause): that hold ends as one with no cause.
 func (c *Collector) heldCause(ctx context.Context, key types.NamespacedName, uid types.UID, why string) (Observation,
 	bool) {
 	s, ok := c.holds.get(key, uid)
@@ -635,15 +654,29 @@ func (c *Collector) heldCause(ctx context.Context, key types.NamespacedName, uid
 	if s.opened {
 		return obs, true
 	}
-	_, _, _ = c.endWithCause(ctx, key, s, &obs, c.causeOutcome(ctx, s), why)
+	outcome := c.causeOutcome(ctx, s)
+	if !keepsCause(s, outcome) {
+		return Observation{}, false
+	}
+	_, _, _ = c.endWithCause(ctx, key, s, &obs, outcome, why)
 	return obs, true
+}
+
+// keepsCause reports whether a hold with a cause that ends with outcome (causeOutcome) is emitted with that cause:
+// always for an OOM kill or a waiting reason, as before; for a non-zero exit only when the Incident controller
+// confirmed it saw it (outcome released, decided 2026-11-21 on #432). A hold for which it reports false ends as
+// one with no cause: dropped when its pod is gone or the event leaves the collector, judged by its samples at the
+// end of ConsequenceGrace and then emitted without a cause.
+func keepsCause(s consequenceHold, outcome string) bool {
+	return !s.obs.causeExit || outcome == holdReleased
 }
 
 // causeOutcome is the outcome of a hold with a cause that ends by another path than a sample's answer (the end of
 // the hold, its pod gone or replaced, the event leaving the collector): released when ReleaseCause marked it for
 // the cause it shows and Config.CauseSeen confirms it, else cause_unseen. Unmarked, it does not ask, so an end
-// never waits on a controller that has not loaded its Incidents; a failed ask is cause_unseen. The consequence
-// is emitted with its cause either way: only the metric's outcome depends on it.
+// never waits on a controller that has not loaded its Incidents; a failed ask is cause_unseen. For an OOM kill or
+// a waiting reason the consequence is emitted with its cause either way, and only the metric's outcome depends on
+// it; a non-zero exit is kept only when released (keepsCause).
 func (c *Collector) causeOutcome(ctx context.Context, s consequenceHold) string {
 	if s.cause == "" || s.releasedFor != s.cause {
 		return holdCauseUnseen

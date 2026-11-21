@@ -97,6 +97,7 @@ func TestSummaryFitsAtEveryBoundGenerated(t *testing.T) {
 			}
 		})
 		ub := unbounded(t, r)
+		anyReasonShowsTally(b, ub)
 		for name, inc := range cases {
 			full := wantSummary(t, ub, inc)
 			for _, tc := range []struct {
@@ -135,6 +136,7 @@ func TestSummaryFitsAtEveryBoundGenerated(t *testing.T) {
 // occurrences, seen times and phase lines were removed, and at 1200 its phase. Each line now stays.
 func TestSummaryAtTheSmallestBoundKeepsEveryLine(t *testing.T) {
 	b, ub := newBuilder(t, reader(t), sources{}, nil), unbounded(t, nil)
+	anyReasonShowsTally(b, ub)
 	inc := cause(bothTally()...)
 	inc.Spec.Subject.Kind = "K" + strings.Repeat("k", 62)
 	inc.Spec.Subject.Namespace = strings.Repeat("n", 63)

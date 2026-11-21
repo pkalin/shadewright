@@ -893,7 +893,7 @@ func (r *RemediationRequestReconciler) endMergeWait(ctx context.Context, rr *api
 // was lost (seed 3506 of the handoff model). The predecessor is read from the API server; one gone or made again
 // counts by its name alone, as for recordFoundMerge. With claim (rr's MergeContent entry is its claim on that merge,
 // otherHeadClaim), one that records another pull request than pr counts so too, since the claim decides by its own
-// number (handsOverClaimed); without it, such a predecessor means pr is not the merge of a takeover. A failed read is the Kubernetes API's (a *clusterError).
+// number (settleClaim, claimPredecessor); without it, such a predecessor means pr is not the merge of a takeover. A failed read is the Kubernetes API's (a *clusterError).
 func (r *RemediationRequestReconciler) takenOverMerge(ctx context.Context, rr *api.RemediationRequest,
 	pr *api.GitWaitPullRequest, claim bool) (*api.RemediationRequest, bool, error) {
 	if pr == nil || rr.Status.PullRequest != nil || !mayCarryHandoffCommit(rr) ||
@@ -914,7 +914,7 @@ func (r *RemediationRequestReconciler) takenOverMerge(ctx context.Context, rr *a
 			return nil, false, nil
 		}
 		// A claim decides by its own number (decision of 2026-11-21 on #870, count 4), as the watch does
-		// (handsOverClaimed): a predecessor that records another pull request counts as gone, by its name alone.
+		// (settleClaim): a predecessor that records another pull request counts as gone, by its name alone.
 	}
 	gone := &api.RemediationRequest{}
 	gone.Name, gone.Namespace = string(from.Name), rr.Namespace

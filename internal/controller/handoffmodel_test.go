@@ -145,6 +145,11 @@ import (
 //	   rule over the state): it releases in the write that records the merge, or after it reads the predecessor's
 //	   record (mayReleaseOnMerge). Every such release is checked and counted, and the default seed set must reach one
 //	   (hmP13Reach), under the race detector too;
+//	P14 a reconcile of a request being deleted never hands a failure of the Git host or of the settings to the error
+//	   backoff, where it would retry invisibly: only a failure of the Kubernetes API is returned, and anything else
+//	   is a paced retry that a condition shows (#1057: a claim holder deleted while its settings entry cannot be
+//	   used). Every deletion that meets an unusable entry is counted, and the default seed set must reach one
+//	   (hmP14Reach), under the race detector too;
 //	P9 the predecessor never stores the abort of an intent whose takeover the replacement, as stored at that write,
 //	   recorded (from Done), whatever ends it, unless a person put the predecessor's own head back on the pull
 //	   request (fourth round of #786).
@@ -1913,6 +1918,10 @@ func (m *hmWorld) reconcile(who string) {
 	p11 := m.p11Applies(who, before)
 	m.noteClaimWithPredGone(who, before)
 	claimPast := m.claimPastEnd(who, before)
+	deleting := !before.DeletionTimestamp.IsZero()
+	if deleting && m.settings == settingsUnusable {
+		m.reach["deletion-entry-unusable"] = true
+	}
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.keys[who]})
 	m.mu.Lock()
 	m.actor = ""
@@ -1954,6 +1963,7 @@ func (m *hmWorld) reconcile(who string) {
 			res.RequeueAfter)
 	}
 	m.checkClaimNotBackedOff(who, claimPast, faulted, err)
+	m.checkDeletionNotBackedOff(who, deleting, faulted, err)
 	// P5: a reconcile that could act ends every wait that stood past its own end at its start.
 	if after != nil && err == nil && !faulted && !m.paused {
 		for _, w := range before.Status.GitWaits {
@@ -2438,6 +2448,16 @@ func (m *hmWorld) checkClaimNotBackedOff(who string, claimPast, faulted bool, er
 		m.fail("P5", "the claim of the %s stood past its own end and the reconcile returned %v to the error backoff",
 			who, err)
 	}
+}
+
+// checkDeletionNotBackedOff is P14: the reconcile of who, being deleted at its start, returned err; only a failure of
+// the Kubernetes API (or a fault the model injected there, a crash, a pause) may go to the error backoff.
+func (m *hmWorld) checkDeletionNotBackedOff(who string, deleting, faulted bool, err error) {
+	if !deleting || err == nil || faulted || m.paused || errors.Is(err, errHMCrash) || isClusterError(err) ||
+		apierrors.IsServiceUnavailable(err) {
+		return
+	}
+	m.fail("P14", "the %s is being deleted and its reconcile returned %v to the error backoff", who, err)
 }
 
 // claimPastEnd reports whether who, about to be reconciled from before, is the replacement holding a claim on a merge
@@ -3053,8 +3073,9 @@ func hmSeeds(t *testing.T) []uint64 {
 // 2026-11-21 on #870). 398 (#870, narrow decision of 2026-11-21): the claim starts after the end of the watch and the
 // predecessor is made again under its name (hRemakePred, armed for that shape too); P12 and P13 fail when the look at
 // stopped holders sends that claim to the generic look, which releases the lock with no record (seeds 911 and 2464
-// too, in the run of 1 to 6,000).
-var hmFixedSeeds = []uint64{45273, 398}
+// too, in the run of 1 to 6,000). 2941 (#1057): a claim holder is deleted while its settings entry cannot be used, and
+// its finalizer handed that failure to the error backoff (P14); 460: the same deletion met answers that disagree.
+var hmFixedSeeds = []uint64{45273, 398, 2941, 460}
 
 func TestHandoffModel(t *testing.T) {
 	schema := requestStatusSchema(t)
@@ -3082,6 +3103,11 @@ func TestHandoffModel(t *testing.T) {
 		for _, k := range hmP13Reach {
 			if counts["reach "+k] == 0 {
 				t.Errorf("P13: no seed of the default set reached %q", k)
+			}
+		}
+		for _, k := range hmP14Reach {
+			if counts["reach "+k] == 0 {
+				t.Errorf("P14: no seed of the default set reached %q", k)
 			}
 		}
 	})
@@ -3134,6 +3160,10 @@ var hmP12Reach = []string{"pred-head-merge-pred-left", "pred-head-recorded-then-
 // hmP13Reach are the shapes of P13 the default seed set must reach: a replacement before its takeover that lets go of
 // the lock on a merge (each such release is checked).
 var hmP13Reach = []string{"release-on-merge-before-takeover"}
+
+// hmP14Reach are the shapes of P14 the default seed set (with hmFixedSeeds) must reach: a request being deleted while
+// its settings entry cannot be used (#1057).
+var hmP14Reach = []string{"deletion-entry-unusable"}
 
 // hmP5Reach are the shapes of P5 the default seed set (with hmFixedSeeds) must reach: a claim on a merge of another
 // head held by the watch after a refusal once the predecessor is gone, and once it is made again under its name, and

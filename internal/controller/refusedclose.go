@@ -425,8 +425,13 @@ type cleanupRelease struct {
 //
 // Then release is non-nil and the caller reports it (leftOpen, gaveUp) before it removes the finalizer. Until then
 // a refusal is tried again every closeRefusedRetry and any other failure as waitOrFail says, never later than the
-// end of the bound. The caller's cancellation records nothing and is returned. A failed status write is returned for
-// a retry and starts nothing.
+// end of the bound. No failure of the Git host or of the settings goes to the error backoff, where it would be
+// retried with nothing shown (#1057): settings that cannot reach the repository (an entry that cannot be used, a
+// missing settings object) also set condition PullRequestUnreadable as the other looks set it (repositoryRead) and are
+// retried as a failed open of the repository (recoveryRead, retryGitRead), and answers about the pull request that
+// disagree (answeredUnknown) are looked at again after the poll interval. A failure of the Kubernetes API is returned.
+// The caller's cancellation records nothing and is returned. A failed status write is returned for a retry and starts
+// nothing.
 func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, err error) (reconcile.Result, *cleanupRelease, error) {
 	if ctx.Err() != nil {
@@ -436,6 +441,9 @@ func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context
 	failing := cleanupFailingCondition(rr, err)
 	wasFailing := meta.IsStatusConditionTrue(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
 	changed, _ := r.setRefused(rr, failing)
+	if unreadable := repositoryRead(rr, err); unreadable != nil && putUnreadable(&rr.Status.Conditions, unreadable) {
+		changed = true
+	}
 	var want metav1.Condition
 	var refusedChanged, refusedEvent bool
 	if refused {
@@ -481,7 +489,14 @@ func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context
 		wait := min(refusedLeft, closeRefusedRetry, failingLeft)
 		return reconcile.Result{RequeueAfter: wait}, nil, nil
 	}
-	res, werr := r.waitOrFail(ctx, rr, err, paceWithin(failingLeft))
+	var res reconcile.Result
+	var werr error
+	if answeredUnknown(err) && !isClusterError(err) {
+		// Every read answered: no failed call to pace by its class, looked at again after the poll interval.
+		res = reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}
+	} else {
+		res, werr = r.waitOrFail(ctx, rr, recoveryRead(err), paceWithin(failingLeft))
+	}
 	if res.RequeueAfter > failingLeft {
 		res.RequeueAfter = failingLeft
 	}

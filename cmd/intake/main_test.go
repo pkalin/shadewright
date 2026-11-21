@@ -177,3 +177,51 @@ func TestBudgetOutcomeLogsAWarning(t *testing.T) {
 		t.Fatalf("no warning with the family and the month: %s", stderr.String())
 	}
 }
+
+// A record with two attempts on the UTC day is refused with exit code 3, a line naming the record and the
+// count, no score and no reservation; --extra-attempt naming it lets one run through, naming another record
+// is a configuration error.
+func TestThirdAttemptExitsWithItsOwnCode(t *testing.T) {
+	dir := t.TempDir()
+	rec := writeRecord(t, dir, "The probe path /healthz returns 404 since the last rollout.")
+	id := strings.TrimSuffix(filepath.Base(rec), ".json")
+	now := time.Now().UTC()
+	spend := filepath.Join(dir, "spend")
+	fam := filepath.Join(spend, "spend", now.Format("2006-01"), string(intake.FamilyOpenAI))
+	if err := os.MkdirAll(fam, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []string{"local-a", "local-b"} {
+		name := now.Format("20060102") + "." + id + "." + run + ".1.100.json"
+		if err := os.WriteFile(filepath.Join(fam, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := filepath.Join(dir, "score.json")
+	args := []string{recordFlag, rec, spendFlag, spend, "--out", out, dryRun}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != exitAttempts {
+		t.Fatalf("exit %d, want %d: %s", code, exitAttempts, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"record":"`+id+`"`) || !strings.Contains(stderr.String(), `"attempts":2`) {
+		t.Fatalf("the line does not name the record and the count: %s", stderr.String())
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Fatal("a refused run wrote a score")
+	}
+	if entries, err := os.ReadDir(fam); err != nil || len(entries) != 2 {
+		t.Fatalf("a refused run reserved: %d names, %v", len(entries), err)
+	}
+	other := strings.Replace(id, id[:8], "00000000", 1)
+	stderr.Reset()
+	if code := run(append(args, "--extra-attempt", other), &stdout, &stderr); code != exitConfig {
+		t.Fatalf("an extra attempt for another record: exit %d: %s", code, stderr.String())
+	}
+	stderr.Reset()
+	if code := run(append(args, "--extra-attempt", id), &stdout, &stderr); code != 0 {
+		t.Fatalf("the extra attempt: exit %d: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("the extra attempt wrote no score: %v", err)
+	}
+}

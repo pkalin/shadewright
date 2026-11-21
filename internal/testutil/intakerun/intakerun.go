@@ -74,8 +74,10 @@ func (s source) Read(context.Context, int64) ([]byte, error) { return s.data, ni
 
 type ledger struct{}
 
-func (ledger) Spent(context.Context, string, intake.Family) (int64, error) { return 0, nil }
-func (ledger) Reserve(context.Context, intake.Reservation) error           { return nil }
+func (ledger) List(context.Context, string, intake.Family) ([]intake.Reservation, error) {
+	return nil, nil
+}
+func (ledger) Reserve(context.Context, intake.Reservation) error { return nil }
 
 // Score scores one ordinary record, as the analyzer writes one, whose model is of the other family than
 // judgeFamily: judge is the judge and cross answers the cross-check.

@@ -45,10 +45,12 @@ import (
 )
 
 // Exit codes: 0 an outcome was written (scored, unjudged, invalid, quarantined or budget), 1 a failed step to
-// retry, 2 a usage or configuration error.
+// retry, 2 a usage or configuration error, 3 the record had its attempts of the UTC day and nothing was written
+// or called (try it on a later day, or once more with --extra-attempt).
 const (
-	exitRetry  = 1
-	exitConfig = 2
+	exitRetry    = 1
+	exitConfig   = 2
+	exitAttempts = 3
 )
 
 // Defaults of the token caps (ADR-0047 section 6). They are below the consoles' monthly limits, so the code
@@ -68,6 +70,7 @@ type options struct {
 	openaiEndpoint              string
 	maxCall, maxRun, maxMonth   int64
 	dryRun                      bool
+	extraAttempt                string
 }
 
 func main() {
@@ -84,7 +87,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fl.StringVar(&o.out, "out", "-", "Path of the score JSON, created only if absent (a score that exists ends the run "+
 		"without a model call), or - for standard output.")
 	fl.StringVar(&o.spendDir, "spend-dir", "", "Directory of the spend reservations, kept across runs: "+
-		"spend/<month>/<family>/<run>.<call>.<tokens>.json. Required.")
+		"spend/<month>/<family>/<day>.<record ID>.<run>.<call>.<tokens>.json. Required.")
 	fl.StringVar(&o.anthropicModel, "anthropic-model", "", "Model ID of the Anthropic family (judge of OpenAI records, "+
 		"cross-check of Anthropic ones).")
 	fl.StringVar(&o.anthropicKF, "anthropic-key-file", "",
@@ -102,6 +105,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		"from the spend directory.")
 	fl.BoolVar(&o.dryRun, "dry-run", false, "Use a built-in fake model of each family that answers a fixed "+
 		"score: no key, no network. Reservations are still counted.")
+	fl.StringVar(&o.extraAttempt, "extra-attempt", "", "Record ID of the record this run scores even when it had "+
+		"its attempts of the UTC day; for one run by hand. The run ends with exit code 2 when the record is another.")
 	if err := fl.Parse(args); err != nil {
 		return exitConfig
 	}
@@ -125,7 +130,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitRetry
 	}
 	scorer := &intake.Scorer{Redactor: red, Models: models, Ledger: intake.DirLedger{Root: o.spendDir},
-		Limits: intake.Limits{MaxCallTokens: o.maxCall, MaxRunTokens: o.maxRun, MaxMonthTokens: o.maxMonth}, Run: runID}
+		Limits: intake.Limits{MaxCallTokens: o.maxCall, MaxRunTokens: o.maxRun, MaxMonthTokens: o.maxMonth}, Run: runID,
+		ExtraAttemptFor: o.extraAttempt}
 	if err := scorer.Validate(); err != nil {
 		log.Error("The configuration is invalid", "error", err.Error())
 		return exitConfig
@@ -143,6 +149,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	score, err := scorer.Score(ctx, &intake.FileSource{Path: o.record})
+	var attempts *intake.AttemptsError
+	switch {
+	case errors.As(err, &attempts):
+		log.Warn("Refused the record: it had its attempts of the UTC day; try a later day or --extra-attempt",
+			"run", runID, "record", attempts.Record, "day", attempts.Day, "attempts", attempts.Attempts,
+			"limit", intake.MaxAttemptsPerDay, "raced", attempts.Raced)
+		return exitAttempts
+	case errors.Is(err, intake.ErrExtraAttemptOtherRecord):
+		log.Error("The flag --extra-attempt names another record than --record", "run", runID)
+		return exitConfig
+	}
 	if err != nil {
 		// The intake's errors hold no record text; the redactor runs over them all the same.
 		log.Error("Failed to score the record; try again", "run", runID, "error", red.String(err.Error()))

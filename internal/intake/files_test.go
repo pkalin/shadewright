@@ -27,44 +27,56 @@ import (
 	"github.com/pkalin/shadewright/internal/testutil/importguard"
 )
 
+// testRecordID is a record ID in the shape the name check gives.
+const testRecordID = "0f8e2a4c-1b3d-4e5f-8a9b-0c1d2e3f4a5b-20261120t093000z"
+
 func TestDirLedgerSumsTheNamesOfItsMonthAndFamily(t *testing.T) {
 	ctx := context.Background()
 	l := DirLedger{Root: t.TempDir()}
-	if n, err := l.Spent(ctx, testMonth, FamilyOpenAI); err != nil || n != 0 {
-		t.Fatalf("an empty ledger: %d, %v", n, err)
+	if rs, err := l.List(ctx, testMonth, FamilyOpenAI); err != nil || Spent(rs) != 0 {
+		t.Fatalf("an empty ledger: %v, %v", rs, err)
 	}
 	for _, r := range []Reservation{
-		{Month: testMonth, Family: FamilyOpenAI, Run: "a", Call: 1, Tokens: 100},
-		{Month: testMonth, Family: FamilyOpenAI, Run: "a", Call: 3, Tokens: 50},
-		{Month: testMonth, Family: FamilyAnthropic, Run: "a", Call: 2, Tokens: 7},
-		{Month: "2026-10", Family: FamilyOpenAI, Run: "b", Call: 1, Tokens: 1000},
+		{Month: testMonth, Day: "20261121", Record: testRecordID, Family: FamilyOpenAI, Run: "a", Call: 1, Tokens: 100},
+		{Month: testMonth, Day: "20261121", Record: testRecordID, Family: FamilyOpenAI, Run: "a", Call: 3, Tokens: 50},
+		{Month: testMonth, Day: "20261121", Record: testRecordID, Family: FamilyAnthropic, Run: "a", Call: 2, Tokens: 7},
+		{Month: "2026-10", Day: "20261031", Record: testRecordID, Family: FamilyOpenAI, Run: "b", Call: 1, Tokens: 1000},
 	} {
 		if err := l.Reserve(ctx, r); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if n, err := l.Spent(ctx, testMonth, FamilyOpenAI); err != nil || n != 150 {
-		t.Fatalf("spent = %d, %v; want 150", n, err)
+	if rs, err := l.List(ctx, testMonth, FamilyOpenAI); err != nil || Spent(rs) != 150 {
+		t.Fatalf("spent = %d, %v; want 150", Spent(rs), err)
 	}
-	err := l.Reserve(ctx, Reservation{Month: testMonth, Family: FamilyOpenAI, Run: "a", Call: 1, Tokens: 100})
+	err := l.Reserve(ctx, Reservation{Month: testMonth, Day: "20261121", Record: testRecordID, Family: FamilyOpenAI,
+		Run: "a", Call: 1, Tokens: 100})
 	if !errors.Is(err, ErrReservationExists) {
 		t.Fatalf("a second reservation of the same name: %v", err)
 	}
-	for _, bad := range []Reservation{
-		{Month: "../x", Family: FamilyOpenAI, Run: "a", Call: 1},
-		{Month: testMonth, Family: "other", Run: "a", Call: 1},
-		{Month: testMonth, Family: FamilyOpenAI, Run: "../a", Call: 1},
-		{Month: testMonth, Family: FamilyOpenAI, Run: "a", Call: 4},
+	good := Reservation{Month: testMonth, Day: "20261121", Record: testRecordID, Family: FamilyOpenAI, Run: "c", Call: 1}
+	for name, mod := range map[string]func(*Reservation){
+		"month":         func(r *Reservation) { r.Month = "../x" },
+		"family":        func(r *Reservation) { r.Family = "other" },
+		"run":           func(r *Reservation) { r.Run = "../a" },
+		"call":          func(r *Reservation) { r.Call = 4 },
+		"no day":        func(r *Reservation) { r.Day = "" },
+		"other month":   func(r *Reservation) { r.Day = "20261201" },
+		"no such day":   func(r *Reservation) { r.Day = "20261131" },
+		"no record":     func(r *Reservation) { r.Record = "" },
+		"record dotted": func(r *Reservation) { r.Record = testRecordID + ".x" },
 	} {
+		bad := good
+		mod(&bad)
 		if err := l.Reserve(ctx, bad); err == nil {
-			t.Errorf("reservation %+v was created", bad)
+			t.Errorf("%s: reservation %+v was created", name, bad)
 		}
 	}
 	// An entry that is not a reservation makes the sum untrustworthy: an error, never a lower sum.
 	if err := os.WriteFile(filepath.Join(l.Root, "spend", testMonth, "openai", "note.txt"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.Spent(ctx, testMonth, FamilyOpenAI); err == nil {
+	if _, err := l.List(ctx, testMonth, FamilyOpenAI); err == nil {
 		t.Fatal("a foreign entry was ignored")
 	}
 }

@@ -132,7 +132,41 @@ type Scorer struct {
 	Run string
 	// Now is the intake's clock, read once per run; time.Now when nil.
 	Now func() time.Time
+	// ExtraAttemptFor names a record ID whose run goes through whatever its attempts of the day: the person's
+	// flag to raise the limit for one run by hand. Empty for every other run. A run of another record with it
+	// set ends with ErrExtraAttemptOtherRecord before any reservation.
+	ExtraAttemptFor string
 }
+
+// MaxAttemptsPerDay is the attempts of one record on one UTC day: the distinct runs with a reservation of
+// that record and day. A run that would be the third is refused before any reservation or model call.
+const MaxAttemptsPerDay = 2
+
+// AttemptsError ends a run without a model call because the record had its attempts of the day. It is not an
+// outcome: no score is written, and the record is tried again on a later day or by hand (ExtraAttemptFor).
+type AttemptsError struct {
+	// Record is the record ID, in its checked shape.
+	Record string
+	// Day is the UTC day, "20060102".
+	Day string
+	// Attempts is the distinct runs counted for the record and the day.
+	Attempts int
+	// Raced is true when the run had reserved its first call and another run of the same record reserved too;
+	// the run ends without the call.
+	Raced bool
+}
+
+func (e *AttemptsError) Error() string {
+	if e.Raced {
+		return fmt.Sprintf("the record %s has %d attempts on %s with this run, over the limit of %d; another run "+
+			"reserved at the same time, so this one makes no call", e.Record, e.Attempts, e.Day, MaxAttemptsPerDay)
+	}
+	return fmt.Sprintf("the record %s has %d attempts on %s, the limit of %d a day", e.Record, e.Attempts, e.Day,
+		MaxAttemptsPerDay)
+}
+
+// ErrExtraAttemptOtherRecord ends a run whose ExtraAttemptFor names another record than the one read.
+var ErrExtraAttemptOtherRecord = errors.New("the extra attempt names another record than the one read")
 
 // Validate checks the configuration.
 func (s *Scorer) Validate() error {
@@ -145,6 +179,8 @@ func (s *Scorer) Validate() error {
 		return errors.New("intake: the run name must be 1 to 64 lower-case letters, digits and hyphens")
 	case s.Limits.MaxCallTokens <= 0 || s.Limits.MaxRunTokens <= 0 || s.Limits.MaxMonthTokens <= 0:
 		return errors.New("intake: every token cap must be above zero")
+	case s.ExtraAttemptFor != "" && !checkedRecordID(s.ExtraAttemptFor):
+		return errors.New("intake: the extra attempt must name a record ID")
 	}
 	for _, f := range []Family{FamilyAnthropic, FamilyOpenAI} {
 		if m, ok := s.Models[f]; !ok || m.Provider == nil {
@@ -158,6 +194,8 @@ func (s *Scorer) Validate() error {
 type run struct {
 	*Scorer
 	score Score
+	// day is the UTC day of the run's one clock read, "20060102", the same read as score.Month.
+	day string
 	// words are the fixed words that replace the record's names in every text built for a model (nameWords).
 	words map[string]string
 }
@@ -174,7 +212,9 @@ func (s *Scorer) Score(ctx context.Context, src Source) (Score, error) {
 	if s.Now != nil {
 		now = s.Now
 	}
-	r := &run{Scorer: s, score: Score{SchemaVersion: ScoreSchemaVersion, Month: now().UTC().Format("2006-01")}}
+	t := now().UTC()
+	r := &run{Scorer: s, day: t.Format(dayLayout),
+		score: Score{SchemaVersion: ScoreSchemaVersion, Month: t.Format("2006-01")}}
 	return r.do(ctx, src)
 }
 
@@ -198,6 +238,9 @@ func (r *run) do(ctx context.Context, src Source) (Score, error) {
 		return r.quarantine(CheckName, "the record's name is not <record ID>.json with an ID the analyzer makes", nil)
 	}
 	r.score.RecordID = id
+	if r.ExtraAttemptFor != "" && r.ExtraAttemptFor != id {
+		return Score{}, ErrExtraAttemptOtherRecord
+	}
 	size, err := src.Size(ctx)
 	if err != nil {
 		return Score{}, fmt.Errorf("reading the record's size: %w", err)
@@ -261,19 +304,46 @@ func (r *run) reserve(ctx context.Context, fam Family, call int, cr checkedReque
 	if r.score.Reserved+tokens > r.Limits.MaxRunTokens {
 		return false, "the call would pass the per-run token cap", nil
 	}
-	spent, err := r.Ledger.Spent(ctx, r.score.Month, fam)
+	rs, err := r.Ledger.List(ctx, r.score.Month, fam)
 	if err != nil {
 		return false, "", fmt.Errorf("reading the month's spend reservations: %w", err)
 	}
-	if spent+tokens > r.Limits.MaxMonthTokens {
+	if Spent(rs)+tokens > r.Limits.MaxMonthTokens {
 		return false, "the call would pass the monthly token cap of the " + string(fam) + " family", nil
 	}
-	if err := r.Ledger.Reserve(ctx, Reservation{Month: r.score.Month, Family: fam, Run: r.Run, Call: call,
-		Tokens: tokens}); err != nil {
+	if err := r.Ledger.Reserve(ctx, Reservation{Month: r.score.Month, Day: r.day, Record: r.score.RecordID,
+		Family: fam, Run: r.Run, Call: call, Tokens: tokens}); err != nil {
 		return false, "", fmt.Errorf("reserving the spend of call %d: %w", call, err)
 	}
 	r.score.Reserved += tokens
 	return true, "", nil
+}
+
+// checkAttempts counts the record's attempts of the day: the distinct runs among the reservations of both
+// families' listings of the month with this record and day. Before the run's first reservation (reserved false)
+// a count of MaxAttemptsPerDay or more ends the run. After it (reserved true) the count includes this run, and
+// a count over MaxAttemptsPerDay ends the run before its first call: two runs that both passed the first count
+// and reserved at the same time cannot both make calls, because the later of their two listings sees both
+// reservations (the reservations are create-only and a listing sees every name created before it). Both may
+// end, which costs the record its day. A failed listing is an error for a retry. ExtraAttemptFor naming the
+// record skips the count.
+func (r *run) checkAttempts(ctx context.Context, reserved bool) error {
+	if r.ExtraAttemptFor == r.score.RecordID {
+		return nil
+	}
+	var all []Reservation
+	for _, fam := range []Family{FamilyAnthropic, FamilyOpenAI} {
+		rs, err := r.Ledger.List(ctx, r.score.Month, fam)
+		if err != nil {
+			return fmt.Errorf("reading the month's spend reservations: %w", err)
+		}
+		all = append(all, rs...)
+	}
+	n := Attempts(all, r.day, r.score.RecordID)
+	if (!reserved && n >= MaxAttemptsPerDay) || (reserved && n > MaxAttemptsPerDay) {
+		return &AttemptsError{Record: r.score.RecordID, Day: r.day, Attempts: n, Raced: reserved}
+	}
+	return nil
 }
 
 // judge makes the judge's call, at most one cross-check and, after it, one more judge call with its result.
@@ -290,11 +360,17 @@ func (r *run) judge(ctx context.Context, rec analysis.Record, judgeFam Family) (
 	if !ok {
 		return r.quarantine(CheckRedactor, reasonUnsent, kinds)
 	}
+	if err := r.checkAttempts(ctx, false); err != nil {
+		return Score{}, err
+	}
 	if ok, why, err := r.reserve(ctx, judgeFam, 1, first); err != nil || !ok {
 		if err != nil {
 			return Score{}, err
 		}
 		return r.end(StatusBudget, why)
+	}
+	if err := r.checkAttempts(ctx, true); err != nil {
+		return Score{}, err
 	}
 	r.score.PromptVersion = PromptVersion
 	c, err := r.send(ctx, judge, first, true)

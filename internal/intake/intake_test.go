@@ -471,7 +471,8 @@ func TestLedgerFailureIsAnErrorWithoutACall(t *testing.T) {
 		t.Fatalf("err = %v, %d calls", err, f.modelCalls())
 	}
 	f = newFixture(t)
-	if err := f.ledger.Reserve(context.Background(), Reservation{Month: testMonth, Family: FamilyOpenAI, Run: "run-1", Call: 1}); err != nil {
+	if err := f.ledger.Reserve(context.Background(), Reservation{Month: testMonth, Day: "20261121", Record: rec.ID,
+		Family: FamilyOpenAI, Run: testRun, Call: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.scorer.Score(context.Background(), sourceOf(t, rec)); !errors.Is(err, ErrReservationExists) || f.modelCalls() != 0 {

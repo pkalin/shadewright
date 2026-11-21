@@ -31,7 +31,14 @@ Before each call (the judge, the cross-check, the judge with the tool result) th
 
 The `reason` of a `budget` outcome names the cap, and every `budget` outcome logs a warning with the family and the month. Only the month cap clears by itself, in the next month. A call over the call cap or the run cap gets `budget` on every run, because the same record makes the same request: such a record is scored only after the cap is raised with `--max-call-tokens` or `--max-run-tokens`.
 
-Reservations are empty files in `--spend-dir`, `spend/<month>/<family>/<run>.<call>.<tokens>.json`, created only if absent. The run ID is random per run and stands for the message ID and dequeue count of the job's names (ADR-0047 section 5), which a file run does not have. A file there that is not a reservation stops the run with an error, because the month's sum cannot be trusted.
+Reservations are empty files in `--spend-dir`, `spend/<month>/<family>/<day>.<record ID>.<run>.<call>.<tokens>.json`, created only if absent. The day is the UTC day of the same clock read as the month, as `20060102`, and must fall in that month. The record ID goes into the name only in the shape step 1 checks (a lower-case UUID, a dash and a valid time), so no other text reaches a name. The run ID is random per run and stands for the message ID and dequeue count of the job's names (ADR-0047 section 5), which a file run does not have. A name of the layout before the day and the record were added, `<run>.<call>.<tokens>.json`, is still read and counts toward the month's sum, but toward no record's attempts. A file there that is neither stops the run with an error, because the month's sum cannot be trusted. Nothing of a model's answer is stored there or anywhere else, and a run never reuses an earlier run's answers.
+
+## Attempts per record
+
+A record has at most 2 attempts a UTC day. An attempt is a run that reserved at least one call for that record that day: the distinct run IDs among the names with that record and day, in both families' directories of the month, read from the same listing as the month's sum. Before its first reservation a run counts them; at 2 or more it ends with exit code 3 and a warning that names the record, the day and the count, with no reservation, no model call and no score written. The record is tried again on a later UTC day, or once by hand with `--extra-attempt <record ID>`, which lets that one run through whatever the count (the run still counts as an attempt, and every token cap still holds).
+
+Two runs of one record that start together can both count one attempt before either has reserved. So each run lists again right after its first reservation, and ends with exit code 3 before its first call when the count, its own run included, is over 2. Reservations are create-only and a listing sees every name created before it, so of two runs racing for the second attempt the one that lists last sees both: at most one of them calls a model. Both can end, when each lists after the other reserved; the record has then used its day, and the month's sum counts both reservations although no call was made.
+
 
 ## Flags
 
@@ -49,6 +56,7 @@ Reservations are empty files in `--spend-dir`, `spend/<month>/<family>/<run>.<ca
 | `--max-run-tokens` | 100000 | Cap of one run. |
 | `--max-month-tokens` | 4000000 | Cap of a month, for each family. |
 | `--dry-run` | false | A built-in fake model of each family answers a fixed score: no key, no network. Reservations are still counted. |
+| `--extra-attempt` | | Record ID of the record this run scores even when it had its 2 attempts of the UTC day; for one run by hand. When it names another record than `--record`, the run ends with exit code 2 before any reservation. |
 
 Both families need a model and a key file unless `--dry-run` is set. The two key files must differ; each adapter refuses the other's file. The keys are those of whoever runs the command (ADR-0047 section 1), read from the files at each call; never the intake's keys from the vault, which only the job gets through its identity (section 6), and never the analyzer's or the lab's.
 
@@ -61,6 +69,11 @@ The score JSON has `status` (`scored`, `unjudged`, `invalid`, `quarantined` or `
 | 0 | An outcome was written, or the score file existed already. |
 | 1 | A step failed (a read, a reservation, a model call, the run's deadline of 8 minutes): try again. No score was written; the reservations made before the failed step stay in `--spend-dir` and count against the caps. |
 | 2 | A flag or the configuration is wrong. |
+| 3 | The record had its 2 attempts of the UTC day (see [Attempts per record](#attempts-per-record)). Nothing was reserved, called or written. Try again on a later UTC day, or once with `--extra-attempt`. |
+
+## Known limits
+
+- A judge's reply with a text block that only names a secret-named flag (such as `--token`), with no secret in it, quarantines the record at the judge's second request, which sends that reply back. How many real records this hits is measured with #992.
 
 Example, on a downloaded record:
 

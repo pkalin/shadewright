@@ -21,8 +21,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math/rand/v2"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -70,6 +70,7 @@ const (
 	claudeID  = "claude-opus-5-5"
 	gptID     = "gpt-5.1"
 	testMonth = "2026-11"
+	testRun   = "run-1"
 	foundry   = "Foundry"
 )
 
@@ -132,30 +133,41 @@ type memLedger struct {
 	spentErr error
 }
 
-func (l *memLedger) Spent(_ context.Context, _ string, f Family) (int64, error) {
+// List returns the reservations of the month and family, and spent[f] as one reservation of the old layout.
+func (l *memLedger) List(_ context.Context, month string, f Family) ([]Reservation, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.spentErr != nil {
-		return 0, l.spentErr
+		return nil, l.spentErr
 	}
-	return l.spent[f], nil
+	var out []Reservation
+	if n := l.spent[f]; n > 0 {
+		out = append(out, Reservation{Month: month, Family: f, Run: "before", Call: 1, Tokens: n})
+	}
+	for _, r := range l.reserved {
+		if r.Month == month && r.Family == f {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 func (l *memLedger) Reserve(_ context.Context, r Reservation) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := fmt.Sprintf("%s/%s/%s.%d", r.Month, r.Family, r.Run, r.Call)
+	// The name is checked as DirLedger checks it; the key leaves out the tokens, so a second reservation of
+	// one run and call is refused whatever its count.
+	if _, err := ReservationName(r); err != nil {
+		return err
+	}
+	key := r.Month + "/" + string(r.Family) + "/" + r.Day + "." + r.Record + "." + r.Run + "." + strconv.Itoa(r.Call)
 	if l.names == nil {
 		l.names = map[string]bool{}
 	}
 	if l.names[key] {
 		return ErrReservationExists
 	}
-	if l.spent == nil {
-		l.spent = map[Family]int64{}
-	}
 	l.names[key] = true
-	l.spent[r.Family] += r.Tokens
 	l.reserved = append(l.reserved, r)
 	return nil
 }
@@ -183,7 +195,7 @@ func newFixture(t *testing.T) *fixture {
 		},
 		Ledger: f.ledger,
 		Limits: Limits{MaxCallTokens: 40_000, MaxRunTokens: 100_000, MaxMonthTokens: 4_000_000},
-		Run:    "run-1",
+		Run:    testRun,
 		Now:    func() time.Time { return time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC) },
 	}
 	return f

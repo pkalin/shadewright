@@ -251,8 +251,12 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 	}
 	if staleCheckRecorded(o, n) {
-		// The write of a stopped holder's look exit that records the failed check (checkHeld, afterLook, #1008): the
-		// look returned its own delay (a refused close tried again at heldRecheckInterval, a close a second later).
+		// Every write that records state Stale and nothing else on the review check: the exit of a stopped holder's
+		// look (checkHeld, afterLook, #1008), and the standalone write of failCheck (recordStaleCheck) for a stale plan
+		// (failStaleCheck, before the close of cleanUpStale or endStaleClosed) and a cancel (failCancelCheck). None
+		// waits for this event: each writer goes on in the same reconcile with the record in memory and returns its own
+		// delay (a refused close tried again at heldRecheckInterval, a close a second later, the poll interval). A
+		// change of Approved that recordStaleCheck makes in the same write is not dropped here and still wakes it.
 		n.Status.PullRequest.ReviewCheck = o.Status.PullRequest.ReviewCheck
 	}
 	if deliveryPending(o) && deliveryPending(n) {

@@ -324,6 +324,14 @@ func TestGitWaitModel(t *testing.T) {
 			t.Errorf("property \"stopped holder\" was never reached on the fixed seeds: a change of the model's " +
 				"events no longer draws a stopped holder kept by another pull request (#925)")
 		}
+		t.Logf("looks of such a stopped holder whose Git reads failed, checked: %d, of which taken over by a stop "+
+			"exception: %d, with the check still owed: %d", modelHeldChecks.failedReads,
+			modelHeldChecks.failedReadExceptions, modelHeldChecks.failedReadsOwed)
+		if fixedSeeds && modelHeldChecks.failedReads == 0 && !t.Failed() {
+			t.Errorf("property \"stopped holder\" never checked a look whose Git reads failed on the fixed seeds: a " +
+				"change of the model's events no longer draws a failed read of a stopped holder kept by another pull " +
+				"request (#1008)")
+		}
 		if fixedSeeds && modelHeldChecks.exceptions == 0 && !t.Failed() {
 			t.Errorf("property \"stopped holder\" never checked a look a stop exception took over on the fixed seeds: " +
 				"a change of the model's events moved modelExceptionSeeds (#1008)")
@@ -488,6 +496,14 @@ type modelWorld struct {
 	// exceptionLook: a stop exception took the reconcile running over (stopExceptionTaken), counted by property
 	// "stopped holder" (modelHeldChecks.exceptions).
 	exceptionLook bool
+	// stopChecksBefore counts the stop's failed check runs (stoppedCheckTitle) on the recorded head of the request
+	// as read before the reconcile running, and headBefore is that head (property "stopped holder", no write while
+	// the reads fail).
+	stopChecksBefore int
+	headBefore       string
+	// checkOwedBefore is whether that head did not show a failed check last before the reconcile running: only then
+	// can a look write the stop's failed check.
+	checkOwedBefore bool
 }
 
 // pauseSpan is a pause from its start to its lift, or a time the executor was down.
@@ -1922,6 +1938,12 @@ func (m *modelWorld) step() {
 	m.writeFaulted, m.calls, m.failedCalls, m.passed, m.ended = false, 0, 0, passed, false
 	m.exceptionLook = false
 	m.mu.Unlock()
+	m.headBefore, m.stopChecksBefore, m.checkOwedBefore = "", 0, false
+	if pr := before.Status.PullRequest; pr != nil {
+		m.headBefore, m.stopChecksBefore = pr.HeadSHA, stopChecks(m.g.CheckRuns(pr.HeadSHA))
+		last := lastReviewCheck(m.g.CheckRuns(pr.HeadSHA))
+		m.checkOwedBefore = last == nil || last.Status != providers.CheckRunFailure
+	}
 	if m.handoff && !m.paused && (m.repo != nil || m.configured != m.planBranch) && m.refusedAt.IsZero() {
 		m.refusedAt = m.clock.at
 	}
@@ -2156,6 +2178,26 @@ var modelHeldChecks struct {
 	count int
 	// exceptions counts the checked looks a stop exception took over, which get no allowance (#1008).
 	exceptions int
+	// failedReads counts the checked looks whose Git reads failed, which write nothing (ADR-0046 limit (b), decision
+	// of 2026-11-21 on #1008), and failedReadExceptions those of them a stop exception took over. The model's faults
+	// fail an operation for the whole reconcile, so the look's own read fails before a stop exception's step can
+	// read: seeds 1 to 200000 draw no such look (the directed tests of stopexception_test.go cover it), and only
+	// failedReads must be reached on the fixed seeds.
+	failedReads, failedReadExceptions int
+	// failedReadsOwed counts the looks of failedReads whose head did not show a failed check last before the look:
+	// the only ones where a write could happen.
+	failedReadsOwed int
+}
+
+// stopChecks counts the stop's failed check runs (stoppedCheckTitle) in runs.
+func stopChecks(runs []providers.CheckRun) int {
+	n := 0
+	for _, run := range runs {
+		if run.Status == providers.CheckRunFailure && run.Title == stoppedCheckTitle {
+			n++
+		}
+	}
+	return n
 }
 
 // stoppedHolderProperty: a stopped holder whose own pull request is not open (closed, merged, gone or never found)
@@ -2166,12 +2208,16 @@ var modelHeldChecks struct {
 // its own pull request. The model reaches no new installation of the App; the rule has no exception for one
 // (decision of 2026-11-21 on #925, ADR-0046), and the directed tests cover that path.
 //
-// A look that a stop exception took over (the expired cleanup past its cutoff, a step of settleStopException) gets no
-// allowance: checkHeld runs the rule at its single exit, so that look writes the check too (#1008, which closed
-// ADR-0046 limit (c)). Such looks are counted (exceptionLook, set through stopExceptionTaken), so the fixed seed set
-// shows they were checked.
+// A look that a stop exception took over (a step of settleStopException) gets no allowance: checkHeld runs the rule
+// at its single exit, so that look writes the check too (#1008, which closed ADR-0046 limit (c)). Such looks are
+// counted (exceptionLook, set through stopExceptionTaken), so the fixed seed set shows they were checked.
+//
+// A look whose Git reads failed (every fault the model injects is a read, so failedCalls > 0 says it) writes no
+// failed check of the stop and sets no ReviewCheckNotFailed, the looks a stop exception took over included (ADR-0046
+// limit (b), decision of 2026-11-21 on #1008): the first later look whose reads answer writes. Such exception looks
+// are counted too (failedReads).
 func (m *modelWorld) stoppedHolderProperty(live *api.RemediationRequest, err error, faulted bool) {
-	if !m.r.ReviewerHints || err != nil || faulted || m.lastFailedCalls > 0 || len(m.history) < 2 {
+	if !m.r.ReviewerHints || err != nil || faulted || len(m.history) < 2 {
 		return
 	}
 	before := m.history[len(m.history)-2]
@@ -2188,13 +2234,17 @@ func (m *modelWorld) stoppedHolderProperty(live *api.RemediationRequest, err err
 		// Open, or merged into a target branch: the merge path records it (its reads and waits), not this rule.
 		return
 	}
+	m.mu.Lock()
+	exception := m.exceptionLook
+	m.mu.Unlock()
+	if m.lastFailedCalls > 0 {
+		m.noWriteWhileReadsFail(before, live, exception)
+		return
+	}
 	if len(live.Status.GitWaits) > 0 ||
 		meta.FindStatusCondition(live.Status.Conditions, api.ConditionGitReadRetry) != nil {
 		return
 	}
-	m.mu.Lock()
-	exception := m.exceptionLook
-	m.mu.Unlock()
 	modelHeldChecks.mu.Lock()
 	modelHeldChecks.count++
 	if exception {
@@ -2213,19 +2263,53 @@ func (m *modelWorld) stoppedHolderProperty(live *api.RemediationRequest, err err
 	}
 }
 
+// noWriteWhileReadsFail is the part of property "stopped holder" for a look whose Git reads failed: the look added no
+// failed check of the stop on the recorded head and did not set ReviewCheckNotFailed. before is the request before
+// the look, exception whether a stop exception took the look over.
+func (m *modelWorld) noWriteWhileReadsFail(before, live *api.RemediationRequest, exception bool) {
+	pr := live.Status.PullRequest
+	if pr.HeadSHA != m.headBefore {
+		return
+	}
+	modelHeldChecks.mu.Lock()
+	modelHeldChecks.failedReads++
+	if m.checkOwedBefore {
+		modelHeldChecks.failedReadsOwed++
+	}
+	if exception {
+		modelHeldChecks.failedReadExceptions++
+	}
+	modelHeldChecks.mu.Unlock()
+	noted := meta.FindStatusCondition(before.Status.Conditions, api.ConditionReviewCheckNotFailed) == nil &&
+		meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil
+	if n := stopChecks(m.g.CheckRuns(pr.HeadSHA)); n > m.stopChecksBefore || noted {
+		m.fatalf("stopped holder: a look whose Git reads failed (%d failed calls) wrote the stop's failed check on "+
+			"%.12s (%d before, %d after) or set ReviewCheckNotFailed (%t); a stop exception took the look over: %t",
+			m.lastFailedCalls, pr.HeadSHA, m.stopChecksBefore, n, noted, exception)
+	}
+}
+
 // TestStoppedHolderPropertyAllowsNoStopExceptionLook drives property "stopped holder" through one scripted look of a
 // stopped holder whose own pull request is closed while an unmarked one from its branch keeps the lock: a look a stop
-// exception took over fails the property without the failed check on the recorded head, as any other look does (#1008).
+// exception took over fails the property without the failed check on the recorded head, as any other look does, and a
+// look whose Git reads failed fails it when it wrote the check (#1008, decision of 2026-11-21). The generated sequences
+// reach no look whose reads failed while the check was still owed (failedReadsOwed), so this scripted look is what
+// shows that part of the property can fail.
 func TestStoppedHolderPropertyAllowsNoStopExceptionLook(t *testing.T) {
 	schema := requestStatusSchema(t)
 	for _, tc := range []struct {
 		name             string
 		exception, check bool
-		fails            bool
+		// readsFailed: the look's Git reads failed, and the check, when written, is written in that look.
+		readsFailed bool
+		fails       bool
 	}{
 		{name: "a look without an exception, no check", fails: true},
 		{name: "an exception look, no check", exception: true, fails: true},
 		{name: "an exception look with the check", exception: true, check: true},
+		{name: "an exception look whose reads failed, no check", exception: true, readsFailed: true},
+		{name: "an exception look whose reads failed and that wrote the check", exception: true, readsFailed: true,
+			check: true, fails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// #nosec G404 -- a fixed seed: the scripted look draws nothing.
@@ -2242,9 +2326,14 @@ func TestStoppedHolderPropertyAllowsNoStopExceptionLook(t *testing.T) {
 					"pull request %v, unmarked open %t", holdsLock(live), live.Status.PullRequest, m.unmarkedOpen())
 			}
 			m.history = []*api.RemediationRequest{live.DeepCopy(), live.DeepCopy()}
+			m.headBefore = live.Status.PullRequest.HeadSHA
+			m.stopChecksBefore = stopChecks(m.g.CheckRuns(m.headBefore))
+			if tc.readsFailed {
+				m.lastFailedCalls = 1
+			}
 			if tc.check {
 				if err := m.g.CreateCheckRun(context.Background(), live.Status.PullRequest.HeadSHA, providers.CheckRun{
-					Name: providers.CheckRunName, Status: providers.CheckRunFailure}); err != nil {
+					Name: providers.CheckRunName, Status: providers.CheckRunFailure, Title: stoppedCheckTitle}); err != nil {
 					t.Fatal(err)
 				}
 			}

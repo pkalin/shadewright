@@ -46,6 +46,6 @@
 | [0042](0042-openai-compatible-model-endpoints.md) | OpenAI-compatible model endpoints and an optional API key | Accepted |
 | [0043](0043-the-executor-follows-its-own-pull-request-to-any-base.md) | The executor follows its own pull request to any base | Accepted, amended |
 | [0045](0045-the-failed-review-check-on-a-pull-request-on-another-base.md) | The failed review check on a pull request on another base | Accepted, amended |
-| [0046](0046-the-failed-review-check-of-a-stopped-holder-while-the-lock-is-held.md) | The failed review check of a stopped holder while the lock is held | Accepted |
+| [0046](0046-the-failed-review-check-of-a-stopped-holder-while-the-lock-is-held.md) | The failed review check of a stopped holder while the lock is held | Accepted, amended |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

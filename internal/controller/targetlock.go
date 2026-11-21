@@ -1429,9 +1429,9 @@ func unsettledRuleApplies(v changeVerdict, err error, said bool) bool {
 // write), for the error backoff: the check run is then
 // written already, but on a head without Stale recorded before the look Stale stays unrecorded, so the retry looks
 // again and writes the same failed run once more without reading it first; on a head with Stale stored already the
-// retry reads the check first (failStoppedCheck, ADR-0046 limit (g)). The read of the request at the first try is
-// also the one the gate of the check write decides on (writeStoppedCheck): a request being deleted, recording a merge,
-// not holding the lock or not owning the check gets no write (#1008).
+// retry reads the check first (failStoppedCheck, ADR-0046 limit (g)). The gate of the check write
+// (writeStoppedCheck) makes its own read of the request and decides on that one, not on the read made here: a request
+// being deleted, recording a merge, not holding the lock or not owning the check gets no write (#1008).
 func (r *RemediationRequestReconciler) afterLook(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) error {
 	var want *remediationv1alpha1.RemediationRequestStatus
 	var written *remediationv1alpha1.RemediationRequest

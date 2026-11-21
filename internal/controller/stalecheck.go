@@ -269,8 +269,8 @@ func (r *RemediationRequestReconciler) stoppedCheckRefusal(rr, live *remediation
 
 // writeStoppedCheck is the gate of the failed review check of a stopped request (failStoppedCheck), and the only
 // function that writes it (decisions of 2026-11-21 on #1008, ADR-0046). It is called after every other call of the
-// step, and it reads the request from the API server itself, immediately before the write, at a look's exit as at a
-// stop: no earlier read of the request decides. It writes the failed run on the head of pr, the pull request the
+// step, and it reads the request from the API server itself as the last read before the write, at a look's exit as
+// at a stop: no earlier read of the request decides. It writes the failed run on the head of pr, the pull request the
 // caller names for this write, only when that request still exists with rr's UID, is not being deleted, records pr
 // (or no pull request yet, when the caller records pr in this step: recordsNow), records no merge, holds the target
 // lock and owns the review check (stoppedCheckRefusal). A step that decides the check may be written (a stop
@@ -279,7 +279,8 @@ func (r *RemediationRequestReconciler) stoppedCheckRefusal(rr, live *remediation
 // error: in each of those cases the request is going away, records a merge or another pull request, no longer holds
 // the lock or no longer owns the check, so no check is owed. A failed read of the request is a failure of the
 // Kubernetes API, returned for the error backoff with nothing written. A change of the request between the gate's read
-// and the write is not seen (the one limit left, ADR-0046). ctx is the reconcile's, stepCtx the step's bounded one,
+// and the Git host taking the write is not seen: the kill switch's gate, a token fetch and the client's retries run in
+// that time, so it can last seconds (the one limit left, ADR-0046). ctx is the reconcile's, stepCtx the step's bounded one,
 // for naming a failed write (boundErr).
 func (r *RemediationRequestReconciler) writeStoppedCheck(ctx, stepCtx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, pr *remediationv1alpha1.PullRequestStatus, recordsNow bool,

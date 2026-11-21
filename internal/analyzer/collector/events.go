@@ -136,6 +136,7 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		if apierrors.IsNotFound(err) {
 			// The one end of a hold with a cause that emits nothing: the event no longer exists (dropped).
 			r.c.series.forget(key)
+			r.c.listed.forget(key)
 			r.c.probes.done(key)
 			r.c.holds.drop(key)
 			return ctrl.Result{}, nil
@@ -186,6 +187,8 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		logf.FromContext(ctx).V(1).Info("Ignored Event that cannot be correlated")
 		return leave("it can no longer be correlated", true)
 	}
+	// An event the start listed, unchanged since, about a pod that is gone opens no Incident (#996).
+	obs.FoldOnly = r.c.goneOnStart(&ev, pod)
 	if probe, ok := probeOf(&ev); ok {
 		// A readiness or startup probe failure of a pod that starts or shuts down (#726), decided from the pod
 		// as fromEvent read it.

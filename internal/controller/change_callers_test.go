@@ -739,8 +739,7 @@ func verdictUses(fset *token.FileSet, decl ast.Decl, consts []string) []string {
 		}
 	case *ast.GenDecl:
 		for _, spec := range d.Specs {
-			switch s := spec.(type) {
-			case *ast.ValueSpec:
+			if s, ok := spec.(*ast.ValueSpec); ok {
 				if id, ok := s.Type.(*ast.Ident); ok && id.Name == "changeState" && d.Tok == token.CONST {
 					return nil
 				}

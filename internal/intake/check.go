@@ -545,6 +545,8 @@ func modelFamily(model string) (Family, bool) {
 // recordFamily returns the family of the record's models, or the reason it is unjudged: no model, a model the
 // table does not know, models of both families, or a model of the OpenAI family under a provider that serves
 // only Anthropic's (providers cannot decide the family: Foundry and OpenAI-compatible endpoints serve either).
+// Only the providers of roles that ran are compared: the record names the escalation provider whenever an
+// escalation model is configured, and that model served a reply only when the record is escalated.
 func recordFamily(rec analysis.Record) (Family, string) {
 	if len(rec.Models) == 0 {
 		return "", "the record names no model"
@@ -560,7 +562,8 @@ func recordFamily(rec analysis.Record) (Family, string) {
 		}
 		fam = f
 	}
-	if fam == FamilyOpenAI && (rec.Providers.Triage == anthropicProvider || rec.Providers.Escalation == anthropicProvider) {
+	if fam == FamilyOpenAI && (rec.Providers.Triage == anthropicProvider ||
+		(rec.Escalated && rec.Providers.Escalation == anthropicProvider)) {
 		return "", "the record's providers do not match its models"
 	}
 	return fam, ""

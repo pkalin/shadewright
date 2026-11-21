@@ -27,6 +27,7 @@ import (
 	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/store/azureblob"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // fakeToken is shaped like a GitHub token, built from parts so no literal looks like one.
@@ -174,11 +175,13 @@ func TestJudgeIsOfTheOtherFamily(t *testing.T) {
 		judge     Family
 		providers analysis.RecordProviders
 	}{
-		{[]string{claudeID}, FamilyOpenAI, analysis.RecordProviders{Triage: "Anthropic"}},
+		{[]string{claudeID}, FamilyOpenAI, analysis.RecordProviders{Triage: anthropicProvider}},
 		{[]string{"claude-sonnet-5", claudeID}, FamilyOpenAI, analysis.RecordProviders{Triage: foundry}},
 		{[]string{gptID}, FamilyAnthropic, analysis.RecordProviders{Triage: foundry}},
 		{[]string{"o3"}, FamilyAnthropic, analysis.RecordProviders{Triage: "OpenAICompatible"}},
 		{[]string{"o4-mini"}, FamilyAnthropic, analysis.RecordProviders{}},
+		// An Anthropic escalation provider whose role never ran (escalated false) served none of the models.
+		{[]string{gptID}, FamilyAnthropic, analysis.RecordProviders{Triage: foundry, Escalation: anthropicProvider}},
 	}
 	for _, c := range cases {
 		t.Run(strings.Join(c.models, ","), func(t *testing.T) {
@@ -213,19 +216,23 @@ func TestRecordOfNoKnownFamilyIsUnjudged(t *testing.T) {
 	cases := map[string]struct {
 		models    []string
 		providers analysis.RecordProviders
+		escalated bool
 	}{
-		"no model":         {nil, analysis.RecordProviders{}},
-		"both families":    {[]string{claudeID, gptID}, analysis.RecordProviders{}},
-		"unknown family":   {[]string{"mistral-large"}, analysis.RecordProviders{}},
-		"a longer word":    {[]string{"o3x"}, analysis.RecordProviders{}},
-		"a bare prefix":    {[]string{"claude-"}, analysis.RecordProviders{}},
-		"provider mismach": {[]string{gptID}, analysis.RecordProviders{Triage: foundry, Escalation: "Anthropic"}},
+		"no model":       {nil, analysis.RecordProviders{}, false},
+		"both families":  {[]string{claudeID, gptID}, analysis.RecordProviders{}, false},
+		"unknown family": {[]string{"mistral-large"}, analysis.RecordProviders{}, false},
+		"a longer word":  {[]string{"o3x"}, analysis.RecordProviders{}, false},
+		"a bare prefix":  {[]string{"claude-"}, analysis.RecordProviders{}, false},
+		"triage provider mismatch": {[]string{gptID},
+			analysis.RecordProviders{Triage: anthropicProvider, Escalation: foundry}, false},
+		"escalation provider mismatch": {[]string{gptID},
+			analysis.RecordProviders{Triage: foundry, Escalation: anthropicProvider}, true},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
 			rec := recordOf(t, rngOf(11, 12), c.models...)
-			rec.Providers = c.providers
+			rec.Providers, rec.Escalated = c.providers, c.escalated
 			s, err := f.scorer.Score(context.Background(), sourceOf(t, rec))
 			if err != nil {
 				t.Fatal(err)
@@ -444,6 +451,10 @@ func TestSpendOverTheCapStopsBeforeTheCall(t *testing.T) {
 		if s.Status != StatusBudget || f.openai.calls() != 1 || s.Reserved > f.scorer.Limits.MaxRunTokens {
 			t.Fatalf("score = %+v with %d judge calls, want budget after one", s, f.openai.calls())
 		}
+		// The cross-check fitted and ran; only the judge's second call met the run cap.
+		if f.anthropic.calls() != 1 || s.CrossCheck != CrossCheckAnswered {
+			t.Fatalf("score = %+v with %d cross-check calls, want one answered", s, f.anthropic.calls())
+		}
 	})
 }
 
@@ -588,6 +599,28 @@ func assertNoRecordText(t *testing.T, s Score, texts ...string) {
 	for _, x := range texts {
 		if strings.Contains(string(data), x) {
 			t.Fatalf("the score holds %q: %s", x, data)
+		}
+	}
+}
+
+// The cross-check's arguments are exactly one "question" key, spelled exactly, as the tool's schema says.
+func TestCrossCheckQuestionKeysAreExact(t *testing.T) {
+	r, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q, ok := question(r, json.RawMessage(`{"question":"Why?"}`)); !ok || q != "Why?" {
+		t.Fatalf("a plain question: %q, %v", q, ok)
+	}
+	for _, args := range []string{
+		`{"question":"Why?","question":"How?"}`,
+		`{"Question":"Why?"}`,
+		`{"QUESTION":"Why?"}`,
+		`{"question":"Why?","Question":"How?"}`,
+		`{"\u0071uestion":"Why?","question":"How?"}`,
+	} {
+		if q, ok := question(r, json.RawMessage(args)); ok {
+			t.Errorf("arguments %s were taken as the question %q", args, q)
 		}
 	}
 }

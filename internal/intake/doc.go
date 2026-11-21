@@ -16,8 +16,9 @@ limitations under the License.
 
 // Package intake scores one analysis record written by an analyzer we do not run (ADR-0047). The record is
 // untrusted input (invariant 4): [Scorer.Score] checks its name, size and schema, runs the redactor over it again
-// and quarantines it on any hit before any model sees it, then makes one judge call of the other model family
-// than the record's, with one bounded cross-check tool, under per-call, per-run and monthly token caps. Each
+// and quarantines it on any hit before any model sees it, then asks a judge of the other model family than the
+// record's, with one bounded cross-check tool, under per-call, per-run and monthly token caps: one judge call,
+// or three when the judge asks the cross-check (the judge, the cross-check, the judge with its answer). Each
 // request is checked by the redactor whole, exactly as it is sent, and only a request that passed reaches the one
 // function that calls a model.
 //

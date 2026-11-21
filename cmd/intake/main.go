@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -225,21 +226,37 @@ func adapterConfigs(o options) (anthropic.Config, openaicompatible.Config) {
 			OtherKeyFiles: []string{o.anthropicKF}, Timeout: callTimeout, MaxAttempts: 1}
 }
 
-// writeOut writes the score to standard output or creates the file; a file that exists is never replaced.
+// writeOut writes the score to standard output or publishes it as the file; a file that exists is never
+// replaced. The score is written to a temporary file next to it and linked to the path only when complete, so
+// a failed write leaves no file that a later run would take for a score.
 func writeOut(path string, data []byte, stdout io.Writer) error {
 	if path == "-" {
 		_, err := stdout.Write(data)
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- the operator's --out flag
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".partial-*")
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if err := writeScore(f, data); err != nil {
 		_ = f.Close()
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// A hard link fails when the path exists, as O_EXCL does, and appears only with the whole content.
+	return os.Link(tmp, path)
+}
+
+// writeScore writes the score's bytes to its temporary file; a variable so a test can make it fail.
+var writeScore = func(f *os.File, data []byte) error {
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 // newRunID returns a random run ID for the reservation names.

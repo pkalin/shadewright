@@ -19,6 +19,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -223,5 +225,39 @@ func TestThirdAttemptExitsWithItsOwnCode(t *testing.T) {
 	}
 	if _, err := os.Stat(out); err != nil {
 		t.Fatalf("the extra attempt wrote no score: %v", err)
+	}
+}
+
+// A score whose write fails leaves no file at --out, so the next run scores the record instead of skipping it;
+// an existing file is never replaced.
+func TestWriteOutLeavesNoPartialScore(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "score.json")
+	saved := writeScore
+	t.Cleanup(func() { writeScore = saved })
+	writeScore = func(f *os.File, data []byte) error {
+		_, _ = f.Write(data[:len(data)/2])
+		return errors.New("disk full")
+	}
+	if err := writeOut(out, []byte(`{"status":"scored"}`), nil); err == nil {
+		t.Fatal("a failed write was reported as written")
+	}
+	if _, err := os.Lstat(out); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("after a failed write the score path: %v", err)
+	}
+	writeScore = saved
+	if err := writeOut(out, []byte("first\n"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeOut(out, []byte("second\n"), nil); err == nil {
+		t.Fatal("an existing score was replaced")
+	}
+	got, err := os.ReadFile(out)
+	if err != nil || string(got) != "first\n" {
+		t.Fatalf("score = %q, %v", got, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("the directory holds %v, %v; want the score alone", entries, err)
 	}
 }

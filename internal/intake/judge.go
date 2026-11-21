@@ -172,6 +172,15 @@ func crossCheckResult(answer string) string {
 // question returns the question of a cross_check call, and false when the arguments are not exactly one
 // question of 1 to MaxQuestionBytes bytes or the redactor would change it.
 func question(r *redact.Redactor, args json.RawMessage) (string, bool) {
+	// No key twice and the name exactly as in the tool's schema: encoding/json alone keeps the last of two
+	// members and matches the name in any case.
+	if checkKeys(args) != nil {
+		return "", false
+	}
+	var names map[string]json.RawMessage
+	if err := json.Unmarshal(args, &names); err != nil || len(names) != 1 || names["question"] == nil {
+		return "", false
+	}
 	var a struct {
 		Question *string `json:"question"`
 	}

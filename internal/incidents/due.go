@@ -245,9 +245,11 @@ type trace struct {
 	// skipReported is the lastTransitionTime of the NotRecent condition last reported ([Controller.reportNotRecent]),
 	// or zero.
 	skipReported time.Time
-	// skipPending: a NotRecent write of this Incident returned an error, so it may have landed unreported. The
-	// first pass that reads NotRecent reports it once ([Controller.reportSkips]). A read of another reason keeps
-	// it, since the cache may lag behind the write; only a report ([Controller.reportNotRecent]), a later write
+	// skipPending: a NotRecent write of this Incident returned an error after which it may have landed
+	// ([mayHaveLanded]), so it may stand unreported. The first pass that reads NotRecent reports it once, or
+	// clears it unreported when that NotRecent's transition time was reported already ([Controller.reportSkips]).
+	// A read of another reason keeps it, since the cache may lag behind the write; only a report
+	// ([Controller.reportNotRecent]), a later write
 	// of AnalysisDue by this loop or the Incident found gone ([Controller.setDue]) clears it, or the trace is
 	// forgotten with the Incident ([Controller.watch]). The transition time alone cannot tell such a write: one
 	// written over another not-due reason keeps that reason's lastTransitionTime, which can be before the loop
@@ -470,13 +472,18 @@ func (c *Controller) heldLocked(fp string) time.Time {
 // reportSkips reports, from the cached Incidents of the pass, each NotRecent condition this trigger loop wrote
 // whose report is still owed: one whose write landed but whose answer was lost (the deadline ran out), so
 // [Controller.setDue] did not report it. Such a condition says not due, NotRecent, and either a write of it
-// returned an error (the pending mark of the Incident's [trace]) or its lastTransitionTime is at or after the
-// loop began (truncated to the second) and differs from the one last reported for that Incident. A pending
-// mark is reported by the first pass that reads NotRecent, which clears it. A read of another reason keeps
-// it and reports nothing: the cache may still show the reason from before a write that landed. Only a later
-// write of AnalysisDue by this loop, the Incident found gone ([Controller.setDue]) or its trace forgotten
-// clears it unreported. A mark kept for a write that did not land costs at most one event, when a NotRecent
-// written by another process is read for it later. So this loop reports each NotRecent it wrote exactly once.
+// returned an error after which it may have landed ([mayHaveLanded]; the pending mark of the Incident's
+// [trace]) or its lastTransitionTime is at or after the loop began (truncated to the second), and in both cases
+// its lastTransitionTime differs from the one last reported for that Incident. A pending mark is reported by
+// the first pass that reads NotRecent, which clears it; one whose NotRecent shows the transition time reported
+// already is cleared without a report, so writes over a NotRecent of a stale generation that keep failing
+// report it once, not once per pass. A read of another reason keeps the mark and reports nothing: the cache
+// may still show the reason from before a write that landed. Only a later write of AnalysisDue by this loop,
+// the Incident found gone ([Controller.setDue]) or its trace forgotten clears it unreported. A mark kept for a
+// write that did not land costs at most one event, when a NotRecent written by another process is read for it
+// later. So this loop reports exactly once each NotRecent it wrote that still stands when it is next read or
+// written. A write that makes the Incident due again over a NotRecent that landed but was not reported yet
+// drops that report, an accepted limit (#983): the Incident is analyzed after all.
 // A NotRecent written before the loop began (a restart, a new leader) is not reported: the process that wrote
 // it did, so a restart sends no burst of events. One the previous leader writes in the loop's first second or
 // later (a leader handover) is reported by both, an extra report accepted as a known limit (#983). What is
@@ -496,7 +503,13 @@ func (c *Controller) reportSkips(items []remediationv1alpha1.Incident) {
 			continue
 		}
 		at := meta.FindStatusCondition(inc.Status.Conditions, ConditionAnalysisDue).LastTransitionTime.Time
-		if !pending && (at.Before(c.triggerStart) || at.Equal(t.skipReported)) {
+		if at.Equal(t.skipReported) {
+			// Reported already: a pending write that left the same transition (one rewritten over a NotRecent
+			// whose generation was stale keeps its transition time) is no new skip.
+			t.skipPending = false
+			continue
+		}
+		if !pending && at.Before(c.triggerStart) {
 			continue
 		}
 		c.reportNotRecent(inc)
@@ -621,8 +634,8 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 			ObservedGeneration: inc.Generation,
 			LastTransitionTime: metav1.NewTime(c.cfg.Now()),
 		})
-		triedNotRecent = !due && reason == ReasonNotRecent
 		if err := c.client.Status().Update(wctx, inc, client.FieldOwner(triggerFieldOwner)); err != nil {
+			triedNotRecent = !due && reason == ReasonNotRecent && mayHaveLanded(err)
 			return err
 		}
 		wrote = true
@@ -645,13 +658,26 @@ func (c *Controller) setDue(ctx context.Context, cached *remediationv1alpha1.Inc
 	}
 	if err != nil {
 		if t := c.memory[cached.UID]; t != nil && triedNotRecent {
-			// The write may have landed with its answer lost: the next pass reports it if it reads NotRecent
-			// ([Controller.reportSkips]).
+			// The write may have landed with its answer lost ([mayHaveLanded]): the next pass reports it if it
+			// reads NotRecent ([Controller.reportSkips]).
 			t.skipPending = true
 		}
 		return due, reason, false, fmt.Errorf("setting AnalysisDue on Incident %s: %w", cached.Name, err)
 	}
 	return due, reason, wrote, nil
+}
+
+// mayHaveLanded reports whether an update that returned err may still have been stored: its answer was lost
+// (a timeout, a deadline or a cancellation, a connection error) or the server's answer does not say the update
+// was refused (a 5xx, an unknown error). An update the server refused with a 4xx answer (Invalid, Forbidden,
+// Conflict, NotFound, TooManyRequests and the like) was not stored.
+func mayHaveLanded(err error) bool {
+	var status apierrors.APIStatus
+	if errors.As(err, &status) {
+		code := status.Status().Code
+		return code < 400 || code >= 500
+	}
+	return true
 }
 
 // conditionAgrees reports whether the Incident's AnalysisDue condition already holds the decision (due,

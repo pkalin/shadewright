@@ -19,6 +19,7 @@ package incidents
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,9 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 )
+
+// incidentsResource is the resource of the Incidents, for the errors the API server answers about one.
+var incidentsResource = schema.GroupResource{Group: remediationv1alpha1.GroupVersion.Group, Resource: "incidents"}
 
 // waitSkipEvent waits, with a deadline, for the next event of rec and checks that it reports a skip.
 func waitSkipEvent(t *testing.T, rec *corerecord.FakeRecorder) {
@@ -346,8 +350,7 @@ func TestConflictThenFailedReadLeavesNoPendingSkip(t *testing.T) {
 				return nil
 			}
 			reads.fail.Store(true)
-			return apierrors.NewConflict(schema.GroupResource{Group: remediationv1alpha1.GroupVersion.Group,
-				Resource: "incidents"}, inc.Name, errors.New("the object has been modified"))
+			return apierrors.NewConflict(incidentsResource, inc.Name, errors.New("the object has been modified"))
 		}
 	})
 	deadline := time.Now().Add(20 * time.Second)
@@ -372,5 +375,95 @@ func TestConflictThenFailedReadLeavesNoPendingSkip(t *testing.T) {
 	}
 	if conflicts.Load() != 1 {
 		t.Fatalf("%d NotRecent writes sent, want the one refused", conflicts.Load())
+	}
+}
+
+// staleNotRecent stores the Incident of fp(1) with a NotRecent condition written before the trigger loop began
+// for an older generation of the Incident: no mark ([DueMark]), so every pass writes NotRecent again.
+func staleNotRecent(t *testing.T, ns string) {
+	t.Helper()
+	st := incidentStatus(35*time.Minute, 35*time.Minute, 0)
+	st.Conditions = []metav1.Condition{{Type: ConditionAnalysisDue, Status: metav1.ConditionFalse,
+		Reason: ReasonNotRecent, Message: dueMessages[ReasonNotRecent], ObservedGeneration: 0,
+		LastTransitionTime: metav1.NewTime(triggerNow.Add(-time.Hour))}}
+	createIncident(t, ns, 1, st)
+	createSettings(t, 2)
+	createBudget(t, ns, nil)
+}
+
+// A NotRecent write the API server refuses (here Forbidden) did not land, so it leaves nothing pending: a
+// stale NotRecent rewritten and refused on every pass is never reported (#983).
+func TestRefusedNotRecentWritesOverAStaleNotRecentReportNothing(t *testing.T) {
+	ns := namespace(t)
+	staleNotRecent(t, ns)
+	before := testutil.ToFloat64(notRecentSkips)
+	var refused atomic.Int32
+	_, rec, passes := startSkips(t, ns, func(obj client.Object) error {
+		refused.Add(1)
+		return apierrors.NewForbidden(incidentsResource, obj.GetName(), errors.New("refused"))
+	})
+	passes.afterPasses(t, 5)
+	if refused.Load() < 4 {
+		t.Fatalf("%d NotRecent writes refused, want one per pass", refused.Load())
+	}
+	noEvent(t, rec, "an event for a write that was refused")
+	if got := skipsSince(before); got != 0 {
+		t.Fatalf("skips counted %v, want 0", got)
+	}
+}
+
+// A NotRecent write that times out may have landed, so the next pass that reads NotRecent reports it; a
+// stale NotRecent rewritten on every pass with each write timing out keeps its transition time, which is
+// reported once and not again (#983).
+func TestTimedOutNotRecentWritesOverAStaleNotRecentReportAtMostOnce(t *testing.T) {
+	ns := namespace(t)
+	staleNotRecent(t, ns)
+	before := testutil.ToFloat64(notRecentSkips)
+	var timedOut atomic.Int32
+	_, _, passes := startSkips(t, ns, func(client.Object) error {
+		timedOut.Add(1)
+		return context.DeadlineExceeded
+	})
+	passes.afterPasses(t, 5)
+	if timedOut.Load() < 4 {
+		t.Fatalf("%d NotRecent writes timed out, want one per pass", timedOut.Load())
+	}
+	if got := skipsSince(before); got > 1 {
+		t.Fatalf("skips counted %v, want at most 1", got)
+	}
+}
+
+// An update the server refused with a 4xx answer was not stored; a lost answer, a 5xx or an unknown error may
+// have been.
+func TestMayHaveLanded(t *testing.T) {
+	gr := incidentsResource
+	refused := map[string]error{
+		"invalid":           apierrors.NewInvalid(schema.GroupKind{Group: gr.Group, Kind: "Incident"}, "x", nil),
+		"forbidden":         apierrors.NewForbidden(gr, "x", errors.New("no")),
+		"conflict":          apierrors.NewConflict(gr, "x", errors.New("modified")),
+		"not found":         apierrors.NewNotFound(gr, "x"),
+		"too many requests": apierrors.NewTooManyRequests("slow down", 1),
+		"bad request":       apierrors.NewBadRequest("bad"),
+		"wrapped conflict":  fmt.Errorf("writing: %w", apierrors.NewConflict(gr, "x", errors.New("modified"))),
+	}
+	for name, err := range refused {
+		if mayHaveLanded(err) {
+			t.Errorf("%s: may have landed, want refused", name)
+		}
+	}
+	maybe := map[string]error{
+		"deadline":       context.DeadlineExceeded,
+		"canceled":       context.Canceled,
+		"wrapped":        fmt.Errorf("writing: %w", context.DeadlineExceeded),
+		"timeout":        apierrors.NewTimeoutError("slow", 1),
+		"server timeout": apierrors.NewServerTimeout(gr, "update", 1),
+		"internal":       apierrors.NewInternalError(errors.New("etcd")),
+		"unavailable":    apierrors.NewServiceUnavailable("down"),
+		"connection":     errors.New("connection reset by peer"),
+	}
+	for name, err := range maybe {
+		if !mayHaveLanded(err) {
+			t.Errorf("%s: refused, want may have landed", name)
+		}
 	}
 }

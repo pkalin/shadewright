@@ -308,7 +308,7 @@ var _ = Describe("RemediationRequest supersede handoff", func() {
 		Expect(get(pred).Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
 
 		By("steps 3 and 4: one commit on top of the old head, and the replacement records the pull request")
-		pollUntil(func(rr *remediationv1alpha1.RemediationRequest) bool { return tookOver(rr) })
+		pollUntil(tookOver)
 		newHead := head()
 		parents, err := git.Parents(ctx, newHead)
 		Expect(err).NotTo(HaveOccurred())

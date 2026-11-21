@@ -146,7 +146,7 @@ func TestCompatibleVolumeSources(t *testing.T) {
 			if skip {
 				args = append(args, "--skip-schema-validation")
 			}
-			out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+			out, err := exec.CommandContext(t.Context(), tool(t, "HELM", "helm"), args...).CombinedOutput()
 			if err == nil || !strings.Contains(string(out), "openAICompatible") {
 				t.Fatalf("source %s skip schema %v: %v %s", source, skip, err, out[:min(len(out), 1024)])
 			}
@@ -175,7 +175,7 @@ func TestCompatibleChartDeclarationRefusals(t *testing.T) {
 			if skip {
 				args = append(args, "--skip-schema-validation")
 			}
-			out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+			out, err := exec.CommandContext(t.Context(), tool(t, "HELM", "helm"), args...).CombinedOutput()
 			if err == nil || !strings.Contains(string(out), "openAICompatible") {
 				t.Fatalf("invalid URL %q skip %v: %v %s", raw, skip, err, out[:min(len(out), 1024)])
 			}
@@ -295,19 +295,20 @@ func TestCompatibleChartModelAndPrefixRefusals(t *testing.T) {
 		} {
 			t.Run(fmt.Sprintf("%s/schema-skipped=%v", tc.name, skip), func(t *testing.T) {
 				set := append(compatibleSet(), endpointPrefix+"models[0]=m")
-				if tc.name == "prefix" {
+				switch {
+				case tc.name == "prefix":
 					p := "analyzer.analysis.openAICompatible.endpoints[1]."
 					set = append(set, p+"url="+tc.value, p+"inferenceAPI=Responses", p+"models[0]=m")
-				} else if tc.value == "" {
+				case tc.value == "":
 					set = append(set, endpointPrefix+"models=null")
-				} else {
+				default:
 					set = append(set, endpointPrefix+"models[0]="+tc.value)
 				}
 				args := helmArgs(t, false, set...)
 				if skip {
 					args = append(args, "--skip-schema-validation")
 				}
-				out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+				out, err := exec.CommandContext(t.Context(), tool(t, "HELM", "helm"), args...).CombinedOutput()
 				if err == nil || !strings.Contains(string(out), tc.reason) {
 					t.Fatalf("wrong refusal: %v %.1200s", err, out)
 				}
@@ -379,7 +380,7 @@ func TestCompatibleInClusterCIDRsRefused(t *testing.T) {
 				if skip {
 					args = append(args, "--skip-schema-validation")
 				}
-				out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+				out, err := exec.CommandContext(t.Context(), tool(t, "HELM", "helm"), args...).CombinedOutput()
 				if err == nil || !strings.Contains(string(out), tc.reason) {
 					t.Fatalf("wrong refusal: %v %.1200s", err, out)
 				}
@@ -390,7 +391,7 @@ func TestCompatibleInClusterCIDRsRefused(t *testing.T) {
 	args := helmArgs(t, false, "analyzer.analysis.triageModel=m", "analyzer.analysis.anthropic.apiKey.secretName=k",
 		inClusterValue+"={198.51.100.0/24}")
 	args = append(args, "--skip-schema-validation")
-	out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+	out, err := exec.CommandContext(t.Context(), tool(t, "HELM", "helm"), args...).CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "needs analyzer.analysis.openAICompatible.endpoints") {
 		t.Fatalf("ranges without endpoints rendered: %v %.1200s", err, out)
 	}
@@ -461,7 +462,7 @@ func TestCompatibleInClusterCIDRsSameVerdict(t *testing.T) {
 				if skip {
 					args = append(args, "--skip-schema-validation")
 				}
-				out, err := exec.Command(tool(t, "HELM", "helm"), args...).CombinedOutput()
+				out, err := exec.CommandContext(t.Context(), tool(t, "HELM", "helm"), args...).CombinedOutput()
 				if (err == nil) != tc.ok {
 					t.Errorf("chart verdict (schema skipped=%v) %v, want accepted=%v: %.600s", skip, err, tc.ok, out)
 				}

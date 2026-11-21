@@ -300,7 +300,7 @@ func TestTokenFileMissingForAMoment(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || tr.read || !errors.Is(tr.transportErr, context.DeadlineExceeded) {
 		t.Errorf("wait cut by the deadline: err = %v, recorded %+v; want the deadline recorded", err, tr)
 	}
-	if cause, retry := entraCause(tr.transportErr); cause != context.DeadlineExceeded || !retry {
+	if cause, retry := entraCause(tr.transportErr); !errors.Is(cause, context.DeadlineExceeded) || !retry {
 		t.Errorf("class = %v, %v; want a transient deadline", cause, retry)
 	}
 }

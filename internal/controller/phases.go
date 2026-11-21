@@ -369,7 +369,7 @@ func (r *RemediationRequestReconciler) deliveryStep(ctx, stepCtx context.Context
 // returned for the error backoff.
 func (r *RemediationRequestReconciler) deliveryRetry(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error, bound waitBound) (reconcile.Result, client.Object, error) {
-	if failed := r.deliveryReadFailed(ctx, rr, err); failed != err {
+	if failed := r.deliveryReadFailed(ctx, rr, err); failed != err { //nolint:errorlint // identity: a joined write error wraps err too
 		// The status write failed: a Kubernetes failure, for the error backoff.
 		return reconcile.Result{}, nil, failed
 	}
@@ -729,7 +729,7 @@ func (r *RemediationRequestReconciler) endVerification(ctx context.Context, rr *
 		Status: status, Reason: reason, Message: message, ObservedGeneration: rr.Generation})
 	r.setPhase(rr, phase)
 	rr.Status.Deadline = nil
-	r.settleRecorded(rr)
+	r.settleRecorded(ctx, rr)
 	if err := r.writeIf(ctx, rr, true); err != nil {
 		return err
 	}

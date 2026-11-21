@@ -947,6 +947,17 @@ func (r *RemediationRequestReconciler) heldRecovery(ctx context.Context, rr *rem
 		return res, true, err
 	case isClusterError(err):
 		return reconcile.Result{}, true, err
+	case answeredUnknown(err):
+		// Answers that disagree (a 404 by number while the branch lists the pull request, a read by number against
+		// the listing, an answer about a pull request not asked for): every read answered, so this is no failed call,
+		// as for any stopped holder (heldUnsettled). The lock is kept with nothing written and looked at again at the
+		// pace of a stopped holder's looks, never past the end of a wait rr records, and the reconcile ends without an
+		// error, so a claim's content wait past its end ends there with MergeContentUnreadable, saying the answers
+		// disagreed (endAfterLastRead; decision of 2026-11-21 on #870, count 4). The read through the predecessor
+		// (heldRecoveryRead) notes its evidence on the predecessor's key (changeOf), so it is noted on rr's here.
+		r.gitRetries().noteDisagreed(client.ObjectKeyFromObject(rr))
+		res, err := r.recoveryPace(ctx, rr, heldRecheckInterval)
+		return res, true, err
 	}
 	// A repository that left the settings releases nothing: no read of the pull request can start, so no verdict
 	// can be stored, and the replacement keeps the lock with PullRequestUnreadable (RepositoryUnavailable) until the

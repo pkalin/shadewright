@@ -1912,6 +1912,7 @@ func (m *hmWorld) reconcile(who string) {
 	p10 := m.p10Applies(who, before)
 	p11 := m.p11Applies(who, before)
 	m.noteClaimWithPredGone(who, before)
+	claimPast := m.claimPastEnd(who, before)
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.keys[who]})
 	m.mu.Lock()
 	m.actor = ""
@@ -1951,6 +1952,14 @@ func (m *hmWorld) reconcile(who string) {
 	if err == nil && res.RequeueAfter > 0 && res.RequeueAfter < time.Second {
 		m.fail("P7", "the reconcile of the %s asked to run again after %v, below the floor of a second", who,
 			res.RequeueAfter)
+	}
+	// P5: a claim on a merge of another head that stood past its own end is never handed to the error backoff for an
+	// answer of the Git host (decision of 2026-11-21 on #870, count 4): the reconcile ends without an error, so the
+	// claim ends there (endAfterLastRead). Only a failed Kubernetes call may return one.
+	if claimPast && err != nil && !faulted && !m.paused && !errors.Is(err, errHMCrash) && !isClusterError(err) &&
+		!apierrors.IsServiceUnavailable(err) {
+		m.fail("P5", "the claim of the %s stood past its own end and the reconcile returned %v to the error backoff",
+			who, err)
 	}
 	// P5: a reconcile that could act ends every wait that stood past its own end at its start.
 	if after != nil && err == nil && !faulted && !m.paused {
@@ -2424,6 +2433,28 @@ func (m *hmWorld) noteClaimWithPredGone(who string, before *api.RemediationReque
 		// Made again under the same name (hRemakePred, decision of 2026-11-21 on #870).
 		m.reach["other-head-claim-pred-made-again"] = true
 	}
+}
+
+// claimPastEnd reports whether who, about to be reconciled from before, is the replacement holding a claim on a merge
+// of another head (otherHeadClaim) whose end has passed, so the reconcile must end it (P5). A request being deleted is
+// left to the bounds of its cleanup. A claim past its end met
+// with a Git fault armed is counted (hmP5Reach): the fault is what may make the read answer with a disagreement, a 404
+// by number while the branch lists the pull request.
+func (m *hmWorld) claimPastEnd(who string, before *api.RemediationRequest) bool {
+	if who != hmRepl || before == nil || !otherHeadClaim(before) || !before.DeletionTimestamp.IsZero() {
+		return false
+	}
+	w := gitWait(before, waitMergeContent)
+	if w.Ends == nil || w.Ends.After(m.now) {
+		return false
+	}
+	m.mu.Lock()
+	armed := m.sticky != nil || len(m.once) > 0
+	m.mu.Unlock()
+	if armed {
+		m.reach["other-head-claim-past-end-git-fault"] = true
+	}
+	return true
 }
 
 // p11Applies reports whether P11 checks the reconcile of who about to start from before: the replacement in its
@@ -3356,5 +3387,20 @@ func TestHandoffModelOtherHeadClaimEndsWithThePredecessorMadeAgain(t *testing.T)
 		{Kind: hRemakePred}, stRecRepl, stRecPred, stRecRepl})
 	if !m.reach["other-head-claim-pred-made-again"] {
 		t.Fatal("the sequence did not reach a claim on a merge of another head with the predecessor made again")
+	}
+}
+
+// #870, count 4 of 2026-11-21, case 1: after the end of the watch, the replacement claims a merge of the predecessor's
+// own head (no merge commit ID) through the predecessor, which still hands over. Once the claim passed its end, the
+// Git host answers 404 for the pull request by its number while the branch lists it. The answers disagree, so the
+// reconcile ends without an error and the claim ends there (P5). Before, heldRecovery handed that verdict to the error
+// backoff and the claim stood past its end. With that fix reverted, no drawn seed of 1 to 30,000 broke P5 this way, so
+// the shape is kept as this directed sequence.
+func TestHandoffModelClaimPastItsEndWithAnswersThatDisagree(t *testing.T) {
+	m := hmDirected(t, hmStartPushed, []hmStep{stSticky(403), stRecRepl, stAnswer, stClock(clockDay), stRecRepl,
+		{Kind: hPush}, stMergeNoID, stRecRepl, stClock(clockDay),
+		{Kind: hFault, Code: 404, Op: opGet}, stRecRepl, stRecRepl})
+	if !m.reach["other-head-claim-past-end-git-fault"] {
+		t.Fatal("the sequence did not reach a claim past its end with a Git fault armed")
 	}
 }

@@ -186,3 +186,106 @@ func TestEndOnOtherMergeLogsWhenTheLockIsKept(t *testing.T) {
 		t.Fatalf("log %q: want the kept lock logged", *lines)
 	}
 }
+
+// claimAfterTheWatch is endedWatch with the ended replacement holding a claim on a merge of another head of the
+// predecessor's pull request cr (mergeWithoutCommitID), the predecessor still present and handing over.
+func claimAfterTheWatch(t *testing.T) (*RemediationRequestReconciler, *fakegit.Git, *api.RemediationRequest,
+	*api.RemediationRequest, providers.ChangeRequest, func(time.Duration)) {
+	t.Helper()
+	r, g, p, rr, cr, move := endedWatch(t)
+	g.SetFail(nil)
+	mergeWithoutCommitID(t, g, p, cr)
+	move(heldRecheckInterval)
+	if got, _ := reconcileOnce(t, r, rr); !otherHeadClaim(got) || claimedNumber(got) != cr.Number {
+		t.Fatalf("phase %q, waits %+v: want the ended replacement holding a claim on #%d", got.Status.Phase,
+			got.Status.GitWaits, cr.Number)
+	}
+	return r, g, p, rr, cr, move
+}
+
+// claimEndsDisagreed runs rr past the end of its claim on cr while the Git host's answers disagree, and fails unless
+// every reconcile ends without an error (no hand-off to the error backoff) and the claim ends NeedsIntervention with
+// MergeContentUnreadable on cr, saying the answers disagreed.
+func claimEndsDisagreed(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest,
+	cr providers.ChangeRequest, move func(time.Duration)) {
+	t.Helper()
+	got, err := reconcileOnce(t, r, rr)
+	if err != nil {
+		t.Fatalf("reconcile while the answers disagree = %v; want no error (the lock kept, looked at again)", err)
+	}
+	if !otherHeadClaim(got) || !ptr.Deref(got.Status.HoldsTarget, false) {
+		t.Fatalf("phase %q, waits %+v: want the claim on #%d and the lock kept", got.Status.Phase,
+			got.Status.GitWaits, cr.Number)
+	}
+	for range 2 {
+		move(mergeContentWait)
+		if got, err = reconcileOnce(t, r, rr); err != nil {
+			t.Fatalf("reconcile past the claim's end = %v; want no error", err)
+		}
+	}
+	c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionApproved)
+	if got.Status.Phase != api.PhaseNeedsIntervention || c == nil || c.Reason != ReasonMergeContentUnreadable ||
+		got.Status.PullRequest == nil || got.Status.PullRequest.Number != cr.Number || otherHeadClaim(got) {
+		t.Fatalf("phase %q, Approved %+v, waits %+v: want the claim on #%d ended with MergeContentUnreadable",
+			got.Status.Phase, c, got.Status.GitWaits, cr.Number)
+	}
+	if strings.Contains(c.Message, "kept failing") || !strings.Contains(c.Message, "answers about pull request") ||
+		!strings.Contains(c.Message, "disagreed") {
+		t.Fatalf("message %q: want it to say the Git host's answers disagreed", c.Message)
+	}
+}
+
+// Count 4, case 1 (decision of 2026-11-21 on #870): the claim's pull request is read through the predecessor by its
+// number, and the Git host answers 404 for it while the branch still lists it. Before, heldRecovery handed that
+// verdict to the error backoff, so the claim, the lock and the missing record outlived the claim's end.
+func TestClaimEndsWhenTheAnswersDisagreeByNumber(t *testing.T) {
+	r, g, _, rr, cr, move := claimAfterTheWatch(t)
+	g.SetFail(func(op string) error {
+		if op == "GetChangeRequest" {
+			return providers.ErrNotFound
+		}
+		return nil
+	})
+	claimEndsDisagreed(t, r, rr, cr, move)
+}
+
+// Count 4, case 1, through the branch (heldRecoveryAlone): the predecessor is made again, so the claim reads the
+// chain's branch, and the Git host answers its listing with a pull request not asked for.
+func TestClaimEndsWhenTheBranchAnswerIsUntrusted(t *testing.T) {
+	r, g, p, rr, cr, move := claimAfterTheWatch(t)
+	remakePredecessor(t, r, p)
+	g.SetFail(func(op string) error {
+		if op == "ListChangeRequests" {
+			return providers.ErrUntrustedAnswer
+		}
+		return nil
+	})
+	claimEndsDisagreed(t, r, rr, cr, move)
+}
+
+// Count 4, case 2 (decision of 2026-11-21 on #870): at the claim's end the predecessor, same UID, records another
+// pull request (#101). The claim decides by its own number, as the watch does: the predecessor counts as gone and the
+// claimed merge is recorded with the takeover, not sent to the generic end (handoff Aborted).
+func TestClaimEndWithThePredecessorRecordingAnotherNumber(t *testing.T) {
+	r, _, p, rr, cr, move := claimAfterTheWatch(t)
+	pred := storedRR(t, r, p)
+	pred.Status.PullRequest.Number = 101
+	if err := r.Status().Update(t.Context(), pred); err != nil {
+		t.Fatal(err)
+	}
+	var got *api.RemediationRequest
+	for range 2 {
+		move(mergeContentWait)
+		got, _ = reconcileOnce(t, r, rr)
+	}
+	c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionApproved)
+	if got.Status.Phase != api.PhaseNeedsIntervention || c == nil || c.Reason != ReasonMergeContentUnreadable ||
+		got.Status.PullRequest == nil || got.Status.PullRequest.Number != cr.Number {
+		t.Fatalf("phase %q, Approved %+v: want the claim on #%d ended with MergeContentUnreadable", got.Status.Phase,
+			c, cr.Number)
+	}
+	if got.Status.Handoff.From.Phase == api.HandoffAborted {
+		t.Fatalf("handoff %q, message %q: the claim's end took the generic end, not the claim's",
+			got.Status.Handoff.From.Phase, c.Message)
+	}
+}

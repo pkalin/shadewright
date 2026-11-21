@@ -405,7 +405,9 @@ type ModelDeployment struct {
 
 	// maxTokensPerDay is meant as the daily spend cap of this deployment, in tokens per UTC day, but it is not
 	// yet counted across analyses: today it is a ceiling for one analysis, so the daily bound on spend is
-	// maxAnalysesPerDay times this ceiling. It counts input (cached or not)
+	// maxAnalysesPerDay times this ceiling. An analysis counts for the UTC day on which it starts, so one still running
+	// after midnight (its deadline is at most 9 minutes) spends in the new day without a unit there: a day can pass
+	// the product by one ceiling for each analysis in flight at midnight. It counts input (cached or not)
 	// plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input
 	// estimate plus maxOutputTokens), except a call the adapter marks as refused by its host before processing
 	// (a 429 on every attempt from a Microsoft-operated Azure OpenAI or Foundry host), counted as 0. Required, with no default, so the admin chooses the cap of each

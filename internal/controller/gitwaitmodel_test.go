@@ -2194,16 +2194,7 @@ func (m *modelWorld) stoppedHolderProperty(live *api.RemediationRequest, err err
 		return
 	}
 	if last := lastReviewCheck(m.g.CheckRuns(pr.HeadSHA)); last == nil || last.Status != providers.CheckRunFailure {
-		m.mu.Lock()
-		exception := m.exceptionLook
-		m.mu.Unlock()
-		if exception && !m.excused {
-			// ADR-0046 limit (c): the next look that reaches the rule writes the check.
-			m.excused = true
-			modelHeldChecks.mu.Lock()
-			modelHeldChecks.excused++
-			modelHeldChecks.mu.Unlock()
-			m.logf("stopped holder: a stop exception took the look over, the check is owed at the next look")
+		if m.excuseStopException() {
 			return
 		}
 		looks := 1
@@ -2286,6 +2277,24 @@ func TestStoppedHolderPropertyLetsGoOneStopExceptionLook(t *testing.T) {
 			}
 		})
 	}
+}
+
+// excuseStopException reports whether property "stopped holder" lets the look just checked go without the failed
+// check: a stop exception took it over (exceptionLook) and the look before it that the property reached was not let
+// go too (ADR-0046 limit (c): the next look that reaches the rule writes the check).
+func (m *modelWorld) excuseStopException() bool {
+	m.mu.Lock()
+	exception := m.exceptionLook
+	m.mu.Unlock()
+	if !exception || m.excused {
+		return false
+	}
+	m.excused = true
+	modelHeldChecks.mu.Lock()
+	modelHeldChecks.excused++
+	modelHeldChecks.mu.Unlock()
+	m.logf("stopped holder: a stop exception took the look over, the check is owed at the next look")
+	return true
 }
 
 // modelGoneStops counts, over every seed of a run, the stops for a pull request read gone with reviewer hints on that

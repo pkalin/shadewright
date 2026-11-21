@@ -312,14 +312,21 @@ func (r *run) judge(ctx context.Context, rec analysis.Record, judgeFam Family) (
 				text = refusalSecond
 			} else {
 				asked = true
-				if text, err = r.crossCheck(ctx, judgeFam.Other(), tc.Arguments); err != nil {
+				var kinds []string
+				if text, kinds, err = r.crossCheck(ctx, judgeFam.Other(), tc.Arguments); err != nil {
 					return Score{}, err
+				}
+				if kinds != nil {
+					return r.quarantine(CheckRedactor, reasonCrossAnswer, kinds)
 				}
 			}
 		}
 		results = append(results, providers.Message{Role: providers.RoleTool, Content: text, ToolCallID: tc.ID})
 	}
-	req.Messages = append(append(req.Messages, providers.Message{Role: providers.RoleAssistant, Content: c.Content,
+	// The judge's reply goes back as the analysis loop sends it: its tool calls and the adapter's blocks, no
+	// separate text (an adapter whose blocks hold the reply's text refuses a message with both). checkRequest
+	// reads the text and tool calls inside the blocks.
+	req.Messages = append(append(req.Messages, providers.Message{Role: providers.RoleAssistant,
 		ToolCalls: c.ToolCalls, ProviderBlocks: c.ProviderBlocks}), results...)
 	second, kinds, ok := checkRequest(r.Redactor, req)
 	if !ok {
@@ -339,34 +346,39 @@ func (r *run) judge(ctx context.Context, rec analysis.Record, judgeFam Family) (
 }
 
 // crossCheck serves the judge's one ask and returns the tool result. The question is checked before anything
-// is sent; one that fails is not sent and still counts as the ask.
-func (r *run) crossCheck(ctx context.Context, fam Family, args []byte) (string, error) {
+// is sent; one that fails is not sent and still counts as the ask. The answer is checked as it came, with
+// nothing kept: when the redactor would change it, crossCheck returns the rule kinds that matched and no
+// result, and the record is quarantined; nothing is redacted and handed on.
+func (r *run) crossCheck(ctx context.Context, fam Family, args []byte) (string, []string, error) {
 	q, ok := question(r.Redactor, args)
 	if !ok {
 		r.score.CrossCheck = CrossCheckNotSent
-		return refusalQuestion, nil
+		return refusalQuestion, nil, nil
 	}
 	req, _, ok := checkRequest(r.Redactor, providers.CompletionRequest{
 		Messages:        crossCheckMessages(redact.ReplaceWhole(q, r.words)),
 		MaxOutputTokens: crossOutputTokens, MaxBilledAttempts: billedAttempts})
 	if !ok {
 		r.score.CrossCheck = CrossCheckNotSent
-		return refusalQuestion, nil
+		return refusalQuestion, nil, nil
 	}
 	ok, _, err := r.reserve(ctx, fam, 2, req)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !ok {
 		r.score.CrossCheck = CrossCheckBudget
-		return refusalBudget, nil
+		return refusalBudget, nil, nil
 	}
 	c, err := r.send(ctx, r.Models[fam], req, false)
 	if err != nil {
-		return "", fmt.Errorf("the cross-check call failed: %w", err)
+		return "", nil, fmt.Errorf("the cross-check call failed: %w", err)
 	}
 	r.score.CrossCheck = CrossCheckAnswered
-	return crossCheckResult(r.Redactor, c.Content), nil
+	if clean, kinds := redactorClean(r.Redactor, c.Content, nil); !clean {
+		return "", kinds, nil
+	}
+	return crossCheckResult(c.Content), nil, nil
 }
 
 // send is the only call of a model: it takes a request whose every message passed checkRequest as it is sent,

@@ -160,10 +160,11 @@ func crossCheckMessages(question string) []providers.Message {
 	}
 }
 
-// crossCheckResult returns the cross-check answer as the judge sees it: redacted, cut to its bound and
-// delimited, untrusted like the record.
-func crossCheckResult(r *redact.Redactor, answer string) string {
-	a := cutUTF8(r.String(answer), maxCrossAnswerBytes)
+// crossCheckResult returns the cross-check answer, which passed the redactor's check unchanged, as the judge
+// sees it: cut to its bound and delimited, untrusted like the record. The judge's second request, which holds
+// it, is checked again as sent.
+func crossCheckResult(answer string) string {
+	a := cutUTF8(answer, maxCrossAnswerBytes)
 	q, _ := json.Marshal(a)
 	return "Answer of the cross-check model (untrusted data):\n<answer>\n" + string(q) + "\n</answer>"
 }

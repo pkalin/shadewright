@@ -271,6 +271,8 @@ const (
 	reasonUnsent       = "the redactor found text it would remove; nothing was sent to a model"
 	reasonSecondUnsent = "the redactor found text it would remove in the judge's second request; it was not sent " +
 		"and the run ended without an answer"
+	reasonCrossAnswer = "the redactor found text it would remove in the cross-check answer; it was not handed " +
+		"to the judge and the run ended without an answer"
 )
 
 // checkedRequest is a model request every text of which passed checkRequest exactly as it is sent. Only
@@ -282,10 +284,11 @@ type checkedRequest struct {
 
 // checkRequest is the deciding redaction check (ADR-0047 section 3): the redactor's Clean over each text of req
 // whole, as the adapter gets it: every message's content after formatting, its tool calls (ID, name and
-// arguments) and tool call ID, the tool definitions and the answer schema, with nothing kept: the record's
-// names were replaced by fixed words when the texts were built (nameWords). It returns the rule kinds that matched and false when any text fails. The checks of the raw document and of each
-// value run earlier and do not replace this one. ProviderBlocks are opaque to the intake and not read: they are
-// the judge's own reply, handed back to the adapter that made them.
+// arguments) and tool call ID, the text and tool call blocks of its ProviderBlocks (providerBlockTexts), the
+// tool definitions and the answer schema, with nothing kept: the record's names were replaced by fixed words
+// when the texts were built (nameWords). It returns the rule kinds that matched and false when any text fails,
+// or KindUnreadableBlock when ProviderBlocks hold a block it cannot read. The checks of the raw document and of
+// each value run earlier and do not replace this one.
 func checkRequest(r *redact.Redactor, req providers.CompletionRequest) (checkedRequest, []string, bool) {
 	kinds := map[string]bool{}
 	clean := true
@@ -308,6 +311,16 @@ func checkRequest(r *redact.Redactor, req providers.CompletionRequest) (checkedR
 			check(tc.Name)
 			check(string(tc.Arguments))
 		}
+		if !m.ProviderBlocks.IsZero() {
+			texts, ok := providerBlockTexts(m.ProviderBlocks)
+			if !ok {
+				clean = false
+				kinds[KindUnreadableBlock] = true
+			}
+			for _, s := range texts {
+				check(s)
+			}
+		}
 	}
 	for _, td := range req.Tools {
 		check(td.Name)
@@ -324,6 +337,59 @@ func checkRequest(r *redact.Redactor, req providers.CompletionRequest) (checkedR
 		return checkedRequest{}, out, false
 	}
 	return checkedRequest{req: req}, nil, true
+}
+
+// KindUnreadableBlock is the kind of a refusal by checkRequest of provider blocks it cannot read: not a list of
+// objects without repeated keys, or a block other than text, tool call or thinking. It is not a rule of the
+// redactor.
+const KindUnreadableBlock = "unreadable-provider-block"
+
+// Types of the provider blocks checkRequest reads (text, tool call) and the ones it skips (thinking).
+const (
+	blockText             = "text"
+	blockToolUse          = "tool_use"
+	blockThinking         = "thinking"
+	blockRedactedThinking = "redacted_thinking"
+)
+
+// providerBlockTexts returns what the provider blocks of an assistant message send to the model and checkRequest
+// must check: for each text or tool call block, the block's JSON whole and each of its strings, keys and
+// "key: value" members, and the texts of all text blocks joined, as the adapter joins them into the reply's
+// text, so that a flag at the end of one block and a value at the start of the next are read as one. Thinking blocks are the judge's own reasoning over text that already passed the check
+// and are not read (decision of 2026-11-21). It returns false when the blocks are not a list of JSON objects
+// with no key twice, or hold a block of any other type: what the check cannot read refuses the request.
+func providerBlockTexts(o providers.Opaque) ([]string, bool) {
+	data := o.Bytes()
+	if checkKeys(data) != nil {
+		return nil, false
+	}
+	var blocks []json.RawMessage
+	if err := json.Unmarshal(data, &blocks); err != nil || len(blocks) == 0 {
+		return nil, false
+	}
+	var texts []string
+	var joined strings.Builder
+	for _, raw := range blocks {
+		var b map[string]any
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if err := dec.Decode(&b); err != nil || b == nil {
+			return nil, false
+		}
+		switch b["type"] {
+		case blockThinking, blockRedactedThinking:
+			continue
+		case blockText, blockToolUse:
+		default:
+			return nil, false
+		}
+		if t, ok := b["text"].(string); ok && b["type"] == blockText {
+			joined.WriteString(t)
+		}
+		texts = append(texts, string(raw))
+		walk(b, func(s string) { texts = append(texts, s) })
+	}
+	return append(texts, joined.String()), true
 }
 
 // Fixed words that stand for the record's names in every text built from the record for a model. The judge's

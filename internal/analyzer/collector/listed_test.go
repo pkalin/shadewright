@@ -27,12 +27,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
+// reasonFailedMount is the kubelet reason of a volume that fails to mount.
+const reasonFailedMount = "FailedMount"
+
 // failedMount returns a kubelet FailedMount event about the web pod, with 14 occurrences, created 20 minutes
 // before the collector starts, as the API server stores it (with a resource version).
 func failedMount(h *harness) *eventsv1.Event {
 	h.t.Helper()
 	ev := warning("mount", 14)
-	ev.Reason, ev.Action, ev.Note = "FailedMount", "", "MountVolume.SetUp failed for volume config"
+	ev.Reason, ev.Action, ev.Note = reasonFailedMount, "", "MountVolume.SetUp failed for volume config"
 	ev.CreationTimestamp = metav1.NewTime(t0.Add(-20 * time.Minute))
 	ev.EventTime = metav1.NewMicroTime(t0.Add(-20 * time.Minute))
 	ev.Series.LastObservedTime = metav1.NewMicroTime(t0.Add(-15 * time.Minute))
@@ -133,12 +136,7 @@ func TestDeletedListedEventIsForgotten(t *testing.T) {
 func TestRecentEventOfAGonePodListedAtStartIsNotFoldOnly(t *testing.T) {
 	for _, last := range []time.Duration{-time.Minute, -StaleOnStart} {
 		h := newHarness(t, Config{})
-		ev := warning("mount", 0)
-		ev.Reason, ev.Action, ev.Note = "FailedMount", "", "MountVolume.SetUp failed for volume config"
-		ev.CreationTimestamp = metav1.NewTime(t0.Add(-20 * time.Minute))
-		ev.EventTime = metav1.NewMicroTime(t0.Add(-20 * time.Minute))
-		ev.Series = &eventsv1.EventSeries{Count: 14, LastObservedTime: metav1.NewMicroTime(t0.Add(-15 * time.Minute))}
-		h.create(ev)
+		ev := failedMount(h)
 		// Raised while no collector ran: the stored event the start lists.
 		ev.Series.Count = 16
 		ev.Series.LastObservedTime = metav1.NewMicroTime(t0.Add(last))
@@ -165,7 +163,7 @@ func TestRecentEventOfAGonePodListedAtStartIsNotFoldOnly(t *testing.T) {
 func TestDeprecatedLastTimestampOfAListedEventIsItsLastOccurrence(t *testing.T) {
 	h := newHarness(t, Config{})
 	ev := warning("mount", 0)
-	ev.Reason, ev.Action = "FailedMount", ""
+	ev.Reason, ev.Action = reasonFailedMount, ""
 	ev.EventTime = metav1.NewMicroTime(t0.Add(-time.Hour))
 	ev.DeprecatedLastTimestamp = metav1.NewTime(t0.Add(-time.Minute))
 	ev.DeprecatedCount = 3
@@ -186,7 +184,7 @@ func TestDeprecatedLastTimestampOfAListedEventIsItsLastOccurrence(t *testing.T) 
 func TestListedEventOfAGonePodWithNoTimeIsNotFoldOnly(t *testing.T) {
 	h := newHarness(t, Config{})
 	ev := warning("mount", 0)
-	ev.Reason, ev.Action = "FailedMount", ""
+	ev.Reason, ev.Action = reasonFailedMount, ""
 	ev.CreationTimestamp = metav1.NewTime(t0.Add(-time.Hour))
 	ev.EventTime = metav1.MicroTime{}
 	h.create(ev)

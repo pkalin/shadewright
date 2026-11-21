@@ -533,11 +533,11 @@ func TestOnlyOwnMarksChanged(t *testing.T) {
 		"ReviewCheckNotFailed and a phase": {base, checkNoteAndPhase, false},
 		// #1008: the exit of a stopped holder's look records state Stale on the head in a write of its own, after the
 		// look returned its delay (a refused close tried again at heldRecheckInterval).
-		"Stale recorded on the head":        {withPR, stale, true},
-		"Stale recorded and a phase":        {withPR, staleAndPhase, false},
-		"Stale recorded on another head":    {withPR, staleOn(withPR, strings.Repeat("c", 40)), false},
-		"Stale with a moved head":           {stale, movedHead, false},
-		"Stale recorded with a new record":  {base, stale, false},
+		"Stale recorded on the head":       {withPR, stale, true},
+		"Stale recorded and a phase":       {withPR, staleAndPhase, false},
+		"Stale recorded on another head":   {withPR, staleOn(withPR, strings.Repeat("c", 40)), false},
+		"Stale with a moved head":          {stale, movedHead, false},
+		"Stale recorded with a new record": {base, stale, false},
 		// #771: deliveryReadFailed names a lasting cause in Delivered Unknown and returns the failure for the error
 		// backoff, in both modes; its write must not wake the request before that delay.
 		"Delivered pending set":          {base, pendingCause, true},

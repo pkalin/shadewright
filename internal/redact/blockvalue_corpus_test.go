@@ -423,6 +423,7 @@ func blockLeaks(c blockCase, spans []span) (leaked, lost []string) {
 //   - nor is the part of a quoted or plain scalar over several lines under a bare short key ("pass: 'x" and
 //     the closing line below) after its first line, which main leaves too (TestKeyNameKnownLeaks).
 func TestBlockValueCorpusRedactsEverySecret(t *testing.T) {
+	parallelUnderRace(t)
 	cases := blockCorpus(blockSecretKeys, true)
 	failed, notRequired := 0, 0
 	for i, c := range cases {
@@ -557,6 +558,7 @@ func TestWriteBlockMainTable(t *testing.T) {
 
 // Each byte main redacted in the secret corpus is still redacted: the rules of #840 only add.
 func TestBlockValueStillRedactsWhatMainRedacted(t *testing.T) {
+	parallelUnderRace(t)
 	f, err := os.Open(blockMainTable)
 	if err != nil {
 		t.Fatal(err)

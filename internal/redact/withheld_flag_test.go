@@ -56,6 +56,7 @@ var flaggedEntries = []flagged{
 // alone or as the first value of an answer with nothing after it, is decided (ok true) and shows the marker as
 // text; an entry over the work budget is withheld (ok false) and is Withheld with nothing else.
 func TestWithheldIsAFlagNotAText(t *testing.T) {
+	parallelUnderRace(t)
 	over := strings.Repeat("--token,}", 4096)
 	for _, e := range flaggedEntries {
 		for _, in := range []string{Withheld, Withheld + "\n"} {

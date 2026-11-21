@@ -693,6 +693,7 @@ func readFieldsMainTable(t *testing.T) map[string]bool {
 }
 
 func TestFieldsOfEveryToolHideWhatMainHid(t *testing.T) {
+	redact.ParallelUnderRace(t)
 	results, places := fieldResults(t, true)
 	relations, calls := fieldRelationResults(t, true)
 	marshaled, byType := fieldMarshaledResults(t, true)
@@ -927,6 +928,7 @@ func fieldRelationResults(t *testing.T, sample bool) ([]fieldResult, map[string]
 // strings that a tool shows gets three keys that redact to the same marker (tokens of one length) with values
 // that are no secret, and each value must show.
 func TestMapsKeepEveryEntry(t *testing.T) {
+	redact.ParallelUnderRace(t)
 	values := []string{"Ent1qzk", "Ent2qzk", "Ent3qzk"}
 	maps := 0
 	for _, ft := range fieldTools {

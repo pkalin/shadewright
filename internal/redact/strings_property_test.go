@@ -159,6 +159,7 @@ func forEachParallel(n int, f func(i int)) {
 }
 
 func TestStringsDecidesAsTheJoinedText(t *testing.T) {
+	parallelUnderRace(t)
 	rng := rand.New(rand.NewPCG(845, 2)) //nolint:gosec // a fixed seed keeps the sequences the same on every run
 	cases := seqPropertyCases
 	if raceDetector || testing.Short() {

@@ -181,6 +181,7 @@ func TestTokenShapesWorkIsLinear(t *testing.T) {
 // 2026-11-20 states them): at each, the largest size of the doublings from 1,152 bytes that is still decided,
 // and the next, withheld. The inputs are one line, so Strings and PiecesWithin have one string or data piece.
 func TestTokenEndRunWithheldFrom(t *testing.T) {
+	parallelUnderRace(t)
 	// The largest size decided, by entry point, as one text so that the names of budgetEntries stay literals
 	// there alone.
 	decided := map[string]int{}

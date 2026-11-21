@@ -245,6 +245,7 @@ func TestReadingsPlacesAreTheToolsAnswers(t *testing.T) {
 }
 
 func TestReadingsKeepTheSignalOfAHiddenText(t *testing.T) {
+	redact.ParallelUnderRace(t)
 	forms := signalForms()
 	mainHid := readReadingsMainTable(t, readingsMainTable)
 	if len(mainHid) != len(forms)*len(readingsPlaces) {
@@ -331,6 +332,7 @@ func readingsTheTwelve(f signalForm) bool {
 // of JSON are decided as main decides them at every tool. None of these tools writes a list on one line with a
 // line break of an item kept as a line break, so main shows those 12 everywhere (the twelfth decision).
 func TestReadingsListsAtTheToolsAsMain(t *testing.T) {
+	redact.ParallelUnderRace(t)
 	main := readReadingsMainTable(t, readingsToolsTable)
 	forms := signalForms()
 	if len(main) != len(forms)*len(readingsListTools) {

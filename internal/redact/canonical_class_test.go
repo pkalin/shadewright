@@ -145,6 +145,7 @@ func TestFourthRoundForms(t *testing.T) {
 // anywhere, inside a character too, every redacted range lies inside the input, starts and ends on a character
 // of a valid input, and nothing panics.
 func TestFourthRoundKeepsText(t *testing.T) {
+	parallelUnderRace(t)
 	for _, in := range []string{
 		"userPassword reset failed", "userPassword\treset failed", "12\uff1a30", "3\u22364", "http\u02d0//example.com",
 		"\u05e9\u05dc\u05d5\u05dd\u05c3 \u05e2\u05d5\u05dc\u05dd", "\u0532\u0561\u0580\u0565\u0582\u0589 \u0561\u0577\u056d\u0561\u0580\u0570",

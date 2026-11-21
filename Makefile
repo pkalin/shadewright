@@ -103,7 +103,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test-scripts
-test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection, fuzz target, docs link check, condition reasons page check and plugin dependency check scripts (hack/*_test.sh).
+test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection, fuzz target, docs link check, condition reasons page check, plugin dependency check and side-by-side run scripts (hack/*_test.sh).
 	hack/release-notes-by-scope_test.sh
 	hack/check-chart-docs_test.sh
 	hack/chart-crds_test.sh
@@ -119,6 +119,7 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	hack/docs-reasons-check_test.sh
 	python3 -I hack/docs-reasons-check.py
 	hack/check-plugin-deps_test.sh
+	hack/side-by-side_test.sh
 
 # The shards of the run of internal/redact with the tag redactwork in make test (top-level test names, joined
 # with |): the tests that took longest in that run, one or a few to a binary.
@@ -144,18 +145,27 @@ test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
 	@# The differential tests of the release's reading against its code before #873 check a share of their inputs
 	@# under -race (internal/redact/released/race_test.go) and all of them here.
 	@# internal/redact with the tag took about 555 s in one binary on a laptop, so on a hosted runner (2.4 times
-	@# slower on main) it would pass -timeout 20m: it runs in six binaries, one after the other. The first five
-	@# select the heaviest tests by name (REDACT_SHARD_*), the last runs every other test with -skip, so a test
-	@# renamed out of a shard runs in the last binary and none drops out.
-	go test -timeout 20m -tags redactwork -run '^($(REDACT_SHARD_1))$$' ./internal/redact
-	go test -timeout 20m -tags redactwork -run '^($(REDACT_SHARD_2))$$' ./internal/redact
-	go test -timeout 20m -tags redactwork -run '^($(REDACT_SHARD_3))$$' ./internal/redact
-	go test -timeout 20m -tags redactwork -run '^($(REDACT_SHARD_4))$$' ./internal/redact
-	go test -timeout 20m -tags redactwork -run '^($(REDACT_SHARD_5))$$' ./internal/redact
-	go test -timeout 20m -tags redactwork -skip '^($(REDACT_SHARD_1)|$(REDACT_SHARD_2)|$(REDACT_SHARD_3)|$(REDACT_SHARD_4)|$(REDACT_SHARD_5))$$' ./internal/redact
-	go test -timeout 20m -tags redactwork ./internal/redact/released ./internal/providers/logs/kube ./internal/incidentcontext
+	@# slower on main) it would pass -timeout 20m: it runs in six binaries (test-redactwork-*). The first five select
+	@# the heaviest tests by name (REDACT_SHARD_*), the last runs every other test with -skip, so a test renamed out
+	@# of a shard runs in the last binary and none drops out. They and the run of the other three packages go side by
+	@# side (hack/side-by-side.sh: one process each, each output printed whole when all are done, any failure fails
+	@# make test); one after the other they took about 1,800 s of the test job on a hosted runner.
+	MAKE="$(MAKE)" hack/side-by-side.sh $(REDACTWORK_TARGETS)
 	@# The time bound of the wide mapping refusal is checked only without -race (internal/gitops/patch/race_test.go).
 	go test -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
+
+# The runs with the tag redactwork of make test, which hack/side-by-side.sh starts side by side.
+REDACTWORK_TARGETS := test-redactwork-1 test-redactwork-2 test-redactwork-3 test-redactwork-4 test-redactwork-5 \
+	test-redactwork-rest test-redactwork-other
+REDACTWORK_TEST := go test -timeout 20m -tags redactwork
+
+.PHONY: $(REDACTWORK_TARGETS)
+test-redactwork-1 test-redactwork-2 test-redactwork-3 test-redactwork-4 test-redactwork-5:
+	$(REDACTWORK_TEST) -run '^($(REDACT_SHARD_$(subst test-redactwork-,,$@)))$$' ./internal/redact
+test-redactwork-rest:
+	$(REDACTWORK_TEST) -skip '^($(REDACT_SHARD_1)|$(REDACT_SHARD_2)|$(REDACT_SHARD_3)|$(REDACT_SHARD_4)|$(REDACT_SHARD_5))$$' ./internal/redact
+test-redactwork-other:
+	$(REDACTWORK_TEST) ./internal/redact/released ./internal/providers/logs/kube ./internal/incidentcontext
 
 # The evaluation harness (test/eval, docs/evaluation.md). make test runs it too; these targets write the report.
 EVAL_REPORT_DIR ?= $(LOCALBIN)/eval

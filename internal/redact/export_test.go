@@ -60,5 +60,8 @@ var RaceKeeps = raceKeeps
 
 const RaceSampleEvery = raceSampleEvery
 
+// ParallelUnderRace is parallelUnderRace (racesample_test.go), for the tests of package redact_test.
+var ParallelUnderRace = parallelUnderRace
+
 // MaxShownBytes is maxShownBytes, for TestReleasedShownMatchesValue.
 const MaxShownBytes = maxShownBytes

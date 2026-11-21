@@ -109,6 +109,7 @@ func (p fieldPlace) fill(root reflect.Value, text string) {
 }
 
 func TestStringOverAToolResultHidesNothingMore(t *testing.T) {
+	redact.ParallelUnderRace(t)
 	r := rand.New(rand.NewPCG(845, 6)) // #nosec G404 -- test data from a fixed seed, not a secret
 	red := defaultRedactor()
 	calls, failed, n := 0, 0, 0
@@ -238,6 +239,7 @@ func TestListEventsNotesOfTheSixthDecision(t *testing.T) {
 // shape, between two entries that must show, except where main hid the next entry too (a flow mapping among the
 // labels of a series, which share one line).
 func TestASecretMapValueTakesNoOtherEntry(t *testing.T) {
+	redact.ParallelUnderRace(t)
 	shapes := append([]fieldShape{
 		{name: "a literal block", shape: func(v string) string { return "|\n  " + v }},
 		{name: "a folded block", shape: func(v string) string { return ">-\n  " + v + "\n  more" }},

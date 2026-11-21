@@ -25,6 +25,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // A reference is not a value (#845, seventh decision of 2026-11-18, point 3). get_resource on a container whose
@@ -143,6 +145,7 @@ func referenceResults(t *testing.T) []referenceResult {
 }
 
 func TestReferencesShowWhatMainShowed(t *testing.T) {
+	redact.ParallelUnderRace(t)
 	main := readReferencesMainTable(t)
 	results := referenceResults(t)
 	over, lost, shown := 0, 0, 0

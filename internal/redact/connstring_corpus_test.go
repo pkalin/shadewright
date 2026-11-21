@@ -34,6 +34,7 @@ import (
 // -race each entry point gets a seeded sample of the inputs (redact.RaceKeeps), and make test runs them all
 // without it.
 func TestConnStringsThroughEveryEntryPointAgainstMain(t *testing.T) {
+	redact.ParallelUnderRace(t)
 	gen := connStringCorpus(connStringCorpusSize)
 	eps := connEntryPoints()
 	eps["kube.Excerpt"] = entryPoints["kube.Excerpt"]

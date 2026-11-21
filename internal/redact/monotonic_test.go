@@ -151,6 +151,7 @@ const monotonicCorpusSize = 12000
 
 // On every input of the generated corpus, each byte main's redactor removes is removed too.
 func TestMonotonicAgainstMain(t *testing.T) {
+	parallelUnderRace(t)
 	n := monotonicCorpusSize
 	switch {
 	case raceDetector:

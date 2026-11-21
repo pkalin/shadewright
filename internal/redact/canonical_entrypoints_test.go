@@ -343,6 +343,7 @@ func TestCanonCorpusThroughEveryEntryPoint(t *testing.T) {
 // (redact.CanonMainEntryLeaks, written at the commit of the main table with every entry point main has). A row
 // of that table that names no piece of the corpus fails.
 func TestCanonEntryPointsLeakNothingMainHid(t *testing.T) {
+	redact.ParallelUnderRace(t)
 	_, found := canonCorpusLeaks()
 	main, comments := redact.ReadCanonTable(t, redact.CanonMainEntryLeaks)
 	var onMain []string

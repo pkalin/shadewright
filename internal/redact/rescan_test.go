@@ -27,6 +27,7 @@ import (
 // square of the text. Its scan is charged per byte the engine reads, so the entry is withheld once the reading
 // passes the budget, instead of running for seconds and returning a result (#873, decision of 2026-11-20).
 func TestExpressionRescanIsChargedPerAttempt(t *testing.T) {
+	parallelUnderRace(t)
 	r, err := New(Pattern{Kind: "custom", Expr: "a.*z|a"})
 	if err != nil {
 		t.Fatal(err)

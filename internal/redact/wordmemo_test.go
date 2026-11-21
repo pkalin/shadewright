@@ -50,6 +50,7 @@ func wordText(rng *rand.Rand, n int) string {
 // shellWordEnd with a memory shared by all the calls on one text, in any order, with any limits, keys and flags,
 // gives what the same call gives without one.
 func TestShellWordEndMemoMatches(t *testing.T) {
+	parallelUnderRace(t)
 	rng := rand.New(rand.NewPCG(845, 15)) // #nosec G404 -- reproducible generated texts
 	calls, reused := 0, 0
 	for range 40000 {

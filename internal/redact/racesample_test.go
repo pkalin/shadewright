@@ -19,6 +19,7 @@ package redact
 import (
 	"hash/fnv"
 	"strconv"
+	"testing"
 )
 
 // raceSampleEvery sets the share of a generated corpus that a test checks under -race: about one input in
@@ -43,4 +44,15 @@ func raceKeeps(name string, i int) bool {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(raceSampleSeed + "\x00" + name + "\x00" + strconv.Itoa(i)))
 	return h.Sum64()%raceSampleEvery == 0
+}
+
+// parallelUnderRace marks t parallel under -race only. The tests that call it count no work, measure nothing under
+// -race and share no state with another test, so under -race they run side by side (the race detector makes each
+// 10 to 20 times slower; decision of 2026-11-21 on #873). Without -race they stay serial: that run times some of
+// them (TestExpressionRescanIsChargedPerAttempt), and serial tests are not slowed by the others.
+func parallelUnderRace(t *testing.T) {
+	t.Helper()
+	if raceDetector {
+		t.Parallel()
+	}
 }

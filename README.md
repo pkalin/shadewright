@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/pkalin/shadewright/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/pkalin/shadewright/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status on main"></a>
+  <a href="https://codecov.io/github/pkalin/shadewright"><img src="https://codecov.io/github/pkalin/shadewright/graph/badge.svg" alt="Test coverage on Codecov"></a>
   <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/pkalin/shadewright" alt="Go version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/pkalin/shadewright" alt="License: Apache-2.0"></a>
   <a href="https://artifacthub.io/packages/search?repo=shadewright"><img src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/shadewright" alt="Artifact Hub"></a>

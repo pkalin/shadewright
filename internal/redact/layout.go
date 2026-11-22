@@ -175,10 +175,7 @@ func (r *Redactor) PiecesFitting(ps []Piece, fits func(out []string) bool) (out 
 // meteredPieces runs f, a decision on ps, on the budget of the pieces' bytes, their keys included (budget.go).
 // ok is false when the answer is withheld.
 func (r *Redactor) meteredPieces(ps []Piece, f func(wm *meter.Meter) []string) (out []string, ok bool) {
-	size := 0
-	for _, p := range ps {
-		size += len(p.Text) + len(p.Key)
-	}
+	size := PiecesSize(ps)
 	if size <= MaxEntry && tooManyParts(len(ps), size, PieceBytes) {
 		return withheldStrings(len(ps)), false
 	}

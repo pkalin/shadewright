@@ -39,10 +39,11 @@ import (
 // command: a host name such as "docker" could do that.
 //
 // A sequence is a JSON or YAML flow array ("[" to "]", line ends inside it included), a YAML block sequence (the
-// "- " items of consecutive lines), or the strings Strings is given. A sequence has no command word when it is
-// the value of an "args" key (JSON, YAML block or flow) with no "command" sequence before it in the same object
-// (startSequence), or when its first item is a flag; a free line never has that reading, as "-p 5432" in prose
-// has no command word and no sequence to say whose arguments these are.
+// "- " items of consecutive lines, a block scalar item's content lines and comment lines among them included), or
+// the strings Strings is given. A sequence has no command word when it is the value of an "args" key (JSON, YAML
+// block or flow, or one string) whose object has no "command" key, before or after it (startSequence,
+// shortObjects), or when its first item is a flag; a free line never has that reading, as "-p 5432" in prose has
+// no command word and no sequence to say whose arguments these are.
 
 // shortFlagTool is a row of the table: the letter of the tool's password flag, whether the tool reads the password
 // only glued to it ("-pX": "-p X" is a prompt and an argument), and whether the password is the part of the
@@ -101,17 +102,34 @@ type shortReader struct {
 	depth int
 	// yaml: inside a YAML block sequence.
 	yaml bool
-	// command: the sequence read is the value of a "command" key. pending: one ended in this object, with the
-	// command word of the table it held (pendingTool, pendingHas), for the "args" sequence after it.
-	command, pending, pendingHas bool
-	pendingTool                  shortFlagTool
-	// images: the row of the table each "args" key with no "command" in its object takes from the object's
-	// "image", by the start of the key (shortImages), read once, at the first "args" sequence with no command
-	// before it (imagesRead), so a text with none pays nothing for it.
-	images     map[int]shortFlagTool
-	imagesRead bool
-	wm         *meter.Meter
+	// command: the sequence read is the value of a "command" key.
+	command bool
+	// itemCol: the column of the dash of the last YAML block sequence item. scalar: the lines read are the
+	// content of a block scalar item ("- >-" or "- |", then lines further right than its dash).
+	itemCol int
+	scalar  bool
+	// header: the line read is an item of a YAML block sequence whose value is a block scalar ("- >-").
+	header bool
+	// saved: the state before the comment line being read, taken up again at its end (resume).
+	saved *shortReader
+	// objects: what decides each "args" key, by the start of the key (shortObjects), read once, at the first
+	// "args" sequence (objectsRead), so a text with none pays nothing for it. commands: the command word of the
+	// table each "command" key held, by the start of the key, read once (commandRow).
+	objects     map[int]argsRow
+	objectsRead bool
+	commands    map[int]commandWord
+	// probe: the pass reads the value of one "command" key only (commandRow): it adds nothing, and stops (done)
+	// at the end of that value with the command word it held (found).
+	probe, done bool
+	found       commandWord
+	wm          *meter.Meter
 	keyWords
+}
+
+// commandWord is the command word of the table a "command" key held: has is false when it held none.
+type commandWord struct {
+	tool shortFlagTool
+	has  bool
 }
 
 // keyWords holds the last two words read, as byte ranges, to find the key before a value or a sequence.
@@ -139,41 +157,90 @@ func (k *keyWords) keyAt(name string) (int, bool) {
 // end ends the command: no command word, no sequence item pending.
 func (r *shortReader) end() { r.hasTool, r.args, r.first = false, false, false }
 
-// startSequence starts a sequence. The value of an "args" key has no command word, unless a "command" sequence
-// came before it in the same object: then the command word of that one, if it held one of the table, is its own
-// (a container's command and arguments, as get_resource writes them). With no command, the base name of the
-// object's "image" is its command word when it names a row of the table (shortImages), and the arguments keep
-// the reading of arguments with no command word as well. Any other sequence starts with its first item, which
-// decides.
+// startSequence starts a sequence. The value of an "args" key has no command word, unless its object has a
+// "command" key, before or after it (shortObjects): then the command word of that one, if it held one of the
+// table, is its own (a container's command and arguments, in any key order). With no command, the base name of
+// the object's "image" is its command word when it names a row of the table, and the arguments keep the reading
+// of arguments with no command word as well. Any other sequence starts with its first item, which decides.
 func (r *shortReader) startSequence() {
 	at, args := r.keyAt("args")
 	_, command := r.keyAt("command")
+	if r.probe && !command {
+		r.stop()
+		return
+	}
 	r.end()
 	r.command = command
-	switch {
-	case args && r.pending:
-		r.hasTool, r.tool = r.pendingHas, r.pendingTool
-	case args:
-		r.args = true
-		if !r.imagesRead {
-			r.images, r.imagesRead = shortImages(r.wm, r.s), true
-		}
-		if t, ok := r.images[at]; ok {
-			r.hasTool, r.tool = true, t
-		}
-	default:
+	if !args {
 		r.first = true
+		return
 	}
-	r.pending = false
+	r.argsOf(at)
 }
 
-// endSequence ends a sequence, and keeps the command word of a "command" sequence for the "args" after it.
+// argsOf sets the reading of the value of the "args" key at at: the command word of its object's "command", or
+// its image of the table with the reading of arguments with no command word, or that reading alone.
+func (r *shortReader) argsOf(at int) {
+	if !r.objectsRead {
+		r.objects, r.objectsRead = shortObjects(r.wm, r.s), true
+	}
+	row, ok := r.objects[at]
+	switch {
+	case ok && row.command >= 0:
+		w := r.commandRow(row.command)
+		r.hasTool, r.tool = w.has, w.tool
+	case ok && row.image:
+		r.args, r.hasTool, r.tool = true, true, row.tool
+	default:
+		r.args = true
+	}
+}
+
+// endSequence ends a sequence; it ends the pass of a probe.
 func (r *shortReader) endSequence() {
-	if r.command {
-		r.pending, r.pendingHas, r.pendingTool = true, r.hasTool, r.tool
+	if r.probe {
+		r.stop()
+		return
 	}
 	r.command = false
 	r.end()
+}
+
+// resume takes up again, at the end of a comment line, the state from before it; what the line found out about
+// the text (the objects, the command words, the memory of values) is kept.
+func (r *shortReader) resume() {
+	if r.saved == nil {
+		return
+	}
+	cur := *r
+	*r = *r.saved
+	r.saved = nil
+	r.objects, r.objectsRead, r.commands, r.tm, r.done, r.found = cur.objects, cur.objectsRead, cur.commands, cur.tm,
+		cur.done, cur.found
+}
+
+// stop ends the pass of a probe with the command word read so far.
+func (r *shortReader) stop() {
+	r.found, r.done = commandWord{tool: r.tool, has: r.hasTool}, true
+}
+
+// commandRow returns the command word of the table that the "command" key at at holds: a pass of its own from
+// the key to the end of its value (a sequence, or a scalar up to the end of its line or object), read once and
+// kept by the key. The values of the keys of a text are apart, so each byte is read at most once more for them.
+func (r *shortReader) commandRow(at int) commandWord {
+	if w, ok := r.commands[at]; ok {
+		return w
+	}
+	p := &shortReader{s: r.s, add: func(int, int) {}, tm: &tokenMemo{}, probe: true, wm: r.wm, keyWords: keyWords{s: r.s}}
+	p.run(at)
+	if !p.done {
+		p.stop()
+	}
+	if r.commands == nil {
+		r.commands = map[int]commandWord{}
+	}
+	r.commands[at] = p.found
+	return p.found
 }
 
 // shortFlagRead is the one pass of the rule over s; with lines set s is a sequence of strings joined by line
@@ -182,15 +249,36 @@ func (r *shortReader) endSequence() {
 // pass goes on from the end of the value.
 func shortFlagRead(wm *meter.Meter, s string, lines bool, add func(start, end int)) {
 	r := &shortReader{s: s, add: add, tm: &tokenMemo{}, lines: lines, first: lines, wm: wm, keyWords: keyWords{s: s}}
-	for i := 0; i < len(s); {
+	r.run(0)
+}
+
+// run reads s from i to its end, or, for a probe, to the end of the value it reads.
+func (r *shortReader) run(i int) {
+	s, wm := r.s, r.wm
+	for i < len(s) && !r.done {
 		tick(wm, 1)
+		if c := s[i]; c == '&' && r.yaml && r.depth == 0 && afterItemDash(wm, s, i) {
+			// The anchor of a YAML item ("- &pw"), no shell control character.
+			for i < len(s) && !isSpace(wm, s[i]) {
+				tick(wm, 1)
+				i++
+			}
+			continue
+		}
+		if e := r.itemHeaderEnd(wm, i); e > i {
+			// The header of a block scalar item ends no command: its content is the item.
+			r.header = true
+			i = e
+			continue
+		}
 		switch c := s[i]; {
 		case c == '\n' || c == '\r':
-			r.lineBreak(wm, i)
-			i++
+			i = r.lineBreak(wm, i)
 		case c == '{' || c == '}':
+			if r.probe {
+				r.stop()
+			}
 			r.end()
-			r.pending = false
 			i++
 		case strings.IndexByte(";|&()`", c) >= 0:
 			r.end()
@@ -226,34 +314,59 @@ func shortDelimiter(wm *meter.Meter, c byte) bool {
 // YAML block sequence it ends no command; before the first item of one it starts the sequence (with no command
 // word after an "args:" key), and so does an item after an "args:" or "command:" key inside an item of the
 // sequence being read; any other ends the command.
-func (r *shortReader) lineBreak(wm *meter.Meter, i int) {
+func (r *shortReader) lineBreak(wm *meter.Meter, i int) int {
 	s := r.s
+	r.resume()
 	if r.lines || r.depth > 0 {
-		return
+		return i + 1
 	}
 	if s[i] == '\n' && i > 0 && s[i-1] == '\r' {
-		return // the second byte of CRLF, read with the first
+		return i + 1 // the second byte of CRLF, read with the first
 	}
 	if b := i - 1; b >= 0 && s[b] == '\\' {
-		return // a line continuation
+		return i + 1 // a line continuation
 	}
 	k := i + 1
 	if s[i] == '\r' && k < len(s) && s[k] == '\n' {
 		k++
 	}
+	line := k
 	for k < len(s) && (s[k] == ' ' || s[k] == '\t') {
 		tick(wm, 1)
 		k++
 	}
 	item := k < len(s) && s[k] == '-' && (k+1 == len(s) || isSpace(wm, s[k+1]))
+	blank := k == len(s) || s[k] == '\n' || s[k] == '\r'
+	header := r.header
+	r.header = false
+	if r.yaml && !item && (r.scalar || header) && (blank || k-line > r.itemCol) {
+		// The content of a block scalar item ("- >-" and the lines right of its dash): the item goes on.
+		r.scalar = true
+		return i + 1
+	}
+	r.scalar = false
 	_, args := r.keyAt("args")
 	_, command := r.keyAt("command")
+	if k < len(s) && s[k] == '#' && (r.yaml || args || command) {
+		// A comment line in a YAML block sequence, or between its key and its first item: read as a line of its
+		// own, with no command word, and the sequence goes on after it as before it (resume).
+		saved := *r
+		r.saved = &saved
+		r.end()
+		r.yaml, r.command, r.depth = false, false, 0
+		return i + 1
+	}
+	if item {
+		r.itemCol = k - line
+	}
 	switch {
 	case item && r.yaml && (args || command):
 		// A sequence inside an item of the one being read ("- args:" and its items below it, as YAML writes
 		// a container): it starts here and is read as its own.
 		r.endSequence()
-		r.startSequence()
+		if !r.done {
+			r.startSequence()
+		}
 	case item && r.yaml:
 	case item:
 		r.startSequence()
@@ -261,14 +374,74 @@ func (r *shortReader) lineBreak(wm *meter.Meter, i int) {
 	case r.yaml:
 		r.endSequence()
 		r.yaml = false
+	case r.probe:
+		r.stop()
 	default:
 		r.end()
 	}
+	return i + 1
+}
+
+// afterItemDash reports whether i follows the dash of a YAML block sequence item and a blank, with at most an
+// anchor and a tag between them ("- &pw >-", "- !!str |"); it reads back over two words at most.
+func afterItemDash(wm *meter.Meter, s string, i int) bool {
+	x := i
+	for range 3 {
+		b := x
+		for b > 0 && (s[b-1] == ' ' || s[b-1] == '\t') {
+			tick(wm, 1)
+			b--
+		}
+		if b == x || b == 0 {
+			return false
+		}
+		if s[b-1] == '-' {
+			return b < 2 || s[b-2] == ' ' || s[b-2] == '\t' || s[b-2] == '\n' || s[b-2] == '\r'
+		}
+		w := b
+		for w > 0 && s[w-1] != ' ' && s[w-1] != '\t' && s[w-1] != '\n' && s[w-1] != '\r' {
+			tick(wm, 1)
+			w--
+		}
+		if s[w] != '&' && s[w] != '!' {
+			return false
+		}
+		x = w
+	}
+	return false
+}
+
+// itemHeaderEnd returns, inside a YAML block sequence, the end of the header of a block scalar item at i ("|" or
+// ">" right after the item's "- " and any anchor or tag (afterItemDash), then at most a chomping indicator and an indentation digit, and blanks up to
+// the line end), or i when there is none.
+func (r *shortReader) itemHeaderEnd(wm *meter.Meter, i int) int {
+	s := r.s
+	if !r.yaml || r.depth > 0 || s[i] != '|' && s[i] != '>' || !afterItemDash(wm, s, i) {
+		return i
+	}
+	k := i + 1
+	for k < len(s) && k-i < 3 && (s[k] == '-' || s[k] == '+' || s[k] >= '1' && s[k] <= '9') {
+		tick(wm, 1)
+		k++
+	}
+	for k < len(s) && (s[k] == ' ' || s[k] == '\t') {
+		tick(wm, 1)
+		k++
+	}
+	if k < len(s) && s[k] != '\n' && s[k] != '\r' {
+		return i
+	}
+	return k
 }
 
 // word reads the word s[i:j] and returns where the pass goes on: after the word, or after the value of a flag.
 func (r *shortReader) word(wm *meter.Meter, i, j int) int {
 	w := r.s[i:j]
+	if at, ok := r.keyAt("args"); ok && w != "-" && !r.probe {
+		// The value of an "args" key written as one string ("args: -pX --verbose"): read as its items are.
+		r.end()
+		r.argsOf(at)
+	}
 	r.push(i, j)
 	if w == "-" {
 		return j // the dash of a YAML block sequence item
@@ -327,7 +500,8 @@ func (r *shortReader) flag(wm *meter.Meter, i, j int) int {
 			if s[i+1] == 'u' {
 				vs = afterColon(wm, s, vs, ve)
 			}
-			if !portNumber(wm, s[vs:ve]) {
+			// The value as the flag rule reads it may take in the comma or bracket after a flow item ("[-p, 8080,").
+			if !portNumber(wm, strings.TrimRight(scalarContent(wm, s[vs:ve]), ",]} \t")) {
 				r.add(vs, ve)
 			}
 			end = max(end, ve)
@@ -367,6 +541,8 @@ func (r *shortReader) value(wm *meter.Meter, i, p, j int) (start, end int, glued
 		from, glued = p+1, true
 	case p < j:
 		glued = true
+	case gluedQuote(wm, s, i, p):
+		glued = true
 	default:
 		from = shortSeparatorEnd(wm, s, p)
 		if from == p || from >= len(s) {
@@ -376,7 +552,109 @@ func (r *shortReader) value(wm *meter.Meter, i, p, j int) (start, end int, glued
 	q := strings.TrimLeft(s[p:from], `\`)
 	closed := q != "" && (q[0] == '"' || q[0] == '\'')
 	start, end = flagExtent(wm, s, []int{i, from, i + 1, p}, closed, r.tm)
+	if glued {
+		end = escapedQuotedEnd(wm, s, i, itemEnd(wm, s, i, start, end))
+	}
 	return start, end, glued, end > start
+}
+
+// stringQuote returns, for a flag that starts at i right after a double quote, the number of backslashes before
+// that quote (0 in a JSON string, 1 in a JSON string inside another); -1 when no double quote is before it.
+func stringQuote(wm *meter.Meter, s string, i int) int {
+	if i == 0 || s[i-1] != '"' {
+		return -1
+	}
+	b := 0
+	for x := i - 2; x >= 0 && s[x] == '\\' && b < maxValueExtent; x-- {
+		tick(wm, 1)
+		b++
+	}
+	return b
+}
+
+// itemEnd returns the end of the value from start to end of a flag that starts at i right after a double quote
+// with b backslashes before it, the opening quote of the string the flag word stands in: the value ends at the
+// quote that closes that string (the same quote with as many backslashes), whatever a shell would read on.
+func itemEnd(wm *meter.Meter, s string, i, start, end int) int {
+	b := stringQuote(wm, s, i)
+	if b < 0 {
+		return end
+	}
+	run := 0
+	for k := start; k < end; k++ {
+		tick(wm, 1)
+		switch {
+		case s[k] == '\\':
+			run++
+		case s[k] == '"' && run == b:
+			return k - b
+		default:
+			run = 0
+		}
+	}
+	return end
+}
+
+// escapedQuotedEnd returns the end of the glued value of the flag at i that ends at end, taking in a piece
+// quoted with escaped double quotes glued to it, as a value inside a JSON string holds one ("-pab\"cd\"" for the
+// shell's -pab"cd"): from backslashes and a quote at end, more backslashes than the quote of the string the flag
+// stands in has (stringQuote), to the same backslashes and quote that close it, and the bytes of a word after
+// them. A piece with no closing quote before the next quote or line end is not taken.
+func escapedQuotedEnd(wm *meter.Meter, s string, i, end int) int {
+	n := 0
+	for end+n < len(s) && s[end+n] == '\\' {
+		tick(wm, 1)
+		n++
+	}
+	if n == 0 || n <= stringQuote(wm, s, i) || end+n >= len(s) || s[end+n] != '"' {
+		return end
+	}
+	m := end + n + 1
+	for m < len(s) && s[m] != '"' && s[m] != '\\' && s[m] != '\n' && s[m] != '\r' {
+		tick(wm, 1)
+		m++
+	}
+	b := 0
+	for m+b < len(s) && s[m+b] == '\\' {
+		tick(wm, 1)
+		b++
+	}
+	if b != n || m+b >= len(s) || s[m+b] != '"' {
+		return end
+	}
+	end = m + b + 1
+	for end < len(s) && !shortDelimiter(wm, s[end]) && strings.IndexByte(";|&()`{}[]", s[end]) < 0 {
+		tick(wm, 1)
+		end++
+	}
+	return end
+}
+
+// gluedQuote reports whether the flag that starts at i and ends at p has a quoted value glued to it ("-p'X'",
+// "-p\"X\"" inside a JSON string): a quote at p, after any backslashes, that opens a value, as a letter, a digit or
+// any other byte of a value follows it, and that is not the closing quote of the string the flag stands in (the
+// same quote, with as many backslashes, right before the flag: "\"-p\"").
+func gluedQuote(wm *meter.Meter, s string, i, p int) bool {
+	k := p
+	for k < len(s) && s[k] == '\\' {
+		tick(wm, 1)
+		k++
+	}
+	if k+1 >= len(s) || s[k] != '"' && s[k] != '\'' {
+		return false
+	}
+	if c := s[k+1]; isSpace(wm, c) || strings.IndexByte("\"',;|&()`{}[]<>\\:", c) >= 0 {
+		return false
+	}
+	if i == 0 || s[i-1] != s[k] {
+		return true
+	}
+	b := 0
+	for x := i - 2; x >= 0 && s[x] == '\\'; x-- {
+		tick(wm, 1)
+		b++
+	}
+	return b != k-p
 }
 
 // shortSeparatorEnd returns the end of the separator between a flag that ends at p and a value of its own, as the
@@ -421,6 +699,15 @@ func shortBlanksEnd(wm *meter.Meter, s string, k int) int {
 				tick(wm, 1)
 				d++
 			}
+			if d < len(s) && s[d] == '#' {
+				// A comment line between a flag and its value: the value is after it.
+				for d < len(s) && s[d] != '\n' && s[d] != '\r' {
+					tick(wm, 1)
+					d++
+				}
+				k = d
+				continue
+			}
 			if d+1 < len(s) && s[d] == '-' && (s[d+1] == ' ' || s[d+1] == '\t') {
 				k = d + 2
 			}
@@ -446,6 +733,30 @@ func afterColon(wm *meter.Meter, s string, start, end int) int {
 		}
 	}
 	return end
+}
+
+// scalarContent returns the content of the value v when it is a YAML block scalar, with or without an anchor
+// or a tag before its header (the header line dropped and the blanks around the rest), else v.
+func scalarContent(wm *meter.Meter, v string) string {
+	h := v
+	for h != "" && (h[0] == '&' || h[0] == '!') {
+		tick(wm, 1)
+		k := strings.IndexAny(h, " \t")
+		if k < 0 {
+			return v
+		}
+		h = strings.TrimLeft(h[k:], " \t")
+	}
+	if h == "" || h[0] != '|' && h[0] != '>' {
+		return v
+	}
+	v = h
+	k := strings.IndexAny(v, "\r\n")
+	if k < 0 {
+		return v
+	}
+	tick(wm, len(v))
+	return strings.TrimSpace(v[k:])
 }
 
 // portNumber reports whether v, without the quotes and backslashes around it, is a whole number from 1 to 65535

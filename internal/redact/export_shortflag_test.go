@@ -33,7 +33,8 @@ type ShortContainer struct {
 
 // ShortContainers returns containers whose command is a tool of the table and whose arguments hold its password
 // flag in every form the tool reads it, the same after "sh -c", and containers with no command (the entrypoint
-// in the image) whose arguments hold a flag of the arguments with no command word.
+// in the image) whose arguments hold a flag of the arguments with no command word; and the quoted forms of the
+// tools, once for each piece of the secret they must hide.
 func ShortContainers() []ShortContainer {
 	rng := rand.New(rand.NewPCG(1075, 4)) //nolint:gosec // a fixed seed keeps the corpus the same on every run
 	var out []ShortContainer
@@ -51,6 +52,21 @@ func ShortContainers() []ShortContainer {
 					Kept: []string{t.name, shortHead, shortTail}},
 				ShortContainer{Form: "sh -c " + f.name, Command: []string{"/bin/sh", "-c"},
 					Args: []string{shellJoin(t.name, args)}, Secret: secret, Kept: []string{t.name, shortHead, shortTail}})
+		}
+	}
+	// The quoted forms (#1075, count of 2026-11-22): get_resource writes a double quote in an argument escaped.
+	for _, t := range shortTools {
+		for _, f := range shortQuotedForms {
+			if f.separated && t.glued {
+				continue
+			}
+			secret := shortSecret(rng, i)
+			i++
+			args := append(append([]string{shortHead, "9"}, f.words(t, shortValue(t, secret))...), shortTail)
+			for _, piece := range shortQuotedSecrets(f, t, secret) {
+				out = append(out, ShortContainer{Form: "command " + f.name, Command: []string{t.name}, Args: args,
+					Secret: piece, Kept: []string{t.name, shortHead, shortTail}})
+			}
 		}
 	}
 	for _, t := range shortArgsFlags {

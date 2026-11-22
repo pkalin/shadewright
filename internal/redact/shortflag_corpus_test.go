@@ -535,6 +535,21 @@ func shortFlagShapes(n int) map[string]string {
 		"short flag: open objects with images": rep(`{"args":["-p","1"],"image":"mongo",`),
 		// A YAML item per line, each one column further right: every mapping stays open to the end.
 		"short flag: YAML staircase of images": shortImageStair(n),
+		// The command after the arguments in every container: each command is read once more for its arguments.
+		"short flag: command after args, JSON": `{"kind":"Pod","spec":{"containers":[` +
+			rep(`{"args":["-pswabc12","-a","8080"],"command":["mysql"],"name":"db"},`) + `{}]}}`,
+		"short flag: command after args, YAML": "kind: Pod\nspec:\n  containers:\n" +
+			rep("  - args:\n    - -pswabc12\n    - -a\n    - \"8080\"\n    command:\n    - mysql\n    name: db\n"),
+		// Objects opened and never closed, each with arguments and a command after them that is never closed.
+		"short flag: open objects with commands after args": rep(`{"args":["-p","1"],"command":["mysql",`),
+		// Many arguments keys in one object before one command.
+		"short flag: many args keys before a command": `{` + rep(`"args":["-p","x"],`) + `"command":["mongosh"]}`,
+		"short flag: block scalar items":              "- image: mysql\n  args:\n" + rep("  - |-\n    -pswab\n"),
+		"short flag: anchored block scalar items":     "- image: redis\n  args:\n" + rep("  - &a >-\n    -a\n"),
+		"short flag: comment lines in args":           "- image: redis\n  args:\n" + rep("  # c -a\n  - -a\n"),
+		"short flag: escaped quotes glued":            `{"args":[` + rep(`"-p\"a\"b",`) + `""],"image":"mongo"}`,
+		"short flag: escaped quotes never closed":     `{"msg":"mongosh ` + rep(`-pa\\\"b `) + `"}`,
+		"short flag: quotes glued":                    "mongosh " + rep("-p'a'b\"c\" "),
 	}
 }
 

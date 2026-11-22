@@ -133,6 +133,9 @@ func SecretCollection(name string) bool {
 //     2026-11-18), cut at each piece's ends and widened to whole units (an escape is hidden whole or kept whole).
 //     A secret on one line of a value does not take the lines after it, and a match still reaches across what
 //     the encoding puts side by side (a key and its value, the items of a list, a flag and its argument).
+//     When a value holds a control character its form leaves out (#852), the answer is read a second time as
+//     origin/main wrote it, each control in its form, and what that reading finds is carried back through the
+//     values (readWithControls), so a match origin/main made across a control is still hidden.
 //  3. The reading of the release before (releasedPieces, before.go): its redactor, kept unchanged in package
 //     released, applied as its read tools applied it (each value redacted, made valid UTF-8 and redacted again,
 //     then written into the answer as they wrote it, and the whole answer redacted the same way), each of its
@@ -259,6 +262,9 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 	}
 	reading2 := endAtValueLines(wm, ps, l.w, answer, matches)
 	r.cutAnswer(wm, ps, l.add, settle(wm, answer, endAtObjectValues(wm, ps, wsize, reading2)), widen, text)
+	if writtenWithoutControls(wm, ps) {
+		r.readWithControls(wm, ps, n, l, ids, joined)
+	}
 	// Reading 3: the release before, on the pieces as they were read.
 	hidden := mergeSpans(wm, r.releasedPieces(wm, ps))
 	off, h := 0, 0
@@ -317,6 +323,103 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 	return out
 }
 
+// writtenWithoutControls reports whether a data piece of ps holds a control character ([Control]) that its form
+// leaves out of the answer (#852): only then is the answer read by reading 2 not the answer origin/main read.
+func writtenWithoutControls(wm *meter.Meter, ps []Piece) bool {
+	for _, p := range ps {
+		tick(wm, 1)
+		if p.Data && p.Form != AsIs {
+			tick(wm, len(p.Text))
+			if strings.ContainsFunc(p.Text, Control) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// readWithControls is reading 2 of [Redactor.Pieces] on the answer as origin/main wrote it before #852, each
+// control character written in its form (a space on a line, an escape in JSON), when that answer is not the one
+// the pieces now make (writtenWithoutControls). What it finds is cut at each piece's ends and widened to whole
+// units of that answer as reading 2 does, carried back to the bytes of the values, and from them to the units of
+// the answer as written now (l), where a control is an empty unit. So a match that origin/main made across a
+// control (a flag "--password" a NUL separates from the value before it, and the label that follows) is still
+// hidden once the control is left out, and removing it uncovers nothing (decision of 2026-11-22: no input shows a
+// secret origin/main hides). With joined, the reading of the whole answer of [Redactor.Strings] is taken on it
+// too. The work is linear in the length of the pieces, as reading 2's.
+func (r *Redactor) readWithControls(wm *meter.Meter, ps []Piece, n int, l *answerLayout, ids *windowIDs, joined bool) {
+	m := newAnswerLayoutAs(wm, ps, n, true)
+	matches := r.ruleMatchesWith(wm, m.answer, ids)
+	widen := func(i int, sp span) span { return m.w(i).widen(wm, sp) }
+	text := func(i int) string { return m.w(i).text }
+	// cut adds the spans of one reading of m's answer to l, through the values.
+	cut := func(spans []span) {
+		var got []pieceSpan // in the order of the pieces, and of the spans within one
+		r.cutAnswer(wm, ps, func(i int, sp span) { got = append(got, pieceSpan{i, sp}) }, spans, widen, text)
+		for from := 0; from < len(got); {
+			tick(wm, 1)
+			to := from + 1
+			for to < len(got) && got[to].piece == got[from].piece {
+				tick(wm, 1)
+				to++
+			}
+			i := got[from].piece
+			for _, vsp := range m.w(i).valueSpans(wm, got[from:to]) {
+				tick(wm, 1)
+				if sp := l.w(i).carry(wm, vsp); sp.end > sp.start {
+					l.add(i, sp)
+				}
+			}
+			from = to
+		}
+	}
+	if joined {
+		cut(settle(wm, m.answer, append(slices.Clone(matches), r.releasedString(wm, m.answer, false, nil)...)))
+	}
+	size := func(i int) int { return int(m.off[i+1] - m.off[i]) }
+	cut(settle(wm, m.answer, endAtObjectValues(wm, ps, size, endAtValueLines(wm, ps, m.w, m.answer, matches))))
+}
+
+// pieceSpan is a span of the written text of piece piece.
+type pieceSpan struct {
+	piece int
+	sp    span
+}
+
+// valueSpans returns the spans of w's text in got (sorted, disjoint, each of whole units: widen) as spans of
+// its value: from the first byte of the unit a span starts at to the last byte of the unit it ends in. The work
+// is linear in the length of the value and the number of spans.
+func (w written) valueSpans(wm *meter.Meter, got []pieceSpan) []span {
+	out := make([]span, 0, len(got))
+	if !w.mapped() {
+		for _, g := range got {
+			out = append(out, g.sp)
+		}
+		return out
+	}
+	k, open, start := 0, false, 0
+	w.eachUnit(func(vs, ve, us, ue int) {
+		tick(wm, 1)
+		for k < len(got) {
+			sp := got[k].sp
+			if !open {
+				if us < sp.start {
+					return
+				}
+				start, open = vs, true
+			}
+			if ue < sp.end {
+				return
+			}
+			sp.start, sp.end = start, ve
+			out = append(out, sp)
+			open = false
+			k++
+		}
+	})
+	return out
+}
+
 // answerLayout is the answer the pieces make as written, kept so that an answer of many short pieces holds a few
 // words a piece (#873, decision of 2026-11-21 on the heap): the answer once, where each piece starts in it, and
 // for each data piece the map of its units and the spans found in it.
@@ -336,17 +439,23 @@ type answerLayout struct {
 
 // newAnswerLayout writes the pieces ps, n of which are data pieces, as the answer writes them.
 func newAnswerLayout(wm *meter.Meter, ps []Piece, n int) *answerLayout {
+	return newAnswerLayoutAs(wm, ps, n, false)
+}
+
+// newAnswerLayoutAs is newAnswerLayout; with controls, each control character is written as origin/main wrote it
+// before #852 (writeUnit), for readWithControls.
+func newAnswerLayoutAs(wm *meter.Meter, ps []Piece, n int, controls bool) *answerLayout {
 	l := &answerLayout{off: make([]int32, len(ps)+1), data: make([]int32, len(ps)), units: make([]*units, 0, n),
 		from: make([]int32, n+1)}
 	total := 0
 	for _, p := range ps {
-		total += writtenLen(p)
+		total += writtenLenAs(p, controls)
 	}
 	var raw strings.Builder
 	raw.Grow(total) // sized once, so the answer is not held twice while it grows
 	for i, p := range ps {
 		tick(wm, 1)
-		w := write(wm, p)
+		w := writeAs(wm, p, controls)
 		l.data[i] = -1
 		if p.Data {
 			l.data[i] = int32(len(l.units)) // #nosec G115 -- an entry is at most MaxEntry bytes
@@ -754,7 +863,10 @@ type written struct {
 // the value, where in the text (unitText[b-1]) and in the value (unitValue[b-1]) the unit holding byte b*unitStep
 // of the value starts; the first is 0 in both, so a short value holds no checkpoint.
 type units struct {
-	form                Form
+	form Form
+	// controls says each control character is a unit of its own, written as origin/main wrote it before #852
+	// (readWithControls); otherwise it is an empty unit, as the answer shows it.
+	controls            bool
 	value               string
 	unitText, unitValue []int32
 	// textBack[b-1] is how many bytes before byte b*unitStep of the text the unit holding it starts: a unit is at
@@ -766,18 +878,22 @@ type units struct {
 func (w written) mapped() bool { return w.units != nil }
 
 // write writes the piece p as the answer writes it.
-func write(wm *meter.Meter, p Piece) written {
+func write(wm *meter.Meter, p Piece) written { return writeAs(wm, p, false) }
+
+// writeAs is write; with controls, a control character is written as origin/main wrote it before #852, in
+// its own unit (writeUnit), for readWithControls.
+func writeAs(wm *meter.Meter, p Piece, controls bool) written {
 	if !p.Data || p.Form == AsIs || p.Text == "" {
 		return written{text: p.Text} // an empty value has no byte a span is carried from
 	}
 	n := len(p.Text)
-	if plain(p.Form, p.Text) {
+	if plain(p.Form, p.Text) || controls && plainWithControls(p.Form, p.Text) {
 		// Every unit is one byte written as itself: the text is the value and every span stays as it is, so the piece
 		// holds no map (the steps are those of the loop below: a unit, its byte in the value and in the text).
 		tick(wm, 3*n)
 		return written{text: p.Text}
 	}
-	w := written{units: &units{form: p.Form, value: p.Text}}
+	w := written{units: &units{form: p.Form, controls: controls, value: p.Text}}
 	var b strings.Builder
 	b.Grow(n)
 	for i := 0; i < n; {
@@ -798,7 +914,7 @@ func write(wm *meter.Meter, p Piece) written {
 				size++
 			}
 			b.WriteByte('?')
-		} else if !Control(c) {
+		} else if controls || !Control(c) {
 			// A control character is shown in no form but AsIs (#852): its unit is empty. writeUnit still writes it
 			// as the release before wrote it, for that release's reading (jsonTrace, shownTrace).
 			writeUnit(wm, &b, p.Form, p.Text[i:i+size], c, size)
@@ -831,15 +947,32 @@ func plain(f Form, s string) bool {
 	return true
 }
 
+// plainWithControls is plain for a piece written with its controls (writeAs), as origin/main's plain read it:
+// DEL is written as itself in JSON.
+func plainWithControls(f Form, s string) bool {
+	for i := range len(s) {
+		switch c := s[i]; {
+		case c >= utf8.RuneSelf, c < 0x20:
+			return false
+		case f == Line && c == 0x7f, f == JSON && (c == '"' || c == '\\'):
+			return false
+		}
+	}
+	return true
+}
+
 // writtenLen returns the length of the piece p as the answer writes it (write), without writing it.
-func writtenLen(p Piece) int {
+func writtenLen(p Piece) int { return writtenLenAs(p, false) }
+
+// writtenLenAs is writtenLen for writeAs.
+func writtenLenAs(p Piece, controls bool) int {
 	if !p.Data || p.Form == AsIs {
 		return len(p.Text)
 	}
 	n := 0
 	for i := 0; i < len(p.Text); {
 		c, size := utf8.DecodeRuneInString(p.Text[i:])
-		n += shownWidth(p.Form, c, size)
+		n += widthAs(p.Form, c, size, controls)
 		if p.Form == JSON && c == utf8.RuneError && size == 1 {
 			for i+size < len(p.Text) && invalidAt(p.Text, i+size) {
 				size++
@@ -854,6 +987,15 @@ func writtenLen(p Piece) int {
 func invalidAt(s string, i int) bool {
 	c, size := utf8.DecodeRuneInString(s[i:])
 	return c == utf8.RuneError && size == 1
+}
+
+// widthAs is the length writeAs writes for the character c of size bytes in form f: unitWidth with controls,
+// else shownWidth.
+func widthAs(f Form, c rune, size int, controls bool) int {
+	if controls {
+		return unitWidth(f, c, size)
+	}
+	return shownWidth(f, c, size)
 }
 
 // shownWidth is the length write writes for the character c of size bytes in form f: 0 for a control character
@@ -902,7 +1044,7 @@ func (w written) eachUnit(f func(vs, ve, us, ue int)) {
 	pos := 0
 	for i := 0; i < len(w.value); {
 		c, size := utf8.DecodeRuneInString(w.value[i:])
-		width := shownWidth(w.form, c, size)
+		width := widthAs(w.form, c, size, w.controls)
 		if w.form == JSON && c == utf8.RuneError && size == 1 {
 			for i+size < len(w.value) && invalidAt(w.value, i+size) {
 				size++
@@ -936,7 +1078,7 @@ func (w written) unitOfValue(j int) (us, ue int) {
 			i, pos = p+1, pos+1
 			continue
 		}
-		width := shownWidth(w.form, c, size)
+		width := widthAs(w.form, c, size, w.controls)
 		if j < i+size {
 			return pos, pos + width
 		}

@@ -130,6 +130,11 @@ type Completion struct {
 	// schema of the content, decides what a control in each place means (#852). Adapters leave it empty; it is
 	// the loop's mark, never marshaled.
 	ContentControls []ControlPath `json:"-"`
+	// ContentAsRead is, as set by [WithoutControls] when it removed a control character from Content, the
+	// content as the adapter returned it: a caller that stores a free-text field of the content redacts that
+	// field as it was read and removes the controls afterwards, since redaction decides on the text as read
+	// (#852, order of 2026-11-19). Empty when Content held no control. Never marshaled.
+	ContentAsRead string `json:"-"`
 }
 
 // ControlPath is where a decoded string of a JSON document held a control character ([WithoutControls]).

@@ -690,6 +690,10 @@ var completionFields = map[string]string{
 	// ContentControls is written by WithoutControls itself: member names without their controls and decimal
 	// indexes. An adapter leaves it empty.
 	"ContentControls.Path": kindExempt,
+	// ContentAsRead is the content as the adapter returned it, kept by WithoutControls on purpose: the stored free
+	// text is redacted from it and cleaned after that decision (analysis run.shownModelText). It is never stored,
+	// logged or compared as it is.
+	"ContentAsRead": kindExempt,
 }
 
 // textPaths walks t and returns the path of every field that is not a number or a bool.

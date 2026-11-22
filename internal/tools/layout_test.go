@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"math/rand/v2"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -141,9 +142,13 @@ func TestJSONAnswerKeepsEveryValueItDoesNotHide(t *testing.T) {
 		}
 		if len(wantLabels) < len(labels) {
 			// Two keys that differ only by control characters are shown alike, and the answer renames the second
-			// ("k-a (2)", as for any two keys decided alike): every entry is still there.
+			// ("k-a (2)", as for any two keys decided alike): every entry is still there, each value under its own
+			// key or that key renamed.
 			if len(got.Labels) != len(labels) {
 				t.Errorf("turn %d: labels %q, want %d entries", turn, got.Labels, len(labels))
+			}
+			if gotBy, wantBy := valuesByShownKey(got.Labels, wantLabels), valuesByKey(labels, answered); !reflect.DeepEqual(gotBy, wantBy) {
+				t.Errorf("turn %d: label values by key %q, want %q", turn, gotBy, wantBy)
 			}
 		} else if (len(got.Labels) > 0 || len(wantLabels) > 0) && !reflect.DeepEqual(got.Labels, wantLabels) {
 			t.Errorf("turn %d: labels %q, want %q", turn, got.Labels, wantLabels)
@@ -287,4 +292,36 @@ func TestLeaveOut(t *testing.T) {
 			}
 		})
 	}
+}
+
+// renamedSuffix is the suffix the answer gives a key renamed apart from another decided alike (" (2)").
+var renamedSuffix = regexp.MustCompile(` \([0-9]+\)$`)
+
+// valuesByKey returns the values of labels, each as shown (show), grouped by the key as shown and sorted.
+func valuesByKey(labels map[string]string, show func(string) string) map[string][]string {
+	out := map[string][]string{}
+	for k, v := range labels {
+		out[show(k)] = append(out[show(k)], show(v))
+	}
+	for k := range out {
+		slices.Sort(out[k])
+	}
+	return out
+}
+
+// valuesByShownKey returns the values of the answer's labels grouped by the key they stand for: the key itself
+// when it is one of want's, else the key without the suffix of a renamed key.
+func valuesByShownKey(got, want map[string]string) map[string][]string {
+	out := map[string][]string{}
+	for k, v := range got {
+		base := k
+		if _, ok := want[k]; !ok {
+			base = renamedSuffix.ReplaceAllString(k, "")
+		}
+		out[base] = append(out[base], v)
+	}
+	for k := range out {
+		slices.Sort(out[k])
+	}
+	return out
 }

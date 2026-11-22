@@ -599,6 +599,8 @@ type run struct {
 	// spent is the tokens charged per deployment.
 	spent map[string]int64
 	tools int
+	// asRead is the stored free text of the result last decoded, as the reply held it ([run.decodeReply]).
+	asRead storedText
 }
 
 func (r *run) handOff(reason Reason) (Outcome, error) {
@@ -652,7 +654,7 @@ func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alph
 			code = retryToolCall
 			continue
 		}
-		res, action, err := decodeReply(c)
+		res, action, err := r.decodeReply(c)
 		if err == nil {
 			return res, action, "", nil
 		}
@@ -666,12 +668,36 @@ func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alph
 
 // decodeReply decodes the structured result of a reply ([decodeResult]). A reply that held a control
 // character anywhere but in a free-text field of the result is refused as not matching the schema
-// ([controlsRefused], #852), before its cleaned text is read.
-func decodeReply(c providers.Completion) (*Result, *remediationv1alpha1.Action, error) {
+// ([controlsRefused], #852), before its cleaned text is read. For a result it accepts, it keeps the free text
+// that is stored (the summary and the missing data) as the reply held it, controls included, in r.asRead, for
+// [run.shownModelText].
+func (r *run) decodeReply(c providers.Completion) (*Result, *remediationv1alpha1.Action, error) {
 	if controlsRefused(c.ContentControls) {
 		return nil, nil, errInvalid
 	}
-	return decodeResult(c.Content)
+	res, action, err := decodeResult(c.Content)
+	if err != nil {
+		return res, action, err
+	}
+	r.asRead = storedText{Summary: res.Summary, MissingData: res.MissingData}
+	if c.ContentAsRead != "" {
+		// The cleaned content decoded, and removing controls changes no token of the JSON (StripControlsJSON), so
+		// the content as read decodes to the same members with their controls; a key that held one was refused
+		// above. A reply that does not decode the same way is refused rather than stored from the cleaned text.
+		var read storedText
+		if json.Unmarshal([]byte(c.ContentAsRead), &read) != nil || len(read.MissingData) != len(res.MissingData) {
+			return nil, nil, errInvalid
+		}
+		r.asRead = read
+	}
+	return res, action, nil
+}
+
+// storedText is the free text of a result that is stored (the outcome's log line and the analysis record), as
+// the reply held it ([run.decodeReply]).
+type storedText struct {
+	Summary     string   `json:"summary"`
+	MissingData []string `json:"missingData"`
 }
 
 // escalate calls the escalation model with the read tools, bound to the Incident's namespace, for at most
@@ -707,7 +733,7 @@ func (r *run) escalate(model providers.ModelProvider) (*Result, *remediationv1al
 			return nil, nil, reason, err
 		}
 		if len(c.ToolCalls) == 0 {
-			res, action, err := decodeReply(c)
+			res, action, err := r.decodeReply(c)
 			if err != nil {
 				return nil, nil, ReasonInvalidOutput, nil
 			}
@@ -991,7 +1017,9 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 		err = fmt.Errorf("openai-compatible: reported usage exceeds the request bound: %w", providers.ErrMalformedOutput)
 	}
 	// Model text is untrusted and is read without control characters, for every provider, before anything
-	// parses, redacts, logs, records or compares it (#852): what is stored is what any terminal shows.
+	// parses, logs or compares it (#852): what is stored is what any terminal shows. The free text that is
+	// stored is redacted from the content as it was read, before its controls are removed ([run.shownModelText]):
+	// removing them first could hide a secret from the rules ("x" CR "Bearer" and a token).
 	c = providers.WithoutControls(c)
 	notSent := providers.IsNotSent(err)
 	if !notSent {
@@ -1114,9 +1142,9 @@ func estimateInput(req providers.CompletionRequest) int64 { return providers.Est
 // has evidence found in the blocks the model saw, may target the subject and has a policy configured. action
 // is the proposal's action as decodeResult converted it, before the catalog check, nil without a proposal.
 func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, error) {
-	r.out.Summary, r.out.MissingData = r.redact(res.Summary), nil
-	for _, m := range res.MissingData {
-		r.out.MissingData = append(r.out.MissingData, r.redact(m))
+	r.out.Summary, r.out.MissingData = r.shownModelText(r.asRead.Summary), nil
+	for _, m := range r.asRead.MissingData {
+		r.out.MissingData = append(r.out.MissingData, r.shownModelText(m))
 	}
 	if res.Proposal == nil || action == nil {
 		switch {
@@ -1287,6 +1315,19 @@ func (r *run) redact(s string) string {
 		return redact.StringKeeping(s, r.inc.Name)
 	}
 	return r.a.cfg.Redactor.StringKeeping(s, r.inc.Name)
+}
+
+// shownModelText redacts a free-text field of a result as the reply held it, then removes its control
+// characters (#852, order of 2026-11-19): the decision is taken on the text as read, and also on it without
+// its controls ([run.redactShown]), so what removing them would join or split is hidden either way, and the
+// text stored holds no control. A text without a control character is redacted as before ([run.redact]). The
+// text stored may be a few bytes longer than the bound of the field, which counts it without its controls: a
+// marker that replaces a secret with controls in it can be longer than the secret.
+func (r *run) shownModelText(asRead string) string {
+	if !strings.ContainsFunc(asRead, redact.Control) {
+		return r.redact(asRead)
+	}
+	return incidentcontext.Redact(r.redactShown, asRead)
 }
 
 // redactShown is [run.redact] for text the model is shown without control characters

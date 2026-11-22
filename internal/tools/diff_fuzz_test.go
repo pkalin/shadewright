@@ -232,6 +232,16 @@ var diffToolSeeds = [][]byte{
 	redacttest.RawSeed(0x10, slices.Repeat([]string{strings.Repeat("--token,}", 4096)}, 6)...),
 	// A path and a ref the Git tools accept, so that they reach the answer that they are not available.
 	redacttest.RawSeed(0, "deploy/app.yaml", ""),
+	// Controls in keys, in values and between entries (#852): a NUL between a connection string and the flag that
+	// takes the next entry as its value, an ESC inside a key word, a NEL after a flag and a DEL before a value, a
+	// carriage return between a key and its separator. Each target reads the fields in its own places (label names
+	// and values, arguments, messages, log lines, notes, a revision). The entries corpus compares the same shapes
+	// with origin/main's answers (TestEntriesHideWhatMainHid); the oracle here is the release before #845.
+	redacttest.RawSeed(0, "arg0", "postgres://u:p@h/db\x00---password", "arg1", "Qz900339SecretValue"),
+	redacttest.RawSeed(1, "pass\x1bword", "Qz900339SecretValue", "to\x00ken", "Qz900339SecretValue"),
+	redacttest.RawSeed(0, "--password\u0085", "\x7fQz900339SecretValue", "a", "b"),
+	redacttest.RawSeed(2, "token\r:", "Qz900339SecretValue", "db_pass\x9b=", "Qz900339SecretValue"),
+	redacttest.RawSeed(3, "--token", "\x01Qz900339SecretValue", "pass\x08", "Qz900339SecretValue"),
 }
 
 // toolBodies are the checks of the fuzz targets of this file over one tool set, by target: the failures of one

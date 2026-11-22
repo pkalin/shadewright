@@ -223,13 +223,17 @@ func controlPaths(raw []byte) []ControlPath {
 // WithoutControls returns c with [StripControls] applied to every model-derived string the analysis loop reads:
 // the content (as JSON, [StripControlsJSON]: the loop decodes it as the structured result), and each tool
 // call's ID, name and arguments (as JSON). It is applied once, where a reply of any provider enters the loop,
-// before anything parses, redacts, stores, logs, records or compares the text (issue #852). A tool call that
+// before anything parses, logs, records or compares the text (issue #852); what is stored of the content is
+// redacted from [Completion.ContentAsRead] (below). A tool call that
 // held a control is cleaned too, so what is stored, logged or recorded about it holds none, and is marked
 // [ToolCall.HeldControls]: the loop refuses it instead of running a value the model did not write. Model is
 // left as it is: every adapter accepts only a name of a fixed ASCII pattern, and removing characters could
 // turn a refused name into the configured one. ProviderBlocks is opaque and goes back to its adapter unchanged.
 // Where the content held a control is listed in [Completion.ContentControls]: the content's schema is the
-// caller's, which refuses a control in a field that is not free text instead of reading the cleaned value.
+// caller's, which refuses a control in a field that is not free text instead of reading the cleaned value. The
+// content as it came is kept in [Completion.ContentAsRead]: removing a control can join or split what a
+// redaction rule reads ("x" CR "Bearer" plus a token loses the word boundary before "Bearer"), so text that is
+// stored is redacted as it was read and cleaned afterwards, never redacted after this cleaning.
 // c is not changed in place; a reply without controls comes back with its slices shared.
 func WithoutControls(c Completion) Completion {
 	if content, held := cleanJSON([]byte(c.Content)); held {
@@ -238,6 +242,7 @@ func WithoutControls(c Completion) Completion {
 			// cleanJSON found a control the walk did not place: fail closed at the root.
 			paths = []ControlPath{{}}
 		}
+		c.ContentAsRead = c.Content
 		c.Content, c.ContentControls = string(content), append(slices.Clip(c.ContentControls), paths...)
 	}
 	var calls []ToolCall

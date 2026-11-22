@@ -141,10 +141,15 @@ func TestLoopReadsModelTextWithoutControls(t *testing.T) {
 			if heldControl(reflect.ValueOf(out)) {
 				t.Errorf("U+%04X, escaped %v: the outcome holds a control: %+v", c, escaped, out)
 			}
-			if escaped && (out.Reason != analysis.ReasonMissingData || out.Summary != "SX" ||
+			// Escaped, and raw DEL and C1 (which JSON allows in a string), are read without the control; a raw C0
+			// control is not JSON, and the reply is refused as invalid output, never repaired.
+			if (escaped || c >= 0x7f) && (out.Reason != analysis.ReasonMissingData || out.Summary != "SX" ||
 				len(out.MissingData) != 1 || out.MissingData[0] != "MY") {
 				t.Errorf("U+%04X: reason %s, summary %q, missing data %q, want MissingData, SX and MY",
 					c, out.Reason, out.Summary, out.MissingData)
+			}
+			if !escaped && c < 0x7f && (out.Reason != analysis.ReasonInvalidOutput || out.Summary != "") {
+				t.Errorf("U+%04X: raw: reason %s, summary %q, want InvalidOutput and no summary", c, out.Reason, out.Summary)
 			}
 		}
 	}

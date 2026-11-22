@@ -43,6 +43,8 @@ func FuzzDiffStringShown(f *testing.F) {
 		redacttest.RawSeed(0, "pass\x1bword=\x01"),
 		redacttest.RawSeed(0, "to\x00ken: \x01\rnext: x"),
 		redacttest.RawSeed(0, "password: >\r  \x01\rnext: x"),
+		// keep ("api") on another line than a secret key a NUL splits: P6 still reads the secret.
+		redacttest.RawSeed(0, "api\npass\x1bword=\x01"),
 	)
 	for _, s := range diffSeeds {
 		f.Add(s)
@@ -91,8 +93,14 @@ func diffStringShown(data []byte) ([]string, bool) {
 		rec.Wrap(released.String)(in)
 		fails = append(fails, leaks(rec, "StringShown", shown)...)
 		fails = append(fails, utf8Fails("StringShown", in, shown)...)
-		out := WithoutControls(shown)
-		if l := rules.Leaks(out); len(l) > 0 && !strings.Contains(in, keep) {
+		// P6 reads a decision without keep: the occurrences of keep are shown by design, and an input that held keep
+		// anywhere (on another line than the secret) skipped P6 whole.
+		bare := shown
+		if strings.Contains(in, keep) {
+			bare = defaultRedactor.stringShown(nil, in, nil)
+		}
+		out := WithoutControls(bare)
+		if l := rules.Leaks(out); len(l) > 0 {
 			fails = append(fails, redacttest.LeakLine("P6", "StringShown shows what the rules hide in the text as shown", l, out))
 		}
 	}

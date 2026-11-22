@@ -31,9 +31,10 @@ limitations under the License.
 // Before any network call, a record is refused ([providers.ErrRejected]) unless its ID is a lower-case name
 // safe as a blob name, its data is valid JSON of at most [MaxRecordBytes], and its data passes the redactor
 // unchanged: a record in which a secret pattern is still found is never sent. The caller redacts; this is the
-// last check before the data leaves the pod. A check that did not run, because its wait for the limit on the heap
-// of the redactions running at once ended (the caller's context, or the redactor's longest wait), is a retryable
-// error and nothing is sent: the same record may pass later.
+// last check before the data leaves the pod. The redaction check runs inside the write's tries, each under one
+// try's timeout: a try whose check waited for the limit on the heap of the redactions running at once sends
+// nothing, and the next try checks again. When every try waited, the error is retryable and marked
+// [providers.ErrNotChecked], and nothing was sent.
 //
 // A write has a deadline of 30 seconds (or the caller's, if shorter), 10 seconds per try, and at most three
 // tries with exponential backoff and jitter. Only throttling (429), a timeout (408), transient server errors

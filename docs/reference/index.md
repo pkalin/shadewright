@@ -11,3 +11,4 @@ Facts to look up, kept apart from the guides.
 - [API](api.md): the fields of every custom resource, generated from the Go types.
 - [Metrics](metrics.md): the Prometheus metrics of the executor, the analyzer and the verifier.
 - [Traces](traces.md): the optional OpenTelemetry trace of each analysis, how to turn it on and what its spans carry.
+- [Scoring intake](intake.md): `cmd/intake`, which scores one analysis record outside any cluster: its checks, caps, flags and output.

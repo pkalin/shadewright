@@ -67,6 +67,7 @@ nav = [
     { "API" = "reference/api.md" },
     { "Metrics" = "reference/metrics.md" },
     { "Traces" = "reference/traces.md" },
+    { "Scoring intake" = "reference/intake.md" },
     { "Condition reasons" = "reasons.md" },
     { "Glossary" = "glossary.md" },
   ] },

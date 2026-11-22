@@ -411,6 +411,31 @@ func mergeRanges(wm *meter.Meter, rs []span) []span {
 	return out
 }
 
+// ReplaceWhole returns s with each whole occurrence of a key of words replaced by its word. An occurrence is
+// whole as [Redactor.Clean] and [StringKeeping] take a kept value: no letter, digit or one of "+/_-=." on
+// either side. Occurrences are found from the left, the longest key first where two start at the same offset,
+// and do not overlap, so the text replaced is exactly the text Clean would keep for the same keys.
+func ReplaceWhole(s string, words map[string]string) string {
+	keys := make([]string, 0, len(words))
+	for k := range words {
+		keys = append(keys, k)
+	}
+	occ := wholeOccurrences(s, keys)
+	if len(occ) == 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	pos := 0
+	for _, o := range occ {
+		b.WriteString(s[pos:o.start])
+		b.WriteString(words[s[o.start:o.end]])
+		pos = o.end
+	}
+	b.WriteString(s[pos:])
+	return b.String()
+}
+
 // wholeOccurrences returns the byte ranges of the whole occurrences in s of the non-empty strings of keep, in
 // order and not overlapping (the longest one where two start at the same offset).
 func wholeOccurrences(wm *meter.Meter, s string, keep []string) []span {

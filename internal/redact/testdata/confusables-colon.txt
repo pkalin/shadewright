@@ -1,0 +1,50 @@
+# confusables.txt
+# Date: 2026-08-06, 01:05:35 GMT
+# © 2026 Unicode®, Inc.
+# Unicode and the Unicode Logo are registered trademarks of Unicode, Inc. in the U.S. and other countries.
+# For terms of use and license, see https://www.unicode.org/terms_of_use.html
+#
+# Unicode Security Mechanisms for UTS #39
+# Version: 18.0.0
+#
+# For documentation and usage, see https://www.unicode.org/reports/tr39
+#
+# The lines of the file above whose target is one or more U+003A COLON, for TestFoldColonsAreTheConfusablesOfColon,
+# taken from https://www.unicode.org/Public/18.0.0/security/confusables.txt with:
+#   grep -E '^[0-9A-F]+ ;\s+(003A ?)+;' confusables.txt
+#
+0903 ;	003A ;	MA	# ( ः → : ) DEVANAGARI SIGN VISARGA → COLON	# 
+0A83 ;	003A ;	MA	# ( ઃ → : ) GUJARATI SIGN VISARGA → COLON	# 
+11002 ;	003A ;	MA	# ( 𑀂 → : ) BRAHMI SIGN VISARGA → COLON	# →ः→
+11082 ;	003A ;	MA	# ( 𑂂 → : ) KAITHI SIGN VISARGA → COLON	# →ः→
+11182 ;	003A ;	MA	# ( 𑆂 → : ) SHARADA SIGN VISARGA → COLON	# →ः→
+115BE ;	003A ;	MA	# ( 𑖾 → : ) SIDDHAM SIGN VISARGA → COLON	# →ः→
+116AC ;	003A ;	MA	# ( 𑚬 → : ) TAKRI SIGN VISARGA → COLON	# →ः→
+11838 ;	003A ;	MA	# ( 𑠸 → : ) DOGRA SIGN VISARGA → COLON	# →ः→
+FF1A ;	003A ;	MA	#* ( ： → : ) FULLWIDTH COLON → COLON	# 
+FE55 ;	003A ;	MA	#* ( ﹕ → : ) SMALL COLON → COLON	# 
+FE13 ;	003A ;	MA	#* ( ︓ → : ) PRESENTATION FORM FOR VERTICAL COLON → COLON	# 
+0589 ;	003A ;	MA	#* ( ։ → : ) ARMENIAN FULL STOP → COLON	# 
+0703 ;	003A ;	MA	#* ( ‎܃‎ → : ) SYRIAC SUPRALINEAR COLON → COLON	# 
+0704 ;	003A ;	MA	#* ( ‎܄‎ → : ) SYRIAC SUBLINEAR COLON → COLON	# 
+0831 ;	003A ;	MA	#* ( ‎࠱‎ → : ) SAMARITAN PUNCTUATION AFSAAQ → COLON	# 
+1361 ;	003A ;	MA	#* ( ፡ → : ) ETHIOPIC WORDSPACE → COLON	# 
+16EC ;	003A ;	MA	#* ( ᛬ → : ) RUNIC MULTIPLE PUNCTUATION → COLON	# 
+FE30 ;	003A ;	MA	#* ( ︰ → : ) PRESENTATION FORM FOR VERTICAL TWO DOT LEADER → COLON	# 
+1803 ;	003A ;	MA	#* ( ᠃ → : ) MONGOLIAN FULL STOP → COLON	# 
+1809 ;	003A ;	MA	#* ( ᠉ → : ) MONGOLIAN MANCHU FULL STOP → COLON	# 
+205A ;	003A ;	MA	#* ( ⁚ → : ) TWO DOT PUNCTUATION → COLON	# 
+05C3 ;	003A ;	MA	#* ( ‎׃‎ → : ) HEBREW PUNCTUATION SOF PASUQ → COLON	# 
+10AF5 ;	003A ;	MA	#* ( ‎𐫵‎ → : ) MANICHAEAN PUNCTUATION TWO DOTS → COLON	# 
+1123A ;	003A ;	MA	#* ( 𑈺 → : ) KHOJKI WORD SEPARATOR → COLON	# 
+02F8 ;	003A ;	MA	#* ( ˸ → : ) MODIFIER LETTER RAISED COLON → COLON	# 
+1393 ;	003A ;	MA	#* ( ᎓ → : ) ETHIOPIC TONAL MARK SHORT RIKRIK → COLON	# 
+A789 ;	003A ;	MA	#* ( ꞉ → : ) MODIFIER LETTER COLON → COLON	# 
+2236 ;	003A ;	MA	#* ( ∶ → : ) RATIO → COLON	# 
+1D108 ;	003A ;	MA	#* ( 𝄈 → : ) MUSICAL SYMBOL REPEAT DOTS → COLON	# 
+02D0 ;	003A ;	MA	# ( ː → : ) MODIFIER LETTER TRIANGULAR COLON → COLON	# 
+1015B ;	003A ;	MA	# ( 𐅛 → : ) GREEK ACROPHONIC EPIDAUREAN TWO → COLON	# 
+11DD9 ;	003A ;	MA	# ( 𑷙 → : ) TOLONG SIKI SIGN SELA → COLON	# 
+A4FD ;	003A ;	MA	# ( ꓽ → : ) LISU LETTER TONE MYA JEU → COLON	# 
+2E2C ;	003A 003A ;	MA	#* ( ⸬ → :: ) SQUARED FOUR DOT PUNCTUATION → COLON, COLON	# →∷→
+2237 ;	003A 003A ;	MA	#* ( ∷ → :: ) PROPORTION → COLON, COLON	# 

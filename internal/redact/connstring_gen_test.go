@@ -143,17 +143,17 @@ func connEntryPoints() map[string]func(in string) []string {
 		"fingerprint.Value":  func(in string) []string { return []string{fingerprint.Value(in)} },
 		"modules.BoundValue": func(in string) []string { return []string{modules.BoundValue(in)} },
 		"incidentcontext.Value": func(in string) []string {
-			return []string{incidentcontext.Value(redact.String, in)}
+			return []string{incidentcontext.Value(stringTwice, in)}
 		},
 		"incidentcontext.Value of the symptom": func(in string) []string {
-			return []string{incidentcontext.Value(redact.String, fingerprint.Symptom(fingerprint.Observation{Note: in}))}
+			return []string{incidentcontext.Value(stringTwice, fingerprint.Symptom(fingerprint.Observation{Note: in}))}
 		},
 		tools.NameGetResource: toolText(tools.NameGetResource,
 			map[string]any{argKind: toolKind, argNamespace: toolNS, argName: toolPod}),
 		tools.NameListEvents: toolText(tools.NameListEvents,
 			map[string]any{argNamespace: toolNS, argKind: toolKind, argName: toolPod, "limit": 5}),
 		tools.NameGetPodLogs: toolText(tools.NameGetPodLogs,
-			map[string]any{argNamespace: toolNS, "pod": toolPod, "container": toolContainer}),
+			map[string]any{argNamespace: toolNS, argPod: toolPod, argContainer: toolContainer}),
 	}
 }
 

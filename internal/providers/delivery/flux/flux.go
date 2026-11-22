@@ -81,8 +81,9 @@ var kinds = map[string]schema.GroupVersionKind{
 // it.
 type StatusReader struct {
 	reader client.Reader
-	// redact redacts the message before it is bounded; nil leaves it as it is (the executor's [Verifier]).
-	redact func(string) string
+	// redact redacts the message before it is bounded, false when redaction withheld it; nil leaves it as it is
+	// (the executor's [Verifier]).
+	redact func(string) (string, bool)
 }
 
 var _ providers.DeliveryVerifier = (*StatusReader)(nil)
@@ -95,9 +96,9 @@ func NewStatusReader(reader client.Reader, red *redact.Redactor) (*StatusReader,
 	if reader == nil {
 		return nil, fmt.Errorf("reader is required: %w", providers.ErrInvalidConfig)
 	}
-	r := &StatusReader{reader: reader, redact: redact.String}
+	r := &StatusReader{reader: reader, redact: redact.StringChecked}
 	if red != nil {
-		r.redact = red.String
+		r.redact = red.StringChecked
 	}
 	return r, nil
 }
@@ -216,8 +217,9 @@ func (r *StatusReader) read(ctx context.Context, unit providers.DeliveryUnit) (
 }
 
 // statusOf reads the status of a unit of kind from its object, and whether its spec suspends it. A non-nil
-// red redacts the whole message before it is bounded.
-func statusOf(kind string, u *unstructured.Unstructured, red func(string) string) providers.DeliveryStatus {
+// red redacts the whole message before it is bounded; a message it withholds is left empty and
+// DeliveryStatus.MessageWithheld says so.
+func statusOf(kind string, u *unstructured.Unstructured, red func(string) (string, bool)) providers.DeliveryStatus {
 	obj := u.Object
 	status := fluxstatus.Status(obj)
 	generation, hasGeneration := fluxstatus.Generation(obj)
@@ -227,9 +229,9 @@ func statusOf(kind string, u *unstructured.Unstructured, red func(string) string
 		Ready:              fluxstatus.Ready(obj),
 		Generation:         max(generation, 0),
 		ObservedGeneration: max(observed, 0),
-		Message:            bounded(fluxstatus.ReadyMessage(obj), red),
 		Suspended:          sourcemap.Suspended(u),
 	}
+	st.Message, st.MessageWithheld = bounded(fluxstatus.ReadyMessage(obj), red)
 	cond, typ := fluxstatus.Failing(status, generation, hasGeneration)
 	reason, _ := cond["reason"].(string)
 	st.Failed = cond != nil && (typ != fluxstatus.ConditionReady || reason != fluxstatus.ReasonHealthCheckCanceled)
@@ -251,20 +253,23 @@ func commitOf(revision string) (ref, commit string) {
 }
 
 // bounded returns s as valid UTF-8, redacted whole by a non-nil red, and at most MaxMessageBytes long, cut at
-// a rune boundary.
-func bounded(s string, red func(string) string) string {
+// a rune boundary; or nothing and withheld true when red withheld it (its flag, never its text).
+func bounded(s string, red func(string) (string, bool)) (_ string, withheld bool) {
 	s = strings.ToValidUTF8(s, "�")
 	if red != nil {
-		s = red(s)
+		var ok bool
+		if s, ok = red(s); !ok {
+			return "", true
+		}
 	}
 	if len(s) <= MaxMessageBytes {
-		return s
+		return s, false
 	}
 	cut := MaxMessageBytes
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return s[:cut]
+	return s[:cut], false
 }
 
 // readError classifies a failed read. The API server's text is dropped: it can repeat names from the request.

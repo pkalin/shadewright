@@ -283,17 +283,34 @@ func (b *Builder) seriesLines(l *lines, plan metricPlan, res providers.MetricsRe
 		}
 		return
 	}
-	out := make([]string, 0, len(res.Series))
+	out := make([]frag, 0, len(res.Series))
 	for _, s := range res.Series {
 		keys := slices.Sorted(maps.Keys(s.Labels))
-		pairs := make([]string, 0, len(keys))
+		pairs := make([]frag, 0, len(keys))
 		for _, k := range keys {
-			pairs = append(pairs, b.value(k)+"="+b.value(s.Labels[k]))
+			pairs = append(pairs, cat(b.value(k), "=", b.value(s.Labels[k])))
 		}
 		// A series line is the source's answer; the partial mark after it is code.
-		out = append(out, l.data(plan.template+"{"+strings.Join(pairs, ",")+"} "+valuesOf(plan, s.Samples))+partial)
+		out = append(out, cat(l.data(cat(plan.template+"{", joinFrags(pairs, ","), "} "+valuesOf(plan, s.Samples))), partial))
 	}
-	slices.Sort(out)
+	// Sorted as the release before #845 sorted them, by the lines as it wrote them (releasedKey), so that its
+	// reading reads them in its order. One line needs no order, and a value repeated in the lines of an answer (a
+	// pod or namespace label) is read for the order once: the decision of the section reads each value again, so
+	// the order adds at most one reading of each distinct value of an answer to it (P3 of #845).
+	if len(out) > 1 {
+		written := make(map[string]string)
+		keys := make([]string, len(out))
+		idx := make([]int, len(out))
+		for i, f := range out {
+			idx[i], keys[i] = i, b.releasedKey(f, written)
+		}
+		slices.SortStableFunc(idx, func(x, y int) int { return strings.Compare(keys[x], keys[y]) })
+		sorted := make([]frag, len(out))
+		for i, j := range idx {
+			sorted[i] = out[j]
+		}
+		out = sorted
+	}
 	for _, line := range out {
 		l.add("%s", line)
 	}

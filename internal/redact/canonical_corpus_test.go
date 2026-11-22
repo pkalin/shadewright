@@ -49,8 +49,9 @@ const CanonEntryLeaks = "testdata/canonical-leaks-entry.tsv"
 // main has; its first lines name the commit and list the entry points.
 const CanonMainEntryLeaks = "testdata/canonical-main-entry.tsv"
 
-// canonSampleDivisor is the share of the corpus checked under the race detector and in short mode: one input
-// in 32, chosen with a fixed seed. The full corpus runs in the pass without -race (make test).
+// canonSampleDivisor is the share of the corpus checked in short mode: one input in 32, chosen with a fixed seed.
+// Under the race detector it is one in 2*raceSampleEvery (decision of 2026-11-21 on #873). The full corpus runs in
+// the pass without -race (make test).
 const canonSampleDivisor = 32
 
 // canonSample returns cases, or under the race detector and in short mode a seeded sample of them, and
@@ -59,10 +60,14 @@ func canonSample(cases []canonCase) ([]canonCase, bool) {
 	if !raceDetector && !testing.Short() {
 		return cases, false
 	}
+	divisor := canonSampleDivisor
+	if raceDetector {
+		divisor = 2 * raceSampleEvery
+	}
 	rng := rand.New(rand.NewPCG(845, 8)) //nolint:gosec // a fixed seed keeps the sample the same on every run
 	var out []canonCase
 	for _, c := range cases {
-		if rng.IntN(canonSampleDivisor) == 0 {
+		if rng.IntN(divisor) == 0 {
 			out = append(out, c)
 		}
 	}
@@ -409,7 +414,7 @@ func TestCanonCorpusIsByConstruction(t *testing.T) {
 		for _, r := range c.secrets {
 			s := c.in[r[0]:r[1]]
 			switch {
-			case strings.HasPrefix(s, "Qz") && len(s) == 11:
+			case len(s) == 11 && (strings.HasPrefix(s, "Qz") || strings.HasPrefix(s, "Q!") || strings.Trim(s, "0123456789") == ""):
 				// A generated secret is unique in the corpus, and its prefix and suffix tell it from the other
 				// pieces of its input.
 				if other, ok := seen[s]; ok {
@@ -458,7 +463,7 @@ func TestCanonCorpusIsByConstruction(t *testing.T) {
 // byte for byte.
 func canonStringLeaksOf(c canonCase) []CanonLeak {
 	red := make([]bool, len(c.in))
-	for _, sp := range defaultRedactor.spans(c.in) {
+	for _, sp := range defaultRedactor.spans(nil, c.in) {
 		for i := sp.start; i < sp.end; i++ {
 			red[i] = true
 		}
@@ -539,7 +544,7 @@ func TestCanonCorpusStillRedactsWhatMainRedacted(t *testing.T) {
 		if !want[row.Hash] {
 			continue
 		}
-		now := defaultRedactor.spans(c.in)
+		now := defaultRedactor.spans(nil, c.in)
 		for _, sp := range row.Spans {
 			for i := sp[0]; i < sp[1]; i++ {
 				if !coveredBy([2]int{i, i + 1}, now) {

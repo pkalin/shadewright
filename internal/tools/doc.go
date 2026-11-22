@@ -42,20 +42,26 @@ limitations under the License.
 //   - a timeout for its reads (Config.Timeout), and a byte bound on its result.
 //
 // Arguments come from the model and are untrusted (invariant 4, and invariant 1: model output is never
-// authorization): they choose what to read within those bounds, never how. A refusal says which rule refused
-// in a fixed text and never echoes an argument. Results are cluster data, untrusted too: every piece of text
-// goes through the [Redactor] before any cut, values are left out whole when longer than 1 KiB and their
-// control characters become spaces, the assembled text is redacted again, and only whole lines are cut from
-// redacted text. A log excerpt is rendered by package incidentcontext's RenderLog, as in the context: it first
-// loses the leading lines that may continue an entry whose first line the source left out, before
-// redaction, its header is budgeted first, and every cut keeps the header and the newest lines. get_resource
-// leaves out annotations, managed fields, literal environment values, the metadata of volume claim templates
-// and the containers' termination messages; it redacts each string of the object as it was read, before JSON
-// escapes its line breaks, and encodes the object without HTML escapes, so that no escape hides what a rule
-// reads (a block scalar's lines, a folded indicator ">"). The error text of a failed read never reaches the result.
+// authorization): they choose what to read within those bounds, never how. A refusal says which rule refused in a
+// fixed text and never echoes an argument. Results are cluster data, untrusted too: every piece of text goes through
+// the [Redactor] before any cut; in an answer written as lines, a value longer than 1 KiB once decided is left out
+// whole and its control characters become spaces, and only whole lines are cut from redacted text (get_resource
+// bounds its JSON instead, by leaveOut below); the assembled text is not redacted again (#845). A
+// log excerpt is rendered by package incidentcontext's RenderLog, as in the context: it first loses the leading
+// lines that may continue an entry whose first line the source left out, before redaction, its header is budgeted
+// first, and every cut keeps the header and the newest lines. get_resource leaves out annotations, managed fields,
+// literal environment values, the metadata of volume claim templates and the containers' termination messages. Every
+// tool decides its answer once, on the text it returns (layout.go, #845): the object's JSON for get_resource, whose
+// string tokens are walked in one pass and are the pieces, the lines for the others but get_pod_logs, whose excerpt
+// RenderLog decides as above, each value written as the answer writes it; a key in one field or list item and its value
+// in a later one are seen together, a value under a secret key the object gives (a map key, a field name) is
+// hidden whole, line breaks included, and keys that are decided or written alike are renamed apart, so a map keeps
+// every entry, unless the answer is over its bound: values, then long keys, then the whole answer may be left out,
+// each replaced by a note of its size (leaveOut). The error text of a failed read never reaches the result.
 // [Result.Content] puts the text in a delimited block that says it is data, never instructions, and that the
 // text cannot close: every angle bracket and look-alike in it is escaped.
 //
-// query_metrics names one pod (or, for the Deployment template, one Deployment) that the tool reads first in
+// query_metrics writes each label of a series as "name=value", the value under its name, so a secret label name
+// hides its whole value (#845). It names one pod (or, for the Deployment template, one Deployment) that the tool reads first in
 // the requested namespace, so a query only ever selects an object that exists there, never a name pattern.
 package tools

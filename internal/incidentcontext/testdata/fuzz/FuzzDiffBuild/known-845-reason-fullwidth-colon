@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\x00\x00password：Authorization\x1e\x01\x1epassword：Authorization\x1e\x01")

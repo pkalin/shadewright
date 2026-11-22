@@ -156,32 +156,41 @@ func TestOrphanedBlockScalarSecretIsDropped(t *testing.T) {
 }
 
 // The build deadline bounds the whole build: once it passes, the remaining source calls are not made and
-// their sections are "could not fetch", an escalation; the build itself does not fail.
+// their sections are "could not fetch", an escalation; the build itself does not fail. The deadline is 500 ms
+// and is to expire during the log read: a build that has not reached the log read by then (the target's reads
+// on a loaded machine under -race) runs again with a longer deadline (underLoad).
 func TestBuildDeadline(t *testing.T) {
-	var metricCalls, logCalls atomic.Int32
-	src := webSources()
-	b := newBuilder(t, reader(t, webObjects()...), src, func(c *Config) {
-		// Long enough for the target to resolve under the race detector on a busy runner, so the deadline
-		// expires during the log read.
-		c.BuildTimeout = 500 * time.Millisecond
-		c.Logs = logFunc(func(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
-			logCalls.Add(1)
-			select {
-			case <-ctx.Done():
-				return providers.LogExcerpt{}, ctx.Err()
-			case <-time.After(10 * time.Second):
-				return providers.LogExcerpt{}, errors.New("slow source")
-			}
+	type run struct {
+		c                     *Context
+		metricCalls, logCalls atomic.Int32
+		took                  time.Duration
+	}
+	r, _ := underLoad(t, func(k time.Duration) (*run, bool) {
+		r := &run{}
+		b := newBuilder(t, reader(t, webObjects()...), webSources(), func(c *Config) {
+			c.BuildTimeout = 500 * time.Millisecond * k
+			c.Logs = logFunc(func(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
+				r.logCalls.Add(1)
+				select {
+				case <-ctx.Done():
+					return providers.LogExcerpt{}, ctx.Err()
+				case <-time.After(10 * time.Second):
+					return providers.LogExcerpt{}, errors.New("slow source")
+				}
+			})
+			c.Metrics = metricsFunc(func(context.Context, providers.MetricsQuery) (providers.MetricsResult, error) {
+				r.metricCalls.Add(1)
+				return providers.MetricsResult{}, nil
+			})
 		})
-		c.Metrics = metricsFunc(func(context.Context, providers.MetricsQuery) (providers.MetricsResult, error) {
-			metricCalls.Add(1)
-			return providers.MetricsResult{}, nil
-		})
+		start := time.Now()
+		r.c = build(t, b, incident(deploymentRef()))
+		r.took = time.Since(start)
+		return r, r.logCalls.Load() > 0
 	})
-	start := time.Now()
-	c := build(t, b, incident(deploymentRef()))
-	if d := time.Since(start); d > 5*time.Second {
-		t.Errorf("the build took %s", d)
+	c, metricCalls, logCalls := r.c, &r.metricCalls, &r.logCalls
+	if r.took > 5*time.Second {
+		t.Errorf("the build took %s", r.took)
 	}
 	if metricCalls.Load() != 0 || logCalls.Load() != 1 {
 		t.Errorf("%d log calls and %d metric calls after the deadline", logCalls.Load(), metricCalls.Load())
@@ -254,23 +263,21 @@ func TestRecentPodSubjectIsCertain(t *testing.T) {
 }
 
 // RenderLog budgets the header first: the whole text stays within the budget and keeps the newest line,
-// however long the header; FitLog keeps both after a second pass that grows the text.
+// however long the header; FitLog keeps both in a smaller bound.
 func TestRenderLogBudgetsTheHeaderFirst(t *testing.T) {
 	var body strings.Builder
 	for i := 0; body.Len() < 900; i++ {
 		fmt.Fprintf(&body, "line %03d\n", i)
 	}
 	body.WriteString("newest\n")
-	id := func(s string) string { return s }
 	ex := providers.LogExcerpt{Text: body.String(), Instance: providers.LogInstance{ContainerID: strings.Repeat("c", 400)}}
-	v := RenderLog(id, "pod p container c, current instance", ex, nil, 1000, 1000)
+	v := RenderLog(noRedaction{}, false, "pod p container c, current instance", ex, nil, 1000, 1000)
 	if len(v.Text) > 1000 || !strings.HasSuffix(v.Text, "newest\n") || !v.Cut || v.HeadLen < 400 ||
 		!strings.HasPrefix(v.Text, "pod p container c") {
 		t.Fatalf("%d bytes, header %d, cut %t:\n%s", len(v.Text), v.HeadLen, v.Cut, v.Text)
 	}
-	grow := func(s string) string { return strings.ReplaceAll(s, "line", "line+") }
-	text, head, cut := FitLog(grow, v.Text, v.HeadLen, 1000)
-	if len(text) > 1000 || !strings.HasSuffix(text, "newest\n") || !cut || head != v.HeadLen ||
+	text, head, cut := FitLog(v.Text, v.HeadLen, 900)
+	if len(text) > 900 || !strings.HasSuffix(text, "newest\n") || !cut || head != v.HeadLen ||
 		!strings.Contains(text, strings.Repeat("c", 400)) {
 		t.Fatalf("%d bytes, header %d, cut %t:\n%s", len(text), head, cut, text)
 	}

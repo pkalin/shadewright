@@ -66,12 +66,15 @@ func bothExitedBeforeWindow() []client.Object {
 // excerpts. Reading the first container's previous instance before the second container's current one used
 // up the budget and cut that read short.
 func TestFirstReadsComeBeforeSecondReads(t *testing.T) {
-	const call = 400 * time.Millisecond
-	l := &timedLogs{
-		plan:    map[string][2]outcome{crashPod: {slow, hangs}, secondPod: {slow, hangs}},
-		slowFor: 240 * time.Millisecond,
-	}
-	c, _, _, _ := timedBuildOf(t, bothExitedBeforeWindow(), l, call, 10*time.Second)
+	r, k := underLoad(t, func(k time.Duration) (timedRun, bool) {
+		l := &timedLogs{
+			plan:    map[string][2]outcome{crashPod: {slow, hangs}, secondPod: {slow, hangs}},
+			slowFor: 240 * time.Millisecond * k,
+		}
+		c, _, _, reached := timedBuildOf(t, bothExitedBeforeWindow(), l, 400*time.Millisecond*k, 10*time.Second*k)
+		return timedRun{c: c, l: l}, reached
+	})
+	c, l, call := r.c, r.l, 400*time.Millisecond*k
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if len(l.calls) < 2 || l.calls[0].Pod != crashPod || l.calls[0].Previous ||
@@ -159,8 +162,9 @@ func oneReadPerContainer(plan map[string][2]outcome, previousFirst bool) ([]prov
 // context; the log excerpt is failed exactly when the reference's is; the second reads follow only a first
 // read that did not fail, at most one per container, ending within two call timeouts of the first call.
 func TestLogReadsMatchOneReadPerContainer(t *testing.T) {
-	// A slow answer comes 90 ms before the call timeout, a margin for the time from the builder setting a
-	// call's deadline to the fake source starting its timer, under -race on a loaded machine.
+	// A slow answer comes 90 ms before the call timeout, decided by the call's deadline. The reads of the
+	// target run with the call timeout too: a build that makes no log call runs again with longer durations
+	// (underLoad).
 	const call, slowFor = 150 * time.Millisecond, 60 * time.Millisecond
 	// The table of the budget tests (each outcome for both instances, and after a current instance that
 	// answers), with slow answers before a second read. A plan is the current, then the previous instance's
@@ -192,8 +196,12 @@ func TestLogReadsMatchOneReadPerContainer(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/%v-%v_%v-%v", f.name, a[0], a[1], b[0], b[1]), func(t *testing.T) {
 					t.Parallel()
 					plan := map[string][2]outcome{crashPod: a, secondPod: b}
-					l := &timedLogs{plan: plan, slowFor: slowFor}
-					c, metricReads, _, _ := timedBuildOf(t, f.objs(), l, call, 10*time.Second)
+					r, k := underLoad(t, func(k time.Duration) (timedRun, bool) {
+						l := &timedLogs{plan: plan, slowFor: slowFor * k}
+						c, metricReads, _, reached := timedBuildOf(t, f.objs(), l, call*k, 10*time.Second*k)
+						return timedRun{c, l, metricReads}, reached
+					})
+					c, l, metricReads, call := r.c, r.l, r.metricReads, call*k
 					l.mu.Lock()
 					defer l.mu.Unlock()
 					want, excerpts, failed := oneReadPerContainer(plan, f.previousFirst)

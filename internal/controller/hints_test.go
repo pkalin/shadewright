@@ -48,6 +48,7 @@ import (
 	"github.com/pkalin/shadewright/internal/policy/freshness"
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
+	"github.com/pkalin/shadewright/internal/redact"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
@@ -430,6 +431,24 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Expect(refusals()).To(HaveKeyWithValue(unclean, remediationv1alpha1.HintRefusalNotRedactable))
 		Expect(fetch().Status.Hints).To(BeEmpty(), "nothing is stored in part")
 		Expect(asks()).To(Equal(2), "the author is asked first, once per look")
+	})
+
+	It("refuses a hint redaction withholds whole as not redactable, never storing the marker (#873)", func() {
+		// "--token,}" repeated costs the reading of the release before more than the budget of redaction, so the
+		// hint redacts to redact.Withheld, which is short and clean but is not the hint.
+		withheld := byWriter("/shadewright reanalyze: " + strings.Repeat("--token,}", 6144))
+		poll()
+		Expect(refusals()).To(HaveKeyWithValue(withheld, remediationv1alpha1.HintRefusalNotRedactable))
+		Expect(fetch().Status.Hints).To(BeEmpty())
+	})
+
+	It("stores a hint that spells the withheld marker as text: withheld is a flag, not a text (#873)", func() {
+		spelled := byWriter("/shadewright reanalyze: " + redact.Withheld)
+		poll()
+		Expect(refusals()).NotTo(HaveKey(spelled))
+		hints := fetch().Status.Hints
+		Expect(hints).To(HaveLen(1))
+		Expect(hints[0].Text).To(Equal(redact.Withheld))
 	})
 
 	It("handles a comment once across restarts, also when it is returned again on the watermark", func() {

@@ -473,9 +473,12 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 			refuse(remediationv1alpha1.HintRefusalCapReached)
 			continue
 		}
-		stored := redact.String(text)
+		// Withheld is told by the flag, never by the text: a hint that spells the marker is a hint like any other.
+		// NotRedactable is decided before TooLong, as HintRefusal says: a long hint whose redaction runs out of its
+		// budget has no redacted length to compare, so it is refused as NotRedactable.
+		stored, decided := redact.StringChecked(text)
 		switch {
-		case !hintClean(stored):
+		case !decided || !hintClean(stored):
 			refuse(remediationv1alpha1.HintRefusalNotRedactable)
 			continue
 		case len(stored) > remediationv1alpha1.MaxHintTextBytes:

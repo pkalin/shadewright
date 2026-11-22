@@ -316,40 +316,53 @@ func TestLogReadsMetricIsBounded(t *testing.T) {
 	want := map[string]metricguard.Labels{
 		"shadewright_analyzer_context_log_reads_without_lines_total": {logReasonLabelName: logReadReasons},
 	}
-	metricguard.Check(t, metrics.Registry, want)
+	metricguard.Check(t, metrics.Registry, metricguard.WithRedaction(want))
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), want)
 }
 
 // A log source that fails costs one read per container: a failed read is not followed by a read of the
 // other instance, so a hanging source cannot use up the build deadline and take the metrics with it.
 func TestFailedLogReadIsNotReadAgain(t *testing.T) {
-	src := webSources()
-	var mu sync.Mutex
-	var logReads, metricReads int
-	b := newBuilder(t, reader(t, webObjects()...), src, func(c *Config) {
-		// The build deadline leaves room for a second read of the hanging source, which must not come, and for
-		// the metrics after the one read, also on a loaded runner.
-		c.SourceTimeout = 400 * time.Millisecond
-		c.BuildTimeout = 2 * time.Second
-		c.Logs = logFunc(func(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
-			mu.Lock()
-			logReads++
-			mu.Unlock()
-			<-ctx.Done()
-			return providers.LogExcerpt{}, ctx.Err()
+	type run struct {
+		c                     *Context
+		logReads, metricReads int
+	}
+	r, _ := underLoad(t, func(k time.Duration) (*run, bool) {
+		src := webSources()
+		r := &run{}
+		var mu sync.Mutex
+		var first time.Time
+		b := newBuilder(t, reader(t, webObjects()...), src, func(c *Config) {
+			// The build deadline leaves room for a second read of the hanging source, which must not come, and
+			// for the metrics after the one read, when the build reaches the log section within a quarter of it.
+			c.SourceTimeout = 400 * time.Millisecond * k
+			c.BuildTimeout = 2 * time.Second * k
+			c.Logs = logFunc(func(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
+				mu.Lock()
+				r.logReads++
+				if first.IsZero() {
+					first = time.Now()
+				}
+				mu.Unlock()
+				<-ctx.Done()
+				return providers.LogExcerpt{}, ctx.Err()
+			})
+			c.Metrics = metricsFunc(func(ctx context.Context, q providers.MetricsQuery) (providers.MetricsResult, error) {
+				mu.Lock()
+				r.metricReads++
+				mu.Unlock()
+				return src.metrics.Query(ctx, q)
+			})
 		})
-		c.Metrics = metricsFunc(func(ctx context.Context, q providers.MetricsQuery) (providers.MetricsResult, error) {
-			mu.Lock()
-			metricReads++
-			mu.Unlock()
-			return src.metrics.Query(ctx, q)
-		})
+		start := time.Now()
+		r.c = build(t, b, incident(deploymentRef()))
+		mu.Lock()
+		defer mu.Unlock()
+		return r, !first.IsZero() && first.Sub(start) < 500*time.Millisecond*k
 	})
-	c := build(t, b, incident(deploymentRef()))
-	mu.Lock()
-	defer mu.Unlock()
-	if logReads != 1 || metricReads == 0 {
-		t.Errorf("%d log reads, %d metric reads: want 1 log read and the metrics read", logReads, metricReads)
+	c := r.c
+	if r.logReads != 1 || r.metricReads == 0 {
+		t.Errorf("%d log reads, %d metric reads: want 1 log read and the metrics read", r.logReads, r.metricReads)
 	}
 	if got := sectionNames(c.FailedSources); strings.Join(got, ",") != string(SectionLogs) {
 		t.Errorf("failed sources %v, want the log excerpt only", got)

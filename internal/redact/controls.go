@@ -200,9 +200,12 @@ func StringShownChecked(s string, keep ...string) (out string, ok bool) {
 // RenderLog decide with it. The result still holds the controls; the caller removes them
 // (incidentcontext.ShownText). ok is false when the entry is withheld, and out is then Withheld.
 func (r *Redactor) StringTwiceShownChecked(s string, cut func(string) int) (out string, ok bool) {
-	return meteredText(len(s), func(wm *meter.Meter) string {
-		return render(wm, s, settle(wm, s, append(r.shownMatches(wm, s), r.releasedString(wm, s, true, cut)...)))
-	})
+	return meteredText(len(s), func(wm *meter.Meter) string { return r.stringTwiceShown(wm, s, cut) })
+}
+
+// stringTwiceShown is StringTwiceShownChecked on the budget wm.
+func (r *Redactor) stringTwiceShown(wm *meter.Meter, s string, cut func(string) int) string {
+	return render(wm, s, settle(wm, s, append(r.shownMatches(wm, s), r.releasedString(wm, s, true, cut)...)))
 }
 
 // StringTwiceShownChecked is the package's StringTwiceShownChecked with the built-in rules.

@@ -99,6 +99,14 @@ var budgetEntries = []budgetEntry{
 	{"StringTwice", func(in string) int { return len(in) },
 		func(wm *meter.Meter, in string) string { return defaultRedactor.stringTwice(wm, in, nil) },
 		func(in string) string { return StringTwice(in, nil) }},
+	// The decisions on a text shown without its controls (#852): StringKeeping and StringTwice with the controls
+	// view read too.
+	{"StringShown", func(in string) int { return len(in) },
+		func(wm *meter.Meter, in string) string { return defaultRedactor.stringShown(wm, in, []string{"api"}) },
+		func(in string) string { out, _ := StringShownChecked(in, "api"); return out }},
+	{"StringTwiceShown", func(in string) int { return len(in) },
+		func(wm *meter.Meter, in string) string { return defaultRedactor.stringTwiceShown(wm, in, nil) },
+		func(in string) string { out, _ := StringTwiceShownChecked(in, nil); return out }},
 	{"ReplaceFrom", func(in string) int { return len(in) },
 		func(wm *meter.Meter, in string) string {
 			r := defaultRedactor

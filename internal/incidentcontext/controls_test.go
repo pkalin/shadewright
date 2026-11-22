@@ -90,6 +90,51 @@ func TestControlInsideAKeyIsHiddenByTheDecision(t *testing.T) {
 	}
 }
 
+// The size limit of a value counts the text as shown, after its controls are removed (decision of 2026-11-22 on
+// #852): a value of 1,500 bytes of which 500 are ESC is shown as its 1,000 visible bytes, where origin/main left
+// it out whole. The redactor still decides on the whole text as it was read, before the limit: a secret past the
+// byte where the text as read passes the limit, with controls before it and one inside its key, is hidden, never
+// shown.
+func TestValueSizeLimitCountsShownText(t *testing.T) {
+	const secret = "Hunter2Secret9x" // #nosec G101 -- not a credential: a made-up value the test looks for
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := strings.Repeat("ab\x1b", 500)
+	if got, want := Value(Twice(red), visible), strings.Repeat("ab", 500); got != want {
+		t.Errorf("Value of 1,500 bytes, 1,000 visible: %d bytes %.40q, want the 1,000 visible bytes", len(got), got)
+	}
+	if got, want := Value(Twice(red), strings.Repeat("ab\x1b", 513)), LeftOut(1026); got != want {
+		t.Errorf("Value of 1,026 visible bytes: %.40q, want %q", got, want)
+	}
+	before := strings.Repeat("ab\x1b", 400) // 1,200 bytes as read, 800 shown
+	for _, in := range []string{
+		before + " pass\x1bword=" + secret,
+		before + " password=" + secret,
+		before + " token: \x1b" + secret,
+	} {
+		if len(in)-len(secret) <= maxValueBytes {
+			t.Fatalf("the secret of %q starts before the limit", in)
+		}
+		var seen string
+		r := func(s string) string {
+			seen = s
+			return Twice(red)(s)
+		}
+		got := Value(r, in)
+		if seen != in {
+			t.Errorf("the redactor decided on %d bytes, not the %d read", len(seen), len(in))
+		}
+		if strings.Contains(got, secret) || strings.ContainsFunc(got, removedControl) {
+			t.Errorf("Value(%q) = %q, shows the secret or a control", in[len(before):], got[min(len(got), 800):])
+		}
+		if !strings.HasPrefix(got, strings.Repeat("ab", 400)) {
+			t.Errorf("Value(%q) left out its 800 visible bytes before the secret: %.40q", in[len(before):], got)
+		}
+	}
+}
+
 // Every section of a built context that shows text from the cluster (the Incident's summary, the status of
 // the subject and its pods, the log excerpts, the metric labels) shows it without controls, in its text and
 // in every part a quote may cite, and keeps the visible text: an ANSI-coloured log line is quotable as the

@@ -62,7 +62,7 @@ Both families need a model and a key file unless `--dry-run` is set. The two key
 
 ## Output and exit codes
 
-The score JSON has `status` (`scored`, `unjudged`, `invalid`, `quarantined` or `budget`), the `check` and the fixed `reason` of a refusal, the redactor's rule `kinds`, the record's ID and SHA-256, the month, the record's and the judge's family, the judge's model, `crossCheck` (`answered`, `notSent` or `budget`; absent when not asked), the prompt version, the `answer`, the tokens `reserved` and the `usage` the providers reported. It holds no record text: every string in it is fixed by code, a checked shape, or the judge's note after the redactor found nothing in it. In the job, `quarantined` and `budget` go to the quarantine container and the `budget/` prefix (ADR-0047 section 5); a file run writes them as a score with that status.
+The score JSON has `status` (`scored`, `unjudged`, `invalid`, `quarantined` or `budget`), the `check` and the fixed `reason` of a refusal, the redactor's rule `kinds`, the record's ID and SHA-256, the month, the record's and the judge's family, the judge's model, `crossCheck` (`answered`, `notSent` or `budget`; absent when not asked), the prompt version, the `answer`, the tokens `reserved` and the `usage` the providers reported. It holds no record text: every string in it is fixed by code, a checked shape, or the judge's note, without its control characters, after the redactor found nothing in it. In the job, `quarantined` and `budget` go to the quarantine container and the `budget/` prefix (ADR-0047 section 5); a file run writes them as a score with that status.
 
 | Exit | Meaning |
 | --- | --- |

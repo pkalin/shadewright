@@ -67,38 +67,48 @@ var withholdShapes = map[string]withholdShape{
 // withholdSizes are, for each known expensive shape and entry point, the largest size of the text in bytes that is
 // decided inside its budget and the smallest that is withheld (one unit more), as TestBudgetWithholdSizes finds
 // them. They are the only source of these figures: the pages (ADR-0015, design 10.3, troubleshooting, the metrics
-// reference) and the comments of budget.go cite this test. Every shape at String, StringTwice (StringTwiceChecked)
-// and Strings, whose lines are the strings of the sequence; "--token,}" at every entry point. One text, so that the
-// names of budgetEntries stay literals there alone.
+// reference) and the comments of budget.go cite this test. Every shape at String, StringTwice (StringTwiceChecked),
+// StringTwiceShown (StringTwiceShownChecked, the context builder's decision since #852) and Strings, whose lines are
+// the strings of the sequence; "--token,}" at every entry point; "-password," also at StringShown
+// (StringShownChecked, the reviewer hint's). One text, so that the names of budgetEntries stay literals there alone.
 const withholdSizes = `
---token,}         String        6039   6048
---token,}         StringKeeping 6030   6039
---token,}         Clean         6039   6048
---token,}         StringTwice   6039   6048
---token,}         ReplaceFrom   6039   6048
---token,}         Replace       6039   6048
---token,}         ReleasedText  6300   6309
---token,}         Strings       2709   2718
---token,}         PiecesWithin  5625   5634
---token,}         PiecesFitting 5625   5634
--password,        String        9600   9610
--password,        StringTwice   9600   9610
--password,        Strings       4440   4450
-TOKEN-blank-line  String        30562  30571
-TOKEN-blank-line  StringTwice   25342  25351
-TOKEN-blank-line  Strings       11572  11581
-glued-auth        String        34808  34816
-glued-auth        StringTwice   31448  31456
-glued-auth        Strings       9752   9760
-glued-auth-tail   String        29292  29300
-glued-auth-tail   StringTwice   26908  26916
-glued-auth-tail   Strings       9292   9300
-glued-token       String        99711  99720
-glued-token       StringTwice   72108  72117
-glued-token       Strings       10647  10656
-glued-token-tail  String        61672  61681
-glued-token-tail  StringTwice   49954  49963
-glued-token-tail  Strings       10003  10012
+--token,}         String           6039   6048
+--token,}         StringKeeping    6030   6039
+--token,}         Clean            6039   6048
+--token,}         StringTwice      6039   6048
+--token,}         StringShown      6030   6039
+--token,}         StringTwiceShown 6030   6039
+--token,}         ReplaceFrom      6039   6048
+--token,}         Replace          6039   6048
+--token,}         ReleasedText     6300   6309
+--token,}         Strings          2709   2718
+--token,}         PiecesWithin     5625   5634
+--token,}         PiecesFitting    5625   5634
+-password,        String           9600   9610
+-password,        StringTwice      9600   9610
+-password,        StringShown      9580   9590
+-password,        StringTwiceShown 9590   9600
+-password,        Strings          4440   4450
+TOKEN-blank-line  String           30562  30571
+TOKEN-blank-line  StringTwice      25342  25351
+TOKEN-blank-line  StringTwiceShown 25180  25189
+TOKEN-blank-line  Strings          11572  11581
+glued-auth        String           34808  34816
+glued-auth        StringTwice      31448  31456
+glued-auth        StringTwiceShown 31328  31336
+glued-auth        Strings          9752   9760
+glued-auth-tail   String           29292  29300
+glued-auth-tail   StringTwice      26908  26916
+glued-auth-tail   StringTwiceShown 26580  26588
+glued-auth-tail   Strings          9292   9300
+glued-token       String           99711  99720
+glued-token       StringTwice      72108  72117
+glued-token       StringTwiceShown 71082  71091
+glued-token       Strings          10647  10656
+glued-token-tail  String           61672  61681
+glued-token-tail  StringTwice      49954  49963
+glued-token-tail  StringTwiceShown 49675  49684
+glued-token-tail  Strings          10003  10012
 `
 
 // withholdRow is one line of withholdSizes.

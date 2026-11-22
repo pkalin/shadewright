@@ -251,6 +251,8 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 		// What String hides in the answer, the reading of the release before included, as String reads it: a match
 		// is not ended at the line breaks of the values (#845, fifteenth decision, P2).
 		whole := append(slices.Clone(matches), r.releasedString(wm, answer, false, nil)...)
+		// The strings as one sequence: a line break between two of them ends no command (#1075, shortflag.go).
+		whole = append(whole, shortFlagSequence(wm, answer, len(r.rules))...)
 		r.cutAnswer(wm, ps, l.add, settle(wm, answer, whole), widen, text)
 	}
 	reading2 := endAtValueLines(wm, ps, l.w, answer, matches)

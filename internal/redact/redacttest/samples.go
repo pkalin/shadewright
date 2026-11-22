@@ -67,6 +67,7 @@ func Samples() []Sample {
 		{Secret: "jane.doe@example.com"},
 		{Secret: "10.20.30.40"},
 		{Secret: "2001:db8:85a3::8a2e:370:7334"},
+		{Key: "redis-cli -a ", Secret: value},
 	}
 	for i := range s {
 		s[i].Rule = i

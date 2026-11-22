@@ -181,6 +181,7 @@ func corpusShapes(n int) map[string]string {
 	out["repeated quoted keys"] = repeatedQuotedKeys(n / len(repeatedQuotedKeys(1)))
 	maps.Copy(out, gluedQuotedPairs(n))
 	maps.Copy(out, budgetShapes(n))
+	maps.Copy(out, shortFlagShapes(n))
 	out[passwordFlagRun] = strings.Repeat(passwordFlagUnit, n/len(passwordFlagUnit))
 	out[`TOKEN="a" before a blank line`] = strings.Repeat(`TOKEN="a"`, n/len(`TOKEN="a"`)) + "\"\n" +
 		strings.Repeat(" ", 4096) + "\"："

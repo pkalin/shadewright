@@ -170,10 +170,16 @@ func heapBound(n int) uint64 { return uint64(HeapFixed + HeapPerByte*int64(n)) }
 // heapSample is the metric the probe samples: the bytes of heap objects, live or not yet swept.
 const heapSample = "/memory/classes/heap/objects:bytes"
 
+// heapProcs is the GOMAXPROCS peakLiveHeap measures under: CI's hosted runners have four cores, and the pacing of
+// the collector, so the garbage a sample still holds, depends on how many run (#1087: ReplaceFrom on secrets held
+// 34.9 MiB on 24 cores and less on four). A fixed count makes the figure the same on every machine.
+const heapProcs = 4
+
 // peakLiveHeap returns the most heap f held at once over the heap before it, sampled every half millisecond
-// while the collector runs at GOGC 10 under a soft limit of 96 MiB, so that a sample stays close to what f keeps
-// alive.
+// while the collector runs at GOGC 10 under a soft limit of 96 MiB and GOMAXPROCS heapProcs, so that a sample
+// stays close to what f keeps alive.
 func peakLiveHeap(f func()) uint64 {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(heapProcs))
 	defer debug.SetGCPercent(debug.SetGCPercent(10))
 	defer debug.SetMemoryLimit(debug.SetMemoryLimit(96 << 20))
 	s := []metrics.Sample{{Name: heapSample}}

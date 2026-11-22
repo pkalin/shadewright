@@ -122,13 +122,7 @@ func base64Windows(wm *meter.Meter, run string, add func(start, end int)) {
 func windowParts(wm *meter.Meter, run string) []windowPart {
 	// The parts counted to size the slice: the loop that builds them counts the steps of this one too, as the one
 	// loop over the parts did before (a step a part).
-	n := 0
-	eachPart(nil, run, func(start, end int) {
-		if !emptyPart(run, start, end) {
-			n++
-		}
-	})
-	parts := make([]windowPart, 0, n)
+	parts := make([]windowPart, 0, countParts(run))
 	var gap uint8
 	eachPart(wm, run, func(start, end int) {
 		if emptyPart(run, start, end) {
@@ -144,8 +138,24 @@ func windowParts(wm *meter.Meter, run string) []windowPart {
 	return parts
 }
 
-// eachPart calls f with the byte range of each slash-separated part of run, in order, a step a part (none with wm
-// nil).
+// countParts returns the parts of run that are not empty. It counts no step: the loop that builds them counts
+// one a part.
+func countParts(run string) int {
+	n := 0
+	for pos := 0; pos <= len(run); {
+		end := pos + strings.IndexByte(run[pos:], '/')
+		if end < pos {
+			end = len(run)
+		}
+		if !emptyPart(run, pos, end) {
+			n++
+		}
+		pos = end + 1
+	}
+	return n
+}
+
+// eachPart calls f with the byte range of each slash-separated part of run, in order, a step a part.
 func eachPart(wm *meter.Meter, run string, f func(start, end int)) {
 	for pos := 0; pos <= len(run); {
 		tick(wm, 1)

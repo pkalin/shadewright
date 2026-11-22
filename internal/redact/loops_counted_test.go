@@ -94,6 +94,7 @@ var boundedLoops = map[string]string{
 	"(*rule).each#0":               "the matches of the expression, each counted by f",
 	"(*Redactor).releasedPieces#0": entrySize,
 	"kindIndex#0":                  "the kinds of the rules, a few",
+	"countParts#0":                 "the parts of a run, counted by eachPart when windowParts builds them",
 }
 
 // entrySize is the bound of a loop that adds up the lengths of the strings or pieces of one entry.

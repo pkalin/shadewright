@@ -57,13 +57,14 @@ type releasedReading struct {
 	onto   string
 	// read holds what each text a pass read was found to hold: a value repeated in the pieces of an answer (a
 	// label in the series of every metric template) is read by that release's rules once (#873, second round).
-	// The spans depend on the text only. Only texts of at most maxReadKept bytes are kept: a longer one is no
-	// label, and reading it again costs as much as its bytes, which its entry counts each time (#1087: the spans of
-	// each whole text a pass read were kept to the end).
-	read map[string][]released.Span
+	// The spans depend on the text only. A text longer than maxReadKept bytes is kept only when the passes read
+	// pieces (pieces), which repeat: the answer or the string a pass reads whole is read once, and is not held to
+	// the end with its spans (#1087).
+	read   map[string][]released.Span
+	pieces bool
 }
 
-// maxReadKept is the longest text whose spans a releasedReading keeps for a later pass on the same text.
+// maxReadKept is the longest text whose spans a releasedReading keeps the first time it reads it.
 const maxReadKept = 4 << 10
 
 // hide adds the span [lo, hi) of the text decided on, of the kind given, widened to its characters.
@@ -90,7 +91,7 @@ func (x *releasedReading) pass(wm *meter.Meter, t trace) trace {
 	switch {
 	case ok:
 		tick(wm, len(t.text)) // the lookup hashes the text
-	case len(t.text) > maxReadKept:
+	case len(t.text) > maxReadKept && !x.pieces:
 		found = x.r.SpansWithin(wm, t.text)
 	default:
 		found = x.r.SpansWithin(wm, t.text)
@@ -228,6 +229,7 @@ func (r *Redactor) releasedPieces(wm *meter.Meter, ps []Piece) []span {
 	}
 	l := r.newMatchList()
 	x := r.releasedReading(wm, read.String(), l)
+	x.pieces = true
 	var tb traceBuilder
 	off := 0
 	for _, p := range ps {

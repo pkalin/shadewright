@@ -47,7 +47,7 @@ func TestReleasedIsTheReleaseBefore(t *testing.T) {
 		"extent.go":  "83c7cd9d2f8b1de7af41019e7631c88eeb23962bfa3952a5f2edc6f54d0ba0aa",
 		"work.go":    "02ba296592fb1f3ac8f8d5cda941abe1ee782c89e7d1f7901844d6ae7211e3f5",
 		"lines.go":   "7ba72fa9847d6bce30faecc36b3385f67d85fe2e12ea512746a33452469b6a0c",
-		"windows.go": "62c688d6e48020c015f0ff59bf4d9e8bf3e7d28b2c9031e84d51bbff39a3c24e",
+		"windows.go": "b29e6df6e9380e45e3227d863bfa3dfa778c26e5a37b568db12f9ed3184d791e",
 	} {
 		b, err := os.ReadFile(name)
 		if err != nil {

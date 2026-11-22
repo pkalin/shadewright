@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	eventsv1 "k8s.io/api/events/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -42,21 +43,15 @@ import (
 // diff_fuzz_test.go need them: the text each tool rendered and redacted, with the redactor of that release
 // (package released) in place of package redact, every call of it recorded (redacttest.Recorder). Each function
 // names the origin/main file it comes from; what did not change since (strip, eventTime, eventCount, summary,
-// deliveryState, refcheck.Check, incidentcontext.KeepHead and RenderLog with a redactor that has only String) is
-// called, not copied.
+// deliveryState, refcheck.Check, incidentcontext.KeepHead and FitLog) is called, not copied. incidentcontext's
+// Shown and RenderLog remove control characters since #852, which origin/main kept (as spaces in a value, as they
+// were in an excerpt), so they are copied as origin/main had them (mainShown, renderLog): the release before read
+// its second pass over the text with those characters in it.
 
 // mainTools is the redaction of the tools of origin/main, with what it hid recorded.
 type mainTools struct {
 	rec *redacttest.Recorder
 }
-
-// redactorFunc is a Redactor of one function.
-type redactorFunc func(string) string
-
-func (f redactorFunc) String(s string) string { return f(s) }
-
-// StringChecked never withholds: origin/main had no work budget.
-func (f redactorFunc) StringChecked(s string) (string, bool) { return f(s), true }
 
 // once is the redactor of origin/main (s.redactor.String there).
 func (m mainTools) once(s string) string { return m.rec.Wrap(released.String)(s) }
@@ -67,7 +62,50 @@ func (m mainTools) redact(s string) string { return m.once(strings.ToValidUTF8(m
 
 // value is Set.value of origin/main tools.go: incidentcontext.Value there, on redact.
 func (m mainTools) value(s string) string {
-	return incidentcontext.Shown(m.redact(s))
+	return mainShown(m.redact(s))
+}
+
+// mainValueBytes is maxValueBytes of origin/main internal/incidentcontext.
+const mainValueBytes = 1024
+
+// mainShown is Shown of origin/main excerpt.go: a value over the bound left out whole, control characters and the
+// Unicode line and paragraph separators as spaces.
+func mainShown(v string) string {
+	if len(v) > mainValueBytes {
+		return incidentcontext.LeftOut(len(v))
+	}
+	return strings.Map(func(c rune) rune {
+		if unicode.IsControl(c) || c == '\u2028' || c == '\u2029' {
+			return ' '
+		}
+		return c
+	}, v)
+}
+
+// renderLog is RenderLog of origin/main excerpt.go for an answer of the log source (no error), with a redactor
+// that has only String and no refit: the header (the title, then the instance of the excerpt, or the note of an
+// answer larger than asked for, or of no lines), then the excerpt without its leading continuation lines, each
+// redacted and made valid UTF-8, the header cut to budget and the excerpt to its newest lines in what is left.
+// It returns the text and the length of its header.
+func (m mainTools) renderLog(title string, ex providers.LogExcerpt, asked, budget int) (string, int) {
+	header := title + "\n"
+	var body string
+	switch {
+	case len(ex.Text) > 2*asked:
+		header += "could not fetch: the answer was larger than asked for\n"
+	default:
+		in := ex.Instance
+		header += fmt.Sprintf("instance: pod uid %s, container id %s, restarts %d, read at %s\n", m.value(in.PodUID),
+			m.value(in.ContainerID), in.RestartCount, ex.CollectedAt.UTC().Format(time.RFC3339))
+		if ex.Text == "" {
+			header += "no log lines were returned\n"
+			break
+		}
+		body = ex.Text[providers.LeadingContinuation(ex.Text):]
+	}
+	head, _ := incidentcontext.KeepHead(strings.ToValidUTF8(m.redact(header), "?"), budget)
+	tail, _, _ := incidentcontext.FitLog(strings.ToValidUTF8(m.redact(body), "?"), 0, min(asked, budget-len(head)))
+	return head + tail, len(head)
 }
 
 // call is the end of Set.Call of origin/main tools.go: the whole text redacted again and cut to the tool's
@@ -230,8 +268,8 @@ func (m mainTools) podLogs(pod, ctr string, previous bool, ex providers.LogExcer
 		instance = "previous instance"
 	}
 	title := "pod " + m.value(pod) + " container " + m.value(ctr) + ", " + instance
-	v := incidentcontext.RenderLog(redactorFunc(m.redact), false, title, ex, nil, maxBytes, logBytes)
-	return m.call(v.Text, v.HeadLen, logBytes)
+	text, headLen := m.renderLog(title, ex, maxBytes, logBytes)
+	return m.call(text, headLen, logBytes)
 }
 
 // mainExcerpt is Excerpt of origin/main internal/providers/logs/kube/kube.go, with the redactor of that release:

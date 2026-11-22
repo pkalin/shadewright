@@ -8,7 +8,7 @@ Shadewright watches a Kubernetes cluster for symptoms, works out a fix, and prop
 
 [![Two-lap loop from an event to a verified pull request: a recorded analysis that did not escalate, then an illustration of one that does. No path leads from the agent or the model to the workloads.](../assets/diagrams/analysis-replay.svg)](../assets/diagrams/analysis-replay.svg "Open full size")
 
-Two laps, 13 seconds each. Lap 1 replays a recording: release v0.3.0-rc.2, scenario `oom`. The first OOMKilled event took 3 min 34 s to become a pull request, with one model call, so the dim escalation path was not taken. The model call and the steps after the merge are off by default. Lap 2 is an illustration with no numbers: the same flow through the escalation model, with read tools offered, no call shown.
+Two laps, 13 seconds each. Lap 1 replays a recording: v0.3.0-rc.2, one OOMKilled workload. Its first event took 3 min 34 s to become a pull request, with one model call, so the dim path was not taken. The model call and the steps after the merge are off by default. Lap 2 is an illustration with no numbers: the same flow through the escalation model, with read tools offered, no call shown.
 
 ## Rules the design enforces
 
@@ -24,17 +24,17 @@ Two laps, 13 seconds each. Lap 1 replays a recording: release v0.3.0-rc.2, scena
 
 -   **03 Changes go through Git**
 
-    A branch and a pull request, never a push to a protected branch. Policies, pipelines, RBAC and secrets are out of reach.
+    A branch and a pull request, never a push to a protected branch, never a bypassed check. Policies, pipelines, RBAC and secrets are out of reach.
 
 -   **04 Cluster input is untrusted**
 
-    Events, logs and Git contents never change instructions, tools, permissions or actions. Secrets are redacted before a model sees them.
+    Events, logs and Git contents never change instructions, tools, permissions or actions. Secrets are redacted before storage and before a model sees them.
 
 -   **05 Retries open no second pull request**
 
     Branch names derive from the request UID and plan digest, so a restart finds the existing pull request.
 
--   **06 Three separate identities**
+-   **06 Separate identities**
 
     The analyzer reads the cluster. The executor holds the Git access. The verifier has no model, Git or Secrets. Never `cluster-admin`, never one token for both.
 

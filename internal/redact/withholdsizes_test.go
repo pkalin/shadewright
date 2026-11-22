@@ -84,21 +84,21 @@ const withholdSizes = `
 -password,        String        9600   9610
 -password,        StringTwice   9600   9610
 -password,        Strings       4440   4450
-TOKEN-blank-line  String        30562  30571
-TOKEN-blank-line  StringTwice   25342  25351
-TOKEN-blank-line  Strings       11572  11581
-glued-auth        String        34808  34816
-glued-auth        StringTwice   31448  31456
-glued-auth        Strings       9752   9760
-glued-auth-tail   String        29292  29300
-glued-auth-tail   StringTwice   26908  26916
-glued-auth-tail   Strings       9292   9300
-glued-token       String        99711  99720
-glued-token       StringTwice   72108  72117
-glued-token       Strings       10647  10656
-glued-token-tail  String        61672  61681
-glued-token-tail  StringTwice   49954  49963
-glued-token-tail  Strings       10003  10012
+TOKEN-blank-line  String        30517  30526
+TOKEN-blank-line  StringTwice   25360  25369
+TOKEN-blank-line  Strings       11482  11491
+glued-auth        String        34776  34784
+glued-auth        StringTwice   31464  31472
+glued-auth        Strings       9736   9744
+glued-auth-tail   String        29276  29284
+glued-auth-tail   StringTwice   26924  26932
+glued-auth-tail   Strings       9276   9284
+glued-token       String        99441  99450
+glued-token       StringTwice   72180  72189
+glued-token       Strings       10629  10638
+glued-token-tail  String        61096  61105
+glued-token-tail  StringTwice   49990  49999
+glued-token-tail  Strings       9985   9994
 `
 
 // withholdRow is one line of withholdSizes.

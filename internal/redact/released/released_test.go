@@ -33,7 +33,9 @@ import (
 
 // The files of the release before are kept byte for byte: the sums are those of redact.go, extent.go and work.go
 // of package redact at origin/main 0701cd3a with "package released" for "package redact", and the change of #873,
-// which made the work linear without changing the output (lines.go is new with it). What the code computes is
+// which made the work linear without changing the output (lines.go is new with it), and the change of #1087, which
+// moved the reading of base64 windows into windows.go and keeps no empty part between slashes there, so that its
+// heap is bounded without changing the output. What the code computes is
 // checked against that release's results by TestReleasedReproducesTheReleaseBefore (package redact), and against
 // the code before #873 (testdata/v052) by the tests of kept_test.go and TestReleasedSpansMatchKeptCopy.
 //
@@ -41,10 +43,11 @@ import (
 // bytes: the sums are of the files with it taken out (unmetered), printed by go/printer.
 func TestReleasedIsTheReleaseBefore(t *testing.T) {
 	for name, want := range map[string]string{
-		"redact.go": "f1c529161cef604df2e6d6741caa0d589fff7959969aef33981cbba97e81e031",
-		"extent.go": "83c7cd9d2f8b1de7af41019e7631c88eeb23962bfa3952a5f2edc6f54d0ba0aa",
-		"work.go":   "02ba296592fb1f3ac8f8d5cda941abe1ee782c89e7d1f7901844d6ae7211e3f5",
-		"lines.go":  "7ba72fa9847d6bce30faecc36b3385f67d85fe2e12ea512746a33452469b6a0c",
+		"redact.go":  "26267c19f828be0455e464dfeca53f98d09be516068394489d76aa4cec8c31b8",
+		"extent.go":  "83c7cd9d2f8b1de7af41019e7631c88eeb23962bfa3952a5f2edc6f54d0ba0aa",
+		"work.go":    "02ba296592fb1f3ac8f8d5cda941abe1ee782c89e7d1f7901844d6ae7211e3f5",
+		"lines.go":   "7ba72fa9847d6bce30faecc36b3385f67d85fe2e12ea512746a33452469b6a0c",
+		"windows.go": "62c688d6e48020c015f0ff59bf4d9e8bf3e7d28b2c9031e84d51bbff39a3c24e",
 	} {
 		b, err := os.ReadFile(name)
 		if err != nil {

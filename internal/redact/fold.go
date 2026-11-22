@@ -99,10 +99,66 @@ func foldMarkAt(wm *meter.Meter, s string, i int) (string, bool) {
 }
 
 // foldedView is the folded view of a text: its text, and for each of its bytes the first byte of the original
-// it stands for (from) and the end of the last (to).
+// it stands for (from) and the end of the last (to). What each byte stands for is kept as segments (foldSeg), not
+// as two offsets a byte: a text copied as it is is one segment, and so is a folded piece. Two offsets a byte held
+// sixteen bytes for each byte of the text, and both folds held them at once (#1087).
 type foldedView struct {
-	text     string
-	from, to []int
+	text string
+	segs []foldSeg
+	// cur is the segment the last lookup found, so that lookups along the text take constant time.
+	cur *int
+}
+
+// foldSeg is a piece of a folded view from its byte at on, up to the next segment's at or the end of the text:
+// copied (to is negative), byte at+k stands for the byte from+k of the original; folded, every byte stands for
+// [from, to). Twelve bytes a segment: a text with a fold every few bytes holds a few segments for each.
+type foldSeg struct {
+	at, from, to int32
+}
+
+// copied reports whether s is a copy of the original.
+func (s foldSeg) copied() bool { return s.to < 0 }
+
+// seg returns the segment that holds byte i of the view: the one found last or the next, otherwise by a binary
+// search. It counts no step: a lookup stands for the read of an offset the view held for each byte, which counted
+// none either, and its search halves the segments at most 32 times.
+func (f foldedView) seg(_ *meter.Meter, i int) foldSeg {
+	k := *f.cur
+	if k < len(f.segs) && int(f.segs[k].at) <= i && (k+1 == len(f.segs) || int(f.segs[k+1].at) > i) {
+		return f.segs[k]
+	}
+	if k+1 < len(f.segs) && int(f.segs[k+1].at) <= i && (k+2 >= len(f.segs) || int(f.segs[k+2].at) > i) {
+		*f.cur = k + 1
+		return f.segs[k+1]
+	}
+	lo, hi := 0, len(f.segs) // the last segment at or before i is in [lo, hi)
+	for hi-lo > 1 {
+		if m := int(uint(lo+hi) >> 1); int(f.segs[m].at) <= i {
+			lo = m
+		} else {
+			hi = m
+		}
+	}
+	*f.cur = lo
+	return f.segs[lo]
+}
+
+// from returns the first byte of the original that byte i of the view stands for.
+func (f foldedView) from(wm *meter.Meter, i int) int {
+	s := f.seg(wm, i)
+	if s.copied() {
+		return int(s.from) + i - int(s.at)
+	}
+	return int(s.from)
+}
+
+// to returns the end of the last byte of the original that byte i of the view stands for.
+func (f foldedView) to(wm *meter.Meter, i int) int {
+	s := f.seg(wm, i)
+	if s.copied() {
+		return int(s.from) + i - int(s.at) + 1
+	}
+	return int(s.to)
 }
 
 // isKeyByte reports whether c is a byte of a key name.
@@ -131,8 +187,8 @@ func foldView(wm *meter.Meter, s string) (foldedView, bool) {
 	from := func(i int) int { return i }
 	to := func(i int) int { return i + 1 }
 	if glyphs {
-		from = func(i int) int { return g.from[i] }
-		to = func(i int) int { return g.to[i] }
+		from = func(i int) int { return g.from(wm, i) }
+		to = func(i int) int { return g.to(wm, i) }
 	}
 	return newFoldBuilder(wm, len(t)).build(wm, func(emit func(text string, from, to int, copied bool)) {
 		sepWalk(wm, t, func(text string, a, b int, copied bool) {
@@ -159,25 +215,37 @@ type foldBuilder struct {
 
 // newFoldBuilder returns a builder for a view of about n bytes.
 func newFoldBuilder(_ *meter.Meter, n int) *foldBuilder {
-	fb := &foldBuilder{f: foldedView{from: make([]int, 0, n), to: make([]int, 0, n)}}
+	fb := &foldBuilder{f: foldedView{cur: new(int)}}
 	fb.b.Grow(n)
 	return fb
 }
 
 // build calls walk with an emit function and returns the view of what it emitted: a piece copied from the
-// original (copied) maps each byte to its own, a folded piece maps each byte to all of from to to.
+// original (copied) maps each byte to its own, a folded piece maps each byte to all of from to to. A piece that
+// goes on with the segment before it (a copy after a copy of the bytes before, or one byte that stands for itself)
+// adds no segment.
 func (fb *foldBuilder) build(wm *meter.Meter, walk func(emit func(text string, from, to int, copied bool))) foldedView {
 	walk(func(text string, from, to int, copied bool) {
-		tick(wm, 1)
-		fb.b.WriteString(text)
-		for i := range len(text) {
-			tick(wm, 1)
-			if copied {
-				fb.f.from, fb.f.to = append(fb.f.from, from+i), append(fb.f.to, from+i+1)
-				continue
-			}
-			fb.f.from, fb.f.to = append(fb.f.from, from), append(fb.f.to, to)
+		tick(wm, 1+len(text))
+		if text == "" {
+			return
 		}
+		at := fb.b.Len()
+		fb.b.WriteString(text)
+		if !copied && len(text) == 1 && to == from+1 {
+			copied = true // one byte that stands for one byte is a copy of it
+		}
+		if n := len(fb.f.segs); n > 0 {
+			l := fb.f.segs[n-1]
+			if copied && l.copied() && int(l.from)+at-int(l.at) == from ||
+				!copied && !l.copied() && int(l.from) == from && int(l.to) == to {
+				return
+			}
+		}
+		if copied {
+			to = -1
+		}
+		fb.f.segs = append(fb.f.segs, foldSeg{at: int32(at), from: int32(from), to: int32(to)}) // #nosec G115 -- an entry is at most MaxEntry bytes
 	})
 	fb.f.text = fb.b.String()
 	return fb.f
@@ -533,7 +601,11 @@ func (r sepRun) foldsAsSeparator(_ *meter.Meter) bool {
 // anything folds.
 func sepWalk(wm *meter.Meter, s string, emit func(text string, from, to int, copied bool)) bool {
 	changed, pos, prevRunEnd := false, 0, -1
-	for _, m := range sepKeyWindows.findAll(wm, s) {
+	found := false // with emit nil, something folds: the matches after it are read, as before, but not looked at
+	sepKeyWindows.each(wm, s, func(m []int) bool {
+		if found {
+			return true
+		}
 		tick(wm, 1)
 		at := m[1]
 		if s[at-1] == '-' && at < len(s) && s[at] == '>' {
@@ -541,12 +613,12 @@ func sepWalk(wm *meter.Meter, s string, emit func(text string, from, to int, cop
 			at--
 		}
 		if at < pos {
-			continue
+			return true
 		}
 		r, ok := sepRunAt(wm, s, at)
 		if !ok {
 			prevRunEnd = -1
-			continue
+			return true
 		}
 		// A plain run the rules read stays, unless an "=" follows a quoted key ("\"password\" = V"), which no
 		// rule reads.
@@ -558,10 +630,11 @@ func sepWalk(wm *meter.Meter, s string, emit func(text string, from, to int, cop
 		nested := keyAt == prevRunEnd && keyAt >= pos
 		prevRunEnd = r.end
 		if !fold && !nested {
-			continue
+			return true
 		}
 		changed = true
 		if emit == nil {
+			found = true
 			return true
 		}
 		if nested {
@@ -577,13 +650,17 @@ func sepWalk(wm *meter.Meter, s string, emit func(text string, from, to int, cop
 			pos = keyAt
 		}
 		if !fold {
-			continue
+			return true
 		}
 		if at > pos {
 			emit(s[pos:at], pos, at, true)
 		}
 		emit(": ", at, r.end, false)
 		pos = r.end
+		return true
+	})
+	if found {
+		return true
 	}
 	if changed && pos < len(s) {
 		emit(s[pos:], pos, len(s), true)

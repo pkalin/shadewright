@@ -20,7 +20,6 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -45,16 +44,7 @@ const (
 type heapShape struct {
 	name string
 	text func(n int) string
-	// over, when set, says why the shape is measured but held only under heapCeiling, not under the bound, at the
-	// entry points overAt names: the heap it holds grows with its matches, not with its bytes, in code this change
-	// did not touch. Every other entry point is held to the bound on it.
-	over   string
-	overAt []string
 }
-
-// heapCeiling is what a shape that is over the bound (heapShape.over) may hold at the largest entry: well inside
-// the analyzer's limit of 128 Mi, so that it cannot grow unseen.
-const heapCeiling = 112 << 20
 
 // repeatTo returns unit repeated to n bytes.
 func repeatTo(unit string, n int) string { return strings.Repeat(unit, n/len(unit)+1)[:n] }
@@ -73,11 +63,27 @@ var heapShapes = []heapShape{
 	{name: "blank lines", text: func(n int) string { return repeatTo("\n", n) }},
 	// Lines of one letter: two bytes a line, as many pieces or strings as the gates let through.
 	{name: "letters", text: func(n int) string { return repeatTo("x\n", n) }},
-	// Many short lines, each with a secret: as many matches as lines. Each match holds its spans in every reading
-	// (this package's rules, each pass of the release before's) for the whole decision: over the bound at the
-	// largest entry for StringTwiceChecked, StringsChecked and the Pieces entry points.
-	{name: "secrets", text: func(n int) string { return repeatTo("password=hunter2\n", n) }, over: "spans held per match",
-		overAt: []string{"Redactor.StringTwiceChecked", "Redactor.StringsChecked", epPiecesWithin, epPiecesWithin + "/values", epPiecesFitting}},
+	// Many short lines, each with a secret: two matches a line of 17 bytes, more than the gate allows
+	// (FreeMatches), so withheld at the largest entry.
+	{name: "secrets", text: func(n int) string { return repeatTo("password=hunter2\n", n) }},
+	// The densest lines of secrets the gate lets through: two matches a line of 21 bytes.
+	{name: "secrets under the gate", text: func(n int) string { return repeatTo("password=hunter2 abc\n", n) }},
+	// The densest secrets found (#1087): a short secret key and a value of one character, every six bytes, on
+	// lines, on one line, and as a query string. The reading of the release before holds what it finds for each
+	// match, so these are withheld before it (FreeMatches); the heap of the reading up to there is measured.
+	{name: "dense secrets", text: func(n int) string { return repeatTo("pwd=a\n", n) }},
+	{name: "dense secrets on a line", text: func(n int) string { return repeatTo("pwd=a ", n) }},
+	{name: "query", text: func(n int) string { return repeatTo("key=1&", n) }},
+	// A run of slashes alone: the long-token rule reads it as empty parts between slashes (base64Windows), each
+	// of which it held in 56 bytes before #1087.
+	{name: "slashes", text: func(n int) string { return repeatTo("/", n) }},
+	// Parts of one character between slashes: the most parts base64Windows keeps for the bytes.
+	{name: "short parts", text: func(n int) string { return repeatTo("a/", n) }},
+	// Look-alike colons after secret keys on every line: a fold every few bytes, so the folded views hold a
+	// segment for each.
+	{name: "dense folds", text: func(n int) string { return repeatTo("pwd\uff1aa\n", n) }},
+	// The same with four letters after each secret: about as dense as the gate lets through.
+	{name: "folds under the gate", text: func(n int) string { return repeatTo("pwd\uff1aabcd\n", n) }},
 }
 
 // heapEntryPoint is an entry point of the package, with the largest entry it can get.
@@ -221,13 +227,6 @@ func TestHeapOfOneEntryIsBounded(t *testing.T) {
 				bound := heapBound(size)
 				t.Logf("%s on %s, an entry of %d bytes: peak %.1f MiB (bound %.1f MiB), decided %v", ep.name, sh.name,
 					size, mib(peak), mib(bound), ok)
-				if sh.over != "" && slices.Contains(sh.overAt, ep.name) {
-					if peak > heapCeiling {
-						t.Errorf("%s on an entry of %d bytes of %s held %.1f MiB, above the ceiling of %.0f MiB (%s)", ep.name,
-							size, sh.name, mib(peak), mib(heapCeiling), sh.over)
-					}
-					return
-				}
 				if peak > bound {
 					t.Errorf("%s on an entry of %d bytes of %s held %.1f MiB, above the bound of %.1f MiB (%d per byte + %.0f MiB)",
 						ep.name, size, sh.name, mib(peak), mib(bound), HeapPerByte, mib(HeapFixed))

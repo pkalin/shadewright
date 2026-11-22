@@ -566,8 +566,15 @@ func (b *Builder) podLines(l *lines, t *target) {
 		if ref := metav1.GetControllerOfNoCopy(p); ref != nil {
 			owner = cat(", controlled by ", l.data(b.value(ref.Kind)), " ", l.data(b.value(ref.Name)))
 		}
-		l.add("pod %s%s, phase %s, created %s", l.data(b.value(p.Name)), owner, l.data(b.value(string(p.Status.Phase))),
-			stamp(p.CreationTimestamp))
+		var deleting string
+		if p.DeletionTimestamp != nil {
+			// No request time is computed: a later delete whose shorter grace period would already have ended
+			// sets the deletionTimestamp to its own time, so the timestamp minus the period is then the start of
+			// the last grace period, not the request.
+			deleting = ", being deleted, grace period ends " + stamp(*p.DeletionTimestamp)
+		}
+		l.add("pod %s%s, phase %s, created %s%s", l.data(b.value(p.Name)), owner, l.data(b.value(string(p.Status.Phase))),
+			stamp(p.CreationTimestamp), deleting)
 		if p.Status.Reason != "" || p.Status.Message != "" {
 			l.add("  status reason %s: %s", l.data(b.value(p.Status.Reason)), l.data(b.value(p.Status.Message)))
 		}
@@ -583,7 +590,8 @@ func (b *Builder) podLines(l *lines, t *target) {
 }
 
 // containerLine describes one container of a running pod, with the memory limit of that pod's own spec,
-// labelled as the pod's: during a rollout it may differ from the pod template's.
+// labelled as the pod's: during a rollout it may differ from the pod template's. A current exit that finished
+// after the pod's deletion began carries that fact, and no conclusion about its cause ([shutdown]).
 func (b *Builder) containerLine(l *lines, p *corev1.Pod, cs containerStatus) {
 	kind := "container"
 	if cs.init {
@@ -591,6 +599,9 @@ func (b *Builder) containerLine(l *lines, p *corev1.Pod, cs containerStatus) {
 	}
 	parts := []frag{cat(fmt.Sprintf("ready %t, restarts %d", cs.Ready, cs.RestartCount))}
 	parts = append(parts, cat("now ", b.state(l, cs.State)))
+	if shutdown(p, cs) {
+		parts = append(parts, cat("exited after the deletion began"))
+	}
 	if cs.LastTerminationState.Terminated != nil {
 		parts = append(parts, cat("last ", b.state(l, cs.LastTerminationState)))
 	}

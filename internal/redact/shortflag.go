@@ -755,36 +755,7 @@ func shortBlanksEnd(wm *meter.Meter, s string, k int, skip *commentSkip) int {
 		case c == ' ' || c == '\t' || c == '\v' || c == '\f':
 			k++
 		case c == '\r' || c == '\n':
-			k++
-			if c == '\r' && k < len(s) && s[k] == '\n' {
-				k++
-			}
-			if skip.from <= k && k < skip.to {
-				k = skip.to // read by an earlier flag: the same lines lead to the same line start
-			}
-			if from >= 0 {
-				skip.from, skip.to = from, k
-			}
-			d := k
-			for d < len(s) && (s[d] == ' ' || s[d] == '\t') {
-				tick(wm, 1)
-				d++
-			}
-			if d < len(s) && s[d] == '#' {
-				// A comment line between a flag and its value: the value is after it.
-				if from < 0 {
-					from = k
-				}
-				for d < len(s) && s[d] != '\n' && s[d] != '\r' {
-					tick(wm, 1)
-					d++
-				}
-				k = d
-				continue
-			}
-			if d+1 < len(s) && s[d] == '-' && (s[d+1] == ' ' || s[d+1] == '\t') {
-				k = d + 2
-			}
+			k = afterLineBreak(wm, s, k, skip, &from)
 		case c == '\\' && k+1 < len(s) && (s[k+1] == '\n' || s[k+1] == '\r'):
 			k += 2
 			if s[k-1] == '\r' && k < len(s) && s[k] == '\n' {
@@ -793,6 +764,42 @@ func shortBlanksEnd(wm *meter.Meter, s string, k int, skip *commentSkip) int {
 		default:
 			return k
 		}
+	}
+	return k
+}
+
+// afterLineBreak reads, for shortBlanksEnd, the line break at k and the start of the line after it, and returns
+// where the blanks go on: the end of the line when it is a comment line (from, the start of the first comment line
+// of this run, is set then), after a YAML list dash and its blank, or the line start.
+func afterLineBreak(wm *meter.Meter, s string, k int, skip *commentSkip, from *int) int {
+	k++
+	if s[k-1] == '\r' && k < len(s) && s[k] == '\n' {
+		k++
+	}
+	if skip.from <= k && k < skip.to {
+		k = skip.to // read by an earlier flag: the same lines lead to the same line start
+	}
+	if *from >= 0 {
+		skip.from, skip.to = *from, k
+	}
+	d := k
+	for d < len(s) && (s[d] == ' ' || s[d] == '\t') {
+		tick(wm, 1)
+		d++
+	}
+	if d < len(s) && s[d] == '#' {
+		// A comment line between a flag and its value: the value is after it.
+		if *from < 0 {
+			*from = k
+		}
+		for d < len(s) && s[d] != '\n' && s[d] != '\r' {
+			tick(wm, 1)
+			d++
+		}
+		return d
+	}
+	if d+1 < len(s) && s[d] == '-' && (s[d+1] == ' ' || s[d+1] == '\t') {
+		return d + 2
 	}
 	return k
 }

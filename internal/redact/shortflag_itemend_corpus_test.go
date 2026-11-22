@@ -26,7 +26,7 @@ import (
 )
 
 // shortItemImages are images of the table, one for each flag of arguments with no command word.
-var shortItemImages = map[byte]string{'p': "mongo", 'P': "sqlcmd", 'a': "redis", 'u': "curl"}
+var shortItemImages = map[byte]string{'p': "mongo", 'P': "sqlcmd", 'a': shortRedis, 'u': shortCurl}
 
 // shortItemEndCases are the value of a password flag at the end of its own item (decision of 2026-11-22 on
 // #1075): for each flag of arguments with no command word, a flag as the last item of a YAML block "args" before

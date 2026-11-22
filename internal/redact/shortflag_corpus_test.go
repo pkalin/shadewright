@@ -46,13 +46,16 @@ type shortTool struct {
 // shortMySQL is the first tool of the table, the one that reads its password glued only.
 const shortMySQL = "mysql"
 
+// shortCurl is the tool of the table whose password is the part of its value after the colon.
+const shortCurl = "curl"
+
 var shortTools = []shortTool{
 	{name: shortMySQL, letter: 'p', glued: true}, {name: "mariadb", letter: 'p', glued: true},
 	{name: "mongo", letter: 'p'}, {name: "mongosh", letter: 'p'}, {name: "cqlsh", letter: 'p'},
 	{name: "rabbitmqadmin", letter: 'p'}, {name: "sshpass", letter: 'p'},
 	{name: "redis-cli", letter: 'a'},
 	{name: "sqlcmd", letter: 'P'}, {name: "mosquitto_pub", letter: 'P'}, {name: "mosquitto_sub", letter: 'P'}, //nolint:misspell // the MQTT clients' names
-	{name: "curl", letter: 'u', colon: true},
+	{name: shortCurl, letter: 'u', colon: true},
 }
 
 // shortFlagCase is one input of the corpus: a text, or the strings of a sequence (items), with the secrets that
@@ -536,7 +539,8 @@ func TestShortFlagLimitsOfTheDecision(t *testing.T) {
 		}
 	}
 	for _, c := range []struct{ in, want []string }{
-		{[]string{"curl", "-d", `{"a":1}`, "-u", "admin:Sw2PunctWord"}, []string{"curl", "-d", `{"a":1}`, "-u", "admin:Sw2PunctWord"}},
+		{[]string{shortCurl, "-d", `{"a":1}`, "-u", "admin:Sw2PunctWord"},
+			[]string{shortCurl, "-d", `{"a":1}`, "-u", "admin:Sw2PunctWord"}},
 		{[]string{shortMySQL, "-pSw3Space Word"}, []string{shortMySQL, "-p*** Word"}},
 	} {
 		if got := Strings(c.in); strings.Join(got, "\n") != strings.Join(c.want, "\n") {

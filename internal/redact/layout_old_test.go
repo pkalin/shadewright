@@ -61,7 +61,7 @@ func oldWrite(wm *meter.Meter, p Piece) oldWritten {
 				size++
 			}
 			b.WriteByte('?')
-		} else {
+		} else if !Control(c) { // a control character is left out, an empty unit (#852), as write leaves it out
 			writeUnit(wm, &b, p.Form, p.Text[i:i+size], c, size)
 		}
 		to := b.Len()

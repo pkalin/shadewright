@@ -86,6 +86,8 @@ var logOnce sync.Once
 // groupingEnv is one API server with the analyzer's pipeline running against it.
 type groupingEnv struct {
 	admin client.Client
+	// cache is the manager's cache, which the collector reads pods from (its owner resolver).
+	cache client.Reader
 	model *fake.Model
 	// uids maps a fixture's placeholder UIDs to the UIDs the API server gave the created objects.
 	uids map[string]string
@@ -266,7 +268,7 @@ func startGrouping(t *testing.T, s *scenario, gate <-chan struct{}, relay ...rel
 	if !mgr.GetCache().WaitForCacheSync(syncCtx) {
 		t.Fatal("the cache did not sync")
 	}
-	return &groupingEnv{admin: admin, model: model, uids: map[string]string{}}
+	return &groupingEnv{admin: admin, cache: mgr.GetCache(), model: model, uids: map[string]string{}}
 }
 
 // envtestBinaryDir is the envtest binaries make test installs, for a run outside make.
@@ -335,10 +337,21 @@ func shiftTimes(v any, d time.Duration) any {
 // create creates the fixture's objects in order, with their times moved by d, then writes their status. The
 // API server gives each object its UID and creation time: owner references and an event's regarding UID are
 // mapped from the fixture's placeholder UIDs to the created objects' ones, so objects come after their owners.
+//
+// An event is created only once the manager's cache serves every pod created before it as its status was
+// written (cachedAsWritten). The collector reads an event's pod from that cache, and the pod and event informers
+// deliver independently: an event created a moment after its pod's status write could be read against a pod not
+// in the cache yet, or cached before its status. Then the readiness failure of a starting pod is counted instead
+// of skipped, and the kubelet's events of an OOM kill show no cause, and the case waited out its minute (#1095).
+// In a cluster the kubelet writes the pod's status long before its events about it.
 func (g *groupingEnv) create(t *testing.T, objs []*unstructured.Unstructured, d time.Duration) {
 	t.Helper()
 	ctx := t.Context()
+	pods := map[types.NamespacedName]string{}
 	for _, fixture := range objs {
+		if fixture.GetKind() == "Event" {
+			g.cachedAsWritten(t, pods)
+		}
 		u := fixture.DeepCopy()
 		u.Object = shiftTimes(u.Object, d).(map[string]any)
 		placeholder := string(u.GetUID())
@@ -372,6 +385,30 @@ func (g *groupingEnv) create(t *testing.T, objs []*unstructured.Unstructured, d 
 			if err := g.admin.Status().Update(ctx, u); err != nil {
 				t.Fatalf("writing the status of %s %s: %v", u.GetKind(), u.GetName(), err)
 			}
+		}
+		if u.GetKind() == "Pod" {
+			pods[types.NamespacedName{Namespace: u.GetNamespace(), Name: u.GetName()}] = u.GetResourceVersion()
+		}
+	}
+}
+
+// cachedAsWritten waits until the manager's cache serves each pod of written at the resource version its last
+// write gave it. The test writes nothing else to them, so that version is the one the collector must see.
+func (g *groupingEnv) cachedAsWritten(t *testing.T, written map[types.NamespacedName]string) {
+	t.Helper()
+	deadline := time.Now().Add(groupingWait)
+	for key, rv := range written {
+		for {
+			var pod corev1.Pod
+			err := g.cache.Get(t.Context(), key, &pod)
+			if err == nil && pod.ResourceVersion == rv {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the manager's cache does not serve pod %s as written (resource version %s) in %s: has %q (%v)",
+					key, rv, groupingWait, pod.ResourceVersion, err)
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }

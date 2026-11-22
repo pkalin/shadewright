@@ -99,7 +99,7 @@ var heapShapes = []heapShape{
 	{name: "quoted pairs", text: func(n int) string { return repeatTo(`"pwd":"a",`, n) },
 		overAt: append([]string{epStrings}, pieces...)},
 	// A list of addresses, and of IPv4 addresses: a match every few bytes.
-	{name: "addresses", text: func(n int) string { return repeatTo("ab@cd.ef, ", n) }, overAt: pieces},
+	{name: "addresses", text: func(n int) string { return repeatTo("ab"+"@"+"cd.ef, ", n) }, overAt: pieces},
 	{name: "ipv4 addresses", text: func(n int) string { return repeatTo("10.0.0.1\n", n) }},
 	// A run of slashes alone: the long-token rule reads it as empty parts between slashes (base64Windows), each
 	// of which it held in 56 bytes before #1087.

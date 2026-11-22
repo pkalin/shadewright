@@ -34,7 +34,9 @@ import (
 // The files of the release before are kept byte for byte: the sums are those of redact.go, extent.go and work.go
 // of package redact at origin/main 0701cd3a with "package released" for "package redact", and the changes of #873
 // and #962, which made the work linear without changing the output (lines.go is new with #873; #962 added the
-// memories of the flag rules, tokenMemo and plainRun, and the cut in keyValueExtent). What the code computes is
+// memories of the flag rules, tokenMemo and plainRun, and the cut in keyValueExtent), and the change of #1087, which
+// moved the reading of base64 windows into windows.go and keeps no empty part between slashes there, so that its
+// heap is bounded without changing the output. What the code computes is
 // checked against that release's results by TestReleasedReproducesTheReleaseBefore (package redact), and against
 // the code before #873 (testdata/v052) by the tests of kept_test.go and TestReleasedSpansMatchKeptCopy.
 //
@@ -42,10 +44,11 @@ import (
 // bytes: the sums are of the files with it taken out (unmetered), printed by go/printer.
 func TestReleasedIsTheReleaseBefore(t *testing.T) {
 	for name, want := range map[string]string{
-		"redact.go": "114fb82515066d807a778f20a1d8a9869023699cf44294d53a306723bcf6a9f6",
-		"extent.go": "428089ea0b18b850bdc19d825d15fef74b2926cf251a1a9da0fd01457d74fe6d",
-		"work.go":   "02ba296592fb1f3ac8f8d5cda941abe1ee782c89e7d1f7901844d6ae7211e3f5",
-		"lines.go":  "7ba72fa9847d6bce30faecc36b3385f67d85fe2e12ea512746a33452469b6a0c",
+		"redact.go":  "1e0adf32eb9cad07fc3b9f930c0ac53093f168b63983237a48d8b6e2fe8bfb83",
+		"extent.go":  "428089ea0b18b850bdc19d825d15fef74b2926cf251a1a9da0fd01457d74fe6d",
+		"work.go":    "02ba296592fb1f3ac8f8d5cda941abe1ee782c89e7d1f7901844d6ae7211e3f5",
+		"lines.go":   "7ba72fa9847d6bce30faecc36b3385f67d85fe2e12ea512746a33452469b6a0c",
+		"windows.go": "b29e6df6e9380e45e3227d863bfa3dfa778c26e5a37b568db12f9ed3184d791e",
 	} {
 		b, err := os.ReadFile(name)
 		if err != nil {

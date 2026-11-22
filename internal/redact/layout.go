@@ -18,7 +18,6 @@ package redact
 
 import (
 	"regexp"
-	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -137,7 +136,7 @@ func SecretCollection(name string) bool {
 //
 // So everything the release before hid is hidden because its own code says so, and readings 1 and 2 can only
 // add. Where the object says a value ends (Whole, a secret Key), a match of reading 2 that reaches into it ends
-// with it (endAtObjectValues), so a block or a flow collection that the value opens takes no later entry (sixth
+// with it (objectEnds), so a block or a flow collection that the value opens takes no later entry (sixth
 // decision, point 2). The work is linear in the length of the pieces (one pass of this package's rules over each
 // piece and one over the answer, and four passes of the release before's over the answer, as its tools made
 // them), apart from the sorts of the matches (mergeSpans): m log m comparisons for m matches, and m is at most
@@ -241,56 +240,43 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 		}
 		k++
 	}
+	l.compact(wm)
 	// Reading 2: the answer as the tool writes it, each match ended at the line breaks of the values.
+	// Each match is ended as it is found (lineKinds, then objectEnds) and merged with the others as
+	// they come (matchList); with joined, also as it was found.
 	wsize := func(i int) int { return int(l.off[i+1] - l.off[i]) }
 	answer := l.answer
-	matches := r.ruleMatchesWith(wm, answer, ids)
+	kinds := valueLineKinds(wm, ps, l.w, answer)
+	objects := newObjectEnds(wm, ps, wsize)
+	var whole *matchList
+	if joined {
+		whole = r.newMatchList()
+	}
+	reading2 := r.newMatchList()
+	r.eachRuleMatch(wm, answer, ids, func(start, end, rule int) {
+		tick(wm, 1)
+		if whole != nil {
+			whole.add(wm, start, end, rule)
+		}
+		end = kinds.endAtValueLine(start, end)
+		if objects != nil {
+			end = objects.cut(wm, start, end)
+		}
+		reading2.add(wm, start, end, rule)
+	})
 	widen := func(i int, sp span) span { return l.w(i).widen(wm, sp) }
 	text := func(i int) string { return l.w(i).text }
 	if joined {
 		// What String hides in the answer, the reading of the release before included, as String reads it: a match
 		// is not ended at the line breaks of the values (#845, fifteenth decision, P2).
-		whole := append(slices.Clone(matches), r.releasedString(wm, answer, false, nil)...)
-		r.cutAnswer(wm, ps, l.add, settle(wm, answer, whole), widen, text)
+		r.releasedStringInto(wm, answer, false, nil, whole)
+		r.cutAnswer(wm, ps, l.add, settle(wm, answer, whole.spans(wm)), widen, text)
+		l.compact(wm)
 	}
-	reading2 := endAtValueLines(wm, ps, l.w, answer, matches)
-	r.cutAnswer(wm, ps, l.add, settle(wm, answer, endAtObjectValues(wm, ps, wsize, reading2)), widen, text)
-	// Reading 3: the release before, on the pieces as they were read.
-	hidden := mergeSpans(wm, r.releasedPieces(wm, ps))
-	off, h := 0, 0
-	for i, p := range ps {
-		tick(wm, 1)
-		end := off + len(p.Text)
-		for h < len(hidden) && hidden[h].end <= off {
-			tick(wm, 1)
-			h++
-		}
-		for j := h; p.Data && j < len(hidden) && hidden[j].start < end; j++ {
-			tick(wm, 1)
-			sp := hidden[j]
-			from := max(sp.start, off) - off
-			if sp.start < off {
-				// A span that begins before the piece takes it from its first byte that is no blank, the blanks before
-				// that kept as the indentation they are, as for reading 2 (cutAnswer).
-				for from < len(p.Text) && strings.IndexByte(" \t\r\n", p.Text[from]) >= 0 {
-					tick(wm, 1)
-					from++
-				}
-			}
-			sp.start, sp.end = from, min(sp.end, end)-off
-			if sp.end > sp.start { // an empty value has no byte to carry the span to
-				l.add(i, l.w(i).carry(wm, sp))
-			}
-		}
-		off = end
-	}
-	l.group()
-	for i, p := range ps {
-		tick(wm, 1)
-		if p.Data {
-			l.merge(wm, i)
-		}
-	}
+	r.cutAnswer(wm, ps, l.add, settle(wm, answer, reading2.spans(wm)), widen, text)
+	l.compact(wm)
+	r.addReleasedPieces(wm, ps, l) // reading 3
+	l.finish(wm)
 	out := make([]string, len(ps))
 	if fits != nil {
 		for level := range markerLevels {
@@ -321,13 +307,17 @@ type answerLayout struct {
 	off    []int32 // where piece i starts in answer; the last is the length of answer
 	data   []int32 // the index of piece i among the data pieces, -1 for a piece the tool writes
 	units  []*units
-	// spans holds the spans found in the data pieces, in the order they were found, and owner the data piece of
-	// each, until group sorts them by piece (keeping that order within a piece) and from[d] says where the spans of
-	// data piece d start: a piece without one holds four bytes for them.
-	spans []span
-	owner []int32
-	from  []int32
-	kept  []int32 // after merge, how many spans each data piece keeps
+	// spans holds the spans of the readings merged so far, grouped by data piece and merged within each (mergeSpans),
+	// from[d] saying where those of data piece d start: a piece without one holds four bytes for them. pending holds
+	// the spans of the reading under way, in the order they were found, and owner the data piece of each, until
+	// compact merges them in (#1087: merged after each reading, the spans of all readings are not held at once). A
+	// span is held in sixteen bytes (ruleMatch, its kind in kinds) until finish writes the spans out.
+	spans   []ruleMatch
+	from    []int32
+	pending []ruleMatch
+	owner   []int32
+	kinds   []string
+	final   []span
 }
 
 // newAnswerLayout writes the pieces ps, n of which are data pieces, as the answer writes them.
@@ -364,57 +354,121 @@ func (l *answerLayout) w(i int) written {
 	return w
 }
 
-// add adds a span to data piece i.
+// add adds a span of the reading under way to data piece i. The span is on the piece's bytes, so it names a
+// merged range by its own end (span.named).
 func (l *answerLayout) add(i int, sp span) {
-	l.spans, l.owner = append(l.spans, sp), append(l.owner, l.data[i])
+	m := ruleMatch{start: int32(sp.start), end: int32(sp.end), rule: int16(sp.rule), kind: kindIndex(&l.kinds, sp.kind)} // #nosec G115 -- as in newAnswerLayout; a redactor has far fewer than 32767 rules
+	l.pending, l.owner = append(l.pending, m), append(l.owner, l.data[i])
 }
 
-// group sorts the spans by their data piece, keeping the order in which each piece's were found, once every
-// reading has added its own.
-func (l *answerLayout) group() {
-	for _, d := range l.owner {
-		l.from[d+1]++
+// compact merges the spans of the reading under way into those of the readings before, piece by piece, once
+// that reading has added all its own: each piece's spans are those of the readings so far merged (mergeSpans),
+// the same ranges with the same names as when every reading's spans are merged at once.
+func (l *answerLayout) compact(wm *meter.Meter) {
+	if len(l.pending) == 0 {
+		return
 	}
-	for d := 1; d < len(l.from); d++ {
-		l.from[d] += l.from[d-1]
+	pending, owner := l.pending, l.owner
+	grouped := true
+	for x := 1; x < len(owner) && grouped; x++ {
+		tick(wm, 1)
+		grouped = owner[x-1] <= owner[x]
 	}
-	at := slices.Clone(l.from[:len(l.from)-1])
-	sorted := make([]span, len(l.spans))
-	for x, d := range l.owner {
-		sorted[at[d]] = l.spans[x]
-		at[d]++
+	if !grouped {
+		// Grouped by data piece, each piece's spans in the order they were found. A reading adds its spans piece
+		// after piece, so this is not needed today.
+		at := make([]int32, len(l.from))
+		for _, d := range l.owner {
+			tick(wm, 1)
+			at[d+1]++
+		}
+		for d := 1; d < len(at); d++ {
+			tick(wm, 1)
+			at[d] += at[d-1]
+		}
+		pending, owner = make([]ruleMatch, len(l.pending)), make([]int32, len(l.owner))
+		for x, d := range l.owner {
+			tick(wm, 1)
+			pending[at[d]], owner[at[d]] = l.pending[x], d
+			at[d]++
+		}
 	}
-	l.spans, l.owner = sorted, nil
+	out := make([]ruleMatch, 0, len(l.spans)+len(pending))
+	from := make([]int32, len(l.from))
+	p := 0
+	for d := range len(l.from) - 1 {
+		tick(wm, 1)
+		start := len(out)
+		out = append(out, l.spans[l.from[d]:l.from[d+1]]...)
+		q := p
+		for q < len(pending) && int(owner[q]) == d {
+			tick(wm, 1)
+			q++
+		}
+		if q > p {
+			out = append(out, pending[p:q]...)
+			out = out[:start+len(mergeMatches(wm, out[start:]))]
+			p = q
+		}
+		from[d+1] = int32(len(out)) // #nosec G115 -- as in newAnswerLayout
+	}
+	if 4*len(out) < 3*cap(out) {
+		out = append([]ruleMatch(nil), out...) // what merged away is not held
+	}
+	l.spans, l.from, l.pending, l.owner = out, from, nil, nil
 }
 
-// merge merges the spans of data piece i in place (mergeSpans), once they are grouped; the merged spans stay at
-// the start of the piece's part and from says where they end through ends.
-func (l *answerLayout) merge(wm *meter.Meter, i int) {
-	d := l.data[i]
-	own := l.spans[l.from[d]:l.from[d+1]]
-	merged := mergeSpans(wm, own)
-	l.ends(d, len(merged))
-}
-
-// ends records that data piece d keeps its first n spans.
-func (l *answerLayout) ends(d int32, n int) {
-	if l.kept == nil {
-		l.kept = make([]int32, len(l.from)-1)
+// finish merges the last reading in and writes the spans out, for spansOf.
+func (l *answerLayout) finish(wm *meter.Meter) {
+	l.compact(wm)
+	l.final = make([]span, len(l.spans))
+	for x, m := range l.spans {
+		tick(wm, 1)
+		l.final[x] = span{start: int(m.start), end: int(m.end), kind: l.kinds[m.kind], rule: int(m.rule)}
 	}
-	l.kept[d] = int32(n) // #nosec G115 -- as in newAnswerLayout
+	l.spans = nil
 }
 
-// spansOf returns the spans of piece i, nil for a piece the tool writes.
+// spansOf returns the spans of piece i, nil for a piece the tool writes; once finish has run.
 func (l *answerLayout) spansOf(i int) []span {
 	d := l.data[i]
 	if d < 0 {
 		return nil
 	}
-	n := l.from[d+1] - l.from[d]
-	if l.kept != nil {
-		n = l.kept[d]
+	return l.final[l.from[d]:l.from[d+1]]
+}
+
+// addReleasedPieces adds to l reading 3 of piecesWithin: what the release before hid on the pieces as they were
+// read, each span carried to the pieces it covers.
+func (r *Redactor) addReleasedPieces(wm *meter.Meter, ps []Piece, l *answerLayout) {
+	hidden := r.releasedPieces(wm, ps) // sorted and merged
+	off, h := 0, 0
+	for i, p := range ps {
+		tick(wm, 1)
+		end := off + len(p.Text)
+		for h < len(hidden) && hidden[h].end <= off {
+			tick(wm, 1)
+			h++
+		}
+		for j := h; p.Data && j < len(hidden) && hidden[j].start < end; j++ {
+			tick(wm, 1)
+			sp := hidden[j]
+			from := max(sp.start, off) - off
+			if sp.start < off {
+				// A span that begins before the piece takes it from its first byte that is no blank, the blanks before
+				// that kept as the indentation they are, as for reading 2 (cutAnswer).
+				for from < len(p.Text) && strings.IndexByte(" \t\r\n", p.Text[from]) >= 0 {
+					tick(wm, 1)
+					from++
+				}
+			}
+			sp.start, sp.end = from, min(sp.end, end)-off
+			if sp.end > sp.start { // an empty value has no byte to carry the span to
+				l.add(i, l.w(i).carry(wm, sp))
+			}
+		}
+		off = end
 	}
-	return l.spans[l.from[d] : l.from[d]+n]
 }
 
 // fitLevel returns the first level of the markers (markerAt) at which the n pieces written w(i), with the sorted,
@@ -620,13 +674,22 @@ func (l *lineKinds) next(x int, k byte) int {
 // (lineKinds). The steps are counted as when every byte held its kind in a byte and two offsets, with or without a
 // match, so the budget of an entry did not move with the heap it holds.
 func endAtValueLines(wm *meter.Meter, ps []Piece, ws func(i int) written, answer string, matches []span) []span {
-	n := len(answer)
-	var kinds *lineKinds
-	if len(matches) > 0 {
-		kinds = newLineKinds(n)
+	kinds := valueLineKinds(wm, ps, ws, answer)
+	for i := range matches {
+		tick(wm, 1)
+		matches[i].end = kinds.endAtValueLine(matches[i].start, matches[i].end)
 	}
+	return matches
+}
+
+// valueLineKinds returns the kinds of the bytes of the answer as written (the pieces ws joined) that
+// endAtValueLines reads, indexed. They are built whether or not a match comes, in about three eighths of a byte per
+// byte of the answer, so that a reading can end each match as it is found (#1087).
+func valueLineKinds(wm *meter.Meter, ps []Piece, ws func(i int) written, answer string) *lineKinds {
+	n := len(answer)
+	kinds := newLineKinds(n)
 	set := func(x int, k byte) {
-		if kinds != nil && k != byteSolid {
+		if k != byteSolid {
 			kinds.set(x, k)
 		}
 	}
@@ -668,57 +731,62 @@ func endAtValueLines(wm *meter.Meter, ps []Piece, ws func(i int) written, answer
 		})
 		off += len(w.text)
 	}
-	if kinds == nil {
-		tick(wm, n) // the steps of index, as when the kinds were always built
-		return matches
-	}
 	kinds.index(wm)
-	for i := range matches {
-		tick(wm, 1)
-		if q := kinds.next(min(matches[i].start, n), byteSolid); q < matches[i].end {
-			matches[i].end = min(matches[i].end, kinds.next(q, byteLineBreak))
-		}
-	}
-	return matches
+	return kinds
 }
 
-// endAtObjectValues cuts each span of a reading of the whole answer (pieces of length size(i) in that reading's
-// text) that reaches into a data piece the object hides whole (hiddenByObject) at that piece's end: the object
-// says where the value ends, so a block or a flow collection that the value opens, or a key inside it, takes no
-// later piece (#845, sixth decision of 2026-11-18, point 2). The spans are changed in place and returned. The work
-// is linear in the number of pieces and, for each span, logarithmic in the number of hidden pieces; the
-// allocation is linear in the number of hidden pieces.
-func endAtObjectValues(wm *meter.Meter, ps []Piece, size func(i int) int, spans []span) []span {
-	var starts, ends []int // the hidden pieces, in order
+// endAtValueLine returns where endAtValueLines ends a match from start to end.
+func (l *lineKinds) endAtValueLine(start, end int) int {
+	if q := l.next(min(start, l.n), byteSolid); q < end {
+		return min(end, l.next(q, byteLineBreak))
+	}
+	return end
+}
+
+// objectEnds are the data pieces the object hides whole, in order. A span of a reading of the whole answer that
+// reaches into one ends at that piece's end (cut): the object says where the value ends, so a block or a flow
+// collection that the value opens, or a key inside it, takes no later piece (#845, sixth decision of 2026-11-18,
+// point 2). The work is logarithmic in the number of hidden pieces for each span; the allocation is linear in that
+// number.
+type objectEnds struct{ starts, ends []int }
+
+// newObjectEnds returns the pieces of ps the object hides whole, in a reading where piece i is size(i) bytes
+// long, or nil when there is none.
+func newObjectEnds(wm *meter.Meter, ps []Piece, size func(i int) int) *objectEnds {
+	var o objectEnds
 	off := 0
 	for i, p := range ps {
 		tick(wm, 1)
 		if n := size(i); hiddenByObject(wm, p) && n > 0 {
-			starts, ends = append(starts, off), append(ends, off+n)
+			o.starts, o.ends = append(o.starts, off), append(o.ends, off+n)
 		}
 		off += size(i)
 	}
-	if len(starts) == 0 {
-		return spans
+	if len(o.starts) == 0 {
+		return nil
 	}
-	for i := range spans {
+	return &o
+}
+
+// cut returns where a span from start to end ends: at the end of the first hidden piece it
+// reaches into.
+func (o *objectEnds) cut(wm *meter.Meter, start, end int) int {
+	tick(wm, 1)
+	// The first hidden piece that ends after the span's start: the pieces are in order, so their ends are
+	// sorted, and a search holds nothing for each byte of the answer.
+	lo, hi := 0, len(o.ends)
+	for lo < hi {
 		tick(wm, 1)
-		// The first hidden piece that ends after the span's start: the pieces are in order, so their ends are
-		// sorted, and a search holds nothing for each byte of the answer.
-		lo, hi := 0, len(ends)
-		for lo < hi {
-			tick(wm, 1)
-			if m := int(uint(lo+hi) >> 1); ends[m] > spans[i].start {
-				hi = m
-			} else {
-				lo = m + 1
-			}
-		}
-		if h := lo; h < len(starts) && starts[h] < spans[i].end {
-			spans[i].end = min(spans[i].end, ends[h])
+		if m := int(uint(lo+hi) >> 1); o.ends[m] > start {
+			hi = m
+		} else {
+			lo = m + 1
 		}
 	}
-	return spans
+	if h := lo; h < len(o.starts) && o.starts[h] < end {
+		return min(end, o.ends[h])
+	}
+	return end
 }
 
 // hiddenByObject reports whether the object says the data piece p is hidden whole: it is marked Whole or its

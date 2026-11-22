@@ -49,35 +49,55 @@ type releasedReading struct {
 	r *released.Redactor
 	// rule is the rule index the spans take: after every rule of this package's redactor, so that on a tie a
 	// span of this package's rules names the merged range, as it did before the reading was added.
-	rule   int
-	hidden []span
+	rule int
+	// hidden holds what the passes hide, as spans of onto, the text decided on, each widened to its characters
+	// (onRunes) as it is found, merged as they come (#1087: the spans of every pass were held whole until the
+	// end).
+	hidden *matchList
+	onto   string
 	// read holds what each text a pass read was found to hold: a value repeated in the pieces of an answer (a
 	// label in the series of every metric template) is read by that release's rules once (#873, second round).
-	// The spans depend on the text only.
-	read map[string][]released.Span
+	// The spans depend on the text only. A text longer than maxReadKept bytes is kept only when the passes read
+	// pieces (pieces), which repeat: the answer or the string a pass reads whole is read once, and is not held to
+	// the end with its spans (#1087).
+	read   map[string][]released.Span
+	pieces bool
+}
+
+// maxReadKept is the longest text whose spans a releasedReading keeps the first time it reads it.
+const maxReadKept = 4 << 10
+
+// hide adds the span [lo, hi) of the text decided on, of the kind given, widened to its characters.
+func (x *releasedReading) hide(wm *meter.Meter, lo, hi int, kind string) {
+	if hi > lo {
+		x.hidden.addKind(wm, runeFloor(wm, x.onto, lo), runeCeil(wm, x.onto, hi), x.rule, kind)
+	}
 }
 
 // releasedReading returns a reading with the redactor of the release before that has r's extra patterns, or
 // nil when r has none (a redactor made of some of the rules only, in a test).
-func (r *Redactor) releasedReading(_ *meter.Meter) *releasedReading {
+func (r *Redactor) releasedReading(_ *meter.Meter, onto string, into *matchList) *releasedReading {
 	if r.before == nil {
 		return nil
 	}
-	return &releasedReading{r: r.before, rule: len(r.rules)}
+	return &releasedReading{r: r.before, rule: len(r.rules), hidden: into, onto: onto}
 }
 
 // pass is one call of String of the release before on t: the spans it finds are hidden, and the text it returns
 // has its markers in place.
 func (x *releasedReading) pass(wm *meter.Meter, t trace) trace {
 	found, ok := x.read[t.text]
-	if !ok {
+	switch {
+	case ok:
+		tick(wm, len(t.text)) // the lookup hashes the text
+	case len(t.text) > maxReadKept && !x.pieces:
+		found = x.r.SpansWithin(wm, t.text)
+	default:
 		found = x.r.SpansWithin(wm, t.text)
 		if x.read == nil {
 			x.read = make(map[string][]released.Span)
 		}
 		x.read[t.text] = found
-	} else {
-		tick(wm, len(t.text)) // the lookup hashes the text
 	}
 	if len(found) == 0 {
 		return t
@@ -88,9 +108,7 @@ func (x *releasedReading) pass(wm *meter.Meter, t trace) trace {
 		tick(wm, 1)
 		tb.copy(wm, t, pos, f.Start)
 		lo, hi := t.lo(f.Start), t.hi(f.End-1)
-		if hi > lo {
-			x.hidden = append(x.hidden, span{start: int(lo), end: int(hi), kind: f.Kind, rule: x.rule})
-		}
+		x.hide(wm, int(lo), int(hi), f.Kind)
 		tb.add(wm, released.MarkerWithin(wm, f.Kind, f.End-f.Start), lo, hi)
 		pos = f.End
 	}
@@ -195,16 +213,26 @@ func jsonTrace(wm *meter.Meter, t trace) trace {
 // redacted the whole answer the same way before they cut it. A map key also loses what that release hid in the
 // same text as a value. nil when r has no such reading.
 func (r *Redactor) releasedPieces(wm *meter.Meter, ps []Piece) []span {
-	x := r.releasedReading(wm)
-	if x == nil {
+	if r.before == nil {
 		return nil
 	}
-	var tb traceBuilder
+	n := 0
+	for _, p := range ps {
+		n += len(p.Text)
+	}
 	var read strings.Builder
-	off := 0
+	read.Grow(n)
 	for _, p := range ps {
 		tick(wm, 1)
 		read.WriteString(p.Text)
+	}
+	l := r.newMatchList()
+	x := r.releasedReading(wm, read.String(), l)
+	x.pieces = true
+	var tb traceBuilder
+	off := 0
+	for _, p := range ps {
+		tick(wm, 1)
 		t := traceOf(wm, p.Text, off)
 		if p.Data {
 			if !p.MapKey {
@@ -226,7 +254,7 @@ func (r *Redactor) releasedPieces(wm *meter.Meter, ps []Piece) []span {
 		off += len(p.Text)
 	}
 	x.redact(wm, tb.trace(wm))
-	return onRunes(wm, read.String(), x.hidden)
+	return l.spans(wm)
 }
 
 // releasedString returns what the release before hid in s, as spans of s: one call of its String when twice
@@ -236,20 +264,26 @@ func (r *Redactor) releasedPieces(wm *meter.Meter, ps []Piece) []span {
 // excerpt at get_pod_logs, which RenderLog cut to its newest lines and FitLog redacted again). nil when r has no
 // such reading.
 func (r *Redactor) releasedString(wm *meter.Meter, s string, twice bool, cut func(string) int) []span {
-	x := r.releasedReading(wm)
+	l := r.newMatchList()
+	r.releasedStringInto(wm, s, twice, cut, l)
+	return l.spans(wm)
+}
+
+// releasedStringInto is releasedString with the spans added to l, merged with what it holds.
+func (r *Redactor) releasedStringInto(wm *meter.Meter, s string, twice bool, cut func(string) int, l *matchList) {
+	x := r.releasedReading(wm, s, l)
 	if x == nil {
-		return nil
+		return
 	}
 	if !twice {
 		x.pass(wm, traceOf(wm, s, 0))
-		return onRunes(wm, s, x.hidden)
+		return
 	}
 	t := x.redact(wm, traceOf(wm, s, 0))
 	if cut != nil {
 		from := min(max(cut(t.text), 0), len(t.text))
 		x.redact(wm, t.from(from))
 	}
-	return onRunes(wm, s, x.hidden)
 }
 
 // releasedExcerpt returns what the release before hid in a log as the log source read it (s) when it kept the
@@ -259,9 +293,16 @@ func (r *Redactor) releasedString(wm *meter.Meter, s string, twice bool, cut fun
 // incidentcontext.Redact did, twice (RenderLog, then get_pod_logs fitting the text again), each time on the text
 // with that release's markers in place (#845, fifteenth decision). nil when r has no such reading.
 func (r *Redactor) releasedExcerpt(wm *meter.Meter, s string, from int, drop func(string) int) []span {
-	x := r.releasedReading(wm)
+	l := r.newMatchList()
+	r.releasedExcerptInto(wm, s, from, drop, l)
+	return l.spans(wm)
+}
+
+// releasedExcerptInto is releasedExcerpt with the spans added to l, merged with what it holds.
+func (r *Redactor) releasedExcerptInto(wm *meter.Meter, s string, from int, drop func(string) int, l *matchList) {
+	x := r.releasedReading(wm, s, l)
 	if x == nil {
-		return nil
+		return
 	}
 	from = min(max(from, 0), len(s))
 	t := traceOf(wm, s, 0)
@@ -269,9 +310,7 @@ func (r *Redactor) releasedExcerpt(wm *meter.Meter, s string, from int, drop fun
 	pos := from
 	for _, f := range x.r.SpansWithin(wm, s) {
 		tick(wm, 1)
-		if f.End > f.Start {
-			x.hidden = append(x.hidden, span{start: f.Start, end: f.End, kind: f.Kind, rule: x.rule})
-		}
+		x.hide(wm, f.Start, f.End, f.Kind)
 		if f.End <= from {
 			continue
 		}
@@ -286,7 +325,6 @@ func (r *Redactor) releasedExcerpt(wm *meter.Meter, s string, from int, drop fun
 		d := min(max(drop(ex.text), 0), len(ex.text))
 		x.redact(wm, x.redact(wm, ex.from(d)))
 	}
-	return onRunes(wm, s, x.hidden)
 }
 
 // StringTwice is String for a text the release before redacted, made valid UTF-8 and redacted again
@@ -310,7 +348,10 @@ func (r *Redactor) StringTwiceChecked(s string, cut func(string) int) (out strin
 
 // stringTwice is StringTwice on the budget wm.
 func (r *Redactor) stringTwice(wm *meter.Meter, s string, cut func(string) int) string {
-	return render(wm, s, settle(wm, s, append(r.ruleMatches(wm, s), r.releasedString(wm, s, true, cut)...)))
+	l := r.newMatchList()
+	r.eachRuleMatch(wm, s, &windowIDs{}, func(start, end, rule int) { l.add(wm, start, end, rule) })
+	r.releasedStringInto(wm, s, true, cut, l)
+	return render(wm, s, settle(wm, s, l.spans(wm)))
 }
 
 // StringTwice is the package's StringTwice with the built-in rules.
@@ -334,7 +375,10 @@ func StringTwiceChecked(s string, cut func(string) int) (out string, ok bool) {
 func (r *Redactor) ReplaceFrom(s string, from int, drop func(string) int, repl func(kind, text string) string,
 	between func(string) string) (out string, ok bool) {
 	spans, ok := metered(r, len(s), func(wm *meter.Meter) []span {
-		return settle(wm, s, append(r.ruleMatches(wm, s), r.releasedExcerpt(wm, s, from, drop)...))
+		l := r.newMatchList()
+		r.eachRuleMatch(wm, s, &windowIDs{}, func(start, end, rule int) { l.add(wm, start, end, rule) })
+		r.releasedExcerptInto(wm, s, from, drop, l)
+		return settle(wm, s, l.spans(wm))
 	})
 	if !ok {
 		return Withheld, false

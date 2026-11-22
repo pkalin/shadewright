@@ -196,7 +196,7 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 		// instance checked before.
 		after = instance{}
 	}
-	text, truncated, err := Excerpt(s.redactor, data, over, keep)
+	text, truncated, err := Excerpt(s.redactor.WithContext(ctx), data, over, keep)
 	if err != nil {
 		// Redaction withheld the excerpt whole (its work budget ran out): nothing of the log is returned, and the
 		// caller shows the read as failed.

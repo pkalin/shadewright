@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 572" role="img" aria-labelledby="t d" data-diagram="analysis-replay" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">One analysis, replayed</title>
+  <desc id="d">A looping replay of one recorded analysis, from a Warning event to a verified pull request, in about 28 seconds. An OOMKilled event becomes an Incident. The analyzer builds the context and redacts it: a secret value in the input is replaced by the placeholder [REDACTED:credential]. The triage model answers with one call, and the answer becomes a typed proposal. If triage is unsure, an escalation model may be asked; this run did not use it, so that path is drawn dim. The executor checks the proposal against the fixed list of changes and the policy, then opens a pull request in the GitOps repository. A person reviews and merges it, Flux applies the commit, and the verifier reads the pods and ends the request. Shown in red: nothing, neither the analyzer, the model nor the executor, has a path to the workloads; only Flux changes them. With reduced motion set, the picture is still and shows every step at once. Replay of release v0.3.0-rc.2, scenario oom, not live: 3 min 34 s from symptom to pull request.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .cap{fill:#7d7999;font-size:12.5px}
+      .lbl{fill:#c6a8ff;font-size:12px}
+      .no{fill:#ff8fa3;font-size:13px;font-weight:600}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .x{stroke:#7a3348;stroke-width:1.8;fill:none;stroke-dasharray:4 4}
+      .xx{stroke:#ff8fa3;stroke-width:1.8;fill:none}
+      .dim{opacity:.4}
+      .dot{fill:#a879ff;opacity:0}
+      .raw,.red{opacity:0}
+      .stat{opacity:1}
+      .stillred{opacity:1}
+      @media (prefers-reduced-motion:no-preference){
+        .g,.ln{opacity:.28}
+        .raw{opacity:0}
+        .red{opacity:0}
+        .g1{animation:lg1 28.0s linear infinite}
+        .g2{animation:lg2 28.0s linear infinite}
+        .g3{animation:lg3 28.0s linear infinite}
+        .g4{animation:lg4 28.0s linear infinite}
+        .g5{animation:lg5 28.0s linear infinite}
+        .g6{animation:lg6 28.0s linear infinite}
+        .g7{animation:lg7 28.0s linear infinite}
+        .g8{animation:lg8 28.0s linear infinite}
+        .g9{animation:lg9 28.0s linear infinite}
+        .g10{animation:lg10 28.0s linear infinite}
+        .l1{animation:ll1 28.0s linear infinite}
+        .d1{offset-path:path('M176 116H236');offset-rotate:0deg;animation:mv1 28.0s linear infinite}
+        .l2{animation:ll2 28.0s linear infinite}
+        .d2{offset-path:path('M376 116H436');offset-rotate:0deg;animation:mv2 28.0s linear infinite}
+        .l3{animation:ll3 28.0s linear infinite}
+        .d3{offset-path:path('M668 116H728');offset-rotate:0deg;animation:mv3 28.0s linear infinite}
+        .l4{animation:ll4 28.0s linear infinite}
+        .d4{offset-path:path('M868 116H928');offset-rotate:0deg;animation:mv4 28.0s linear infinite}
+        .l5{animation:ll5 28.0s linear infinite}
+        .d5{offset-path:path('M1050 148V324');offset-rotate:0deg;animation:mv5 28.0s linear infinite}
+        .l6{animation:ll6 28.0s linear infinite}
+        .d6{offset-path:path('M928 356H868');offset-rotate:0deg;animation:mv6 28.0s linear infinite}
+        .l7{animation:ll7 28.0s linear infinite}
+        .d7{offset-path:path('M728 356H668');offset-rotate:0deg;animation:mv7 28.0s linear infinite}
+        .l8{animation:ll8 28.0s linear infinite}
+        .d8{offset-path:path('M436 356H376');offset-rotate:0deg;animation:mv8 28.0s linear infinite}
+        .l9{animation:ll9 28.0s linear infinite}
+        .d9{offset-path:path('M306 388V470');offset-rotate:0deg;animation:mv9 28.0s linear infinite}
+        .l10{animation:ll10 28.0s linear infinite}
+        .d10{offset-path:path('M236 356H176');offset-rotate:0deg;animation:mv10 28.0s linear infinite}
+        .l11{animation:ll11 28.0s linear infinite}
+        .d11{offset-path:path('M110 388V470');offset-rotate:0deg;animation:mv11 28.0s linear infinite}
+        .gw{animation:lw 28.0s linear infinite}
+        .raw{animation:raw 28.0s linear infinite}.red{animation:red 28.0s linear infinite}
+      }
+      @media (prefers-reduced-motion:reduce){
+        .dot,.raw{display:none}
+        .red{opacity:1}
+      }
+      @keyframes lg1{0%,0.0%{opacity:0.28}1.071%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes lg2{0%,8.536%{opacity:0.28}9.607%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes lg3{0%,17.107%{opacity:0.28}18.179%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes lg4{0%,35.679%{opacity:0.28}36.75%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes lg5{0%,44.25%{opacity:0.28}45.321%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes lg6{0%,53.536%{opacity:0.28}54.607%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes lg7{0%,62.107%{opacity:0.28}63.179%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes lg8{0%,70.679%{opacity:0.28}71.75%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes lg9{0%,79.25%{opacity:0.28}80.321%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes lg10{0%,92.107%{opacity:0.28}93.179%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes ll1{0%,3.571%{opacity:0.28}4.643%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes ll2{0%,12.143%{opacity:0.28}13.214%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes ll3{0%,30.714%{opacity:0.28}31.786%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes ll4{0%,39.286%{opacity:0.28}40.357%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes ll5{0%,47.857%{opacity:0.28}48.929%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes ll6{0%,57.143%{opacity:0.28}58.214%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes ll7{0%,65.714%{opacity:0.28}66.786%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes ll8{0%,74.286%{opacity:0.28}75.357%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes ll9{0%,82.143%{opacity:0.28}83.214%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes ll10{0%,87.143%{opacity:0.28}88.214%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes ll11{0%,93.571%{opacity:0.28}94.643%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes lw{0%,85.714%{opacity:0.28}86.786%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
+      @keyframes raw{0%,17.143%{opacity:0}18.571%,23.571%{opacity:1}25.0%,100%{opacity:0}}
+      @keyframes red{0%,23.571%{opacity:0}26.429%,94.286%{opacity:1}98.571%,100%{opacity:0}}
+      @keyframes mv1{0%,3.571%{offset-distance:0%;opacity:0}3.75%{opacity:1}8.571%{offset-distance:100%;opacity:1}9.464%,100%{offset-distance:100%;opacity:0}}
+      @keyframes mv2{0%,12.143%{offset-distance:0%;opacity:0}12.321%{opacity:1}17.143%{offset-distance:100%;opacity:1}18.036%,100%{offset-distance:100%;opacity:0}}
+      @keyframes mv3{0%,30.714%{offset-distance:0%;opacity:0}30.893%{opacity:1}35.714%{offset-distance:100%;opacity:1}36.607%,100%{offset-distance:100%;opacity:0}}
+      @keyframes mv4{0%,39.286%{offset-distance:0%;opacity:0}39.464%{opacity:1}44.286%{offset-distance:100%;opacity:1}45.179%,100%{offset-distance:100%;opacity:0}}
+      @keyframes mv5{0%,47.857%{offset-distance:0%;opacity:0}48.036%{opacity:1}53.571%{offset-distance:100%;opacity:1}54.464%,100%{offset-distance:100%;opacity:0}}
+      @keyframes mv6{0%,57.143%{offset-distance:0%;opacity:0}57.321%{opacity:1}62.143%{offset-distance:100%;opacity:1}63.036%,100%{offset-distance:100%;opacity:0}}
+      @keyframes mv7{0%,65.714%{offset-distance:0%;opacity:0}65.893%{opacity:1}70.714%{offset-distance:100%;opacity:1}71.607%,100%{offset-distance:100%;opacity:0}}
+      @keyframes mv8{0%,74.286%{offset-distance:0%;opacity:0}74.464%{opacity:1}79.286%{offset-distance:100%;opacity:1}80.179%,100%{offset-distance:100%;opacity:0}}
+      @keyframes mv9{0%,82.143%{offset-distance:0%;opacity:0}82.321%{opacity:1}85.714%{offset-distance:100%;opacity:1}86.607%,100%{offset-distance:100%;opacity:0}}
+      @keyframes mv10{0%,87.143%{offset-distance:0%;opacity:0}87.321%{opacity:1}92.143%{offset-distance:100%;opacity:1}93.036%,100%{offset-distance:100%;opacity:0}}
+      @keyframes mv11{0%,93.571%{offset-distance:0%;opacity:0}93.75%{opacity:1}96.429%{offset-distance:100%;opacity:1}97.321%,100%{offset-distance:100%;opacity:0}}
+    </style>
+  </defs>
+  <rect width="1120" height="572" rx="18" fill="#0e0e16"/>
+  <rect class="lane" x="24" y="24" width="1072" height="228" rx="14"/>
+  <text class="lanet" x="44" y="54">ANALYZER · READ-ONLY</text>
+  <rect class="lane" x="24" y="272" width="1072" height="156" rx="14"/>
+  <text class="lanet" x="44" y="302">EXECUTOR · GIT HOST · FLUX · VERIFIER</text>
+
+  <g class="dim">
+    <rect class="box" x="728" y="168" width="140" height="64" rx="10"/>
+    <text class="h" x="744" y="194">Escalation</text>
+    <text class="s" x="744" y="215">not used in this run</text>
+    <path class="f" d="M798 148V168" marker-end="url(#a)"/>
+    <path class="f" d="M868 200H980V152" marker-end="url(#a)"/>
+  </g>
+  <text class="lbl" x="808" y="162">if unsure</text>
+
+  <g class="ln l1"><path class="f" d="M176 116H236" marker-end="url(#a)"/></g>
+  <g class="ln l2"><path class="f" d="M376 116H436" marker-end="url(#a)"/></g>
+  <g class="ln l3"><path class="f" d="M668 116H728" marker-end="url(#a)"/><text class="lbl" x="698" y="108" text-anchor="middle">context</text></g>
+  <g class="ln l4"><path class="f" d="M868 116H928" marker-end="url(#a)"/><text class="lbl" x="898" y="108" text-anchor="middle">answer</text></g>
+  <g class="ln l5"><path class="f" d="M1050 148V324" marker-end="url(#a)"/><text class="lbl" x="1042" y="240" text-anchor="middle">proposal</text></g>
+  <g class="ln l6"><path class="f" d="M928 356H868" marker-end="url(#a)"/><text class="lbl" x="898" y="348" text-anchor="middle">opens PR</text></g>
+  <g class="ln l7"><path class="f" d="M728 356H668" marker-end="url(#a)"/><text class="lbl" x="698" y="348" text-anchor="middle">review</text></g>
+  <g class="ln l8"><path class="f" d="M436 356H376" marker-end="url(#a)"/><text class="lbl" x="406" y="348" text-anchor="middle">merged</text></g>
+  <g class="ln l9"><path class="f" d="M306 388V470" marker-end="url(#a)"/><text class="lbl" x="316" y="436" text-anchor="middle">applies</text></g>
+  <g class="ln l10"><path class="f" d="M236 356H176" marker-end="url(#a)"/><text class="lbl" x="206" y="348" text-anchor="middle">applied</text></g>
+  <g class="ln l11"><path class="r" d="M110 388V470" marker-end="url(#m)"/><text class="lbl" x="120" y="436" text-anchor="middle">reads pods</text></g>
+  <g class="g g1"><rect class="box" x="44" y="84" width="132" height="64" rx="10"/><text class="h" x="60" y="110">Event</text><text class="s" x="60" y="131">OOMKilled</text></g>
+  <g class="g g2"><rect class="box" x="236" y="84" width="140" height="64" rx="10"/><text class="h" x="252" y="110">Incident</text><text class="s" x="252" y="131">debounced</text></g>
+  <g class="g g3"><rect class="key" x="436" y="84" width="232" height="64" rx="12"/><text class="h" x="452" y="110">Context, redacted</text><text class="raw no" x="452" y="131">api_key=s3cr3t-9f2a</text><text class="red lbl" x="452" y="131">api_key=[REDACTED:credential]</text></g>
+  <g class="g g4"><rect class="box" x="728" y="84" width="140" height="64" rx="10"/><text class="h" x="744" y="110">Triage model</text><text class="s" x="744" y="131">one model call</text></g>
+  <g class="g g5"><rect class="box" x="928" y="84" width="152" height="64" rx="10"/><text class="h" x="944" y="110">Proposal</text><text class="s" x="944" y="131">typed, not applied</text></g>
+  <g class="g g6"><rect class="box" x="928" y="324" width="152" height="64" rx="10"/><text class="h" x="944" y="350">Policy check</text><text class="s" x="944" y="371">source, bounds</text></g>
+  <g class="g g7"><rect class="ext" x="728" y="324" width="140" height="64" rx="10"/><text class="h" x="744" y="350">Pull request</text><text class="s" x="744" y="371">in the GitOps repo</text></g>
+  <g class="g g8"><rect class="box" x="436" y="324" width="232" height="64" rx="10"/><text class="h" x="452" y="350">Person merges</text><text class="s" x="452" y="371">your branch rules apply</text></g>
+  <g class="g g9"><rect class="box" x="236" y="324" width="140" height="64" rx="10"/><text class="h" x="252" y="350">Flux sync</text><text class="s" x="252" y="371">applies the commit</text></g>
+  <g class="g g10"><rect class="box" x="44" y="324" width="132" height="64" rx="10"/><text class="h" x="60" y="350">Verify</text><text class="s" x="60" y="371">reads the pods</text></g>
+  <text class="cap" x="236" y="172">2 min 16 s</text>
+  <text class="cap" x="436" y="172">10 s, context and model call</text>
+  <text class="cap" x="928" y="410">26 s, source and policy</text>
+  <text class="cap" x="728" y="410">42 s</text>
+  <path class="x" d="M1004 388V430"/>
+  <path class="xx" d="M998 436l12 12M1010 436l-12 12"/>
+  <text class="no" x="1020" y="448">no write</text>
+  <g class="gw"><rect class="box" x="44" y="470" width="1036" height="60" rx="10"/><text class="h" x="60" y="496">Workloads in the cluster</text><text class="s" x="60" y="517">changed only by Flux, after a person merges</text></g>
+  <text class="cap" x="44" y="556">Replay of one recorded run, not live: v0.3.0-rc.2, scenario oom. 3 min 34 s from symptom to pull request, shown here in 28 s.</text>
+  <circle class="dot d1" r="4"/>
+  <circle class="dot d2" r="4"/>
+  <circle class="dot d3" r="4"/>
+  <circle class="dot d4" r="4"/>
+  <circle class="dot d5" r="4"/>
+  <circle class="dot d6" r="4"/>
+  <circle class="dot d7" r="4"/>
+  <circle class="dot d8" r="4"/>
+  <circle class="dot d9" r="4"/>
+  <circle class="dot d10" r="4"/>
+  <circle class="dot d11" r="4"/>
+</svg>

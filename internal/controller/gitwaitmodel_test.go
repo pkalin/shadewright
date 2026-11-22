@@ -164,6 +164,8 @@ const (
 	// one stays above the 2 s that modelGit.fail takes for a short deadline.
 	modelLongTimeout  = 30 * time.Second
 	modelShortTimeout = 150 * time.Millisecond
+	// maxModelScale is the largest factor a run multiplies modelShortTimeout by (modelWorld.scale).
+	maxModelScale = 8
 
 	faultNone    = "none"
 	faultContent = "content"
@@ -324,8 +326,20 @@ func TestGitWaitModel(t *testing.T) {
 	for _, seed := range modelSeeds(t) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			t.Parallel()
-			m := newModel(t, seed, schema)
-			m.run()
+			// The short deadline of a fault that times out is wall-clock time: a run in which a reconcile spent it
+			// before the read set to wait for it (late), on a loaded machine, and broke a property runs again from
+			// its seed with the deadline doubled, up to maxModelScale times. The last run is reported as it is.
+			for k := time.Duration(1); ; k *= 2 {
+				m := newModel(t, seed, schema)
+				m.scale = k
+				m.play()
+				if len(m.violations) == 0 || !m.late || k == maxModelScale {
+					m.report()
+					return
+				}
+				t.Logf("seed %d ran out of its short deadline times %d before the read set to time out, and broke %q: "+
+					"running it again with twice the deadline", seed, k, m.violations)
+			}
 		})
 	}
 }
@@ -481,6 +495,15 @@ type modelWorld struct {
 	// excused: property "stopped holder" let the last look it reached go without the failed check for that reason,
 	// so the next look it reaches must show the check.
 	exceptionLook, excused bool
+
+	// scale multiplies modelShortTimeout (zero counts as 1): a run that ran out of a short deadline before the read
+	// set to wait for it (late) runs again with it doubled (TestGitWaitModel, #1095).
+	scale time.Duration
+	// late is set when a reconcile under a fault that times out took its whole short deadline without reaching the
+	// read that waits for it: the time went to the load of the machine, not to the fault. timedOutReads counts the
+	// reads that waited for the deadline (modelGit.fail).
+	late          bool
+	timedOutReads int
 }
 
 // pauseSpan is a pause from its start to its lift, or a time the executor was down.
@@ -695,9 +718,24 @@ func (m *modelWorld) cleanupTimeout() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if strings.Contains(m.fault, faultTimeout) {
-		return modelShortTimeout
+		return modelShortTimeout * max(m.scale, 1)
 	}
 	return modelLongTimeout
+}
+
+// noteLate sets late when a reconcile that began at start with a short deadline (timeout) took all of it while no
+// read waited for it (timedOutReads still at reads).
+func (m *modelWorld) noteLate(start time.Time, timeout time.Duration, reads int) {
+	if timeout >= modelLongTimeout || time.Since(start) < timeout {
+		return
+	}
+	m.mu.Lock()
+	late := m.timedOutReads == reads
+	m.late = m.late || late
+	m.mu.Unlock()
+	if late {
+		m.logf("the reconcile took its short deadline of %v without reaching the read set to time out", timeout)
+	}
 }
 
 // freshPlan makes rr's plan the one made on the head of its target branch, as the source mapping finds it
@@ -932,7 +970,8 @@ func (m *modelWorld) report() {
 		strings.Join(m.violations, "\n  "), strings.Join(m.trace, "\n  "))
 }
 
-func (m *modelWorld) run() {
+// play runs the model's events and reconciles; its violations stay in m.violations for report.
+func (m *modelWorld) play() {
 	if m.focus == focusCancel && m.rng.IntN(4) > 0 {
 		// The cancel and the branch change come before the executor first looks: a pull request whose record was
 		// lost is not found before them.
@@ -978,7 +1017,6 @@ func (m *modelWorld) run() {
 		m.step()
 	}
 	m.settled()
-	m.report()
 }
 
 // lostThenMoved is the order lost write, move, reconcile (#892, decisions of 2026-11-19): a person moves the pull
@@ -1924,7 +1962,12 @@ func (m *modelWorld) step() {
 	flick := m.flicker
 	m.mu.Unlock()
 	m.r.CleanupTimeout = m.cleanupTimeout()
+	m.mu.Lock()
+	reads := m.timedOutReads
+	m.mu.Unlock()
+	began := time.Now()
 	res, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.key})
+	m.noteLate(began, m.r.CleanupTimeout, reads)
 	m.mu.Lock()
 	m.flickered = flick && !m.flicker
 	// The reconcile starts from the API server's copy; the cache's older copy reaches only a later read of it (the
@@ -1993,7 +2036,12 @@ func (m *modelWorld) stepSecond(ctx context.Context, first *api.RemediationReque
 	r := &RemediationRequestReconciler{Client: m.base, APIReader: &apiServerReader{Reader: m.base}, Scheme: m.r.Scheme,
 		Source: &stubResolver{result: res}, Now: m.r.Now,
 		CleanupTimeout: m.cleanupTimeout()}
+	m.mu.Lock()
+	reads := m.timedOutReads
+	m.mu.Unlock()
+	began := time.Now()
 	_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: m.second})
+	m.noteLate(began, r.CleanupTimeout, reads)
 	live := &api.RemediationRequest{}
 	if gerr := m.base.Get(ctx, m.second, live); gerr != nil {
 		m.t.Fatal(gerr)
@@ -2877,6 +2925,9 @@ func (g *modelGit) fail(ctx context.Context, op string) error {
 		if deadline, bounded := ctx.Deadline(); timeout && bounded && time.Until(deadline) < 2*time.Second {
 			// The step's time (CleanupTimeout) runs out while the host does not answer.
 			<-ctx.Done()
+			g.m.mu.Lock()
+			g.m.timedOutReads++
+			g.m.mu.Unlock()
 			return freshness.WrapProvider("read "+op, ctx.Err())
 		}
 		// A read with no short deadline of its own fails as the host's client gives up.

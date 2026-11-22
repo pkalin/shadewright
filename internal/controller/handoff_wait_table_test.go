@@ -73,8 +73,14 @@ var failureKinds = []failureKind{kindStatus, kindForbidden, kindConflict, kindTr
 	kindJoined, kindAdapterNetwork}
 
 // waitStepTimeout is the recovery's own deadline in the table: long enough for a whole look at the fakes, short
-// enough for the rows that run into it.
+// enough for the rows that run into it. It is a wall-clock deadline (the recovery bounds its steps with
+// context.WithTimeout, with no clock to inject), so a look on a loaded machine can run out of it where the row did
+// not put a failure: a row whose look did (callLog.late) runs again with the deadlines doubled, up to
+// maxWaitStepScale times, and is checked on the look that kept to them (#1095).
 const waitStepTimeout = 300 * time.Millisecond
+
+// maxWaitStepScale is the largest factor a row's deadlines are multiplied by (waitingWorld).
+const maxWaitStepScale = 8
 
 // transportError is a failure to reach a server at all: no status, no class of the Git host.
 func transportError() error {
@@ -138,9 +144,56 @@ type callLog struct {
 	cancel context.CancelFunc
 	// failing fails with a status error at every look, unless it is the target.
 	failing string
+	// contexts holds the context of each call as the call found it; hit is set once the target was called, and
+	// targetDeadline is the deadline of the target's context (zero when it has none).
+	contexts       []callContext
+	hit            bool
+	targetDeadline time.Time
+}
+
+// callContext is what one call found of its context: its deadline, whether that deadline had passed, and whether
+// the call came after the target.
+type callContext struct {
+	deadline    time.Time
+	bounded     bool
+	ended       bool
+	afterTarget bool
+}
+
+// late reports whether the look, which returned at end, ran out of a deadline the row did not make it run out of:
+// a call found its context past its deadline, or the look returned after the latest deadline any call carried. Only
+// a step deadline the row injects is its own: the target's context and those that end with it (a later call on a
+// context whose deadline is not after the target's). A look that ran out of time on a loaded machine shows where
+// the time went, not what the row checks.
+func (l *callLog) late(end time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	injected := l.kind == kindStepDeadline && l.hit && !l.targetDeadline.IsZero()
+	var latest time.Time
+	for _, c := range l.contexts {
+		if !c.bounded {
+			continue
+		}
+		own := injected && c.afterTarget && !c.deadline.After(l.targetDeadline)
+		if c.ended && !own {
+			return true
+		}
+		if c.deadline.After(latest) {
+			latest = c.deadline
+		}
+	}
+	if latest.IsZero() || (injected && !latest.After(l.targetDeadline)) {
+		return false
+	}
+	return end.After(latest)
 }
 
 func (l *callLog) call(ctx context.Context, cluster bool, name string) error {
+	deadline, bounded := ctx.Deadline()
+	l.mu.Lock()
+	l.contexts = append(l.contexts, callContext{deadline: deadline, bounded: bounded,
+		ended: errors.Is(ctx.Err(), context.DeadlineExceeded), afterTarget: l.hit})
+	l.mu.Unlock()
 	if cluster && ctx.Err() != nil {
 		// A real client sends nothing on an ended context; the fake client would write all the same.
 		return ctx.Err()
@@ -158,6 +211,9 @@ func (l *callLog) call(ctx context.Context, cluster bool, name string) error {
 	key = fmt.Sprintf("%s#%d", key, l.seen[key])
 	l.calls = append(l.calls, key)
 	hit := key == l.target
+	if hit {
+		l.hit, l.targetDeadline = true, deadline
+	}
 	l.mu.Unlock()
 	if !hit {
 		if key == l.failing {
@@ -688,9 +744,10 @@ var recoveryPaths = []recoveryPath{
 
 // waitingWorld is a replacement whose handoff was aborted at a refused read of the branch and that watches past the
 // deadline and its grace (#786, decision of 2026-11-18), set up on path, with every later call of r to the Kubernetes API and to the Git host going through l. It
-// also returns the client without l, for the test's own reads.
-func waitingWorld(t *testing.T, path recoveryPath, l *callLog) (*RemediationRequestReconciler, client.Client,
-	*api.RemediationRequest) {
+// also returns the client without l, for the test's own reads. The recovery's deadlines are k times their table
+// values (waitStepTimeout).
+func waitingWorld(t *testing.T, path recoveryPath, l *callLog, k time.Duration) (*RemediationRequestReconciler,
+	client.Client, *api.RemediationRequest) {
 	t.Helper()
 	r, g, p, rr, cr, _ := handoffAppendedWorld(t, nil)
 	ctx := context.Background()
@@ -713,10 +770,12 @@ func waitingWorld(t *testing.T, path recoveryPath, l *callLog) (*RemediationRequ
 	base := r.Client
 	c := logClient(r.Client.(client.WithWatch), l)
 	r.Client, r.APIReader = c, c
-	r.WriteTimeout = waitStepTimeout
+	r.WriteTimeout = waitStepTimeout * k
 	if path.stepTimeout > 0 {
-		r.WriteTimeout = path.stepTimeout
+		r.WriteTimeout = path.stepTimeout * k
 	}
+	// The read of the Incident's count, when the path set its deadline (mergedWithIncident).
+	r.IncidentReadTimeout *= k
 	l.failing = path.failing
 	r.OpenRepository = func(ctx context.Context, _ api.GitRepository) (providers.GitProvider, error) {
 		if err := l.call(ctx, false, "open"); err != nil {
@@ -753,10 +812,24 @@ func TestRecoveryWaitSortsEachFailureByItsSource(t *testing.T) {
 	for _, path := range recoveryPaths {
 		t.Run(path.name, func(t *testing.T) {
 			// The look that works makes exactly the listed calls, and ends as the path says.
-			l := &callLog{}
-			r, base, rr := waitingWorld(t, path, l)
 			ctx := context.Background()
-			if _, _, err := r.recoverHandoff(ctx, rr); err != nil {
+			var (
+				l    *callLog
+				base client.Client
+				rr   *api.RemediationRequest
+				err  error
+			)
+			for k := time.Duration(1); ; k *= 2 {
+				var r *RemediationRequestReconciler
+				l = &callLog{}
+				r, base, rr = waitingWorld(t, path, l, k)
+				_, _, err = r.recoverHandoff(ctx, rr)
+				if k == maxWaitStepScale || !l.late(time.Now()) {
+					break
+				}
+				t.Logf("the look ran out of its deadlines times %d (%v): trying again with twice the deadlines", k, err)
+			}
+			if err != nil {
 				t.Fatalf("recoverHandoff without a failure: %v", err)
 			}
 			if got := l.recorded(); !slices.Equal(got, path.calls) {
@@ -813,19 +886,47 @@ func nothingToReadRow(t *testing.T, res reconcile.Result, err error, got *api.Re
 	}
 }
 
+// rowLook is what one look of a row gave: its call log, the client without the log, the request's key, the
+// condition PullRequestUnreadable before the look, and the look's result.
+type rowLook struct {
+	l    *callLog
+	base client.Client
+	key  client.ObjectKey
+	was  *metav1.Condition
+	res  reconcile.Result
+	err  error
+}
+
+// lookUnderLoad runs the look of path with kind injected at call. A look that ran out of a deadline the row did not
+// inject (callLog.late, a loaded machine) runs again with the deadlines doubled, up to maxWaitStepScale times; the
+// row checks the last look, so no check is relaxed (#1095).
+func lookUnderLoad(t *testing.T, path recoveryPath, call string, kind failureKind) rowLook {
+	t.Helper()
+	for k := time.Duration(1); ; k *= 2 {
+		ctx, cancel := context.WithCancel(context.Background())
+		l := &callLog{target: call, kind: kind, cancel: cancel}
+		r, base, rr := waitingWorld(t, path, l, k)
+		look := rowLook{l: l, base: base, key: client.ObjectKeyFromObject(rr), was: watchedRecovery(rr).DeepCopy()}
+		look.res, _, look.err = r.recoverHandoff(ctx, rr)
+		late := l.late(time.Now())
+		cancel()
+		if k == maxWaitStepScale || !late {
+			return look
+		}
+		t.Logf("the look ran out of a deadline the row did not inject, with the deadlines times %d (%v): trying "+
+			"again with twice the deadlines", k, look.err)
+	}
+}
+
 func recoveryWaitRow(t *testing.T, path recoveryPath, call string, kind failureKind) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	l := &callLog{target: call, kind: kind, cancel: cancel}
-	r, base, rr := waitingWorld(t, path, l)
-	was := watchedRecovery(rr).DeepCopy()
+	look := lookUnderLoad(t, path, call, kind)
+	l, base, key, was, res, err := look.l, look.base, look.key, look.was, look.res, look.err
 	cluster := call[:3] == "k8s"
-	res, _, err := r.recoverHandoff(ctx, rr)
 	if !slices.Contains(l.recorded(), call) {
 		t.Fatalf("the call %s was not made: calls %q", call, l.recorded())
 	}
 	got := &api.RemediationRequest{}
-	if err := base.Get(context.Background(), client.ObjectKeyFromObject(rr), got); err != nil {
+	if err := base.Get(context.Background(), key, got); err != nil {
 		t.Fatal(err)
 	}
 	if after, ok := path.bestEffort[call]; ok && kind != kindCancel && (kind != kindStepDeadline || !after.stepWide) {

@@ -605,21 +605,37 @@ func TestLogExcerptKeepsItsTail(t *testing.T) {
 }
 
 // Acceptance: timeout. A read that does not answer ends in "could not fetch, timed out" within the tool's
-// timeout; the caller's cancellation is an error, not a result.
+// timeout; the caller's cancellation is an error, not a result. The timeout is checked on the deadline each
+// blocked read was given, not on the time the call took: under load the work around the reads takes longer,
+// and a check of the call's wall time failed once on a loaded machine (#1095). Every read of one call carries
+// the same deadline, at most timeout ahead when the read starts: one bound for the whole call, not one per read
+// and not a default.
 func TestTimeout(t *testing.T) {
 	const timeout = 50 * time.Millisecond
+	seen := &deadlines{}
 	e := newEnv(t, nil, func(c *Config) {
-		b := blockingReader{}
-		c.Pods, c.Events, c.Objects, c.Logs, c.Timeout = b, b, b, blockingLogs{}, timeout
+		b := blockingReader{seen: seen}
+		c.Pods, c.Events, c.Objects, c.Logs, c.Timeout = b, b, b, blockingLogs{seen: seen}, timeout
 	})
 	for _, name := range []string{NameGetResource, NameListEvents, NameGetPodLogs, NameQueryMetrics, NameCheckMissingReference} {
-		start := time.Now()
 		r := e.call(t, name, with(name, nil))
 		if r.Status != StatusCouldNotFetch || !slices.Contains(r.Labels, LabelTimedOut) {
 			t.Errorf("%s: %q %v", name, r.Status, r.Labels)
 		}
-		if d := time.Since(start); d > 20*timeout {
-			t.Errorf("%s took %s", name, d)
+		reads := seen.take()
+		if len(reads) == 0 {
+			t.Errorf("%s: no read waited for the timeout", name)
+		}
+		for i, d := range reads {
+			switch {
+			case !d.bounded:
+				t.Errorf("%s: read %d has no deadline", name, i)
+			case d.left > timeout:
+				t.Errorf("%s: read %d had %s left, want at most the tool's timeout %s", name, i, d.left, timeout)
+			case !d.at.Equal(reads[0].at):
+				t.Errorf("%s: read %d has deadline %s, read 0 %s: one deadline for the call", name, i,
+					d.at.Format(time.StampMicro), reads[0].at.Format(time.StampMicro))
+			}
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())

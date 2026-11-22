@@ -36,12 +36,15 @@ import (
 // The current instance is read first, the read runs out of its call timeout, the log excerpt is a failed
 // source, and no second read follows a failed one: the previous instance's excerpt is lost.
 func TestKnownLimitHangingCurrentInstanceLosesThePreviousExcerpt(t *testing.T) {
-	const call = 400 * time.Millisecond
-	l := &timedLogs{
-		plan:         map[string][2]outcome{crashPod: {hangs, answers}},
-		previousText: "starting\npanic: boom\n",
-	}
-	c, _, _, _ := timedBuildOf(t, objectsWith(exited), l, call, 10*time.Second)
+	r, k := underLoad(t, func(k time.Duration) (timedRun, bool) {
+		l := &timedLogs{
+			plan:         map[string][2]outcome{crashPod: {hangs, answers}},
+			previousText: "starting\npanic: boom\n",
+		}
+		c, _, _, reached := timedBuildOf(t, objectsWith(exited), l, 400*time.Millisecond*k, 10*time.Second*k)
+		return timedRun{c: c, l: l}, reached
+	})
+	c, l, call := r.c, r.l, 400*time.Millisecond*k
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if len(l.calls) != 1 || l.calls[0].Pod != crashPod || l.calls[0].Previous {
@@ -66,30 +69,44 @@ func TestKnownLimitHangingCurrentInstanceLosesThePreviousExcerpt(t *testing.T) {
 // Known limit (b): a container in CrashLoopBackOff whose previous instance answers without lines at once while
 // its current instance hangs. The fallback read of the current instance runs out of its call timeout, and
 // when the build deadline is shorter than the log section's time plus the metrics' time, the metrics are cut
-// and become a failed source. Call timeout 400 ms, build deadline 700 ms, metrics that take 420 ms.
+// and become a failed source. Call timeout 400 ms, build deadline 700 ms, metrics that take 420 ms; the build
+// must reach the log section within 300 ms, the build deadline less the call timeout, or it runs again with
+// all three durations doubled (underLoad).
 func TestKnownLimitHangingFallbackReadCostsTheMetrics(t *testing.T) {
-	const call, whole, metricsTake = 400 * time.Millisecond, 700 * time.Millisecond, 420 * time.Millisecond
-	l := &timedLogs{plan: map[string][2]outcome{crashPod: {hangs, empty}}}
-	var mu sync.Mutex
-	var metricStarts, metricDeadlines []time.Time
-	b := newBuilder(t, reader(t, objectsWith(crashingNow)...), webSources(), func(c *Config) {
-		c.SourceTimeout, c.BuildTimeout = call, whole
-		c.Logs = l
-		c.Metrics = metricsFunc(func(ctx context.Context, q providers.MetricsQuery) (providers.MetricsResult, error) {
-			d, _ := ctx.Deadline()
-			mu.Lock()
-			metricStarts = append(metricStarts, time.Now())
-			metricDeadlines = append(metricDeadlines, d)
-			mu.Unlock()
-			select {
-			case <-time.After(metricsTake):
-				return providers.MetricsResult{}, nil
-			case <-ctx.Done():
-				return providers.MetricsResult{}, ctx.Err()
-			}
+	type run struct {
+		c                             *Context
+		l                             *timedLogs
+		metricStarts, metricDeadlines []time.Time
+	}
+	r, k := underLoad(t, func(k time.Duration) (*run, bool) {
+		call, whole, metricsTake := 400*time.Millisecond*k, 700*time.Millisecond*k, 420*time.Millisecond*k
+		r := &run{l: &timedLogs{plan: map[string][2]outcome{crashPod: {hangs, empty}}}}
+		var mu sync.Mutex
+		b := newBuilder(t, reader(t, objectsWith(crashingNow)...), webSources(), func(c *Config) {
+			c.SourceTimeout, c.BuildTimeout = call, whole
+			c.Logs = r.l
+			c.Metrics = metricsFunc(func(ctx context.Context, q providers.MetricsQuery) (providers.MetricsResult, error) {
+				d, _ := ctx.Deadline()
+				mu.Lock()
+				r.metricStarts = append(r.metricStarts, time.Now())
+				r.metricDeadlines = append(r.metricDeadlines, d)
+				mu.Unlock()
+				select {
+				case <-time.After(metricsTake):
+					return providers.MetricsResult{}, nil
+				case <-ctx.Done():
+					return providers.MetricsResult{}, ctx.Err()
+				}
+			})
 		})
+		start := time.Now()
+		r.c = build(t, b, incident(deploymentRef()))
+		r.l.mu.Lock()
+		defer r.l.mu.Unlock()
+		return r, !r.l.first.IsZero() && r.l.first.Sub(start) < whole-call
 	})
-	c := build(t, b, incident(deploymentRef()))
+	call, metricsTake := 400*time.Millisecond*k, 420*time.Millisecond*k
+	c, l, metricStarts, metricDeadlines := r.c, r.l, r.metricStarts, r.metricDeadlines
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if len(l.calls) != 2 || !l.calls[0].Previous || l.calls[1].Previous {
@@ -102,8 +119,6 @@ func TestKnownLimitHangingFallbackReadCostsTheMetrics(t *testing.T) {
 	}
 	// Decided by deadlines, not by the clock: every metric call that reached the source had less time than the
 	// metrics take, so none could answer.
-	mu.Lock()
-	defer mu.Unlock()
 	for i, d := range metricDeadlines {
 		if d.IsZero() || !d.Before(metricStarts[i].Add(metricsTake)) {
 			t.Errorf("metric call %d may run %s, want less than the %s the metrics take", i, d.Sub(metricStarts[i]), metricsTake)

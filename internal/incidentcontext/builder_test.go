@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -354,15 +355,22 @@ func TestValueStaysOnOneLine(t *testing.T) {
 }
 
 // A source call that runs out of its own timeout while the build goes on is a failed source.
+// The call timeout of 20 ms bounds the reads of the target too: a build whose target reads ran out of it on a
+// loaded machine made no log call and runs again with a longer timeout (underLoad).
 func TestSourceTimeoutIsAFailure(t *testing.T) {
-	b := newBuilder(t, reader(t, webObjects()...), webSources(), func(c *Config) {
-		c.SourceTimeout = 20 * time.Millisecond
-		c.Logs = logFunc(func(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
-			<-ctx.Done()
-			return providers.LogExcerpt{}, ctx.Err()
+	c, _ := underLoad(t, func(k time.Duration) (*Context, bool) {
+		var logCalls atomic.Int32
+		b := newBuilder(t, reader(t, webObjects()...), webSources(), func(c *Config) {
+			c.SourceTimeout = 20 * time.Millisecond * k
+			c.Logs = logFunc(func(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
+				logCalls.Add(1)
+				<-ctx.Done()
+				return providers.LogExcerpt{}, ctx.Err()
+			})
 		})
+		c := build(t, b, incident(deploymentRef()))
+		return c, logCalls.Load() > 0
 	})
-	c := build(t, b, incident(deploymentRef()))
 	if one(t, c, SectionLogs).Availability != CouldNotFetch || !c.Escalate() {
 		t.Fatalf("timed-out source: %+v", c)
 	}

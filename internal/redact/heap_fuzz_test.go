@@ -29,12 +29,13 @@ const fuzzHeapSize = 192 << 10
 // FuzzHeapWithinWeight looks for a shape heavier than the line of the table test (#1087, decisions of 2026-11-22):
 // a fuzzed unit of at most 64 bytes, repeated to an entry of fuzzHeapSize bytes and passed to the entry point the
 // knob picks, must not hold more than heapWeightRoom percent of HeapWeightPerByte per byte past HeapFixed at that
-// size (heapRatio.overTestLine, the line TestHeapPerByteOfEveryShape fails on). A shape it finds goes into
-// heapShapes, and HeapWeightPerByte rises with the measured ratio. A shape under that line and over the worst
-// measured one passes. The seeds are a unit
-// of every shape of heapShapes at every entry point. As FuzzDiffStrings does, an input whose redaction does not
-// return within productDeadline fails as such, before Go's fuzzing worker kills itself at a minute; the work of
-// an entry is bounded by its budget at this size, so no step cap is needed besides. It runs without the race
+// size (heapRatio.overTestLine, the line TestHeapPerByteOfEveryShape fails on). At this size the fixed 4 MiB is
+// subtracted from the peak, so a shape with little fixed heap passes up to about 96 bytes per byte; the table
+// test at 512 KiB and 1.5 MiB is the one that holds the line of 75. A shape it finds goes into heapShapes, and
+// HeapWeightPerByte rises with the measured ratio. The seeds are a unit of every shape of heapShapes, each
+// seeded at one entry point (shape i at entry point i modulo the count). As FuzzDiffStrings does, an input whose
+// redaction does not return within productDeadline fails as such, before Go's fuzzing worker kills itself at a
+// minute; the work of an entry is bounded by its budget at this size, so no step cap is needed besides. It runs without the race
 // detector only (the detector's shadow memory is no heap of the product).
 func FuzzHeapWithinWeight(f *testing.F) {
 	for i, sh := range heapShapes {

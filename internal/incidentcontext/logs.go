@@ -60,14 +60,14 @@ type logPick struct {
 // logPicks chooses the containers to read, most relevant first: one whose last instance terminated inside
 // the window, then one that waits with a reason or terminated with an error, then one that is not ready. A
 // termination that finished before the window, a container that ran to completion (a finished init
-// container) and one stopped by its pod's deletion ([shutdown]) are not trouble. When no container shows
+// container) and one that exited after its pod's deletion began ([shutdown]) are not trouble. When no container shows
 // trouble, the first regular container of the most troubled pod is read.
 //
 // Which instance is read first: for a container whose current instance has terminated, that instance, the
 // newest dead one (the kubelet keeps one terminated instance per container, so the one before it is usually
 // gone); for any other container whose last instance terminated inside the window, the previous instance,
 // whose tail holds the lines before the termination (while a container waits, the kubelet serves that same
-// instance for both), and so for a container whose current instance was stopped by its pod's deletion: the
+// instance for both), and so for a container whose current instance exited after its pod's deletion began: the
 // instance that terminated before it is the one in trouble; otherwise the current one.
 func logPicks(t *target, w window) []logPick {
 	var all []logPick

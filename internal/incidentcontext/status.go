@@ -568,8 +568,9 @@ func (b *Builder) podLines(l *lines, t *target) {
 		}
 		var deleting string
 		if p.DeletionTimestamp != nil {
-			deleting = ", being deleted (requested " + stamp(metav1.NewTime(deletionStart(p))) +
-				", grace period ends " + stamp(*p.DeletionTimestamp) + ")"
+			// No request time is computed: a delete that shortens the grace period moves the deletionTimestamp,
+			// so the timestamp minus the period is the start of the last grace period, not the request.
+			deleting = ", being deleted, grace period ends " + stamp(*p.DeletionTimestamp)
 		}
 		l.add("pod %s%s, phase %s, created %s%s", l.data(b.value(p.Name)), owner, l.data(b.value(string(p.Status.Phase))),
 			stamp(p.CreationTimestamp), deleting)
@@ -588,8 +589,8 @@ func (b *Builder) podLines(l *lines, t *target) {
 }
 
 // containerLine describes one container of a running pod, with the memory limit of that pod's own spec,
-// labelled as the pod's: during a rollout it may differ from the pod template's. The current exit of a
-// container stopped by its pod's deletion is marked as that pod's shutdown ([shutdown]).
+// labelled as the pod's: during a rollout it may differ from the pod template's. A current exit that finished
+// after the pod's deletion began carries that fact, and no conclusion about its cause ([shutdown]).
 func (b *Builder) containerLine(l *lines, p *corev1.Pod, cs containerStatus) {
 	kind := "container"
 	if cs.init {
@@ -598,7 +599,7 @@ func (b *Builder) containerLine(l *lines, p *corev1.Pod, cs containerStatus) {
 	parts := []frag{cat(fmt.Sprintf("ready %t, restarts %d", cs.Ready, cs.RestartCount))}
 	parts = append(parts, cat("now ", b.state(l, cs.State)))
 	if shutdown(p, cs) {
-		parts = append(parts, cat("this exit is the shutdown of a pod being deleted, not counted as a failure"))
+		parts = append(parts, cat("exited after the deletion began"))
 	}
 	if cs.LastTerminationState.Terminated != nil {
 		parts = append(parts, cat("last ", b.state(l, cs.LastTerminationState)))

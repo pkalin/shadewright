@@ -34,7 +34,10 @@ const errorReason = "Error"
 // completedReason is the reason the kubelet records for a container that ran to completion.
 const completedReason = "Completed"
 
-const shutdownNote = "this exit is the shutdown of a pod being deleted, not counted as a failure"
+const shutdownNote = "exited after the deletion began"
+
+// deletedPod is the pod of the fixture's ReplicaSet that these tests delete.
+const deletedPod = "web-abc-3"
 
 // deletionGrace is the grace period of the deletions of these tests.
 const deletionGrace = 30
@@ -78,9 +81,9 @@ func statusOrder(t *testing.T, c *Context) []string {
 	return out
 }
 
-// A pod being deleted in a rollout is shown as being deleted, its shutdown exit is marked as such, and it is
-// ranked below a running pod, not beside the crashing one as a failure (#969). Its logs are not picked as
-// trouble either.
+// A pod being deleted in a rollout is shown as being deleted with the end of its grace period and no computed
+// request time, its exit after the deletion began carries that fact, and it is ranked below a running pod,
+// not beside the crashing one (#969). Its logs are not picked as trouble either.
 func TestDeletedPodShutdownIsNotAFailure(t *testing.T) {
 	for _, tc := range []struct {
 		reason string
@@ -88,16 +91,16 @@ func TestDeletedPodShutdownIsNotAFailure(t *testing.T) {
 	}{{errorReason, 137}, {errorReason, 143}, {completedReason, 143}} {
 		t.Run(fmt.Sprintf("%s-%d", tc.reason, tc.exit), func(t *testing.T) {
 			ref := controllerRef(kindReplicaSet, "web-abc", "uid-rs-abc")
-			gone := deleting(pod("web-abc-3", webLabels(), longAgo, ref),
+			gone := deleting(pod(deletedPod, webLabels(), longAgo, ref),
 				tc.reason, tc.exit)
 			c := build(t, newBuilder(t, reader(t, rolloutObjects(gone)...), webSources(), nil), incident(deploymentRef()))
 			text := one(t, c, SectionStatus).Text
-			if got, want := statusOrder(t, c), []string{crashPod, secondPod, "web-abc-3"}; !slices.Equal(got, want) {
+			if got, want := statusOrder(t, c), []string{crashPod, secondPod, deletedPod}; !slices.Equal(got, want) {
 				t.Errorf("pod order %v, want %v\n%s", got, want, text)
 			}
-			if !strings.Contains(text, "pod web-abc-3, controlled by ReplicaSet web-abc, phase Running, created "+
-				stamp(longAgo)+", being deleted (requested "+stamp(metav1.NewTime(recent.Add(-20*time.Second)))+
-				", grace period ends "+stamp(*gone.DeletionTimestamp)+")") {
+			if !strings.Contains(text, "pod "+deletedPod+", controlled by ReplicaSet web-abc, phase Running, created "+
+				stamp(longAgo)+", being deleted, grace period ends "+stamp(*gone.DeletionTimestamp)+"\n") ||
+				strings.Contains(text, "requested") {
 				t.Errorf("the pod is not shown as being deleted:\n%s", text)
 			}
 			if strings.Count(text, shutdownNote) != 1 {
@@ -120,7 +123,7 @@ func TestDeletedPodKeepsOOMAndEarlierCrashes(t *testing.T) {
 	ref := controllerRef(kindReplicaSet, "web-abc", "uid-rs-abc")
 	labels := webLabels()
 
-	oom := deleting(pod("web-abc-3", labels, longAgo, ref), reasonOOMKilled, 137)
+	oom := deleting(pod(deletedPod, labels, longAgo, ref), reasonOOMKilled, 137)
 	if tr := troubleOf(oom); tr.broken != 1 || tr.unready != 1 {
 		t.Errorf("trouble of an OOM kill of a pod being deleted %+v, want broken and unready", tr)
 	}
@@ -166,7 +169,7 @@ func TestDeletedPodEarlierExitStaysTrouble(t *testing.T) {
 		"no grace period": func(p *corev1.Pod) { p.DeletionGracePeriodSeconds = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
-			p := deleting(pod("web-abc-3", webLabels(), longAgo, ref), errorReason, 1)
+			p := deleting(pod(deletedPod, webLabels(), longAgo, ref), errorReason, 1)
 			change(p)
 			if tr := troubleOf(p); tr.broken != 1 || tr.unready != 1 {
 				t.Errorf("trouble %+v, want broken and unready", tr)
@@ -179,13 +182,13 @@ func TestDeletedPodEarlierExitStaysTrouble(t *testing.T) {
 			if strings.Contains(text, shutdownNote) {
 				t.Errorf("an exit before the deletion is marked as its shutdown:\n%s", text)
 			}
-			if got := statusOrder(t, c); !slices.Equal(got, []string{crashPod, "web-abc-3", secondPod}) {
+			if got := statusOrder(t, c); !slices.Equal(got, []string{crashPod, deletedPod, secondPod}) {
 				t.Errorf("pod order %v, want the deleted pod ranked as troubled\n%s", got, text)
 			}
 		})
 	}
 	// With no grace period recorded, an exit at the deletionTimestamp itself is the shutdown.
-	p := deleting(pod("web-abc-3", webLabels(), longAgo, ref), errorReason, 143)
+	p := deleting(pod(deletedPod, webLabels(), longAgo, ref), errorReason, 143)
 	p.DeletionGracePeriodSeconds = nil
 	p.DeletionTimestamp = ptrTime(recent.Time)
 	if tr := troubleOf(p); tr != (trouble{}) {
@@ -197,7 +200,7 @@ func TestDeletedPodEarlierExitStaysTrouble(t *testing.T) {
 // when it finished after the deletion began.
 func TestDeletedPodCompletedContainerIsNotMarked(t *testing.T) {
 	ref := controllerRef(kindReplicaSet, "web-abc", "uid-rs-abc")
-	p := deleting(pod("web-abc-3", webLabels(), longAgo, ref), errorReason, 143)
+	p := deleting(pod(deletedPod, webLabels(), longAgo, ref), errorReason, 143)
 	p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
 		Name: "setup",
 		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
@@ -220,7 +223,7 @@ func TestDeletedPodCompletedContainerIsNotMarked(t *testing.T) {
 // nothing is marked as a shutdown, and it is no trouble.
 func TestDeletedPodPastGraceStillRunning(t *testing.T) {
 	ref := controllerRef(kindReplicaSet, "web-abc", "uid-rs-abc")
-	p := pod("web-abc-3", webLabels(), longAgo, ref)
+	p := pod(deletedPod, webLabels(), longAgo, ref)
 	p.DeletionTimestamp, p.DeletionGracePeriodSeconds = ptrTime(recent.Time), new(int64(deletionGrace))
 	p.Finalizers = []string{"example.com/hold"}
 	if tr := troubleOf(p); tr != (trouble{}) {
@@ -228,7 +231,48 @@ func TestDeletedPodPastGraceStillRunning(t *testing.T) {
 	}
 	c := build(t, newBuilder(t, reader(t, rolloutObjects(p)...), webSources(), nil), incident(deploymentRef()))
 	text := one(t, c, SectionStatus).Text
-	if strings.Contains(text, shutdownNote) || !strings.Contains(text, ", being deleted (requested ") {
+	if strings.Contains(text, shutdownNote) || !strings.Contains(text, ", being deleted, grace period ends ") {
 		t.Errorf("a running pod being deleted:\n%s", text)
+	}
+}
+
+// A named limit (ADR-0023, amendment of 2026-11-22): a pod kept by a finalizer after a delete shortened its
+// grace period to 0 (the kubelet's final delete) has its deletionTimestamp moved past the exit it already had.
+// That exit finished before the start of the last grace period, so it is not marked and ranks the pod as trouble,
+// as before #969.
+func TestDeletedPodZeroGraceAfterExitRanksAsTrouble(t *testing.T) {
+	ref := controllerRef(kindReplicaSet, "web-abc", "uid-rs-abc")
+	p := deleting(pod(deletedPod, webLabels(), longAgo, ref), errorReason, 137)
+	p.DeletionGracePeriodSeconds = new(int64(0))
+	p.DeletionTimestamp = ptrTime(recent.Add(5 * time.Second))
+	if tr := troubleOf(p); tr.broken != 1 || tr.unready != 1 {
+		t.Errorf("trouble %+v, want broken and unready", tr)
+	}
+	c := build(t, newBuilder(t, reader(t, rolloutObjects(p)...), webSources(), nil), incident(deploymentRef()))
+	text := one(t, c, SectionStatus).Text
+	if strings.Contains(text, shutdownNote) {
+		t.Errorf("an exit before the moved deletionTimestamp is marked:\n%s", text)
+	}
+	if got := statusOrder(t, c); !slices.Equal(got, []string{crashPod, deletedPod, secondPod}) {
+		t.Errorf("pod order %v, want the deleted pod ranked as troubled\n%s", got, text)
+	}
+}
+
+// The other named limit: a real crash during the grace period (a segfault while flushing, exit 139 three seconds
+// after the start of the grace period) reads like a shutdown. It carries the fact and does not rank the pod.
+func TestDeletedPodCrashInsideGraceIsMarkedNotRanked(t *testing.T) {
+	ref := controllerRef(kindReplicaSet, "web-abc", "uid-rs-abc")
+	p := deleting(pod(deletedPod, webLabels(), longAgo, ref), errorReason, 139)
+	p.Status.ContainerStatuses[0].State.Terminated.FinishedAt = metav1.NewTime(deletionStart(p).Add(3 * time.Second))
+	if tr := troubleOf(p); tr != (trouble{}) {
+		t.Errorf("trouble %+v, want none", tr)
+	}
+	c := build(t, newBuilder(t, reader(t, rolloutObjects(p)...), webSources(), nil), incident(deploymentRef()))
+	text := one(t, c, SectionStatus).Text
+	if strings.Count(text, shutdownNote) != 1 {
+		t.Errorf("the exit inside the grace period is not marked once:\n%s", text)
+	}
+	if got := statusOrder(t, c); !slices.Equal(got, []string{crashPod, secondPod, deletedPod}) {
+		t.Errorf("pod order %v, want the deleted pod ranked last\n%s", got, text)
 	}
 }

@@ -414,14 +414,19 @@ func completed(cs containerStatus) bool {
 // even when the pod is being deleted ([shutdown]).
 const reasonOOMKilled = "OOMKilled"
 
-// shutdown reports a container whose current instance was stopped by its pod's deletion: the pod is being
+// shutdown reports a container whose current instance exited after its pod's deletion began: the pod is being
 // deleted (deletionTimestamp set), and the instance terminated other than by an OOM kill, with a non-zero exit
-// code ([completed] covers a zero one), at or after the deletion began ([deletionStart]). The deletion stops
-// a container with exit code 137 after the grace period or 143 for a runtime that exits on SIGTERM, so a
-// rollout, a scale down or a node drain shows such exits. An exit that finished before the deletion began,
-// or with no finish time recorded, is a failure like any other (#969). Only the current instance is meant:
-// the kubelet restarts no container of a pod being deleted, so the last termination, when there is one,
-// ended an earlier instance and stays trouble.
+// code ([completed] covers a zero one), at or after the start of the last grace period ([deletionStart]). A
+// rollout, a scale down or a node drain stops containers this way (for example with exit code 137 after the
+// grace period, or 143 for a runtime that exits on SIGTERM). Such an exit does not rank the pod as troubled.
+// An exit that finished before that start, or with no finish time recorded, is a failure like any other
+// (#969). Only the current instance is meant: the kubelet restarts no container of a pod being deleted, so
+// the last termination, when there is one, ended an earlier instance and stays trouble.
+//
+// Two limits are known and accepted. A real crash during the grace period (a segfault while flushing) reads
+// the same and is not ranked. A pod kept by a finalizer after a delete shortened its grace period to 0 (the
+// kubelet's final delete) has its deletionTimestamp moved past the exits it already had, so they are not
+// marked and rank as trouble.
 //
 // The finish time comes from the kubelet's clock and the deletionTimestamp from the API server's: a kubelet
 // clock that runs behind can show a shutdown as a failure, one that runs ahead can hide a failure of the
@@ -435,8 +440,10 @@ func shutdown(p *corev1.Pod, cs containerStatus) bool {
 	return !term.FinishedAt.Time.Before(deletionStart(p))
 }
 
-// deletionStart is when the deletion of p began: its deletionTimestamp, the end of the grace period, minus
-// that grace period. A pod with no grace period recorded (or a negative one) counts as deleted with none.
+// deletionStart is the start of p's last grace period: its deletionTimestamp, the end of that period, minus
+// deletionGracePeriodSeconds. It is the request time only when no later delete shortened the period (such a
+// delete moves the deletionTimestamp). A pod with no grace period recorded (or a negative one) counts as
+// deleted with none.
 func deletionStart(p *corev1.Pod) time.Time {
 	var grace int64
 	if p.DeletionGracePeriodSeconds != nil {
@@ -446,7 +453,7 @@ func deletionStart(p *corev1.Pod) time.Time {
 }
 
 // settled reports a container whose current instance is no trouble although it is not ready: it ran to
-// completion ([completed]) or was stopped by its pod's deletion ([shutdown]).
+// completion ([completed]) or exited after its pod's deletion began ([shutdown]).
 func settled(p *corev1.Pod, cs containerStatus) bool {
 	return completed(cs) || shutdown(p, cs)
 }

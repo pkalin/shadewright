@@ -607,11 +607,12 @@ func TestLogExcerptKeepsItsTail(t *testing.T) {
 // Acceptance: timeout. A read that does not answer ends in "could not fetch, timed out" within the tool's
 // timeout; the caller's cancellation is an error, not a result. The timeout is checked on the deadline each
 // blocked read was given, not on the time the call took: under load the work around the reads takes longer,
-// and a check of the call's wall time failed once on a loaded machine (#1095). Every read of one call carries
+// and a check of the call's wall time failed once on a loaded machine (#1095). The call must still return
+// within a second of that deadline. Every read of one call carries
 // the same deadline, at most timeout ahead when the read starts: one bound for the whole call, not one per read
 // and not a default.
 func TestTimeout(t *testing.T) {
-	const timeout = 50 * time.Millisecond
+	const timeout, afterDeadline = 50 * time.Millisecond, time.Second
 	seen := &deadlines{}
 	e := newEnv(t, nil, func(c *Config) {
 		b := blockingReader{seen: seen}
@@ -619,12 +620,20 @@ func TestTimeout(t *testing.T) {
 	})
 	for _, name := range []string{NameGetResource, NameListEvents, NameGetPodLogs, NameQueryMetrics, NameCheckMissingReference} {
 		r := e.call(t, name, with(name, nil))
+		returned := time.Now()
 		if r.Status != StatusCouldNotFetch || !slices.Contains(r.Labels, LabelTimedOut) {
 			t.Errorf("%s: %q %v", name, r.Status, r.Labels)
 		}
 		reads := seen.take()
 		if len(reads) == 0 {
 			t.Errorf("%s: no read waited for the timeout", name)
+		}
+		// The call ends soon after its deadline: measured from the deadline, not from the start of the call, so
+		// slow work before the reads does not count, and loose enough for a loaded machine.
+		if len(reads) > 0 && reads[0].bounded {
+			if late := returned.Sub(reads[0].at); late > afterDeadline {
+				t.Errorf("%s: returned %s after its deadline, want within %s", name, late, afterDeadline)
+			}
 		}
 		for i, d := range reads {
 			switch {

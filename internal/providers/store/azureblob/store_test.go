@@ -37,6 +37,7 @@ import (
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 const testToken = "test-access-token-value"
@@ -761,26 +762,14 @@ func TestPutRetryableWhenTheRedactionCheckWaited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// An entry of 700 KiB weighs more than the whole limit of a test binary (64 MiB, no Go memory limit), so it
-	// takes all of it while its fits function runs.
-	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	var once, freed sync.Once
-	free := func() { freed.Do(func() { close(release); <-done }) }
-	go func() {
-		defer close(done)
-		big := "pwd=abcdef " + strings.Repeat("lorem ipsum ", (700<<10)/12)
-		red.PiecesFitting([]redact.Piece{{Text: big, Data: true}}, func([]string) bool {
-			once.Do(func() { close(entered) })
-			<-release
-			return true
-		})
-	}()
-	defer free()
-	select {
-	case <-entered:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the heavy entry did not start")
-	}
+	free := redacttest.HoldHeapLimit(t, func(block func()) {
+		red.PiecesFitting([]redact.Piece{{Text: "pwd=abcdef", Data: true}}, func([]string) bool { block(); return true })
+	}, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, ok := red.WithContext(ctx).StringChecked("x")
+		return !ok
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	_, err = st.Put(ctx, testRecord())

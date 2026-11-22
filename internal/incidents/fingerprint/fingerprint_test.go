@@ -20,7 +20,6 @@ import (
 	"context"
 	"regexp"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -586,31 +585,14 @@ func TestFingerprintDoesNotWaitForTheHeapLimit(t *testing.T) {
 	if idleNote == placeholderRedacted {
 		t.Fatalf("on an idle analyzer the note is the placeholder: %q", idleNote)
 	}
-	// An entry of 700 KiB weighs more than the whole limit of a test binary (64 MiB, no Go memory limit), so it
-	// takes all of it while its fits function runs; the ordinary entry below checks that it does.
-	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	go func() {
-		defer close(done)
-		big := "pwd=abcdef " + strings.Repeat("lorem ipsum ", (700<<10)/12)
-		red.PiecesFitting([]redact.Piece{{Text: big, Data: true}}, func([]string) bool {
-			once.Do(func() { close(entered) })
-			<-release
-			return true
-		})
-	}()
-	defer func() { <-done }()
-	defer close(release)
-	select {
-	case <-entered:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the heavy entry did not start")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if _, ok := red.WithContext(ctx).ReplaceChecked(o.Note, rawPlaceholder, sanitize); ok {
-		t.Fatal("an ordinary entry ran beside the one that holds the limit: the test does not hold it")
-	}
+	redacttest.HoldHeapLimit(t, func(block func()) {
+		red.PiecesFitting([]redact.Piece{{Text: "pwd=abcdef", Data: true}}, func([]string) bool { block(); return true })
+	}, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, ok := red.WithContext(ctx).ReplaceChecked(o.Note, rawPlaceholder, sanitize)
+		return !ok
+	})
 	got := make(chan [2]string, 1)
 	go func() { got <- [2]string{Fingerprint(o), Normalize(o)} }()
 	select {

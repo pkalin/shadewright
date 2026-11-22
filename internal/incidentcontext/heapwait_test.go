@@ -18,12 +18,11 @@ package incidentcontext
 
 import (
 	"context"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 // The redactions of a build wait for the limit on the heap of the redactions running at once only until the build
@@ -35,26 +34,14 @@ func TestBuildDeadlineEndsTheWaitForTheHeapLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// An entry of 700 KiB weighs more than the whole limit of a test binary (64 MiB, no Go memory limit), so it
-	// takes all of it while its fits function runs.
-	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	go func() {
-		defer close(done)
-		big := "pwd=abcdef " + strings.Repeat("lorem ipsum ", (700<<10)/12)
-		red.PiecesFitting([]redact.Piece{{Text: big, Data: true}}, func([]string) bool {
-			once.Do(func() { close(entered) })
-			<-release
-			return true
-		})
-	}()
-	defer func() { <-done }()
-	defer close(release)
-	select {
-	case <-entered:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the heavy entry did not start")
-	}
+	redacttest.HoldHeapLimit(t, func(block func()) {
+		red.PiecesFitting([]redact.Piece{{Text: "pwd=abcdef", Data: true}}, func([]string) bool { block(); return true })
+	}, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, ok := red.WithContext(ctx).StringChecked("x")
+		return !ok
+	})
 
 	b := newBuilder(t, reader(t, webObjects()...), webSources(), func(c *Config) {
 		c.BuildTimeout = 300 * time.Millisecond

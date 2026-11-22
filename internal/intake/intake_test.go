@@ -67,6 +67,26 @@ func TestScoresACleanRecord(t *testing.T) {
 	}
 }
 
+// A record that holds the field the analyzer adds for refused tool calls (#852) decodes under the strict
+// decoding and is scored: the intake reads the record type of its own release.
+func TestScoresARecordWithRefusedToolCalls(t *testing.T) {
+	f := newFixture(t)
+	rec := recordOf(t, rngOf(1, 2), claudeID)
+	rec.ToolCallsWithControls = 2
+	raw, err := json.Marshal(rec)
+	if err != nil || !bytes.Contains(raw, []byte(`"toolCallsWithControls":2`)) {
+		t.Fatalf("the record does not carry the field: %v %s", err, raw)
+	}
+	f.openai.replies = []providers.Completion{answerReply(gptID)}
+	s, err := f.scorer.Score(context.Background(), sourceOf(t, rec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Status != StatusScored || s.Answer == nil {
+		t.Fatalf("score = %+v", s)
+	}
+}
+
 // Acceptance: a record that changes under the redactor is quarantined and no model is called.
 func TestRecordChangedByTheRedactorIsQuarantinedWithoutAModelCall(t *testing.T) {
 	cases := map[string]func(*analysis.Record){

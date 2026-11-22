@@ -178,7 +178,8 @@ func controlFreeRows(cases []redact.ControlFreeCase, names []string, keep func(n
 
 // TestWriteControlFreeMainTable writes controlFreeMainTable from the entry points it runs with, when
 // CONTROLFREE_MAIN_TABLE names the output path (and CONTROLFREE_MAIN_COMMIT the commit, for its first line); it
-// is run once in a checkout of origin/main with this file and export_controlfree_test.go copied in.
+// is run once in a checkout of origin/main with this file and export_controlfree_test.go copied in. It refuses
+// when internal/redact/controls.go exists in the tree it runs in, and without the commit.
 func TestWriteControlFreeMainTable(t *testing.T) {
 	path := os.Getenv("CONTROLFREE_MAIN_TABLE")
 	if path == "" {
@@ -186,6 +187,15 @@ func TestWriteControlFreeMainTable(t *testing.T) {
 	}
 	if redact.RaceDetector {
 		t.Fatal("the main table needs every input: run without -race")
+	}
+	// The table is the answer of main. Run on a tree that has the controls view it would record the branch's own
+	// outputs, and the comparison test would then pass whatever the branch does. A tree that holds controls.go is
+	// not main's: no variable or copied file can make it look like one by accident.
+	if _, err := os.Stat("controls.go"); err == nil {
+		t.Fatal("controls.go exists in this tree: the main table is written from a checkout of origin/main, not from this branch")
+	}
+	if os.Getenv("CONTROLFREE_MAIN_COMMIT") == "" {
+		t.Fatal("CONTROLFREE_MAIN_COMMIT must name the commit of the checkout")
 	}
 	cases, names := redact.ControlFreeCorpus(), controlFreeNames()
 	rows := controlFreeRows(cases, names, func(string, int) bool { return true })

@@ -36,8 +36,11 @@ import (
 // each run before the controls go ("\xc3" ESC "\xa9" shows "??", not "é").
 //
 // The controls view holds the text without its controls (at most the bytes of the text) and one pair of
-// offsets for each run of controls removed, never an offset for each byte, so a decision that reads it holds at
-// most one more copy of the text on the heap (budget.go, HeapPerByte). Its work is linear in the length of the
+// offsets (8 bytes) for each run of controls removed, never an offset for each byte. It is a copy of the text on
+// top of the entry, and the gaps cost up to about 4 bytes for each byte of the entry when a character and a
+// control alternate (a run every two bytes). That shape is not yet one of the shapes of the heap test
+// (heapbound_test.go), so the view is not yet measured against HeapPerByte (budget.go): it is measured with
+// #1087. Its work is linear in the length of the
 // text, and the matches read on it are carried back with a binary search over the runs, counted on the budget.
 //
 // Only text that is shown without its controls is decided this way ([Redactor.StringShownChecked],

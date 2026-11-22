@@ -84,7 +84,7 @@ only ASCII letters, digits and the key's punctuation, so no character inserted
 into the key hides it. Model text is stored without control characters (Unicode
 Cc except newline and tab, [#852](https://github.com/pkalin/shadewright/issues/852)),
 and the view drops a superset of them, so a key contiguous in stored text is
-refused; the provider must not ship before #852. A reply
+refused; the condition that the provider not ship before #852 is met ([ADR-0042](../adr/0042-openai-compatible-model-endpoints.md#amendments)). A reply
 whose content or argument fields have a wrong JSON type is refused as malformed
 output with its own fixed text. Re-encoded keys (base64,
 percent encoding, homoglyphs) and splits across replies remain outside this check:

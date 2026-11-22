@@ -309,4 +309,4 @@ Offline transport tests do not replace scenario qualification.
 
 ## Amendments
 
-None.
+- 2026-11-22 ([#852](https://github.com/pkalin/shadewright/issues/852)): the condition of the Decision and the Consequences, that this provider must not ship before #852, is met: model text from every provider, this one included, is stored without control characters, and a tool call that holds one is refused ([ADR-0023 amendment of 2026-11-17](0023-how-the-analyzer-calls-the-model.md#amendments), [design 11](../design/11-model.md)). Nothing else changed.

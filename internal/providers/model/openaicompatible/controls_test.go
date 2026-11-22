@@ -76,7 +76,7 @@ func controlResult(c rune, escaped bool) string {
 
 // Every control code point, escaped and raw, in a tool call's arguments and in the result, through this adapter
 // and the analysis loop: the tool call is refused, never run with the cleaned value, its result sent back is the
-// fixed refusal, it uses its step, and nothing of the outcome holds a control (#852, threat model G4.14).
+// fixed refusal, it uses its step, and nothing of the outcome holds a control (#852, threat model G4.15).
 func TestLoopReadsModelTextWithoutControls(t *testing.T) {
 	text := func(s string) string {
 		b, err := json.Marshal(s)

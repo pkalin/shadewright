@@ -48,7 +48,7 @@ const (
 	// occurrence already held is merged into it; one of a new occurrence before RecurAfter is not held, so
 	// it is not counted when the Incident opens (an undercount), unless the collector reports it again. The
 	// later observations share the first one's symptom (up to 1 KiB), so one first sighting holds about
-	// 3 KiB at most and all of them together about 12 MiB, within the analyzer's 128 Mi.
+	// 3 KiB at most and all of them together about 12 MiB, within the analyzer's 256 Mi.
 	maxHeldPerFingerprint = 4
 )
 

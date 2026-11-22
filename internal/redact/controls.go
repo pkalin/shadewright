@@ -22,28 +22,32 @@ import (
 	"github.com/pkalin/shadewright/internal/redact/meter"
 )
 
-// The controls view (#852, decision of 2026-11-22). A control character can split what a reader of the text sees
+// The controls view (#852, decisions of 2026-11-22). A control character can split what a reader of the text sees
 // as one key and value: "pass" NUL "word=V", a token with an escape inside it, a flag and its value with a C1
 // code point between them. The rules read every text as it is (and in its folded view), and then once more without
 // its controls: every code point of Unicode category Cc (C0, DEL, C1) except newline and tab is left out, every
-// other byte is kept, an invalid one included. What that reading finds is added to what the reading of the text as
-// it is found, each match counted on the bytes of the text it was read from, the controls inside it included
-// (ruleMatchesWith). Nothing in the text is changed before the readings run, the reading of the text as it is runs
-// first and unchanged, and the readings of the release before (before.go) read the text as it is: so the controls
-// view can only add to what is hidden, never take away a byte another reading hides. The text keeps its controls;
-// the caller that shows a text without them (the model text the analysis loop stores) removes them from the
-// redacted text, after every marker is in place, and the markers hold none.
+// other byte is kept, an invalid one included. What that reading finds is added to what the readings of the text
+// as it is found, each match counted on the bytes of the text it was read from, the controls inside it included
+// (addControlsView: String, StringTwice, ReplaceFrom, Strings and each piece and the whole answer of Pieces).
+// Nothing in the text is changed before the readings run, the readings of the text as it is run first and
+// unchanged, and the readings of the release before (before.go) read the text as it is: so the controls view can
+// only add to what is hidden, never take away a byte another reading hides. The text keeps its controls; the
+// caller that shows a text without them (the model text the analysis loop stores) removes them from the redacted
+// text, after every marker is in place, and the markers hold none.
 //
-// The decisions that read a key alone (SecretKey, SecretCollection), the forms a tool writes a value in (write)
-// and the cut of shown text do not read the controls view: a secret key name split by a control is not read as a
-// secret key, as on origin/main.
+// Not read without controls, as on origin/main: the decisions that read a key alone (SecretKey,
+// SecretCollection), the forms a tool writes a value in (write), the cut of shown text, and the short entry points
+// of the collector (shortentry.go), whose callers redact, change the text and redact again: a fingerprint, a
+// symptom and a module's evidence value are decided as before. A secret key name split by a control is not read as
+// a secret key, and a secret a control splits in an event note's symptom is shown as on origin/main.
 //
 // The view is read with its own long windows (windowIDs), so what it reads leaves no trace in the windows the
 // other readings of the same decision share. It holds the text without its controls (at most the bytes of the
-// text) and one pair of offsets (8 bytes) for each run of controls removed, so up to about 4 bytes for each byte
-// of the entry when a character and a control alternate; the heap test (heapbound_test.go) measures that shape
-// against HeapPerByte. Its work is linear in the length of the text, and the matches read on it are carried back
-// with a binary search over the runs, counted on the budget.
+// text) and one pair of offsets (8 bytes) for each run of controls removed. A match the other readings already
+// hold whole is not held a second time (matchList.covers), so on text whose controls hide nothing the view adds
+// no match; the heap tests (heapbound_test.go) measure its shapes against HeapWeightPerByte. Its work is linear in
+// the length of the text, and the matches read on it are carried back with a binary search over the runs,
+// counted on the budget.
 
 // Control reports whether r is a code point the controls view leaves out, and that model text is stored without:
 // Unicode category Cc (U+0000 to U+001F, U+007F to U+009F) except newline and tab.
@@ -146,19 +150,47 @@ func (v controlsView) orig(wm *meter.Meter, i int) int {
 	return i + int(v.gaps[lo-1].removed)
 }
 
-// withControlsView returns spans, the matches of the reading of s as it is, with the matches of the same reading
-// of the controls view of s appended, each counted on the bytes of s it was read from, when s holds a code point
-// of [Control]; spans comes back unchanged otherwise. The spans given are never changed or dropped.
-func (r *Redactor) withControlsView(wm *meter.Meter, s string, spans []span) []span {
+// eachControlsMatch calls add with each match of the reading of the controls view v of a text (its rules, in its
+// folded view too, with long windows of its own), counted on the bytes of the text it was read from, the controls
+// inside it included, with the index of its rule, in no order.
+func (r *Redactor) eachControlsMatch(wm *meter.Meter, v controlsView, add func(start, end, rule int)) {
+	r.eachRuleMatch(wm, v.text, &windowIDs{}, func(start, end, rule int) {
+		tick(wm, 1)
+		add(v.orig(wm, start), v.orig(wm, end-1)+1, rule)
+	})
+}
+
+// addControlsView adds to l, which holds the matches of the readings of s as it is, the matches of the controls
+// view of s that l does not already hold whole, when s holds a code point of [Control]; for text without one it
+// does nothing. A match l holds whole would add no byte to what is hidden, so it is not held a second time: the
+// heap of the view is its text, its gaps and the matches that add to what is hidden (#852, decision of
+// 2026-11-22 on the heap). The matches l holds are never changed or dropped.
+func (r *Redactor) addControlsView(wm *meter.Meter, s string, l *matchList) {
 	v, ok := controlsViewOf(wm, s)
 	if !ok {
-		return spans
+		return
 	}
-	n := len(spans)
-	spans = append(spans, r.ruleMatchesAsRead(wm, v.text, &windowIDs{})...)
-	for i := n; i < len(spans); i++ {
+	l.merge(wm)
+	r.eachControlsMatch(wm, v, func(start, end, rule int) {
+		if !l.covers(wm, start, end) {
+			l.add(wm, start, end, rule)
+		}
+	})
+}
+
+// covers reports whether the matches of l merged so far hold all of [start, end). They are sorted and disjoint
+// (mergeMatches), so one binary search finds the only range that can.
+func (l *matchList) covers(wm *meter.Meter, start, end int) bool {
+	ms := l.m[:l.merged]
+	lo, hi := 0, len(ms) // the first range that starts after start
+	for lo < hi {
 		tick(wm, 1)
-		spans[i].start, spans[i].end = v.orig(wm, spans[i].start), v.orig(wm, spans[i].end-1)+1
+		m := int(uint(lo+hi) >> 1)
+		if int(ms[m].start) <= start {
+			lo = m + 1
+		} else {
+			hi = m
+		}
 	}
-	return spans
+	return lo > 0 && int(ms[lo-1].end) >= end
 }

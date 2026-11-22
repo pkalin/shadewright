@@ -37,6 +37,7 @@ import (
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 const testToken = "test-access-token-value"
@@ -747,5 +748,104 @@ func TestNewWithoutWorkloadIdentity(t *testing.T) {
 	t.Setenv("AZURE_FEDERATED_TOKEN_FILE", "")
 	if _, err := New(Config{Account: testAccount, Container: testContainer}, Options{}); !providers.IsInvalidConfig(err) {
 		t.Fatalf("New = %v, want invalid configuration", err)
+	}
+}
+
+// A record whose redaction check did not run, because its wait for the limit on the heap of the redactions running
+// at once ended, is a retryable failure and nothing is sent; it is not refused (#1087, decision of 2026-11-22).
+// Once the limit is free the same record is written, and a record whose check ran and found a secret is still
+// refused.
+func TestPutRetryableWhenTheRedactionCheckWaited(t *testing.T) {
+	srv := newServer(t, status(http.StatusCreated))
+	st, _ := testStore(t, srv)
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	free := redacttest.HoldHeapLimit(t, func(block func()) {
+		red.PiecesFitting([]redact.Piece{{Text: "pwd=abcdef", Data: true}}, func([]string) bool { block(); return true })
+	}, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, ok := red.WithContext(ctx).StringChecked("x")
+		return !ok
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err = st.Put(ctx, testRecord())
+	if !providers.IsRetryable(err) || providers.IsRejected(err) {
+		t.Fatalf("a check that waited past the write's context: %v (retryable %v, rejected %v)", err,
+			providers.IsRetryable(err), providers.IsRejected(err))
+	}
+	if n := len(srv.requests()); n != 0 {
+		t.Fatalf("%d requests sent for a record whose check did not run", n)
+	}
+	free()
+	if _, err := st.Put(context.Background(), testRecord()); err != nil {
+		t.Fatalf("the same record once the limit is free: %v", err)
+	}
+	secret := testRecord()
+	secret.Data = []byte(`{"summary":"password: hunter2xyz9"}`)
+	if _, err := st.Put(context.Background(), secret); !providers.IsRejected(err) || providers.IsRetryable(err) {
+		t.Fatalf("a record whose check found a secret: %v", err)
+	}
+}
+
+// holdHeapLimit holds the whole limit on the heap of the redactions running at once until free is called.
+func holdHeapLimit(t *testing.T) (free func()) {
+	t.Helper()
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return redacttest.HoldHeapLimit(t, func(block func()) {
+		red.PiecesFitting([]redact.Piece{{Text: "pwd=abcdef", Data: true}}, func([]string) bool { block(); return true })
+	}, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, ok := red.WithContext(ctx).StringChecked("x")
+		return !ok
+	})
+}
+
+// The redaction check of a record runs inside Put's tries (#1087, decision of 2026-11-22): a try whose check waited
+// for the heap limit sends nothing, and when the limit is free by the next try the record is checked and written by
+// the same Put.
+func TestPutChecksTheRecordAgainOnTheNextTry(t *testing.T) {
+	srv := newServer(t, status(http.StatusCreated))
+	st, waits := testStore(t, srv)
+	st.tryTimeout = 50 * time.Millisecond
+	free := holdHeapLimit(t)
+	st.sleep = func(ctx context.Context, d time.Duration) error {
+		*waits = append(*waits, d)
+		free()
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := st.Put(ctx, testRecord()); err != nil {
+		t.Fatalf("Put with the limit held for its first try and free for its second: %v", err)
+	}
+	if len(*waits) != 1 || len(srv.requests()) != 1 {
+		t.Fatalf("%d waits and %d requests, want one of each: the first try waited and sent nothing", len(*waits), len(srv.requests()))
+	}
+}
+
+// When the check waits on every try, Put sends nothing and returns a retryable error marked
+// providers.ErrNotChecked, never a refusal, after maxTries tries.
+func TestPutNotCheckedWhenEveryTryWaited(t *testing.T) {
+	srv := newServer(t, status(http.StatusCreated))
+	st, waits := testStore(t, srv)
+	st.tryTimeout = 50 * time.Millisecond
+	holdHeapLimit(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := st.Put(ctx, testRecord())
+	if !providers.IsNotChecked(err) || !providers.IsRetryable(err) || providers.IsRejected(err) {
+		t.Fatalf("every check waited: %v (not checked %v, retryable %v, rejected %v)", err,
+			providers.IsNotChecked(err), providers.IsRetryable(err), providers.IsRejected(err))
+	}
+	if len(*waits) != maxTries-1 || len(srv.requests()) != 0 {
+		t.Fatalf("%d waits and %d requests, want %d waits and none", len(*waits), len(srv.requests()), maxTries-1)
 	}
 }

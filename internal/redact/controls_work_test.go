@@ -39,7 +39,7 @@ var controlsWorkShapes = []struct{ name, unit string }{
 var controlsWorkSizes = []int{4 << 10, 16 << 10, 32 << 10, 3 << 19}
 
 // The work of the controls view is linear in the length of the text and inside the budget (decision of 2026-11-22
-// on #852): on each shape, the work of the added reading alone (withControlsView) per byte at 1.5 MiB is at most
+// on #852): on each shape, the work of the added reading alone (addControlsView on an empty list) per byte at 1.5 MiB is at most
 // 1.3 times its work per byte at 32 KiB and at most ownWorkPerByte; and String with it is decided, never withheld,
 // at every size. It logs the work per byte of the added reading and of String at each size.
 func TestControlsViewWorkIsLinear(t *testing.T) {
@@ -52,7 +52,7 @@ func TestControlsViewWorkIsLinear(t *testing.T) {
 		var line strings.Builder
 		for _, n := range controlsWorkSizes {
 			s := repeatTo(sh.unit, n)
-			added := Work(func() { r.withControlsView(nil, s, nil) })
+			added := Work(func() { r.addControlsView(nil, s, r.newMatchList()) })
 			var ok bool
 			total := Work(func() { _, ok = r.StringChecked(s) })
 			per[n] = float64(added) / float64(n)

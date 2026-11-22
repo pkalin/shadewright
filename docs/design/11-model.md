@@ -90,7 +90,7 @@ output with its own fixed text. Re-encoded keys (base64,
 percent encoding, homoglyphs) and splits across replies remain outside this check:
 the endpoint is trusted with the key at install. Output redaction, typed
 validation and deterministic policy still apply. [ADR-0042](../adr/0042-openai-compatible-model-endpoints.md)
-remains Proposed.
+is Accepted.
 
 The [harness](../evaluation.md#openai-compatible-models-and-servers) qualifies a
 model and server together, including the Responses tool path of #501.

@@ -27,6 +27,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/fake"
 	"github.com/pkalin/shadewright/internal/redact/redacttest"
@@ -34,9 +35,10 @@ import (
 
 // The controls gate of #852 through the context builder (decision of 2026-11-22: a new reading may only add to
 // what origin/main hides). Each input of redacttest.GateCases is the message of the crashing container (a status
-// message), its previous log, and the value and the name of a metric label; the four-byte parts of the probe the
-// context shows (redacttest.VisibleGrams) must be among those origin/main's context showed. buildGateMainTable
-// holds origin/main's answer, written at a commit of main with BUILD_GATE_MAIN_TABLE set to the output path. This
+// message), its previous log, the value and the name of a metric label, and the note the Incident's symptom was
+// made from (fingerprint.Symptom); the four-byte parts of the probe the context shows (redacttest.VisibleGrams)
+// must be among those origin/main's context showed, and the symptom line must be origin/main's, byte for byte
+// (the context's value of the symptom decides as main). buildGateMainTable holds origin/main's answer, written at a commit of main with BUILD_GATE_MAIN_TABLE set to the output path. This
 // file compiles on origin/main as it is.
 
 // buildGateMainTable is the table of origin/main's answers.
@@ -58,11 +60,23 @@ func buildGateText(t testing.TB, c redacttest.GateCase) string {
 	objs := webObjects()
 	crashing(objs[2].(*corev1.Pod), c.Text())
 	b := newBuilder(t, reader(t, objs...), s, nil)
-	return contextText(build(t, b, incident(deploymentRef())))
+	inc := incident(deploymentRef())
+	inc.Spec.Symptom = fingerprint.Symptom(fingerprint.Observation{Note: c.Text()})
+	return contextText(build(t, b, inc))
+}
+
+// symptomLine returns the line of text that shows the symptom, quoted.
+func symptomLine(text string) string {
+	for line := range strings.SplitSeq(text, "\n") {
+		if strings.HasPrefix(line, "symptom: ") {
+			return strconv.Quote(line)
+		}
+	}
+	return `""`
 }
 
 // buildGateRows builds the inputs keep accepts, in parallel, and returns what each context showed of its probe in
-// hex ("" for an input not run).
+// hex and its symptom line, quoted, separated by a tab ("" for an input not run).
 func buildGateRows(t testing.TB, cases []redacttest.GateCase, keep func(i int) bool) []string {
 	rows := make([]string, len(cases))
 	var wg sync.WaitGroup
@@ -70,7 +84,8 @@ func buildGateRows(t testing.TB, cases []redacttest.GateCase, keep func(i int) b
 	for range 8 {
 		wg.Go(func() {
 			for i := range next {
-				rows[i] = strconv.FormatUint(redacttest.VisibleGrams(buildGateText(t, cases[i]), cases[i].Probe), 16)
+				text := buildGateText(t, cases[i])
+				rows[i] = strconv.FormatUint(redacttest.VisibleGrams(text, cases[i].Probe), 16) + "\t" + symptomLine(text)
 			}
 		})
 	}
@@ -105,7 +120,7 @@ func TestWriteBuildGateMainTable(t *testing.T) {
 	cases := redacttest.GateCases()
 	rows := buildGateRows(t, cases, func(int) bool { return true })
 	var b strings.Builder
-	fmt.Fprintf(&b, "# What the context showed of the probe of each input of the controls gate of #852, at origin/main %s.\n", commit)
+	fmt.Fprintf(&b, "# What the context showed of the probe of each input of the controls gate of #852, and its symptom line, at origin/main %s.\n", commit)
 	for i, c := range cases {
 		fmt.Fprintf(&b, "%s\t%s\n", strings.ReplaceAll(c.Name, "\t", " "), rows[i])
 	}
@@ -122,12 +137,13 @@ func TestBuildGateHidesWhatMainHid(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	var want [][2]string
+	var want [][3]string
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		if line := sc.Text(); line != "" && !strings.HasPrefix(line, "#") {
-			name, bits, _ := strings.Cut(line, "\t")
-			want = append(want, [2]string{name, bits})
+			name, rest, _ := strings.Cut(line, "\t")
+			bits, symptom, _ := strings.Cut(rest, "\t")
+			want = append(want, [3]string{name, bits, symptom})
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -137,8 +153,9 @@ func TestBuildGateHidesWhatMainHid(t *testing.T) {
 	if len(want) != len(cases) {
 		t.Fatalf("%s has %d rows, the gate %d inputs", buildGateMainTable, len(want), len(cases))
 	}
-	got := buildGateRows(t, cases, func(i int) bool { return i%buildGateEvery == 0 && raceKeeps(t.Name(), i) })
-	shows, ran, hidOnMain := 0, 0, 0
+	built := func(i int) bool { return i%buildGateEvery == 0 && raceKeeps(t.Name(), i) }
+	got := buildGateRows(t, cases, built)
+	shows, ran, hidOnMain, symptoms := 0, 0, 0, 0
 	for i, c := range cases {
 		if want[i][0] != c.Name {
 			t.Fatalf("%s row %d is %q, the input %q", buildGateMainTable, i+1, want[i][0], c.Name)
@@ -147,8 +164,14 @@ func TestBuildGateHidesWhatMainHid(t *testing.T) {
 			continue
 		}
 		ran++
+		gotBits, gotSymptom, _ := strings.Cut(got[i], "\t")
+		if gotSymptom != want[i][2] {
+			if symptoms++; symptoms <= 3 {
+				t.Errorf("the symptom line differs from origin/main's on %s:\n got %s\nmain %s", c.Name, gotSymptom, want[i][2])
+			}
+		}
 		m, errM := strconv.ParseUint(want[i][1], 16, 64)
-		b, errB := strconv.ParseUint(got[i], 16, 64)
+		b, errB := strconv.ParseUint(gotBits, 16, 64)
 		if errM != nil || errB != nil {
 			t.Fatalf("row %d: %v %v", i+1, errM, errB)
 		}
@@ -164,6 +187,14 @@ func TestBuildGateHidesWhatMainHid(t *testing.T) {
 	if shows > 0 {
 		t.Errorf("%d inputs show more than origin/main", shows)
 	}
+	if symptoms > 0 {
+		t.Errorf("%d symptom lines differ from origin/main's", symptoms)
+	}
+	if !raceDetector {
+		for _, missing := range redacttest.GateUncovered(cases, built) {
+			t.Errorf("the gate builds no input with %s", missing)
+		}
+	}
 	if hidOnMain == 0 {
 		t.Fatal("origin/main hid no part of any probe: the table is not read")
 	}
@@ -171,5 +202,7 @@ func TestBuildGateHidesWhatMainHid(t *testing.T) {
 }
 
 // buildGateEvery is the share of the inputs the test builds: one in buildGateEvery, so the test stays near five
-// seconds (a build reads every source); the table holds every input.
-const buildGateEvery = 6
+// seconds (a build reads every source); the table holds every input. It is coprime to the inputs of one form and
+// boundary (redacttest.GateCases: 48), so the sample takes every filler, with and without the "log: " prefix, at
+// many forms and boundaries; the test fails when one is never built (redacttest.GateUncovered).
+const buildGateEvery = 7

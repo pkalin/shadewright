@@ -38,11 +38,13 @@ const Prefix = "shadewright_"
 // empty Labels.
 type Labels map[string][]string
 
-// WithRedaction returns want with the metric of package redact added, which every component that redacts registers
-// in controller-runtime's registry (#873): a test that checks that registry adds it to its own table.
+// WithRedaction returns want with the metrics of package redact added, which every component that redacts
+// registers in controller-runtime's registry (#873, #1087): a test that checks that registry adds them to its own
+// table.
 func WithRedaction(want map[string]Labels) map[string]Labels {
 	all := maps.Clone(want)
-	all["shadewright_redaction_withheld_total"] = Labels{"reason": {redact.ReasonWork, redact.ReasonSize, redact.ReasonHeap}}
+	all["shadewright_redaction_withheld_total"] = Labels{"reason": {redact.ReasonWork, redact.ReasonSize, redact.ReasonHeap, redact.ReasonWait}}
+	all["shadewright_redaction_heap_waits_total"] = Labels{}
 	return all
 }
 

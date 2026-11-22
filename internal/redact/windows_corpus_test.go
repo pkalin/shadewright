@@ -150,7 +150,7 @@ func TestWindowedFindsWhatTheExpressionFinds(t *testing.T) {
 			for _, name := range windowExprNames(exprs, i) {
 				re := exprs[name]
 				w := newWindowed(nil, re)
-				if got, want := w.findAll(nil, s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
+				if got, want := w.findAll(s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
 					t.Errorf("%s (%q): windows found %v, the whole text %v in %q", name, re.String(), got, want, s)
 				}
 			}
@@ -176,7 +176,7 @@ func TestWindowedEdges(t *testing.T) {
 				s := before + run + after + ": v\n" + strings.Repeat(before+run+after+"\n", windowMinText/len(run)+1) + run
 				for name, re := range exprs {
 					w := newWindowed(nil, re)
-					if got, want := w.findAll(nil, s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
+					if got, want := w.findAll(s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
 						t.Errorf("%s around %q and %q: windows found %v, the whole text %v", name, before, after, got, want)
 					}
 				}
@@ -232,7 +232,7 @@ func TestWindowedReadsARepeatedRunOnce(t *testing.T) {
 		keyRules++
 		bytesRead := 0
 		w.onRead = func(n int) { bytesRead += n }
-		w.findAll(nil, answer)
+		w.findAll(answer)
 		if bytesRead > 2*len(label)+windowMinText {
 			t.Errorf("%s: the windowed reading of eight copies read %d bytes with the expression, over twice the %d of one",
 				name, bytesRead, len(label))
@@ -333,7 +333,7 @@ func TestWindowedChunksFindWhatTheExpressionFinds(t *testing.T) {
 					if got, want := w.findAllWith(nil, s, ids), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
 						t.Errorf("%s (%q) on %d bytes: windows found %v, the whole text %v in %q", name, re.String(), len(s), got, want, s)
 					}
-					if got, want := w.findAll(nil, s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
+					if got, want := w.findAll(s), re.FindAllStringSubmatchIndex(s, -1); !reflect.DeepEqual(got, want) {
 						t.Errorf("%s (%q) alone on %d bytes: windows found %v, the whole text %v", name, re.String(), len(s), got, want)
 					}
 				}
@@ -363,7 +363,7 @@ func TestWindowedReadsARepeatedLabelOfShortWindowsOnce(t *testing.T) {
 		read++
 		bytesRead := 0
 		w.onRead = func(n int) { bytesRead += n }
-		w.findAll(nil, answer)
+		w.findAll(answer)
 		if bytesRead > 2*len(label)+windowMinText {
 			t.Errorf("%s: eight copies of a label of short windows read %d bytes with the expression, over twice the %d of one",
 				name, bytesRead, len(label))
@@ -380,4 +380,12 @@ func TestWindowedReadsARepeatedLabelOfShortWindowsOnce(t *testing.T) {
 	if read < 10 {
 		t.Errorf("only %d expressions are read by windows", read)
 	}
+}
+
+// findAll is w.re.FindAllStringSubmatchIndex(s, -1), with each distinct long window of s read once.
+func (w *windowed) findAll(s string) [][]int {
+	if w.whole || len(s) < windowMinText {
+		return w.readWhole(nil, s)
+	}
+	return w.findAllIn(nil, s, longRuns(nil, s, []*windowed{w})[0], &windowIDs{})
 }

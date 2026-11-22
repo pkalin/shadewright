@@ -127,6 +127,13 @@ func (r *reader) flush() {
 // (Meter.Spend): the attempt it stops is not finished.
 func (e *Expr) FindAll(s string, spend func(n int)) [][]int {
 	var out [][]int
+	e.Each(s, spend, func(m []int) bool { out = append(out, m); return true })
+	return out
+}
+
+// Each calls f with each match FindAll returns, in order, as it is found, until f returns false, so that a caller
+// that uses each match once holds none of them for the whole text.
+func (e *Expr) Each(s string, spend func(n int), f func(m []int) bool) {
 	end := len(s)
 	// As regexp.(*Regexp).allMatches: an empty match right after the previous match is not taken, and after an
 	// empty match the search goes on one character later.
@@ -150,11 +157,10 @@ func (e *Expr) FindAll(s string, spend func(n int)) [][]int {
 			pos = m[1]
 		}
 		prevEnd = m[1]
-		if accept {
-			out = append(out, m)
+		if accept && !f(m) {
+			return
 		}
 	}
-	return out
 }
 
 // attempt returns the leftmost match of e in s that starts at pos or later, as the search of FindAll from pos

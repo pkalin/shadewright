@@ -43,8 +43,9 @@ import (
 
 // The controls gate of #852 (decision of 2026-11-22): a new reading may only add to what origin/main hides. Every
 // input of redacttest.GateCases, and the four inputs the counts of that day found, goes through every entry point
-// of cluster text in this package's reach (the decisions of package redact, the forms the log source and the
-// fingerprint use, the answer of pieces, the context builder's value and log excerpt, and the read tools); for
+// of cluster text in this package's reach (the decisions of package redact, the forms the log source uses, the
+// answer of pieces, the context builder's value and log excerpt, and the read tools; the short entry points of the
+// collector do not read the controls view and are checked against main byte for byte in internal/modules); for
 // each, the four-byte parts of the probe the output shows (redacttest.VisibleGrams) must be among those
 // origin/main's output showed. gateMainTable holds origin/main's answer; it was written at a commit of main with
 // CONTROLS_GATE_MAIN_TABLE set to the output path. This file compiles on origin/main as it is.
@@ -214,7 +215,7 @@ func gateLayouts(c gateInput) [][]redact.Piece {
 	return out
 }
 
-// gateMark is the replacement of redact.ReplaceChecked in the gate, as the fingerprint writes one: the kind only.
+// gateMark is the replacement of redact.ReplaceChecked in the gate: the kind only.
 func gateMark(kind, _ string) string { return "<" + kind + ">" }
 
 // gateNames returns the names of gateEntries in order.

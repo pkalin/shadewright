@@ -214,7 +214,7 @@ func TestJudgeAnswerExactCaseNoteOptional(t *testing.T) {
 }
 
 // The judge's note is stored without control characters, as every stored model text (decision of 2026-11-22 on
-// #852, threat model G4.14): a JSON escape that carries one is removed, the visible text kept; a note whose key a
+// #852, threat model G4.15): a JSON escape that carries one is removed, the visible text kept; a note whose key a
 // removed control joins is dropped, never stored.
 func TestJudgeNoteStoredWithoutControls(t *testing.T) {
 	r := newFixture(t).scorer.Redactor

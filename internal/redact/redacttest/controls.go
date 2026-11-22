@@ -42,6 +42,8 @@ type GateCase struct {
 	Key, Sep, Value string
 	// Probe is the secret the form holds.
 	Probe string
+	// Filler is the filler placed, and Prefix the text before the form ("" or "log: ").
+	Filler, Prefix string
 }
 
 // Text returns the case as one text.
@@ -148,7 +150,7 @@ func gateCase(f gateForm, pos, fi int, prefix string) GateCase {
 	parts = append(parts, f.parts[pos:]...)
 	parts = append(parts, " ok")
 	c := GateCase{Name: f.name + " " + strings.TrimSpace(prefix) + " filler " + quoteFill(fill) + " at " + strconv.Itoa(pos),
-		Parts: parts, Probe: f.probe}
+		Parts: parts, Probe: f.probe, Filler: fill, Prefix: prefix}
 	if f.sep < 0 {
 		c.Value = c.Text()
 		return c
@@ -278,4 +280,32 @@ func escapeLen(out string, i int) int {
 		}
 	}
 	return 0
+}
+
+// GateUncovered returns what a sample of the inputs (those built accepts) never takes: each filler, with the
+// prefix "log: " for a control, and the prefix itself. A gate that runs a share of the inputs fails on any of them,
+// so a stride that lines up with the inputs of one form and boundary cannot leave a filler out.
+func GateUncovered(cases []GateCase, built func(i int) bool) []string {
+	seen := map[string]bool{}
+	for i, c := range cases {
+		if built(i) {
+			seen[c.Prefix+"\x00"+c.Filler] = true
+			seen[c.Prefix] = true
+		}
+	}
+	var out []string
+	for _, fill := range gateFillers {
+		for _, prefix := range []string{"", "log: "} {
+			if prefix != "" && !gateControl(fill) {
+				continue
+			}
+			if !seen[prefix+"\x00"+fill] {
+				out = append(out, "the filler "+quoteFill(fill)+" after "+strconv.Quote(prefix))
+			}
+		}
+	}
+	if !seen["log: "] {
+		out = append(out, `the prefix "log: "`)
+	}
+	return out
 }

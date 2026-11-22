@@ -177,7 +177,7 @@ view and is refused. A sequence with visible parameters inside the key, such as
 `[0m` between the key's characters, so no reader sees the key whole. A grammar
 of terminal behaviour in the scan was tried and dropped: it is a list of what a
 screen hides again, and it diverged from what a reader sees field by field. This
-provider must not ship before #852. Every pass is linear in the size of the
+provider needed #852, which is built (amendment of 2026-11-22). Every pass is linear in the size of the
 reply; the tests bound the work at a fixed multiple of it.
 
 The key must be printable ASCII and at least 16 bytes; anything else is refused
@@ -195,7 +195,7 @@ found, and no check of this kind can find it. The endpoint is given the key at
 install and is trusted with it: the check stops an echo from reaching status,
 Events, logs and pull requests in a form a reader can use, and is not a defence
 against an endpoint that hides the key. The check covers terminal tricks only
-together with #852: without that change, control characters and escape sequences
+together with #852 (built): without it, control characters and escape sequences
 inserted into the key could hide letters from a raw terminal that the view keeps.
 Outputs remain untrusted: the redactor
 checks records and telemetry, typed result and tool argument validation and
@@ -309,4 +309,4 @@ Offline transport tests do not replace scenario qualification.
 
 ## Amendments
 
-None.
+- 2026-11-22 ([#852](https://github.com/pkalin/shadewright/issues/852)): #852, the condition this ADR set for shipping the provider, is built. Model text is stored without control characters and a tool call that holds one is refused, for every provider ([ADR-0023](0023-how-the-analyzer-calls-the-model.md), amendment of that date). Nothing else changes.

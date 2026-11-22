@@ -1,4 +1,4 @@
-# What each entry point showed of the probe of each input of the controls gate of #852, at origin/main 7ba21160.
+# What each entry point showed of the probe of each input of the controls gate of #852, at origin/main ab900832.
 # entry points: check_missing_reference,fingerprint.Normalize,fingerprint.Symptom,fingerprint.Value,get_delivery_status,get_pod_logs,get_resource,get_resource of a label,incidentcontext.RenderLog,incidentcontext.Value,incidentcontext.Value of the symptom,kube.Excerpt,list_events,modules.BoundValue,query_metrics,query_metrics of a label,redact.Pieces,redact.PiecesFitting,redact.PiecesWithin,redact.ReplaceChecked,redact.String,redact.StringKeeping,redact.StringTwice,redact.Strings
 5b434bf8f4c226e7	0	0	0	0	0	0	0	-	0	0	0	0	0	0	0	-	0	0	0	0	0	0	0	0
 49151fca8ea58e38	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	-	0	0	0	-	-	-	-	-

@@ -373,6 +373,36 @@ func shortQuotedCorpus() []shortFlagCase {
 	return out
 }
 
+// shortQuotedNeighbours put a second secret right after a quoted value glued to a password flag, with each glue
+// in turn, as another password flag of the same tool, a secret-named flag or a secret key: the quoted value takes
+// no part of the next one, which main hides too.
+func shortQuotedNeighbours() []shortFlagCase {
+	rng := rand.New(rand.NewPCG(1075, 12)) //nolint:gosec // a fixed seed keeps the corpus the same on every run
+	glues := []string{" ", "\t", ",", ", ", ";", "; ", "|", " && ", `"`, `" `, `'`, "' ", "\n", "\\\n  ", "&"}
+	var out []shortFlagCase
+	i := 0
+	for _, t := range shortTools {
+		for _, f := range shortQuotedForms {
+			if f.separated {
+				continue
+			}
+			for _, next := range []func(v string) string{
+				func(v string) string { return t.name + " " + shortFlag(t) + shortValue(t, v) },
+				func(v string) string { return "--password " + v },
+				func(v string) string { return "DB_PASSWORD=" + v },
+			} {
+				first, second := shortSecret(rng, i), shortSecret(rng, i+1)
+				g := glues[i/2%len(glues)]
+				i += 2
+				in := t.name + " " + strings.Join(f.words(t, shortValue(t, first)), " ") + g + next(second) + " " + shortTail
+				out = append(out, shortFlagCase{form: fmt.Sprintf("quoted neighbour: %s %s, %q", t.name, f.name, g), in: in,
+					secrets: append(shortQuotedSecrets(f, t, first), second), kept: []string{t.name}})
+			}
+		}
+	}
+	return out
+}
+
 // shortItemCorpus is group 3: a container whose command is a tool of the table, in each key order (the command
 // the last key of the item among them), then a second container with no command whose arguments hold another
 // flag of the arguments with no command word ("-a" after mysql) with a value that is no port, with no image, an
@@ -580,6 +610,7 @@ func shortFormsGroups() []struct {
 		cases []shortFlagCase
 	}{
 		{"key order", shortKeyOrderCorpus()}, {"quoting", shortQuotedCorpus()},
+		{"quoted neighbours", shortQuotedNeighbours()},
 		{"item boundaries", shortItemCorpus()}, {"block scalars", shortScalarCorpus()},
 		{"other forms", shortOtherCorpus()},
 	}

@@ -2006,6 +2006,258 @@
 {"in":"containers:\n- name: app\n  args:\n  - --log-level\n  - debug\n  - -u\n  - \"admin:Sw4682StxAWwk%S\"\n  - --verbose\n  image: db:1\n","out":"containers:\n- name: app\n  args:\n  - --log-level\n  - debug\n  - -u\n  - \"admin:Sw4682StxAWwk%S\"\n  - --verbose\n  image: db:1\n","spans":null}
 {"in":"args: [--log-level, debug, -u, \"admin:Sw469V9GmBLXKT*h\", --verbose]\nimage: db:1\n","out":"args: [--log-level, debug, -u, \"admin:Sw469V9GmBLXKT*h\", --verbose]\nimage: db:1\n","spans":null}
 {"in":"starting with arguments [\"-u\",\"\\\"admin:Sw470roWAXdgV~g\\\"\",\"--log-level\",\"debug\",\"--verbose\"]","out":"starting with arguments [\"-u\",\"\\\"admin:Sw470roWAXdgV~g\\\"\",\"--log-level\",\"debug\",\"--verbose\"]","spans":null}
+{"in":"mysql -p'Sw000g8kUUJ3tK%P' mysql -pSw001xcdft9yy.a --verbose","out":"mysql -p'Sw000g8kUUJ3tK%P' mysql -pSw001xcdft9yy.a --verbose","spans":null}
+{"in":"mysql -p'Sw002UPsNFE38~Z'\t--password Sw003qLQTw2K.X --verbose","out":"mysql -p'Sw002UPsNFE38~Z'\t--password [credential] --verbose","spans":[[37,51]]}
+{"in":"mysql -p'Sw004FTguSRHZz',DB_PASSWORD=Sw0055nrer2Sz+p --verbose","out":"mysql -p'Sw004FTguSRHZz',DB_PASSWORD=[credential] --verbose","spans":[[37,52]]}
+{"in":"mysql -p\"Sw006KKwsdHucr~M\", mysql -pSw007HHhAqsU8.i --verbose","out":"mysql -p\"Sw006KKwsdHucr~M\", mysql -pSw007HHhAqsU8.i --verbose","spans":null}
+{"in":"mysql -p\"Sw008Mxgfp2f.4\";--password Sw009aSsaszt7 --verbose","out":"mysql -p\"Sw008Mxgfp2f.4\";--password [credential] --verbose","spans":[[36,49]]}
+{"in":"mysql -p\"Sw010qJwiHtL\"; DB_PASSWORD=Sw0117Gtg7ghu.c --verbose","out":"mysql -p\"Sw010qJwiHtL\"; DB_PASSWORD=[credential] --verbose","spans":[[36,51]]}
+{"in":"mysql -p='Sw012YRtUy99'|mysql -pSw013ugPD7E6 --verbose","out":"mysql -p='Sw012YRtUy99'|mysql -pSw013ugPD7E6 --verbose","spans":null}
+{"in":"mysql -p='Sw014a5xmGGTx^7' \u0026\u0026 --password Sw0158Vy6SQGP.S --verbose","out":"mysql -p='Sw014a5xmGGTx^7' \u0026\u0026 --password [credential] --verbose","spans":[[41,56]]}
+{"in":"mysql -p='Sw016vaGsaieRG%D'\"DB_PASSWORD=Sw017sgmLyatp4~S --verbose","out":"mysql -p='Sw016vaGsaieRG%D'\"DB_PASSWORD=[credential] --verbose","spans":[[40,56]]}
+{"in":"mysql -p=\"Sw018DAXuKBXQ+w\"\" mysql -pSw019CMW2NDwgN --verbose","out":"mysql -p=\"Sw018DAXuKBXQ+w\"\" mysql -pSw019CMW2NDwgN --verbose","spans":null}
+{"in":"mysql -p=\"Sw0204m9HGEb~9\"'--password Sw021WRRivat_N --verbose","out":"mysql -p=\"Sw0204m9HGEb~9\"'--password [credential] --verbose","spans":[[37,51]]}
+{"in":"mysql -p=\"Sw022qfr3xvjE7+N\"' DB_PASSWORD=Sw023DcFy9AZK%J --verbose","out":"mysql -p=\"Sw022qfr3xvjE7+N\"' DB_PASSWORD=[credential] --verbose","spans":[[41,56]]}
+{"in":"mysql -p'Sw024Y8c'P8AZ%h\nmysql -pSw025LbCBvJvmB+a --verbose","out":"mysql -p'Sw024Y8c'P8AZ%h\nmysql -pSw025LbCBvJvmB+a --verbose","spans":null}
+{"in":"mysql -p'Sw026KkSA'CEv8.D\\\n  --password Sw027R7sRyLd9%9 --verbose","out":"mysql -p'Sw026KkSA'CEv8.D\\\n  --password [credential] --verbose","spans":[[40,55]]}
+{"in":"mysql -p'Sw028yj'aUvUZJ\u0026DB_PASSWORD=Sw0294m8vxmc3P*e --verbose","out":"mysql -p'Sw028yj'aUvUZJ\u0026DB_PASSWORD=[credential] --verbose","spans":[[36,52]]}
+{"in":"mysql -pSw030bqxX\"Q3Fz+X\" mysql -pSw031oFtK6yX_F --verbose","out":"mysql -pSw030bqxX\"Q3Fz+X\" mysql -pSw031oFtK6yX_F --verbose","spans":null}
+{"in":"mysql -pSw032ZFtvt\"gdYH.R\"\t--password Sw033Xb8Z5Sd --verbose","out":"mysql -pSw032ZFtvt\"gdYH.R\"\t--password [credential] --verbose","spans":[[38,50]]}
+{"in":"mysql -pSw034cJPE\"LvZG%A\",DB_PASSWORD=Sw035McoEbWU~u --verbose","out":"mysql -pSw034cJPE\"LvZG%A\",DB_PASSWORD=[credential] --verbose","spans":[[38,52]]}
+{"in":"mysql -vp\"Sw036tF6QR78gT_o\", mysql -pSw037TARsKybJ_5 --verbose","out":"mysql -vp\"Sw036tF6QR78gT_o\", mysql -pSw037TARsKybJ_5 --verbose","spans":null}
+{"in":"mysql -vp\"Sw038Cj6dyRTZE^s\";--password Sw039Q3CJHNX~G --verbose","out":"mysql -vp\"Sw038Cj6dyRTZE^s\";--password [credential] --verbose","spans":[[39,53]]}
+{"in":"mysql -vp\"Sw040rYqTMDg\"; DB_PASSWORD=Sw041SF67Zva3r%X --verbose","out":"mysql -vp\"Sw040rYqTMDg\"; DB_PASSWORD=[credential] --verbose","spans":[[37,53]]}
+{"in":"mariadb -p'Sw042a6HZLoVwP+k'|mariadb -pSw043M9TVw9rt --verbose","out":"mariadb -p'Sw042a6HZLoVwP+k'|mariadb -pSw043M9TVw9rt --verbose","spans":null}
+{"in":"mariadb -p'Sw044dD3RaX8TT^C' \u0026\u0026 --password Sw045xjiXcyb2+V --verbose","out":"mariadb -p'Sw044dD3RaX8TT^C' \u0026\u0026 --password [credential] --verbose","spans":[[43,58]]}
+{"in":"mariadb -p'Sw046xtJAuaj*s'\"DB_PASSWORD=Sw0476MgENe3Su*Y --verbose","out":"mariadb -p'Sw046xtJAuaj*s'\"DB_PASSWORD=[credential] --verbose","spans":[[39,55]]}
+{"in":"mariadb -p\"Sw048DgASnfhAY\"\" mariadb -pSw049aLGdWGM~s --verbose","out":"mariadb -p\"Sw048DgASnfhAY\"\" mariadb -pSw049aLGdWGM~s --verbose","spans":null}
+{"in":"mariadb -p\"Sw050GGbuXRj\"'--password Sw051rMT5Y7rGW*K --verbose","out":"mariadb -p\"Sw050GGbuXRj\"'--password [credential] --verbose","spans":[[36,52]]}
+{"in":"mariadb -p\"Sw052FDssmDw7.b\"' DB_PASSWORD=Sw053KWr8ssSg --verbose","out":"mariadb -p\"Sw052FDssmDw7.b\"' DB_PASSWORD=[credential] --verbose","spans":[[41,54]]}
+{"in":"mariadb -p='Sw054rAuey3w~a'\nmariadb -pSw055uKMjDznq^d --verbose","out":"mariadb -p='Sw054rAuey3w~a'\nmariadb -pSw055uKMjDznq^d --verbose","spans":null}
+{"in":"mariadb -p='Sw056z5RwHEG+H'\\\n  --password Sw057aZTedPt%v --verbose","out":"mariadb -p='Sw056z5RwHEG+H'\\\n  --password [credential] --verbose","spans":[[42,56]]}
+{"in":"mariadb -p='Sw058rwZRvq5^J'\u0026DB_PASSWORD=Sw059DzanB8Yn*y --verbose","out":"mariadb -p='Sw058rwZRvq5^J'\u0026DB_PASSWORD=[credential] --verbose","spans":[[40,55]]}
+{"in":"mariadb -p=\"Sw060bubVwDupY%z\" mariadb -pSw061rmnvnaiRP^W --verbose","out":"mariadb -p=\"Sw060bubVwDupY%z\" mariadb -pSw061rmnvnaiRP^W --verbose","spans":null}
+{"in":"mariadb -p=\"Sw062hdLtZTNj\"\t--password Sw063HAqSuaf9R*o --verbose","out":"mariadb -p=\"Sw062hdLtZTNj\"\t--password [credential] --verbose","spans":[[38,54]]}
+{"in":"mariadb -p=\"Sw064chgKCZF8\",DB_PASSWORD=Sw065fEKAMHay%W --verbose","out":"mariadb -p=\"Sw064chgKCZF8\",DB_PASSWORD=[credential] --verbose","spans":[[39,54]]}
+{"in":"mariadb -p'Sw0664Ebk'jYQW.i, mariadb -pSw067B8E2saJ --verbose","out":"mariadb -p'Sw0664Ebk'jYQW.i, mariadb -pSw067B8E2saJ --verbose","spans":null}
+{"in":"mariadb -p'Sw068Sktu'd3pm~q;--password Sw069CyJ9xAj%e --verbose","out":"mariadb -p'Sw068Sktu'd3pm~q;--password [credential] --verbose","spans":[[39,53]]}
+{"in":"mariadb -p'Sw070Nd5'39Jrxy; DB_PASSWORD=Sw071gmZmEeF6j^f --verbose","out":"mariadb -p'Sw070Nd5'39Jrxy; DB_PASSWORD=[credential] --verbose","spans":[[40,56]]}
+{"in":"mariadb -pSw072QUT\"y3Vq+Z\"|mariadb -pSw073hCNuBWN3C.o --verbose","out":"mariadb -pSw072QUT\"y3Vq+Z\"|mariadb -pSw073hCNuBWN3C.o --verbose","spans":null}
+{"in":"mariadb -pSw074nZ3\"L6rEUu\" \u0026\u0026 --password Sw075qb8bdNu+R --verbose","out":"mariadb -pSw074nZ3\"L6rEUu\" \u0026\u0026 --password [credential] --verbose","spans":[[41,55]]}
+{"in":"mariadb -pSw076PNiZ\"HUg6.Q\"\"DB_PASSWORD=Sw077DW6krBJfR.q --verbose","out":"mariadb -pSw076PNiZ\"HUg6.Q\"\"DB_PASSWORD=[credential] --verbose","spans":[[40,56]]}
+{"in":"mariadb -vp\"Sw078gqLSnGBLq%M\"\" mariadb -pSw079rvTnhBk_F --verbose","out":"mariadb -vp\"Sw078gqLSnGBLq%M\"\" mariadb -pSw079rvTnhBk_F --verbose","spans":null}
+{"in":"mariadb -vp\"Sw080rsDQ7y45T%R\"'--password Sw081MiFt6Ge%W --verbose","out":"mariadb -vp\"Sw080rsDQ7y45T%R\"'--password [credential] --verbose","spans":[[41,55]]}
+{"in":"mariadb -vp\"Sw0827wWtAx3Z^T\"' DB_PASSWORD=Sw083srtFYNom%J --verbose","out":"mariadb -vp\"Sw0827wWtAx3Z^T\"' DB_PASSWORD=[credential] --verbose","spans":[[42,57]]}
+{"in":"mongo -p'Sw08463knawFm^E'\nmongo -pSw08552HMu3P*n --verbose","out":"mongo -p'Sw08463knawFm^E'\nmongo -pSw08552HMu3P*n --verbose","spans":null}
+{"in":"mongo -p'Sw0863dun42d*Q'\\\n  --password Sw087tCPLRuny --verbose","out":"mongo -p'Sw0863dun42d*Q'\\\n  --password [credential] --verbose","spans":[[39,52]]}
+{"in":"mongo -p'Sw088vXpXC7R^t'\u0026DB_PASSWORD=Sw089qQ2jcag~7 --verbose","out":"mongo -p'Sw088vXpXC7R^t'\u0026DB_PASSWORD=[credential] --verbose","spans":[[37,51]]}
+{"in":"mongo -p\"Sw090URQhiLLCj\" mongo -pSw0913eeU47r%j --verbose","out":"mongo -p\"Sw090URQhiLLCj\" mongo -pSw0913eeU47r%j --verbose","spans":null}
+{"in":"mongo -p\"Sw092orfigNm6+A\"\t--password Sw093otgiU9u2+J --verbose","out":"mongo -p\"Sw092orfigNm6+A\"\t--password [credential] --verbose","spans":[[37,52]]}
+{"in":"mongo -p\"Sw0949svd86XDv~J\",DB_PASSWORD=Sw095iNW6Sarz_2 --verbose","out":"mongo -p\"Sw0949svd86XDv~J\",DB_PASSWORD=[credential] --verbose","spans":[[39,54]]}
+{"in":"mongo -p='Sw096dhbBvjtjw.b', mongo -pSw097dG6LnRxm^r --verbose","out":"mongo -p='Sw096dhbBvjtjw.b', mongo -pSw097dG6LnRxm^r --verbose","spans":null}
+{"in":"mongo -p='Sw0985vNwNBNET%T';--password Sw099iyidUannD%i --verbose","out":"mongo -p='Sw0985vNwNBNET%T';--password [credential] --verbose","spans":[[39,55]]}
+{"in":"mongo -p='Sw10065KQRvxYG^A'; DB_PASSWORD=Sw101Tcix7r4c*4 --verbose","out":"mongo -p='Sw10065KQRvxYG^A'; DB_PASSWORD=[credential] --verbose","spans":[[41,56]]}
+{"in":"mongo -p=\"Sw102yqSK36C^t\"|mongo -pSw1034GSQmaoQ6_o --verbose","out":"mongo -p=\"Sw102yqSK36C^t\"|mongo -pSw1034GSQmaoQ6_o --verbose","spans":null}
+{"in":"mongo -p=\"Sw1042ESEb7kgi_9\" \u0026\u0026 --password Sw105VXCFEmS --verbose","out":"mongo -p=\"Sw1042ESEb7kgi_9\" \u0026\u0026 --password [credential] --verbose","spans":[[42,54]]}
+{"in":"mongo -p=\"Sw106fASS5a6%R\"\"DB_PASSWORD=Sw1078Bx4KS4M --verbose","out":"mongo -p=\"Sw106fASS5a6%R\"\"DB_PASSWORD=[credential] --verbose","spans":[[38,51]]}
+{"in":"mongo -p'Sw108SK'XE8VXQ\" mongo -pSw109V4SEBxR*a --verbose","out":"mongo -p'Sw108SK'XE8VXQ\" mongo -pSw109V4SEBxR*a --verbose","spans":null}
+{"in":"mongo -p'Sw110jHcn'yLPW*H'--password Sw111CUH8MW2s9_w --verbose","out":"mongo -p'Sw110jHcn'yLPW*H'--password [credential] --verbose","spans":[[37,53]]}
+{"in":"mongo -p'Sw112SMeV'Mvn7%j' DB_PASSWORD=Sw1136E7dVEz^i --verbose","out":"mongo -p'Sw112SMeV'Mvn7%j' DB_PASSWORD=[credential] --verbose","spans":[[39,53]]}
+{"in":"mongo -pSw114QxSq\"Jzsm~v\"\nmongo -pSw1155a2dXip%9 --verbose","out":"mongo -pSw114QxSq\"Jzsm~v\"\nmongo -pSw1155a2dXip%9 --verbose","spans":null}
+{"in":"mongo -pSw116foS\"UZwR^U\"\\\n  --password Sw117nPYgC3JQ --verbose","out":"mongo -pSw116foS\"UZwR^U\"\\\n  --password [credential] --verbose","spans":[[39,52]]}
+{"in":"mongo -pSw1187hm\"KwSZ^3\"\u0026DB_PASSWORD=Sw119oCykiej9n~t --verbose","out":"mongo -pSw1187hm\"KwSZ^3\"\u0026DB_PASSWORD=[credential] --verbose","spans":[[37,53]]}
+{"in":"mongo -vp\"Sw120BtjZjH4K%P\" mongo -pSw121GqMfABPk*6 --verbose","out":"mongo -vp\"Sw120BtjZjH4K%P\" mongo -pSw121GqMfABPk*6 --verbose","spans":null}
+{"in":"mongo -vp\"Sw122m5ufeiDwg*d\"\t--password Sw123gYbMkpiKD~F --verbose","out":"mongo -vp\"Sw122m5ufeiDwg*d\"\t--password [credential] --verbose","spans":[[39,55]]}
+{"in":"mongo -vp\"Sw1244zhv4Jg*c\",DB_PASSWORD=Sw125HK8QCgyT --verbose","out":"mongo -vp\"Sw1244zhv4Jg*c\",DB_PASSWORD=[credential] --verbose","spans":[[38,51]]}
+{"in":"mongosh -p'Sw1267dmZAhXtX*c', mongosh -pSw127ABxijVxrK.u --verbose","out":"mongosh -p'Sw1267dmZAhXtX*c', mongosh -pSw127ABxijVxrK.u --verbose","spans":null}
+{"in":"mongosh -p'Sw128XWaa9sEQ_k';--password Sw129kNi9wVos.h --verbose","out":"mongosh -p'Sw128XWaa9sEQ_k';--password [credential] --verbose","spans":[[39,54]]}
+{"in":"mongosh -p'Sw130jmVUfCVh*y'; DB_PASSWORD=Sw131NhK42RL3_W --verbose","out":"mongosh -p'Sw130jmVUfCVh*y'; DB_PASSWORD=[credential] --verbose","spans":[[41,56]]}
+{"in":"mongosh -p\"Sw132bUm7uEUi^p\"|mongosh -pSw133VtdKMkf%W --verbose","out":"mongosh -p\"Sw132bUm7uEUi^p\"|mongosh -pSw133VtdKMkf%W --verbose","spans":null}
+{"in":"mongosh -p\"Sw134VPVrpew%P\" \u0026\u0026 --password Sw135PcFW9bB~k --verbose","out":"mongosh -p\"Sw134VPVrpew%P\" \u0026\u0026 --password [credential] --verbose","spans":[[41,55]]}
+{"in":"mongosh -p\"Sw136zkVkhz4~3\"\"DB_PASSWORD=Sw1373ZQ2gXM*e --verbose","out":"mongosh -p\"Sw136zkVkhz4~3\"\"DB_PASSWORD=[credential] --verbose","spans":[[39,53]]}
+{"in":"mongosh -p='Sw1386USu4wK~4'\" mongosh -pSw139bnMvSjZ%g --verbose","out":"mongosh -p='Sw1386USu4wK~4'\" mongosh -pSw139bnMvSjZ%g --verbose","spans":null}
+{"in":"mongosh -p='Sw140vtqnf2ZNi''--password Sw141Kv5hthYjN+z --verbose","out":"mongosh -p='Sw140vtqnf2ZNi''--password [credential] --verbose","spans":[[39,55]]}
+{"in":"mongosh -p='Sw142WoF3NQxd8_8'' DB_PASSWORD=Sw143FF7o6Sn+6 --verbose","out":"mongosh -p='Sw142WoF3NQxd8_8'' DB_PASSWORD=[credential] --verbose","spans":[[43,57]]}
+{"in":"mongosh -p=\"Sw144yy7WNvc~R\"\nmongosh -pSw145j9N9CLYUp^i --verbose","out":"mongosh -p=\"Sw144yy7WNvc~R\"\nmongosh -pSw145j9N9CLYUp^i --verbose","spans":null}
+{"in":"mongosh -p=\"Sw1468TFwmibPr%w\"\\\n  --password Sw147itJASQ4T^k --verbose","out":"mongosh -p=\"Sw1468TFwmibPr%w\"\\\n  --password [credential] --verbose","spans":[[44,59]]}
+{"in":"mongosh -p=\"Sw148Nmy4SQiW_w\"\u0026DB_PASSWORD=Sw149cLcEKxh^F --verbose","out":"mongosh -p=\"Sw148Nmy4SQiW_w\"\u0026DB_PASSWORD=[credential] --verbose","spans":[[41,55]]}
+{"in":"mongosh -p'Sw150Hq8'bK5G*b mongosh -pSw151LDNP4kvkM^z --verbose","out":"mongosh -p'Sw150Hq8'bK5G*b mongosh -pSw151LDNP4kvkM^z --verbose","spans":null}
+{"in":"mongosh -p'Sw152yPA'Jm6H*X\t--password Sw153Tu2NUjt3^c --verbose","out":"mongosh -p'Sw152yPA'Jm6H*X\t--password [credential] --verbose","spans":[[38,53]]}
+{"in":"mongosh -p'Sw154NZUXe'SyEr~9,DB_PASSWORD=Sw155XkanzBXd9.S --verbose","out":"mongosh -p'Sw154NZUXe'SyEr~9,DB_PASSWORD=[credential] --verbose","spans":[[41,57]]}
+{"in":"mongosh -pSw156VDy4w\"hmxy^K\", mongosh -pSw157aSDWas3 --verbose","out":"mongosh -pSw156VDy4w\"hmxy^K\", mongosh -pSw157aSDWas3 --verbose","spans":null}
+{"in":"mongosh -pSw158v\"swBJvJ\";--password Sw159T4g8sJgC4+a --verbose","out":"mongosh -pSw158v\"swBJvJ\";--password [credential] --verbose","spans":[[36,52]]}
+{"in":"mongosh -pSw160aoZmk\"CzWC_p\"; DB_PASSWORD=Sw1614ZPwTonu.e --verbose","out":"mongosh -pSw160aoZmk\"CzWC_p\"; DB_PASSWORD=[credential] --verbose","spans":[[42,57]]}
+{"in":"mongosh -vp\"Sw162tMPk4Dm%B\"|mongosh -pSw1633MobBAB^a --verbose","out":"mongosh -vp\"Sw162tMPk4Dm%B\"|mongosh -pSw1633MobBAB^a --verbose","spans":null}
+{"in":"mongosh -vp\"Sw164vU2jQLL*4\" \u0026\u0026 --password Sw165Ep3dzvHj~q --verbose","out":"mongosh -vp\"Sw164vU2jQLL*4\" \u0026\u0026 --password [credential] --verbose","spans":[[42,57]]}
+{"in":"mongosh -vp\"Sw166LwHvqJja+J\"\"DB_PASSWORD=Sw1678beekzg3t --verbose","out":"mongosh -vp\"Sw166LwHvqJja+J\"\"DB_PASSWORD=[credential] --verbose","spans":[[41,55]]}
+{"in":"cqlsh -p'Sw1687FMoib7rg%q'\" cqlsh -pSw169E6it3MUb2 --verbose","out":"cqlsh -p'Sw1687FMoib7rg%q'\" cqlsh -pSw169E6it3MUb2 --verbose","spans":null}
+{"in":"cqlsh -p'Sw1704mjRGw2s.A''--password Sw171MEXmHwG --verbose","out":"cqlsh -p'Sw1704mjRGw2s.A''--password [credential] --verbose","spans":[[37,49]]}
+{"in":"cqlsh -p'Sw172AzZPJ45%R'' DB_PASSWORD=Sw173djYhmSGJ --verbose","out":"cqlsh -p'Sw172AzZPJ45%R'' DB_PASSWORD=[credential] --verbose","spans":[[38,51]]}
+{"in":"cqlsh -p\"Sw174d5TggpC^7\"\ncqlsh -pSw175QHZU3Zgt3 --verbose","out":"cqlsh -p\"Sw174d5TggpC^7\"\ncqlsh -pSw175QHZU3Zgt3 --verbose","spans":null}
+{"in":"cqlsh -p\"Sw1765dRCCnFj2+s\"\\\n  --password Sw177P89cz5XwN*M --verbose","out":"cqlsh -p\"Sw1765dRCCnFj2+s\"\\\n  --password [credential] --verbose","spans":[[41,57]]}
+{"in":"cqlsh -p\"Sw178hBJtFdqwn~R\"\u0026DB_PASSWORD=Sw179qD8Hywu --verbose","out":"cqlsh -p\"Sw178hBJtFdqwn~R\"\u0026DB_PASSWORD=[credential] --verbose","spans":[[39,51]]}
+{"in":"cqlsh -p='Sw1809t8a8oavx.d' cqlsh -pSw181JXA4XFbU.g --verbose","out":"cqlsh -p='Sw1809t8a8oavx.d' cqlsh -pSw181JXA4XFbU.g --verbose","spans":null}
+{"in":"cqlsh -p='Sw182FDhG9Ai*X'\t--password Sw1839n48khbP8*B --verbose","out":"cqlsh -p='Sw182FDhG9Ai*X'\t--password [credential] --verbose","spans":[[37,53]]}
+{"in":"cqlsh -p='Sw184vinLt9mRd+u',DB_PASSWORD=Sw185pvqhCawfG --verbose","out":"cqlsh -p='Sw184vinLt9mRd+u',DB_PASSWORD=[credential] --verbose","spans":[[40,54]]}
+{"in":"cqlsh -p=\"Sw186mKAkFtGQ*j\", cqlsh -pSw187ip7prRhD2~m --verbose","out":"cqlsh -p=\"Sw186mKAkFtGQ*j\", cqlsh -pSw187ip7prRhD2~m --verbose","spans":null}
+{"in":"cqlsh -p=\"Sw188V5nskUve_L\";--password Sw189D4bJTsVBC --verbose","out":"cqlsh -p=\"Sw188V5nskUve_L\";--password [credential] --verbose","spans":[[38,52]]}
+{"in":"cqlsh -p=\"Sw190TsMcNkb+r\"; DB_PASSWORD=Sw191H38eShzyK --verbose","out":"cqlsh -p=\"Sw190TsMcNkb+r\"; DB_PASSWORD=[credential] --verbose","spans":[[39,53]]}
+{"in":"cqlsh -p'Sw192yuE'j4DWju|cqlsh -pSw193bSbdSDr^S --verbose","out":"cqlsh -p'Sw192yuE'j4DWju|cqlsh -pSw193bSbdSDr^S --verbose","spans":null}
+{"in":"cqlsh -p'Sw194KkJ'kDP6*D \u0026\u0026 --password Sw195iojZ2xd%Y --verbose","out":"cqlsh -p'Sw194KkJ'kDP6*D \u0026\u0026 --password [credential] --verbose","spans":[[39,53]]}
+{"in":"cqlsh -p'Sw1964WQkU'LnLw~g\"DB_PASSWORD=Sw197yo7jMrnB6_K --verbose","out":"cqlsh -p'Sw1964WQkU'LnLw~g\"DB_PASSWORD=[credential] --verbose","spans":[[39,55]]}
+{"in":"cqlsh -pSw198m6Gxe\"rDpd.z\"\" cqlsh -pSw199ixps5dkZj --verbose","out":"cqlsh -pSw198m6Gxe\"rDpd.z\"\" cqlsh -pSw199ixps5dkZj --verbose","spans":null}
+{"in":"cqlsh -pSw200Vx9\"kArZjX\"'--password Sw201RL3ckVq*9 --verbose","out":"cqlsh -pSw200Vx9\"kArZjX\"'--password [credential] --verbose","spans":[[36,50]]}
+{"in":"cqlsh -pSw2029\"aJhZhe\"' DB_PASSWORD=Sw203vSdqKeFE5.B --verbose","out":"cqlsh -pSw2029\"aJhZhe\"' DB_PASSWORD=[credential] --verbose","spans":[[36,52]]}
+{"in":"cqlsh -vp\"Sw204m6t6q2VtB+A\"\ncqlsh -pSw205mdM2LEc~z --verbose","out":"cqlsh -vp\"Sw204m6t6q2VtB+A\"\ncqlsh -pSw205mdM2LEc~z --verbose","spans":null}
+{"in":"cqlsh -vp\"Sw206rGm2BF4rE~D\"\\\n  --password Sw2072UnRjoaSv^n --verbose","out":"cqlsh -vp\"Sw206rGm2BF4rE~D\"\\\n  --password [credential] --verbose","spans":[[42,58]]}
+{"in":"cqlsh -vp\"Sw208shEFj5w~J\"\u0026DB_PASSWORD=Sw209y4sDofA%Z --verbose","out":"cqlsh -vp\"Sw208shEFj5w~J\"\u0026DB_PASSWORD=[credential] --verbose","spans":[[38,52]]}
+{"in":"rabbitmqadmin -p'Sw210cgdYyDc3d' rabbitmqadmin -pSw211dSC9vGo2 --verbose","out":"rabbitmqadmin -p'Sw210cgdYyDc3d' rabbitmqadmin -pSw211dSC9vGo2 --verbose","spans":null}
+{"in":"rabbitmqadmin -p'Sw2125VgYC3AQ'\t--password Sw213bdP7LyjwT --verbose","out":"rabbitmqadmin -p'Sw2125VgYC3AQ'\t--password [credential] --verbose","spans":[[43,57]]}
+{"in":"rabbitmqadmin -p'Sw214GybjUYWVV~6',DB_PASSWORD=Sw215qKCVTYjj_W --verbose","out":"rabbitmqadmin -p'Sw214GybjUYWVV~6',DB_PASSWORD=[credential] --verbose","spans":[[47,62]]}
+{"in":"rabbitmqadmin -p\"Sw216P5zGASYu%Y\", rabbitmqadmin -pSw217YYqeXWFt^r --verbose","out":"rabbitmqadmin -p\"Sw216P5zGASYu%Y\", rabbitmqadmin -pSw217YYqeXWFt^r --verbose","spans":null}
+{"in":"rabbitmqadmin -p\"Sw218L8C6bgFS~7\";--password Sw219kXCBqYw --verbose","out":"rabbitmqadmin -p\"Sw218L8C6bgFS~7\";--password [credential] --verbose","spans":[[45,57]]}
+{"in":"rabbitmqadmin -p\"Sw220KMxNQ9fSR*8\"; DB_PASSWORD=Sw2216ajRY32k+Y --verbose","out":"rabbitmqadmin -p\"Sw220KMxNQ9fSR*8\"; DB_PASSWORD=[credential] --verbose","spans":[[48,63]]}
+{"in":"rabbitmqadmin -p='Sw222asSHQFyQ7'|rabbitmqadmin -pSw223zoKbFZk^G --verbose","out":"rabbitmqadmin -p='Sw222asSHQFyQ7'|rabbitmqadmin -pSw223zoKbFZk^G --verbose","spans":null}
+{"in":"rabbitmqadmin -p='Sw224GbYAbXJnS+J' \u0026\u0026 --password Sw225ovdTkU2_F --verbose","out":"rabbitmqadmin -p='Sw224GbYAbXJnS+J' \u0026\u0026 --password [credential] --verbose","spans":[[50,64]]}
+{"in":"rabbitmqadmin -p='Sw226vQveVme2^i'\"DB_PASSWORD=Sw227r7NhyKTM*c --verbose","out":"rabbitmqadmin -p='Sw226vQveVme2^i'\"DB_PASSWORD=[credential] --verbose","spans":[[47,62]]}
+{"in":"rabbitmqadmin -p=\"Sw228RpymexQ_t\"\" rabbitmqadmin -pSw2297FgwbHv --verbose","out":"rabbitmqadmin -p=\"Sw228RpymexQ_t\"\" rabbitmqadmin -pSw2297FgwbHv --verbose","spans":null}
+{"in":"rabbitmqadmin -p=\"Sw230e9B23WWg.3\"'--password Sw231wQJ6Ne5au^f --verbose","out":"rabbitmqadmin -p=\"Sw230e9B23WWg.3\"'--password [credential] --verbose","spans":[[46,62]]}
+{"in":"rabbitmqadmin -p=\"Sw232i2593W6\"' DB_PASSWORD=Sw233bL4P83Z --verbose","out":"rabbitmqadmin -p=\"Sw232i2593W6\"' DB_PASSWORD=[credential] --verbose","spans":[[45,57]]}
+{"in":"rabbitmqadmin -p'Sw234boMR'659H~C\nrabbitmqadmin -pSw235QUnYcrtK.e --verbose","out":"rabbitmqadmin -p'Sw234boMR'659H~C\nrabbitmqadmin -pSw235QUnYcrtK.e --verbose","spans":null}
+{"in":"rabbitmqadmin -p'Sw236xJY7'gJHy*X\\\n  --password Sw2374V9myNaq --verbose","out":"rabbitmqadmin -p'Sw236xJY7'gJHy*X\\\n  --password [credential] --verbose","spans":[[48,61]]}
+{"in":"rabbitmqadmin -p'Sw238BtuD4'QPFr*6\u0026DB_PASSWORD=Sw239k7BRKrS+T --verbose","out":"rabbitmqadmin -p'Sw238BtuD4'QPFr*6\u0026DB_PASSWORD=[credential] --verbose","spans":[[47,61]]}
+{"in":"rabbitmqadmin -pSw240FwX\"JRdp~2\" rabbitmqadmin -pSw241XfXVdxatX_d --verbose","out":"rabbitmqadmin -pSw240FwX\"JRdp~2\" rabbitmqadmin -pSw241XfXVdxatX_d --verbose","spans":null}
+{"in":"rabbitmqadmin -pSw242r4T\"UFx4_2\"\t--password Sw243S5HHrhkG*u --verbose","out":"rabbitmqadmin -pSw242r4T\"UFx4_2\"\t--password [credential] --verbose","spans":[[44,59]]}
+{"in":"rabbitmqadmin -pSw244x\"NwrwF7\",DB_PASSWORD=Sw245tQLtjGvxt+E --verbose","out":"rabbitmqadmin -pSw244x\"NwrwF7\",DB_PASSWORD=[credential] --verbose","spans":[[43,59]]}
+{"in":"rabbitmqadmin -vp\"Sw246YceqC2TX+R\", rabbitmqadmin -pSw2477VaurVtJ --verbose","out":"rabbitmqadmin -vp\"Sw246YceqC2TX+R\", rabbitmqadmin -pSw2477VaurVtJ --verbose","spans":null}
+{"in":"rabbitmqadmin -vp\"Sw248virSZVZ_2\";--password Sw249tamtFM6*4 --verbose","out":"rabbitmqadmin -vp\"Sw248virSZVZ_2\";--password [credential] --verbose","spans":[[45,59]]}
+{"in":"rabbitmqadmin -vp\"Sw250pjpZ7fC.p\"; DB_PASSWORD=Sw251LmbVLyJrD.Z --verbose","out":"rabbitmqadmin -vp\"Sw250pjpZ7fC.p\"; DB_PASSWORD=[credential] --verbose","spans":[[47,63]]}
+{"in":"sshpass -p'Sw252dBCtg8trz%H'|sshpass -pSw253ssuNccuN_A --verbose","out":"sshpass -p'Sw252dBCtg8trz%H'|sshpass -pSw253ssuNccuN_A --verbose","spans":null}
+{"in":"sshpass -p'Sw2549XQ8XCei^Z' \u0026\u0026 --password Sw255tQ9RAYb --verbose","out":"sshpass -p'Sw2549XQ8XCei^Z' \u0026\u0026 --password [credential] --verbose","spans":[[42,54]]}
+{"in":"sshpass -p'Sw256FRkpPmN~E'\"DB_PASSWORD=Sw2572vcPNZmpV --verbose","out":"sshpass -p'Sw256FRkpPmN~E'\"DB_PASSWORD=[credential] --verbose","spans":[[39,53]]}
+{"in":"sshpass -p\"Sw258KJFXkpk.w\"\" sshpass -pSw259vnRNisi --verbose","out":"sshpass -p\"Sw258KJFXkpk.w\"\" sshpass -pSw259vnRNisi --verbose","spans":null}
+{"in":"sshpass -p\"Sw260AK7mSGAL.o\"'--password Sw2612U7a8qaY+T --verbose","out":"sshpass -p\"Sw260AK7mSGAL.o\"'--password [credential] --verbose","spans":[[39,54]]}
+{"in":"sshpass -p\"Sw262qPoQLEp8^4\"' DB_PASSWORD=Sw263J8uwzLN --verbose","out":"sshpass -p\"Sw262qPoQLEp8^4\"' DB_PASSWORD=[credential] --verbose","spans":[[41,53]]}
+{"in":"sshpass -p='Sw264igp3DdSP'\nsshpass -pSw265atzCyAyA --verbose","out":"sshpass -p='Sw264igp3DdSP'\nsshpass -pSw265atzCyAyA --verbose","spans":null}
+{"in":"sshpass -p='Sw266s8cFHnUWp%D'\\\n  --password Sw267dxs85Yzv^C --verbose","out":"sshpass -p='Sw266s8cFHnUWp%D'\\\n  --password [credential] --verbose","spans":[[44,59]]}
+{"in":"sshpass -p='Sw268KhqqAmCN^G'\u0026DB_PASSWORD=Sw269VSwEHfwM%E --verbose","out":"sshpass -p='Sw268KhqqAmCN^G'\u0026DB_PASSWORD=[credential] --verbose","spans":[[41,56]]}
+{"in":"sshpass -p=\"Sw270JzeVE8noL+L\" sshpass -pSw271nfjUbeee+s --verbose","out":"sshpass -p=\"Sw270JzeVE8noL+L\" sshpass -pSw271nfjUbeee+s --verbose","spans":null}
+{"in":"sshpass -p=\"Sw272m6K4tiF+C\"\t--password Sw273jm4n36LC --verbose","out":"sshpass -p=\"Sw272m6K4tiF+C\"\t--password [credential] --verbose","spans":[[39,52]]}
+{"in":"sshpass -p=\"Sw274gb99XwL_s\",DB_PASSWORD=Sw275bvrBnKQ_7 --verbose","out":"sshpass -p=\"Sw274gb99XwL_s\",DB_PASSWORD=[credential] --verbose","spans":[[40,54]]}
+{"in":"sshpass -p'Sw276te'EpChV5, sshpass -pSw277DVzHj68 --verbose","out":"sshpass -p'Sw276te'EpChV5, sshpass -pSw277DVzHj68 --verbose","spans":null}
+{"in":"sshpass -p'Sw278YTC'VkfT+G;--password Sw279k5JBBVW2X%r --verbose","out":"sshpass -p'Sw278YTC'VkfT+G;--password [credential] --verbose","spans":[[38,54]]}
+{"in":"sshpass -p'Sw280ocE'YGtZ%b; DB_PASSWORD=Sw281sbAcdD6TU_z --verbose","out":"sshpass -p'Sw280ocE'YGtZ%b; DB_PASSWORD=[credential] --verbose","spans":[[40,56]]}
+{"in":"sshpass -pSw282DZ\"mJeiNc\"|sshpass -pSw283UEXUmFZ^k --verbose","out":"sshpass -pSw282DZ\"mJeiNc\"|sshpass -pSw283UEXUmFZ^k --verbose","spans":null}
+{"in":"sshpass -pSw284wLD2G\"oe4H_s\" \u0026\u0026 --password Sw285J3EUcSZQ%i --verbose","out":"sshpass -pSw284wLD2G\"oe4H_s\" \u0026\u0026 --password [credential] --verbose","spans":[[43,58]]}
+{"in":"sshpass -pSw286TB27\"Cyww+Z\"\"DB_PASSWORD=Sw287vRsKM3B*r --verbose","out":"sshpass -pSw286TB27\"Cyww+Z\"\"DB_PASSWORD=[credential] --verbose","spans":[[40,54]]}
+{"in":"sshpass -vp\"Sw288TZNV5Yk9g\"\" sshpass -pSw289or86p2C^p --verbose","out":"sshpass -vp\"Sw288TZNV5Yk9g\"\" sshpass -pSw289or86p2C^p --verbose","spans":null}
+{"in":"sshpass -vp\"Sw290UhCEnnznP%7\"'--password Sw291HeVrsaNGa_U --verbose","out":"sshpass -vp\"Sw290UhCEnnznP%7\"'--password [credential] --verbose","spans":[[41,57]]}
+{"in":"sshpass -vp\"Sw292hLrXWPyC.7\"' DB_PASSWORD=Sw293nefY6TK%Y --verbose","out":"sshpass -vp\"Sw292hLrXWPyC.7\"' DB_PASSWORD=[credential] --verbose","spans":[[42,56]]}
+{"in":"redis-cli -a'Sw2949NYCHHE%w'\nredis-cli -aSw295BKgYRLCy*n --verbose","out":"redis-cli -a'Sw2949NYCHHE%w'\nredis-cli -aSw295BKgYRLCy*n --verbose","spans":null}
+{"in":"redis-cli -a'Sw296bfettdQ%p'\\\n  --password Sw2972humcsYj --verbose","out":"redis-cli -a'Sw296bfettdQ%p'\\\n  --password [credential] --verbose","spans":[[43,56]]}
+{"in":"redis-cli -a'Sw298PVKJJH7VC+Y'\u0026DB_PASSWORD=Sw299CTKb5rA --verbose","out":"redis-cli -a'Sw298PVKJJH7VC+Y'\u0026DB_PASSWORD=[credential] --verbose","spans":[[43,55]]}
+{"in":"redis-cli -a\"Sw3008WYabiS7\" redis-cli -aSw301gB6DmZB3w --verbose","out":"redis-cli -a\"Sw3008WYabiS7\" redis-cli -aSw301gB6DmZB3w --verbose","spans":null}
+{"in":"redis-cli -a\"Sw302SMw7bPK_b\"\t--password Sw303yKXKX3G~Q --verbose","out":"redis-cli -a\"Sw302SMw7bPK_b\"\t--password [credential] --verbose","spans":[[40,54]]}
+{"in":"redis-cli -a\"Sw304jtAbbVdAJ~U\",DB_PASSWORD=Sw305ytg3hfZ%E --verbose","out":"redis-cli -a\"Sw304jtAbbVdAJ~U\",DB_PASSWORD=[credential] --verbose","spans":[[43,57]]}
+{"in":"redis-cli -a='Sw306bYJ3GkJS*P', redis-cli -aSw307KufcEDYae.m --verbose","out":"redis-cli -a='Sw306bYJ3GkJS*P', redis-cli -aSw307KufcEDYae.m --verbose","spans":null}
+{"in":"redis-cli -a='Sw308ZDPfqVrN4';--password Sw309chusWYZ5h --verbose","out":"redis-cli -a='Sw308ZDPfqVrN4';--password [credential] --verbose","spans":[[41,55]]}
+{"in":"redis-cli -a='Sw3105iSs5hwg^x'; DB_PASSWORD=Sw311SjHvFQaPQ*P --verbose","out":"redis-cli -a='Sw3105iSs5hwg^x'; DB_PASSWORD=[credential] --verbose","spans":[[44,60]]}
+{"in":"redis-cli -a=\"Sw312nn3tFfn.M\"|redis-cli -aSw313KN9Yd99tf_o --verbose","out":"redis-cli -a=\"Sw312nn3tFfn.M\"|redis-cli -aSw313KN9Yd99tf_o --verbose","spans":null}
+{"in":"redis-cli -a=\"Sw314DCZhEQK4E+Z\" \u0026\u0026 --password Sw315iv95pzmzV --verbose","out":"redis-cli -a=\"Sw314DCZhEQK4E+Z\" \u0026\u0026 --password [credential] --verbose","spans":[[46,60]]}
+{"in":"redis-cli -a=\"Sw316eHCG3za_y\"\"DB_PASSWORD=Sw317roLRAn2RQ%f --verbose","out":"redis-cli -a=\"Sw316eHCG3za_y\"\"DB_PASSWORD=[credential] --verbose","spans":[[42,58]]}
+{"in":"redis-cli -a'Sw318FQ5m'Rqby%L\" redis-cli -aSw319raryHZGo --verbose","out":"redis-cli -a'Sw318FQ5m'Rqby%L\" redis-cli -aSw319raryHZGo --verbose","spans":null}
+{"in":"redis-cli -a'Sw320F39As'ru4r_X'--password Sw3214U4WJAh --verbose","out":"redis-cli -a'Sw320F39As'ru4r_X'--password [credential] --verbose","spans":[[42,54]]}
+{"in":"redis-cli -a'Sw322bhyBK'ATUw~R' DB_PASSWORD=Sw323DQ7G8PP_X --verbose","out":"redis-cli -a'Sw322bhyBK'ATUw~R' DB_PASSWORD=[credential] --verbose","spans":[[44,58]]}
+{"in":"redis-cli -aSw324utY\"VeTd*U\"\nredis-cli -aSw325YZtxKMs_6 --verbose","out":"redis-cli -aSw324utY\"VeTd*U\"\nredis-cli -aSw325YZtxKMs_6 --verbose","spans":null}
+{"in":"redis-cli -aSw326ELQ\"8Jhs%k\"\\\n  --password Sw327RJVKGeY2 --verbose","out":"redis-cli -aSw326ELQ\"8Jhs%k\"\\\n  --password [credential] --verbose","spans":[[43,56]]}
+{"in":"redis-cli -aSw328aswo\"hcVK%N\"\u0026DB_PASSWORD=Sw329cTrAmxyz --verbose","out":"redis-cli -aSw328aswo\"hcVK%N\"\u0026DB_PASSWORD=[credential] --verbose","spans":[[42,55]]}
+{"in":"redis-cli -va\"Sw3302TvBrbH+F\" redis-cli -aSw331LMLNEXxP^Y --verbose","out":"redis-cli -va\"Sw3302TvBrbH+F\" redis-cli -aSw331LMLNEXxP^Y --verbose","spans":null}
+{"in":"redis-cli -va\"Sw332U5RCR5hk+B\"\t--password Sw333Bug4R66PY.a --verbose","out":"redis-cli -va\"Sw332U5RCR5hk+B\"\t--password [credential] --verbose","spans":[[42,58]]}
+{"in":"redis-cli -va\"Sw334dboUB4s_A\",DB_PASSWORD=Sw335DCuEzadC~6 --verbose","out":"redis-cli -va\"Sw334dboUB4s_A\",DB_PASSWORD=[credential] --verbose","spans":[[42,57]]}
+{"in":"sqlcmd -P'Sw336h7k4o3Gkp.Z', sqlcmd -PSw337AgyGEro+q --verbose","out":"sqlcmd -P'Sw336h7k4o3Gkp.Z', sqlcmd -PSw337AgyGEro+q --verbose","spans":null}
+{"in":"sqlcmd -P'Sw338vXJEYZcgb';--password Sw339KGvcut7gj --verbose","out":"sqlcmd -P'Sw338vXJEYZcgb';--password [credential] --verbose","spans":[[37,51]]}
+{"in":"sqlcmd -P'Sw340pgsxqFxpC'; DB_PASSWORD=Sw3417XAKUrGvt+S --verbose","out":"sqlcmd -P'Sw340pgsxqFxpC'; DB_PASSWORD=[credential] --verbose","spans":[[39,55]]}
+{"in":"sqlcmd -P\"Sw342JpHDT9Ri~Z\"|sqlcmd -PSw3435dthmLr~J --verbose","out":"sqlcmd -P\"Sw342JpHDT9Ri~Z\"|sqlcmd -PSw3435dthmLr~J --verbose","spans":null}
+{"in":"sqlcmd -P\"Sw344SpGi2kAu%c\" \u0026\u0026 --password Sw345JiowbSHaR --verbose","out":"sqlcmd -P\"Sw344SpGi2kAu%c\" \u0026\u0026 --password [credential] --verbose","spans":[[41,55]]}
+{"in":"sqlcmd -P\"Sw346B76uHgQ^x\"\"DB_PASSWORD=Sw347iUQy7Yc5^b --verbose","out":"sqlcmd -P\"Sw346B76uHgQ^x\"\"DB_PASSWORD=[credential] --verbose","spans":[[38,53]]}
+{"in":"sqlcmd -P='Sw348skRq37fUe'\" sqlcmd -PSw349seW5eCD --verbose","out":"sqlcmd -P='Sw348skRq37fUe'\" sqlcmd -PSw349seW5eCD --verbose","spans":null}
+{"in":"sqlcmd -P='Sw350irT9aL8p+e''--password Sw351hSxYzVEnC%n --verbose","out":"sqlcmd -P='Sw350irT9aL8p+e''--password [credential] --verbose","spans":[[39,55]]}
+{"in":"sqlcmd -P='Sw352itrABZuy'' DB_PASSWORD=Sw353afDPyJ3e --verbose","out":"sqlcmd -P='Sw352itrABZuy'' DB_PASSWORD=[credential] --verbose","spans":[[39,52]]}
+{"in":"sqlcmd -P=\"Sw354XXKUEAj%A\"\nsqlcmd -PSw355BMhE4pw --verbose","out":"sqlcmd -P=\"Sw354XXKUEAj%A\"\nsqlcmd -PSw355BMhE4pw --verbose","spans":null}
+{"in":"sqlcmd -P=\"Sw356ctEobRY.E\"\\\n  --password Sw357jAuNvEH*P --verbose","out":"sqlcmd -P=\"Sw356ctEobRY.E\"\\\n  --password [credential] --verbose","spans":[[41,55]]}
+{"in":"sqlcmd -P=\"Sw358WVfmUmY5g+Y\"\u0026DB_PASSWORD=Sw359zEJ8kBRJE --verbose","out":"sqlcmd -P=\"Sw358WVfmUmY5g+Y\"\u0026DB_PASSWORD=[credential] --verbose","spans":[[41,55]]}
+{"in":"sqlcmd -P'Sw360Vh39Y'SybC*a sqlcmd -PSw361wv9CcqU^q --verbose","out":"sqlcmd -P'Sw360Vh39Y'SybC*a sqlcmd -PSw361wv9CcqU^q --verbose","spans":null}
+{"in":"sqlcmd -P'Sw362WYu7'ZpVf^T\t--password Sw363H4JdVBc+U --verbose","out":"sqlcmd -P'Sw362WYu7'ZpVf^T\t--password [credential] --verbose","spans":[[38,52]]}
+{"in":"sqlcmd -P'Sw364gfe'TEqN_f,DB_PASSWORD=Sw365eiEaJRVi_W --verbose","out":"sqlcmd -P'Sw364gfe'TEqN_f,DB_PASSWORD=[credential] --verbose","spans":[[38,53]]}
+{"in":"sqlcmd -PSw366xkFq\"c6Cj.i\", sqlcmd -PSw367SdAdE44_L --verbose","out":"sqlcmd -PSw366xkFq\"c6Cj.i\", sqlcmd -PSw367SdAdE44_L --verbose","spans":null}
+{"in":"sqlcmd -PSw3687cPi\"ZSeZ_T\";--password Sw3692xqhh8iMw%a --verbose","out":"sqlcmd -PSw3687cPi\"ZSeZ_T\";--password [credential] --verbose","spans":[[38,54]]}
+{"in":"sqlcmd -PSw3704hj\"who2~t\"; DB_PASSWORD=Sw371jtqqqHrLQ.9 --verbose","out":"sqlcmd -PSw3704hj\"who2~t\"; DB_PASSWORD=[credential] --verbose","spans":[[39,55]]}
+{"in":"sqlcmd -vP\"Sw372hKtwmFVz*V\"|sqlcmd -PSw373h5ca5y7zK+6 --verbose","out":"sqlcmd -vP\"Sw372hKtwmFVz*V\"|sqlcmd -PSw373h5ca5y7zK+6 --verbose","spans":null}
+{"in":"sqlcmd -vP\"Sw374zLRukU5%C\" \u0026\u0026 --password Sw375Msddb7EZQ^y --verbose","out":"sqlcmd -vP\"Sw374zLRukU5%C\" \u0026\u0026 --password [credential] --verbose","spans":[[41,57]]}
+{"in":"sqlcmd -vP\"Sw376rD6kJoqa6_2\"\"DB_PASSWORD=Sw377bEjVi76^o --verbose","out":"sqlcmd -vP\"Sw376rD6kJoqa6_2\"\"DB_PASSWORD=[credential] --verbose","spans":[[41,55]]}
+{"in":"mosquitto_pub -P'Sw378CicZoV4xu_n'\" mosquitto_pub -PSw379NpWcwV7%5 --verbose","out":"mosquitto_pub -P'Sw378CicZoV4xu_n'\" mosquitto_pub -PSw379NpWcwV7%5 --verbose","spans":null}
+{"in":"mosquitto_pub -P'Sw380EYtqRfZ''--password Sw381ZuTB4EjFH_6 --verbose","out":"mosquitto_pub -P'Sw380EYtqRfZ''--password [credential] --verbose","spans":[[42,58]]}
+{"in":"mosquitto_pub -P'Sw382UDMEK3QKp+R'' DB_PASSWORD=Sw383WESxaF7+N --verbose","out":"mosquitto_pub -P'Sw382UDMEK3QKp+R'' DB_PASSWORD=[credential] --verbose","spans":[[48,62]]}
+{"in":"mosquitto_pub -P\"Sw384V4DzJPTd+n\"\nmosquitto_pub -PSw385KgLfVjQZ^C --verbose","out":"mosquitto_pub -P\"Sw384V4DzJPTd+n\"\nmosquitto_pub -PSw385KgLfVjQZ^C --verbose","spans":null}
+{"in":"mosquitto_pub -P\"Sw386RRBmHsCJw_m\"\\\n  --password Sw387Mb27wic7 --verbose","out":"mosquitto_pub -P\"Sw386RRBmHsCJw_m\"\\\n  --password [credential] --verbose","spans":[[49,62]]}
+{"in":"mosquitto_pub -P\"Sw388Mm9UeDa\"\u0026DB_PASSWORD=Sw389gtcvh2V.R --verbose","out":"mosquitto_pub -P\"Sw388Mm9UeDa\"\u0026DB_PASSWORD=[credential] --verbose","spans":[[43,57]]}
+{"in":"mosquitto_pub -P='Sw390PodQX3T%X' mosquitto_pub -PSw391KHmJgNv --verbose","out":"mosquitto_pub -P='Sw390PodQX3T%X' mosquitto_pub -PSw391KHmJgNv --verbose","spans":null}
+{"in":"mosquitto_pub -P='Sw392AWeLDkiA+c'\t--password Sw393vv3DK9m+u --verbose","out":"mosquitto_pub -P='Sw392AWeLDkiA+c'\t--password [credential] --verbose","spans":[[46,60]]}
+{"in":"mosquitto_pub -P='Sw394cHSC3Ab9*3',DB_PASSWORD=Sw395z98WvHA%D --verbose","out":"mosquitto_pub -P='Sw394cHSC3Ab9*3',DB_PASSWORD=[credential] --verbose","spans":[[47,61]]}
+{"in":"mosquitto_pub -P=\"Sw396RKVDy8JFr^E\", mosquitto_pub -PSw397QzDdtaDhU.e --verbose","out":"mosquitto_pub -P=\"Sw396RKVDy8JFr^E\", mosquitto_pub -PSw397QzDdtaDhU.e --verbose","spans":null}
+{"in":"mosquitto_pub -P=\"Sw398Q8yaaMVkz_W\";--password Sw399gVhkmMW*y --verbose","out":"mosquitto_pub -P=\"Sw398Q8yaaMVkz_W\";--password [credential] --verbose","spans":[[47,61]]}
+{"in":"mosquitto_pub -P=\"Sw400LYN4cu8L~K\"; DB_PASSWORD=Sw401Z38kvfZp*h --verbose","out":"mosquitto_pub -P=\"Sw400LYN4cu8L~K\"; DB_PASSWORD=[credential] --verbose","spans":[[48,63]]}
+{"in":"mosquitto_pub -P'Sw402cLppF'hubr.8|mosquitto_pub -PSw403jb5hSE9xf.g --verbose","out":"mosquitto_pub -P'Sw402cLppF'hubr.8|mosquitto_pub -PSw403jb5hSE9xf.g --verbose","spans":null}
+{"in":"mosquitto_pub -P'Sw40496V'Bt9S.s \u0026\u0026 --password Sw405gBHY5fT8s --verbose","out":"mosquitto_pub -P'Sw40496V'Bt9S.s \u0026\u0026 --password [credential] --verbose","spans":[[47,61]]}
+{"in":"mosquitto_pub -P'Sw406brn'mtKb%H\"DB_PASSWORD=Sw407gfDuNJu^c --verbose","out":"mosquitto_pub -P'Sw406brn'mtKb%H\"DB_PASSWORD=[credential] --verbose","spans":[[45,59]]}
+{"in":"mosquitto_pub -PSw408Ja\"ECZ4QB\"\" mosquitto_pub -PSw409xcUjEQNE.m --verbose","out":"mosquitto_pub -PSw408Ja\"ECZ4QB\"\" mosquitto_pub -PSw409xcUjEQNE.m --verbose","spans":null}
+{"in":"mosquitto_pub -PSw410bc2v\"LwKK+y\"'--password Sw411nBLbaM2^v --verbose","out":"mosquitto_pub -PSw410bc2v\"LwKK+y\"'--password [credential] --verbose","spans":[[45,59]]}
+{"in":"mosquitto_pub -PSw4126xY\"ogSw+H\"' DB_PASSWORD=Sw413m3JMLDx_x --verbose","out":"mosquitto_pub -PSw4126xY\"ogSw+H\"' DB_PASSWORD=[credential] --verbose","spans":[[46,60]]}
+{"in":"mosquitto_pub -vP\"Sw414qeXAqyQzo^P\"\nmosquitto_pub -PSw4153TxiRiUpR*9 --verbose","out":"mosquitto_pub -vP\"Sw414qeXAqyQzo^P\"\nmosquitto_pub -PSw4153TxiRiUpR*9 --verbose","spans":null}
+{"in":"mosquitto_pub -vP\"Sw416BSn5WCg^6\"\\\n  --password Sw417rfDCtsirY~2 --verbose","out":"mosquitto_pub -vP\"Sw416BSn5WCg^6\"\\\n  --password [credential] --verbose","spans":[[48,64]]}
+{"in":"mosquitto_pub -vP\"Sw418nMfwMjY3~F\"\u0026DB_PASSWORD=Sw419CELDJc9 --verbose","out":"mosquitto_pub -vP\"Sw418nMfwMjY3~F\"\u0026DB_PASSWORD=[credential] --verbose","spans":[[47,59]]}
+{"in":"mosquitto_sub -P'Sw420aaaHiHEi5' mosquitto_sub -PSw421GaEEpnstE_D --verbose","out":"mosquitto_sub -P'Sw420aaaHiHEi5' mosquitto_sub -PSw421GaEEpnstE_D --verbose","spans":null}
+{"in":"mosquitto_sub -P'Sw422yh6cN7M8^P'\t--password Sw423mtd5VQQi9+6 --verbose","out":"mosquitto_sub -P'Sw422yh6cN7M8^P'\t--password [credential] --verbose","spans":[[45,61]]}
+{"in":"mosquitto_sub -P'Sw424i8mgVGXW_6',DB_PASSWORD=Sw425ffWnL8xwX%c --verbose","out":"mosquitto_sub -P'Sw424i8mgVGXW_6',DB_PASSWORD=[credential] --verbose","spans":[[46,62]]}
+{"in":"mosquitto_sub -P\"Sw426DzijLEoUA~X\", mosquitto_sub -PSw427m2doDYX^u --verbose","out":"mosquitto_sub -P\"Sw426DzijLEoUA~X\", mosquitto_sub -PSw427m2doDYX^u --verbose","spans":null}
+{"in":"mosquitto_sub -P\"Sw428kSwKqkZ~f\";--password Sw429fgAMuY6pY --verbose","out":"mosquitto_sub -P\"Sw428kSwKqkZ~f\";--password [credential] --verbose","spans":[[44,58]]}
+{"in":"mosquitto_sub -P\"Sw430Ym99wDL\"; DB_PASSWORD=Sw431BmQ4D2Vtt^m --verbose","out":"mosquitto_sub -P\"Sw430Ym99wDL\"; DB_PASSWORD=[credential] --verbose","spans":[[44,60]]}
+{"in":"mosquitto_sub -P='Sw432EDAandU.2'|mosquitto_sub -PSw433LJSsFrv.U --verbose","out":"mosquitto_sub -P='Sw432EDAandU.2'|mosquitto_sub -PSw433LJSsFrv.U --verbose","spans":null}
+{"in":"mosquitto_sub -P='Sw434Yac2mEeF^S' \u0026\u0026 --password Sw435Bj5pgJD%2 --verbose","out":"mosquitto_sub -P='Sw434Yac2mEeF^S' \u0026\u0026 --password [credential] --verbose","spans":[[49,63]]}
+{"in":"mosquitto_sub -P='Sw436QXeXnkEm~r'\"DB_PASSWORD=Sw437pHcRZkBJ*y --verbose","out":"mosquitto_sub -P='Sw436QXeXnkEm~r'\"DB_PASSWORD=[credential] --verbose","spans":[[47,62]]}
+{"in":"mosquitto_sub -P=\"Sw438DdYUY6r+v\"\" mosquitto_sub -PSw439vyF4vDShZ+Z --verbose","out":"mosquitto_sub -P=\"Sw438DdYUY6r+v\"\" mosquitto_sub -PSw439vyF4vDShZ+Z --verbose","spans":null}
+{"in":"mosquitto_sub -P=\"Sw440ts4uG6T*D\"'--password Sw441zhBAdXa_p --verbose","out":"mosquitto_sub -P=\"Sw440ts4uG6T*D\"'--password [credential] --verbose","spans":[[45,59]]}
+{"in":"mosquitto_sub -P=\"Sw442LtKHkquKV\"' DB_PASSWORD=Sw443bXpiaf6~r --verbose","out":"mosquitto_sub -P=\"Sw442LtKHkquKV\"' DB_PASSWORD=[credential] --verbose","spans":[[47,61]]}
+{"in":"mosquitto_sub -P'Sw444mY74X'jzJS+d\nmosquitto_sub -PSw445tAeEDtzNh~t --verbose","out":"mosquitto_sub -P'Sw444mY74X'jzJS+d\nmosquitto_sub -PSw445tAeEDtzNh~t --verbose","spans":null}
+{"in":"mosquitto_sub -P'Sw446P'soaTZA\\\n  --password Sw447brhMksmN --verbose","out":"mosquitto_sub -P'Sw446P'soaTZA\\\n  --password [credential] --verbose","spans":[[45,58]]}
+{"in":"mosquitto_sub -P'Sw448iaZH'FXMJ~X\u0026DB_PASSWORD=Sw4496E6GiFQ*z --verbose","out":"mosquitto_sub -P'Sw448iaZH'FXMJ~X\u0026DB_PASSWORD=[credential] --verbose","spans":[[46,60]]}
+{"in":"mosquitto_sub -PSw450Gw\"AZzDXE\" mosquitto_sub -PSw451ydciaek --verbose","out":"mosquitto_sub -PSw450Gw\"AZzDXE\" mosquitto_sub -PSw451ydciaek --verbose","spans":null}
+{"in":"mosquitto_sub -PSw452UK\"P2wwcB\"\t--password Sw453WA2dPsXA --verbose","out":"mosquitto_sub -PSw452UK\"P2wwcB\"\t--password [credential] --verbose","spans":[[43,56]]}
+{"in":"mosquitto_sub -PSw454d\"ugp5wa\",DB_PASSWORD=Sw455XiccdNn%5 --verbose","out":"mosquitto_sub -PSw454d\"ugp5wa\",DB_PASSWORD=[credential] --verbose","spans":[[43,57]]}
+{"in":"mosquitto_sub -vP\"Sw456BirHryf*f\", mosquitto_sub -PSw457BnLYyoAM*i --verbose","out":"mosquitto_sub -vP\"Sw456BirHryf*f\", mosquitto_sub -PSw457BnLYyoAM*i --verbose","spans":null}
+{"in":"mosquitto_sub -vP\"Sw4583KDbwsC.w\";--password Sw459HHPaxPEBh --verbose","out":"mosquitto_sub -vP\"Sw4583KDbwsC.w\";--password [credential] --verbose","spans":[[45,59]]}
+{"in":"mosquitto_sub -vP\"Sw460R8oNoTH\"; DB_PASSWORD=Sw461s6cNy59D --verbose","out":"mosquitto_sub -vP\"Sw460R8oNoTH\"; DB_PASSWORD=[credential] --verbose","spans":[[45,58]]}
+{"in":"curl -u'admin:Sw462W5Tm96ej_w'|curl -uadmin:Sw463yup9TwQ8 --verbose","out":"curl -u'admin:Sw462W5Tm96ej_w'|curl -uadmin:Sw463yup9TwQ8 --verbose","spans":null}
+{"in":"curl -u'admin:Sw464P8srdh8' \u0026\u0026 --password Sw46572m4KwxXN_n --verbose","out":"curl -u'admin:Sw464P8srdh8' \u0026\u0026 --password [credential] --verbose","spans":[[42,58]]}
+{"in":"curl -u'admin:Sw466ya8svyS_a'\"DB_PASSWORD=Sw4676GxEEyqTQ^i --verbose","out":"curl -u'admin:Sw466ya8svyS_a'\"DB_PASSWORD=[credential] --verbose","spans":[[42,58]]}
+{"in":"curl -u\"admin:Sw468nX8tL2s%K\"\" curl -uadmin:Sw469QP5W6fXV~j --verbose","out":"curl -u\"admin:Sw468nX8tL2s%K\"\" curl -uadmin:Sw469QP5W6fXV~j --verbose","spans":null}
+{"in":"curl -u\"admin:Sw470r9M8Hvgw\"'--password Sw471LzWnw3vHe --verbose","out":"curl -u\"admin:Sw470r9M8Hvgw\"'--password [credential] --verbose","spans":[[40,54]]}
+{"in":"curl -u\"admin:Sw472HikM3d6^p\"' DB_PASSWORD=Sw473XxAjKNHJ_y --verbose","out":"curl -u\"admin:Sw472HikM3d6^p\"' DB_PASSWORD=[credential] --verbose","spans":[[43,58]]}
+{"in":"curl -u='admin:Sw474jB8wmmu_3'\ncurl -uadmin:Sw475bKR94uW~G --verbose","out":"curl -u='admin:Sw474jB8wmmu_3'\ncurl -uadmin:Sw475bKR94uW~G --verbose","spans":null}
+{"in":"curl -u='admin:Sw476tQVZsHn~t'\\\n  --password Sw477sfWs5qNj --verbose","out":"curl -u='admin:Sw476tQVZsHn~t'\\\n  --password [credential] --verbose","spans":[[45,58]]}
+{"in":"curl -u='admin:Sw478dPgVeXDj'\u0026DB_PASSWORD=Sw479E5wd3mzN6~N --verbose","out":"curl -u='admin:Sw478dPgVeXDj'\u0026DB_PASSWORD=[credential] --verbose","spans":[[42,58]]}
+{"in":"curl -u=\"admin:Sw480eQam8Qq~s\" curl -uadmin:Sw481Ntu2eLRR^d --verbose","out":"curl -u=\"admin:Sw480eQam8Qq~s\" curl -uadmin:Sw481Ntu2eLRR^d --verbose","spans":null}
+{"in":"curl -u=\"admin:Sw482M9opbeor\"\t--password Sw483UjY9wcm_g --verbose","out":"curl -u=\"admin:Sw482M9opbeor\"\t--password [credential] --verbose","spans":[[41,55]]}
+{"in":"curl -u=\"admin:Sw484TdoYFmK7c\",DB_PASSWORD=Sw4857hcWiTa^s --verbose","out":"curl -u=\"admin:Sw484TdoYFmK7c\",DB_PASSWORD=[credential] --verbose","spans":[[43,57]]}
+{"in":"curl -u'admin:Sw486MBCc'2aqS*V, curl -uadmin:Sw487MBzimPGDc --verbose","out":"curl -u'admin:Sw486MBCc'2aqS*V, curl -uadmin:Sw487MBzimPGDc --verbose","spans":null}
+{"in":"curl -u'admin:Sw488xVE'iMXd^E;--password Sw489VvxuWGpC8*y --verbose","out":"curl -u'admin:Sw488xVE'iMXd^E;--password [credential] --verbose","spans":[[41,57]]}
+{"in":"curl -u'admin:Sw490nsuRu'HYPo*a; DB_PASSWORD=Sw491j5VEhdRBG%Q --verbose","out":"curl -u'admin:Sw490nsuRu'HYPo*a; DB_PASSWORD=[credential] --verbose","spans":[[45,61]]}
+{"in":"curl -uadmin:Sw492RrAA\"Lz2x+W\"|curl -uadmin:Sw493pGnvhjuD.t --verbose","out":"curl -uadmin:Sw492RrAA\"Lz2x+W\"|curl -uadmin:Sw493pGnvhjuD.t --verbose","spans":null}
+{"in":"curl -uadmin:Sw494e\"tHaAhK\" \u0026\u0026 --password Sw495uA399fQ+a --verbose","out":"curl -uadmin:Sw494e\"tHaAhK\" \u0026\u0026 --password [credential] --verbose","spans":[[42,56]]}
+{"in":"curl -uadmin:Sw496riL\"bdvp^W\"\"DB_PASSWORD=Sw497NrTK4mwaX^p --verbose","out":"curl -uadmin:Sw496riL\"bdvp^W\"\"DB_PASSWORD=[credential] --verbose","spans":[[42,58]]}
+{"in":"curl -vu\"admin:Sw498ro4s5BM%E\"\" curl -uadmin:Sw499AwAttmY.c --verbose","out":"curl -vu\"admin:Sw498ro4s5BM%E\"\" curl -uadmin:Sw499AwAttmY.c --verbose","spans":null}
+{"in":"curl -vu\"admin:Sw500H4bwEzvF.Q\"'--password Sw501w87JsQ3k --verbose","out":"curl -vu\"admin:Sw500H4bwEzvF.Q\"'--password [credential] --verbose","spans":[[43,56]]}
+{"in":"curl -vu\"admin:Sw502JJGfdR39D*D\"' DB_PASSWORD=Sw5035tygNtmA.k --verbose","out":"curl -vu\"admin:Sw502JJGfdR39D*D\"' DB_PASSWORD=[credential] --verbose","spans":[[46,61]]}
 {"in":"{\"kind\":\"Pod\",\"spec\":{\"containers\":[{\"name\":\"db\",\"image\":\"example.com/team/web:2\",\"args\":[\"-pSw000Yr2fk4K\"],\"command\":[\"mysql\"]},{\"name\":\"worker\",\"args\":[\"--log-level\",\"debug\",\"-P\",\"Sw001kQa3DTV_P\",\"--verbose\"]}]}}","out":"{\"kind\":\"Pod\",\"spec\":{\"containers\":[{\"name\":\"db\",\"image\":\"example.com/team/web:2\",\"args\":[\"-pSw000Yr2fk4K\"],\"command\":[\"mysql\"]},{\"name\":\"worker\",\"args\":[\"--log-level\",\"debug\",\"-P\",\"Sw001kQa3DTV_P\",\"--verbose\"]}]}}","spans":null}
 {"in":"kind: Pod\nspec:\n  containers:\n  - name: db\n    image: example.com/team/web:2\n    args:\n    - -pSw0025VVaCevp%x\n    command:\n    - mysql\n  - args:\n    - --log-level\n    - debug\n    - -P\n    - Sw003shCCu9Hx2%t\n    - --verbose\n    name: worker\n  restartPolicy: Always\n","out":"kind: Pod\nspec:\n  containers:\n  - name: db\n    image: example.com/team/web:2\n    args:\n    - -pSw0025VVaCevp%x\n    command:\n    - mysql\n  - args:\n    - --log-level\n    - debug\n    - -P\n    - Sw003shCCu9Hx2%t\n    - --verbose\n    name: worker\n  restartPolicy: Always\n","spans":null}
 {"in":"kind: Pod\nspec: {containers: [{name: db, image: example.com/team/web:2, args: [-pSw004BqpiDQjf%j], command: [mysql]}, {name: worker, args: [--log-level, debug, -P, Sw005nfYdBqekr*s, --verbose]}]}\n","out":"kind: Pod\nspec: {containers: [{name: db, image: example.com/team/web:2, args: [-pSw004BqpiDQjf%j], command: [mysql]}, {name: worker, args: [--log-level, debug, -P, Sw005nfYdBqekr*s, --verbose]}]}\n","spans":null}

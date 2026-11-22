@@ -17,6 +17,7 @@ limitations under the License.
 package redact
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"math"
@@ -300,7 +301,7 @@ func budgetShapes(n int) map[string]string {
 // meteredSpent runs e on in on a meter of steps steps and returns what it returned, whether it was decided
 // (meteredOn) and the steps it spent, those of the step that ran out included.
 func meteredSpent(e budgetEntry, in string, steps int64) (out string, ok bool, spent int64) {
-	out, ok = meteredOn(e.size(in), steps, func(wm *meter.Meter) string {
+	out, ok = meteredOn(context.Background(), e.size(in), steps, func(wm *meter.Meter) string {
 		defer func() { spent = wm.Spent() }()
 		return e.run(wm, in)
 	})

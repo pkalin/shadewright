@@ -482,7 +482,46 @@ type windowIDs struct {
 	at     map[windowAt]int
 	byText map[windowKey]int
 	// found holds the matches of each expression in each long window it read, relative to the window's start.
-	found map[windowFound][][]int
+	found map[windowFound]windowMatches
+}
+
+// windowMatches are the matches of an expression in a long window, each of stride indexes, one after the other in
+// 32 bits each (#1087: a slice for each match held about four times as much, for every match of a text dense in
+// them).
+type windowMatches struct {
+	stride int
+	at     []int32
+}
+
+// add appends m, shifted by by (shifted).
+func (wms *windowMatches) add(_ *meter.Meter, m []int, by int) {
+	wms.stride = len(m)
+	for _, v := range m {
+		if v >= 0 {
+			v += by
+		}
+		wms.at = append(wms.at, int32(v)) // #nosec G115 -- a window is part of an entry of at most MaxEntry bytes
+	}
+}
+
+// len returns the number of matches.
+func (wms windowMatches) len() int {
+	if wms.stride == 0 {
+		return 0
+	}
+	return len(wms.at) / wms.stride
+}
+
+// match returns match k, shifted by by, in a slice of its own.
+func (wms windowMatches) match(_ *meter.Meter, k, by int) []int {
+	out := make([]int, wms.stride)
+	for j, v := range wms.at[k*wms.stride : (k+1)*wms.stride] {
+		out[j] = int(v)
+		if v >= 0 {
+			out[j] += by
+		}
+	}
+	return out
 }
 
 // windowAt is a long window of the text read now, with the character read before it.
@@ -520,16 +559,17 @@ func (ids *windowIDs) of(wm *meter.Meter, s string, r longRun, lead string) int 
 	return id
 }
 
-// findAll is w.re.FindAllStringSubmatchIndex(s, -1), with each distinct long window of s read once.
-func (w *windowed) findAll(wm *meter.Meter, s string) [][]int {
+// each calls f with each match of w.re.FindAllStringSubmatchIndex(s, -1), in order, as it is found, until f returns false.
+func (w *windowed) each(wm *meter.Meter, s string, f func(m []int) bool) {
 	if w.whole || len(s) < windowMinText {
-		return w.readWhole(wm, s)
+		w.eachWhole(wm, s, f)
+		return
 	}
-	return w.findAllIn(wm, s, longRuns(wm, s, []*windowed{w})[0], &windowIDs{})
+	w.eachIn(wm, s, longRuns(wm, s, []*windowed{w})[0], &windowIDs{}, f)
 }
 
-// findAllWith is findAll on one of several texts read with ids, which keeps the windows read in the texts before:
-// the lines of a text, read one by one.
+// findAllWith is w.re.FindAllStringSubmatchIndex(s, -1) on one of several texts read with ids, which keeps the
+// windows read in the texts before: the lines of a text, read one by one.
 func (w *windowed) findAllWith(wm *meter.Meter, s string, ids *windowIDs) [][]int {
 	if w.whole || len(s) < windowMinText {
 		return w.readWhole(wm, s)
@@ -554,24 +594,28 @@ func leadClass(_ *meter.Meter, r rune) string {
 // findAllIn is w.re.FindAllStringSubmatchIndex(s, -1), where runs are the long windows of s for w (longRuns) and
 // ids names the long windows of s (shared by the expressions read on s).
 func (w *windowed) findAllIn(wm *meter.Meter, s string, runs []longRun, ids *windowIDs) [][]int {
-	if len(runs) == 0 {
-		return w.readWhole(wm, s)
-	}
 	var out [][]int
-	// keep appends the matches ms of a text read from byte at of s that start in [from, to) of s.
-	keep := func(ms [][]int, at, from, to int) {
-		for _, m := range ms {
+	w.eachIn(wm, s, runs, ids, func(m []int) bool { out = append(out, m); return true })
+	return out
+}
+
+// eachIn calls f with each match findAllIn returns, in order, as it is found, until f returns false: the matches
+// of the whole text are not held at once, only those of each long window, which the expressions share (ids).
+func (w *windowed) eachIn(wm *meter.Meter, s string, runs []longRun, ids *windowIDs, f func(m []int) bool) {
+	if len(runs) == 0 {
+		w.eachWhole(wm, s, f)
+		return
+	}
+	stopped := false
+	// keep calls f with the matches ms of a text read from byte at of s that start in [from, to) of s.
+	keep := func(ms windowMatches, at, from, to int) {
+		for k := range ms.len() {
 			tick(wm, 1)
-			if m[0]+at >= from && m[0]+at < to {
-				out = append(out, shifted(wm, m, at))
+			if start := int(ms.at[k*ms.stride]) + at; start >= from && start < to && !f(ms.match(wm, k, at)) {
+				stopped = true
+				return
 			}
 		}
-	}
-	read := func(t string) [][]int {
-		if w.onRead != nil {
-			w.onRead(len(t))
-		}
-		return findAllCharged(wm, w.expr, t)
 	}
 	// part reads the bytes [from, to) of s with the character before from (starting at lo) and the one at to.
 	part := func(lo, from, to int) {
@@ -580,16 +624,27 @@ func (w *windowed) findAllIn(wm *meter.Meter, s string, runs []longRun, ids *win
 			_, size := utf8.DecodeRuneInString(s[to:])
 			hi += size
 		}
-		keep(read(s[lo:hi]), lo, from, to)
+		if w.onRead != nil {
+			w.onRead(hi - lo)
+		}
+		eachCharged(wm, w.expr, s[lo:hi], func(m []int) bool {
+			tick(wm, 1)
+			if m[0]+lo >= from && m[0]+lo < to && !f(shifted(wm, m, lo)) {
+				stopped = true
+			}
+			return !stopped
+		})
 	}
 	if ids.found == nil {
-		ids.found = map[windowFound][][]int{}
+		ids.found = map[windowFound]windowMatches{}
 	}
 	from, lo := 0, 0
 	for _, r := range runs {
 		tick(wm, 1)
 		if r.start > from && !r.follows {
-			part(lo, from, r.start)
+			if part(lo, from, r.start); stopped {
+				return
+			}
 		}
 		lead := s[r.prev:r.start]
 		if r.cut {
@@ -610,21 +665,35 @@ func (w *windowed) findAllIn(wm *meter.Meter, s string, runs []longRun, ids *win
 			// long run at another place (a chunk before a start character that opens a long window, and the same
 			// chunk at the end of a text, which takes that character), and keep applies each run's end.
 			n := len(lead)
-			for _, m := range read(lead + s[r.start:r.next]) {
+			t := lead + s[r.start:r.next]
+			if w.onRead != nil {
+				w.onRead(len(t))
+			}
+			eachCharged(wm, w.expr, t, func(m []int) bool {
 				tick(wm, 1)
 				if m[0] >= n {
-					found = append(found, shifted(wm, m, -n))
+					found.add(wm, m, -n)
 				}
-			}
+				return true
+			})
 			ids.found[windowFound{w, id}] = found
 		}
-		keep(found, r.start, r.start, r.end)
+		if keep(found, r.start, r.start, r.end); stopped {
+			return
+		}
 		from, lo = r.end, r.last
 	}
 	if from < len(s) && !runs[len(runs)-1].final {
 		part(lo, from, len(s))
 	}
-	return out
+}
+
+// eachWhole is readWhole with each match given to f as it is found, until f returns false.
+func (w *windowed) eachWhole(wm *meter.Meter, s string, f func(m []int) bool) {
+	if w.onRead != nil {
+		w.onRead(len(s))
+	}
+	eachCharged(wm, w.expr, s, f)
 }
 
 // readWhole is w.re.FindAllStringSubmatchIndex(s, -1), told to onRead like the parts of a windowed reading.
@@ -641,6 +710,11 @@ func (w *windowed) readWhole(wm *meter.Meter, s string) [][]int {
 // instead of after the call (#873, decision of 2026-11-20).
 func findAllCharged(wm *meter.Meter, e *meter.Expr, s string) [][]int {
 	return e.FindAll(s, func(n int) { tickExpression(wm, n) })
+}
+
+// eachCharged is findAllCharged with each match given to f as it is found, until f returns false (meter.Expr.Each).
+func eachCharged(wm *meter.Meter, e *meter.Expr, s string, f func(m []int) bool) {
+	e.Each(s, func(n int) { tickExpression(wm, n) }, f)
 }
 
 // shifted returns the match m, found in a text that starts at byte by of another, as a match of the other.

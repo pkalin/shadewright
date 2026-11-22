@@ -89,6 +89,10 @@ var (
 	// from the status of the HTTP response the adapter received, never from a body or model output: only an
 	// adapter whose host documents the refusal as free marks an error with it ([NotProcessed]).
 	ErrNotProcessed = errors.New("the host refused the request before processing it")
+	// ErrNotChecked marks the error of a write whose last check before sending, the redaction check of the data,
+	// did not run on any attempt: its wait for the limit on the heap of the redactions running at once ended each
+	// time. Nothing was sent, and the data was not found unsafe either: it is not a refusal.
+	ErrNotChecked = errors.New("the redaction check did not run")
 )
 
 // notProcessedError keeps the text and the chain of err and adds ErrNotProcessed to it.
@@ -151,6 +155,9 @@ func (e *RetryableError) Unwrap() error { return e.Err }
 
 // Is reports whether target is ErrRetryable.
 func (e *RetryableError) Is(target error) bool { return target == ErrRetryable }
+
+// IsNotChecked reports whether err is a write whose redaction check never ran ([ErrNotChecked]).
+func IsNotChecked(err error) bool { return errors.Is(err, ErrNotChecked) }
 
 // IsNotFound reports whether err means the object does not exist.
 func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) }

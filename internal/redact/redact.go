@@ -113,7 +113,9 @@ package redact
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"iter"
 	"math"
@@ -178,16 +180,23 @@ type rule struct {
 	win *windowed
 }
 
-// find returns the matches of the rule's expression in s, as FindAllStringSubmatchIndex(s, -1) does, read by
-// windows when the rule has them (New) and runs holds the long windows of s (longRuns of the redactor's wins).
-func (ru *rule) find(wm *meter.Meter, s string, runs [][]longRun, ids *windowIDs) [][]int {
+// each calls f with each match of the rule's expression in s, in order, as FindAllStringSubmatchIndex(s, -1) finds
+// them, read by windows when the rule has them (New) and runs holds the long windows of s (longRuns of the
+// redactor's wins). f takes each match as it is found, so the matches of the whole text are not held at once
+// (#1087).
+func (ru *rule) each(wm *meter.Meter, s string, runs [][]longRun, ids *windowIDs, f func(m []int)) {
+	all := func(m []int) bool { f(m); return true }
 	if ru.win == nil || runs == nil {
 		if ru.win != nil {
-			return findAllCharged(wm, ru.win.expr, s)
+			eachCharged(wm, ru.win.expr, s, all)
+			return
 		}
-		return ru.re.FindAllStringSubmatchIndex(counted(wm, s), -1)
+		for _, m := range ru.re.FindAllStringSubmatchIndex(counted(wm, s), -1) {
+			f(m)
+		}
+		return
 	}
-	return ru.win.findAllIn(wm, s, runs[ru.win.idx], ids)
+	ru.win.eachIn(wm, s, runs[ru.win.idx], ids, all)
 }
 
 // Redactor replaces sensitive data in text. It is safe for concurrent use.
@@ -202,6 +211,9 @@ type Redactor struct {
 	// only). False on every redactor New returns.
 	lowered    bool
 	workBudget int64
+	// ctx ends the wait of this redactor's entries for the heap limit of the redactions running at once
+	// (WithContext); nil on every redactor New returns.
+	ctx context.Context
 }
 
 var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -333,6 +345,25 @@ func (r *Redactor) stringKeeping(wm *meter.Meter, s string, keep []string) strin
 func (r *Redactor) Clean(s string, keep ...string) bool {
 	clean, ok := metered(r, len(s), func(wm *meter.Meter) bool { return r.clean(wm, s, keep) })
 	return ok && clean
+}
+
+// ErrWait is the error of [Redactor.CleanChecked] when the check did not run: its wait for the limit on the heap
+// of the redactions running at once ended first (heaplimit.go). The same text may be checked again later.
+var ErrWait = errors.New("redaction did not run: its wait for the heap limit ended")
+
+// CleanChecked is Clean that tells a check that did not run from one that ran: it returns ErrWait, and false,
+// when the wait for the heap limit ended before the check could run. Any other withheld entry (longer than
+// MaxEntry, or over its work budget) is not clean, with no error, as in Clean: checking it again decides the same.
+func (r *Redactor) CleanChecked(s string, keep ...string) (bool, error) {
+	ctx := r.ctx
+	if ctx == nil {
+		ctx = context.Background() // the wait ends after maxHeapWait
+	}
+	clean, why := meteredWhy(ctx, len(s), r.budgetOf(len(s)), func(wm *meter.Meter) bool { return r.clean(wm, s, keep) })
+	if why == ReasonWait {
+		return false, ErrWait
+	}
+	return why == "" && clean, nil
 }
 
 // clean is Clean on the budget wm.
@@ -517,7 +548,18 @@ type span struct {
 	start, end int
 	kind       string
 	rule       int
-	folded     bool // a match in the folded view, not mapped to the bytes of the text yet
+	// named is, for a range mergeSpans merged, the end of the match that names it, before the range grew: merged
+	// again with more matches on the same text, the range is named as if all were merged at once (#1087). 0 for a
+	// match not merged yet, which names by its own end; a caller that moves a span to other bytes clears it.
+	named int32
+}
+
+// nameEnd is the end mergeSpans orders sp by on a tie of start and rule: the end of the match that names it.
+func (sp span) nameEnd() int {
+	if sp.named > 0 {
+		return int(sp.named)
+	}
+	return sp.end
 }
 
 // String returns s with every match of every rule replaced by a marker. Overlapping matches are merged
@@ -540,7 +582,10 @@ func (r *Redactor) StringChecked(s string) (out string, ok bool) {
 // look-alike, an explicit key, a separator of other characters), whose matches count on the bytes of s they were
 // folded from. A merged range takes the invisible characters right after it.
 func (r *Redactor) spans(wm *meter.Meter, s string) []span {
-	return settle(wm, s, append(r.ruleMatches(wm, s), r.releasedString(wm, s, false, nil)...))
+	l := r.newMatchList()
+	r.eachRuleMatch(wm, s, &windowIDs{}, func(start, end, rule int) { l.add(wm, start, end, rule) })
+	r.releasedStringInto(wm, s, false, nil, l)
+	return settle(wm, s, l.spans(wm))
 }
 
 // ownSpans is spans without the reading of the release before: the rules of this package alone, as Pieces reads
@@ -579,8 +624,8 @@ func settle(wm *meter.Meter, s string, matches []span) []span {
 	return merged
 }
 
-// ruleMatches returns the matches of every rule in s and in its folded view (mapped to the bytes of s), unsorted
-// and not merged, each with the kind of the rule that found it.
+// ruleMatches returns the matches of every rule in s and in its folded view (mapped to the bytes of s), each with
+// the kind of the rule that found it, sorted and merged as mergeSpans merges them (matchList).
 func (r *Redactor) ruleMatches(wm *meter.Meter, s string) []span {
 	return r.ruleMatchesWith(wm, s, &windowIDs{})
 }
@@ -588,15 +633,21 @@ func (r *Redactor) ruleMatches(wm *meter.Meter, s string) []span {
 // ruleMatchesWith is ruleMatches with the long windows read before in ids (windows.go): the reads of one decision
 // share them, so a value read alone and again in its answer is read once by each expression.
 func (r *Redactor) ruleMatchesWith(wm *meter.Meter, s string, ids *windowIDs) []span {
-	spans := r.ruleSpans(wm, s, nil, false, ids)
+	l := r.newMatchList()
+	r.eachRuleMatch(wm, s, ids, func(start, end, rule int) { l.add(wm, start, end, rule) })
+	return l.spans(wm)
+}
+
+// eachRuleMatch calls add with each match of every rule in s and in its folded view (mapped to the bytes of s as
+// it is found), with the index of its rule, in no order.
+func (r *Redactor) eachRuleMatch(wm *meter.Meter, s string, ids *windowIDs, add func(start, end, rule int)) {
+	r.ruleSpans(wm, s, false, ids, add)
 	if f, ok := foldView(wm, s); ok {
-		spans = r.ruleSpans(wm, f.text, spans, true, ids)
-		for i := len(spans) - 1; i >= 0 && spans[i].folded; i-- {
+		r.ruleSpans(wm, f.text, true, ids, func(start, end, rule int) {
 			tick(wm, 1)
-			spans[i].start, spans[i].end, spans[i].folded = f.from[spans[i].start], f.to[spans[i].end-1], false
-		}
+			add(f.from(wm, start), f.to(wm, end-1), rule)
+		})
 	}
-	return spans
 }
 
 // mergeSpans sorts spans and merges the overlapping ones into one named after the span that starts first (the
@@ -612,13 +663,14 @@ func mergeSpans(wm *meter.Meter, spans []span) []span {
 		if a.rule != b.rule {
 			return a.rule - b.rule
 		}
-		return b.end - a.end
+		return b.nameEnd() - a.nameEnd()
 	})
 
 	merged := spans[:0]
 	for i := 0; i < len(spans); {
 		tick(wm, 1)
 		cur := spans[i]
+		cur.named = int32(cur.nameEnd()) // #nosec G115 -- an entry is at most MaxEntry bytes, an answer six times that
 		for i++; i < len(spans) && spans[i].start < cur.end; i++ {
 			tick(wm, 1)
 			cur.end = max(cur.end, spans[i].end)
@@ -628,8 +680,9 @@ func mergeSpans(wm *meter.Meter, spans []span) []span {
 	return merged
 }
 
-// ruleSpans appends the matches of every rule in s to spans, unsorted, marked folded when s is a folded view.
-func (r *Redactor) ruleSpans(wm *meter.Meter, s string, spans []span, folded bool, ids *windowIDs) []span {
+// ruleSpans calls emit with each match of every rule in s, with the index of its rule, in no order; folded says s
+// is a folded view.
+func (r *Redactor) ruleSpans(wm *meter.Meter, s string, folded bool, ids *windowIDs, emit func(start, end, rule int)) {
 	var runs [][]longRun
 	if len(s) >= windowMinText {
 		runs = longRuns(wm, s, r.wins)
@@ -644,7 +697,7 @@ func (r *Redactor) ruleSpans(wm *meter.Meter, s string, spans []span, folded boo
 		prevEnd := 0
 		add := func(start, end int) {
 			if end > start {
-				spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i, folded: folded})
+				emit(start, end, i)
 			}
 		}
 		if ru.scan != nil {
@@ -658,34 +711,31 @@ func (r *Redactor) ruleSpans(wm *meter.Meter, s string, spans []span, folded boo
 		if ru.spanFor != nil {
 			oneSpan = ru.spanFor()
 		}
-		for _, m := range ru.find(wm, s, runs, ids) {
+		ru.each(wm, s, runs, ids, func(m []int) {
 			tick(wm, 1)
 			if spanFn != nil {
 				prevEnd = spanFn(wm, s, m, prevEnd, add)
-				continue
+				return
 			}
 			if oneSpan != nil {
 				if start, end, ok := oneSpan(wm, s, m, prevEnd); ok && end > start {
-					spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i, folded: folded})
+					emit(start, end, i)
 					prevEnd = end
 				}
-				continue
+				return
 			}
 			if len(ru.groups) == 0 {
-				if m[1] > m[0] {
-					spans = append(spans, span{start: m[0], end: m[1], kind: ru.kind, rule: i, folded: folded})
-				}
-				continue
+				add(m[0], m[1])
+				return
 			}
 			for _, g := range ru.groups {
 				tick(wm, 1)
-				if 2*g+1 < len(m) && m[2*g] >= 0 && m[2*g+1] > m[2*g] {
-					spans = append(spans, span{start: m[2*g], end: m[2*g+1], kind: ru.kind, rule: i, folded: folded})
+				if 2*g+1 < len(m) && m[2*g] >= 0 {
+					add(m[2*g], m[2*g+1])
 				}
 			}
-		}
+		})
 	}
-	return spans
 }
 
 // Replace redacts s with the built-in rules as [String] does, but writes repl(kind, text) for each match in
@@ -1157,14 +1207,14 @@ var blockScalarHeaderWindows = newWindowed(nil, blockScalarHeader)
 // one more than the last, all "pass: |", are read once, not once per header.
 func blockScalarScan(wm *meter.Meter, s string, add func(start, end int)) {
 	prevEnd, refused := 0, -1
-	for _, m := range blockScalarHeaderWindows.findAll(wm, s) {
+	blockScalarHeaderWindows.each(wm, s, func(m []int) bool {
 		tick(wm, 1)
 		if m[0] < prevEnd || keepReference(wm, s, m) || sasRefused(wm, s, m, true) {
-			continue
+			return true
 		}
 		bare := bareShortColon(wm, s, m)
 		if bare && m[1] < refused {
-			continue
+			return true
 		}
 		start, end := indentedLines(wm, s, m[1], m[2]-m[0])
 		switch {
@@ -1179,7 +1229,8 @@ func blockScalarScan(wm *meter.Meter, s string, add func(start, end int)) {
 		default:
 			refused = max(refused, end)
 		}
-	}
+		return true
+	})
 }
 
 // childKey matches a mapping key at the start of a line's text, after any sequence entry indicators. Group
@@ -1900,342 +1951,6 @@ func wordClass(_ *meter.Meter, c byte) int {
 		return classDigit
 	}
 	return classOther
-}
-
-// maxBase64Window is the most characters a window of base64Windows holds: more than the 44 of the longest
-// slash-split secret it is meant for, and a bound that keeps the number of windows per part constant.
-const maxBase64Window = 96
-
-// windowPart is one slash-separated part of a run, with what base64Windows adds up over a window of parts.
-type windowPart struct {
-	start, end   int     // byte range in the run, padding included
-	chars, pairs int     // characters, padding excluded, and pairs of neighbouring ones that count as evidence
-	score        float64 // sum of wordScore over the pairs
-	upper, lower bool    // holds an upper-case or a lower-case letter, as evidence
-	base64       bool    // may be part of standard base64: no "-" or "_", and "=" only as final padding
-	empty        bool    // no characters besides padding
-	word         bool    // a path word (pathWord)
-	lowerWord    bool    // a path word that starts with a lower-case letter
-}
-
-// base64Windows finds standard base64 cut short by slashes in a run that randomRun keeps (#525), such as an
-// AWS secret access key after a path or in a CLI flag, and calls add with each range of the run to redact.
-// A run without a slash is one part and goes through the same windows: a run of 32 or more characters that
-// randomRun keeps (letters and "+" without a digit, say) is redacted when it scores as base64.
-//
-// It judges every window of adjacent parts that holds from minBase64Window to maxBase64Window characters of
-// evidence, apart from the parts around it, so path words next to a key cannot dilute it: the window counts
-// when it mixes cases, its parts average at least four characters, and its pairs of neighbouring characters
-// score at most maxBase64Score on average (wordScore). A window never starts or ends at an empty part, and one
-// that starts or ends at a lower-case path word must score at most -maxBase64Score ("/opt/" before library
-// names scores as words, "cijt/" before a key as base64). Parts with "-" or "_" (Kubernetes names, UUIDs)
-// never join a window, and parts of upper-case letters, maybe with digits (acronyms and library names such
-// as "HTTPS" or "CUDA12"), join one without counting as evidence either way.
-//
-// Of the parts that some window covers, path words (pathWord) are kept and the others are flagged;
-// takeInKeyParts then joins the pieces of a key and adds at most one short part on each side of it. Each
-// stretch of adjacent redacted parts is one range, so two keys with a path between them give two ranges and
-// the path stays.
-// Windows are bounded by maxBase64Window, so the cost is linear in the run.
-//
-// Known gaps when no secret key name stands before the key, kept for safety and simplicity over perfect paths
-// (TestSlashSplitBase64KnownLeaks; after a key name the value goes whatever it reads as, #585: after
-// "client_secret=" up to the next whitespace, after "--client-secret" one token or a quoted value on one
-// line): a key whose windows all score as words stays whole; a short lower-case end of a key that no window
-// covers ("/wed7") stays, as a path word would; a key of upper-case parts with one short mixed part
-// ("ABCDEF/GHIJKL/.../yz2+ab3+cd4+") has too little evidence and stays; and a lower-case path word at either
-// end of a key ("cijt/...") is kept with the path around it.
-func base64Windows(wm *meter.Meter, run string, add func(start, end int)) {
-	var parts []windowPart
-	for pos := 0; pos <= len(run); {
-		tick(wm, 1)
-		end := pos + strings.IndexByte(run[pos:], '/')
-		if end < pos {
-			end = len(run)
-		}
-		parts = append(parts, newWindowPart(wm, run, pos, end))
-		pos = end + 1
-	}
-	covered := coveredParts(wm, parts)
-	if covered == nil {
-		return
-	}
-	redact := make([]bool, len(parts))
-	for i, p := range parts {
-		tick(wm, 1)
-		redact[i] = covered[i] && !p.word
-	}
-	takeInKeyParts(wm, parts, redact)
-	addStretches(wm, parts, redact, add)
-}
-
-// coveredParts reports, for each part, whether a window that qualifies as base64 covers it (see
-// base64Windows), or returns nil when no window qualifies.
-func coveredParts(wm *meter.Meter, parts []windowPart) []bool {
-	// diff counts, as a difference array, the qualifying windows over each part.
-	var diff []int
-	for lo := range parts {
-		tick(wm, 1)
-		if parts[lo].empty {
-			continue
-		}
-		var w windowPart
-		var upper, lower bool
-		for j := lo; j < len(parts) && parts[j].base64; j++ {
-			tick(wm, 1)
-			p, n := parts[j], j-lo+1
-			w.chars, w.pairs, w.score = w.chars+p.chars, w.pairs+p.pairs, w.score+p.score
-			upper, lower = upper || p.upper, lower || p.lower
-			if w.chars > maxBase64Window || 4*n > maxBase64Window {
-				break
-			}
-			limit := maxBase64Score
-			if parts[lo].lowerWord || p.lowerWord {
-				limit = -maxBase64Score // a window at a lower-case path word must read clearly as base64
-			}
-			if !p.empty && w.chars >= minBase64Window && upper && lower && w.chars >= 4*n && w.score <= limit*float64(w.pairs) {
-				if diff == nil {
-					diff = make([]int, len(parts)+1)
-				}
-				diff[lo]++
-				diff[j+1]--
-			}
-		}
-	}
-	if diff == nil {
-		return nil
-	}
-	covered := make([]bool, len(parts))
-	for i, n := 0, 0; i < len(parts); i++ {
-		tick(wm, 1)
-		n += diff[i]
-		covered[i] = n > 0
-	}
-	return covered
-}
-
-// maxTakeInPart is the longest part next to a key that takeInKeyParts takes in with it.
-const maxTakeInPart = 5
-
-// maxBase64Key is the most characters, slashes and padding aside, of the slash-split secrets base64Windows
-// is meant for: the 44 of an older Entra client secret. Two stretches and the one part between them that
-// hold no more than that are one key, whatever the part reads as (takeInKeyParts).
-const maxBase64Key = 44
-
-// keyStretch is a stretch of parts that base64Windows redacts: from the first to the last non-empty part,
-// with the characters of its parts.
-type keyStretch struct{ first, last, chars int }
-
-// takeInKeyParts decides, from the parts that windows flagged (redact on entry: covered and no path word),
-// which parts to redact, and writes that back into redact. Flagged parts with only empty parts ("//")
-// between them form one stretch. A part with "-" or "_" (a Kubernetes name) is never added to a stretch, a
-// lower-case path word ("etc", "api", "keys") or a long part only to join two pieces of one key:
-//
-//   - One part alone between two stretches joins them when the two stretches and the part hold at most
-//     maxBase64Key characters, whatever the part reads as ("ghquje" or "Vpzfixaifdo" inside a key). Beyond
-//     that, it joins them only when it is short (shortPart: at most maxTakeInPart characters) and no
-//     lower-case path word, or when either stretch is shorter than minBase64Stretch (a piece of the same key
-//     that would be kept on its own). A lower-case path word between two stretches of at least that length
-//     ("/api/" between two keys) stays, and the keys are redacted each on its own.
-//   - Then each stretch takes in at most one more part on each side: the next non-empty part, when it is
-//     short, no lower-case path word and not between two stretches, such as "wed7" at the end of ".../wed7"
-//     or a short capitalised word. A part taken in takes in nothing further, so the path after a key loses
-//     one short part at most.
-//
-// Each step looks at a part and its neighbours once, so the cost is linear in the number of parts.
-func takeInKeyParts(wm *meter.Meter, parts []windowPart, redact []bool) {
-	var stretches []keyStretch
-	for i := range parts {
-		tick(wm, 1)
-		if !redact[i] || parts[i].empty {
-			continue
-		}
-		if n := len(stretches); n > 0 && nextNonEmpty(wm, parts, stretches[n-1].last, 1) == i {
-			stretches[n-1].last, stretches[n-1].chars = i, stretches[n-1].chars+parts[i].chars
-			continue
-		}
-		stretches = append(stretches, keyStretch{first: i, last: i, chars: parts[i].chars})
-	}
-	clear(redact)
-	if len(stretches) == 0 {
-		return
-	}
-	// Join stretches across one short part.
-	merged := []keyStretch{stretches[0]}
-	for _, s := range stretches[1:] {
-		tick(wm, 1)
-		prev := &merged[len(merged)-1]
-		c := nextNonEmpty(wm, parts, prev.last, 1)
-		joined := prev.chars + parts[c].chars + s.chars
-		if c != nextNonEmpty(wm, parts, s.first, -1) || !parts[c].base64 || joined > maxBase64Key &&
-			(!shortPart(wm, parts[c]) || parts[c].lowerWord && prev.chars >= minBase64Stretch && s.chars >= minBase64Stretch) {
-			merged = append(merged, s)
-			continue
-		}
-		prev.last, prev.chars = s.last, joined
-	}
-	for k, s := range merged {
-		tick(wm, 1)
-		first, last := s.first, s.last
-		// takeIn returns the part next to the stretch edge at i in direction step when it may be taken in.
-		takeIn := func(i, step int) int {
-			c := nextNonEmpty(wm, parts, i, step)
-			if c < 0 || parts[c].lowerWord || !shortPart(wm, parts[c]) {
-				return i
-			}
-			beyond := nextNonEmpty(wm, parts, c, step)
-			if beyond >= 0 && (step < 0 && k > 0 && beyond == merged[k-1].last ||
-				step > 0 && k+1 < len(merged) && beyond == merged[k+1].first) {
-				return i // between two stretches
-			}
-			return c
-		}
-		first, last = takeIn(first, -1), takeIn(last, 1)
-		for i := first; i <= last; i++ {
-			tick(wm, 1)
-			redact[i] = true
-		}
-	}
-}
-
-// nextNonEmpty returns the index of the first non-empty part after i in direction step (1 or -1), or -1.
-func nextNonEmpty(wm *meter.Meter, parts []windowPart, i, step int) int {
-	for i += step; i >= 0 && i < len(parts); i += step {
-		tick(wm, 1)
-		if !parts[i].empty {
-			return i
-		}
-	}
-	return -1
-}
-
-// shortPart reports whether p is short enough to be redacted with a key next to it (takeInKeyParts): at most
-// maxTakeInPart characters of standard base64, so no "-" or "_" (and no ".", which ends a run).
-func shortPart(_ *meter.Meter, p windowPart) bool {
-	return p.base64 && !p.empty && p.end-p.start <= maxTakeInPart
-}
-
-// addStretches calls add with the range of each stretch of adjacent redacted parts, without empty parts at
-// its ends, that holds at least minBase64Stretch characters.
-func addStretches(wm *meter.Meter, parts []windowPart, redact []bool, add func(start, end int)) {
-	for i := 0; i < len(parts); {
-		tick(wm, 1)
-		if !redact[i] || parts[i].empty {
-			i++
-			continue
-		}
-		j := i
-		for j+1 < len(parts) && redact[j+1] {
-			tick(wm, 1)
-			j++
-		}
-		next := j + 1
-		for parts[j].empty {
-			tick(wm, 1)
-			j--
-		}
-		chars := 0
-		for k := i; k <= j; k++ {
-			tick(wm, 1)
-			chars += parts[k].chars
-		}
-		// A short stretch among path words that a long window reached over is a word, not a key.
-		if chars >= minBase64Stretch {
-			add(parts[i].start, parts[j].end)
-		}
-		i = next
-	}
-}
-
-// minBase64Stretch is the fewest characters a stretch of adjacent parts that base64Windows redacts holds: a
-// key gives one long stretch, while a part that is no path word among words a window covers ("orders" in
-// "/namespaces/orders/pods/") gives a short one, which is kept.
-const minBase64Stretch = minBase64Window / 2
-
-// minPathWordScore is the score per pair (wordScore) from which a part of four or more lower-case letters
-// reads as a path word ("keys" 0.91, "download" 0.84, "credentials" 0.86) in pathWord, and
-// minShortPathWordScore the same for three letters ("etc", "app" 0.49, "api" 1.29), which have one
-// alternation of vowel and consonant at most. Random letters reach them less often, the longer they are.
-const (
-	minPathWordScore      = 0.8
-	minShortPathWordScore = 0.4
-)
-
-// pathWord reports whether part, next to or at the end of a base64 window, is a path word rather than a
-// piece of the key: at least three lower-case letters that read as a word (minPathWordScore), maybe after
-// one capital and maybe followed by digits ("etc", "credentials", "python3", "Documents"), or a version
-// ("v1"). A path word that a window covers is not flagged as key; a window that starts or ends at a
-// lower-case one must score clearly as base64, and a lower-case one is redacted with a key only when it joins
-// two pieces of one (takeInKeyParts).
-func pathWord(wm *meter.Meter, part string) bool {
-	capital := part != "" && part[0] >= 'A' && part[0] <= 'Z'
-	if capital {
-		part = part[1:]
-	}
-	letters := 0
-	for letters < len(part) && part[letters] >= 'a' && part[letters] <= 'z' {
-		tick(wm, 1)
-		letters++
-	}
-	for i := letters; i < len(part); i++ {
-		tick(wm, 1)
-		if part[i] < '0' || part[i] > '9' {
-			return false
-		}
-	}
-	if !capital && part[:letters] == "v" && letters < len(part) {
-		return true
-	}
-	if letters < 3 {
-		return false
-	}
-	var score float64
-	for i := 1; i < letters; i++ {
-		tick(wm, 1)
-		score += wordScore[wordClass(wm, part[i-1])][wordClass(wm, part[i])]
-	}
-	if letters == 3 {
-		return score >= minShortPathWordScore*float64(letters-1)
-	}
-	return score >= minPathWordScore*float64(letters-1)
-}
-
-// newWindowPart returns the part run[start:end] for base64Windows. A part of upper-case letters, maybe with
-// digits, is an acronym or a library name ("REST", "CUDA12", "NCCL2") as often as a piece of a key, so it
-// counts as no evidence: its characters fill a window, but it adds no pairs, no score and no case.
-func newWindowPart(wm *meter.Meter, run string, start, end int) windowPart {
-	p := windowPart{start: start, end: end, base64: true}
-	text := run[start:end]
-	if end == len(run) {
-		text = strings.TrimRight(text, "=")
-	}
-	p.empty = text == ""
-	acronym := !p.empty
-	for i := range len(text) {
-		tick(wm, 1)
-		c := text[i]
-		switch {
-		case c == '-' || c == '_' || c == '=':
-			p.base64 = false
-		case c >= 'A' && c <= 'Z':
-			p.upper = true
-		case c >= 'a' && c <= 'z':
-			p.lower = true
-		}
-		acronym = acronym && (c >= 'A' && c <= 'Z' || c >= '0' && c <= '9')
-		if i > 0 {
-			p.score += wordScore[wordClass(wm, text[i-1])][wordClass(wm, c)]
-		}
-	}
-	p.chars = len(text)
-	p.word = !p.empty && pathWord(wm, run[start:end])
-	p.lowerWord = p.word && run[start] >= 'a' && run[start] <= 'z'
-	if acronym && p.upper {
-		p.upper, p.score = false, 0
-		return p
-	}
-	p.pairs = max(0, len(text)-1)
-	return p
 }
 
 // mixesCase reports whether s holds both an upper-case and a lower-case ASCII letter.

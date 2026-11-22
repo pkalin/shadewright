@@ -17,6 +17,7 @@ limitations under the License.
 package redact
 
 import (
+	"context"
 	"math"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -50,10 +51,10 @@ const (
 	MaxEntry = 4 << 20
 	// HeapPerByte and HeapFixed bound the heap one redaction may hold (#873, decision of 2026-11-21 on the heap): at
 	// most HeapPerByte bytes for each byte of the entry plus HeapFixed, 46 MiB for the largest entry a caller passes
-	// (an object of about 1.5 MiB), inside the 48 MiB the decision allows and well inside the analyzer's limit of
-	// 128 Mi. TestHeapOfOneEntryIsBounded measures it at the largest entry of every entry point, on the worst shapes;
-	// text dense in secrets is held only under a ceiling of 112 MiB there, and nothing bounds the heap of several
-	// redactions at once (#1087).
+	// (an object of about 1.5 MiB), inside the 48 MiB the decision allows. It is the bound of the shapes the heap
+	// tests list as within it (heapShape.overAt), not of every shape: text dense in matches or in control characters
+	// holds more, at worst 71.7 bytes per byte measured (#1087, TestHeapPerByteOfEveryShapePieces). The redactions
+	// running at once are weighed for that worst case instead (HeapWeightPerByte, heaplimit.go).
 	HeapPerByte = 28
 	HeapFixed   = 4 << 20
 	// FreePieces is how many pieces an answer (Pieces), or strings a sequence (Strings), may hold whatever its
@@ -83,13 +84,16 @@ const (
 	// ReasonHeap: the entry is made of more pieces or strings than its bytes allow (FreePieces), withheld before
 	// any work, so that its redaction holds no more heap than the bound (HeapPerByte).
 	ReasonHeap = "heap"
+	// ReasonWait: the wait for the limit on the heap of the redactions running at once ended before the entry
+	// could run (its context ended, or maxHeapWait passed), withheld before any work (heaplimit.go).
+	ReasonWait = "wait"
 )
 
-// withheldTotal counts the entries withheld, by reason (work, size, heap); all three series start at zero.
+// withheldTotal counts the entries withheld, by reason (work, size, heap, wait); every series starts at zero.
 var withheldTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "shadewright_redaction_withheld_total",
 	Help: "Entries redaction withheld whole, by reason (work: the work budget ran out; size: longer than the bound; " +
-		"heap: more pieces or strings than its bytes allow).",
+		"heap: more pieces or strings than its bytes allow; wait: the wait for the heap limit of redactions at once ended).",
 }, []string{"reason"})
 
 func init() {
@@ -97,6 +101,7 @@ func init() {
 	withheldTotal.WithLabelValues(ReasonWork)
 	withheldTotal.WithLabelValues(ReasonSize)
 	withheldTotal.WithLabelValues(ReasonHeap)
+	withheldTotal.WithLabelValues(ReasonWait)
 }
 
 // tooManyParts reports whether an entry of size bytes made of parts pieces (or strings), each standing for
@@ -138,19 +143,56 @@ func (r *Redactor) WithWorkBudget(steps int64) *Redactor {
 	return &c
 }
 
-// metered runs f, the redaction of an entry of size bytes, on r's budget of that entry, and returns its result
-// and true; or the zero value and false when the entry is withheld: longer than MaxEntry (f is not run) or its
-// budget ran out (f stopped).
-func metered[T any](r *Redactor, size int, f func(wm *meter.Meter) T) (out T, ok bool) {
-	return meteredOn(size, r.budgetOf(size), f)
+// WithContext returns a copy of r whose entries wait for the heap limit of the redactions running at once
+// (heaplimit.go) at most until ctx ends, and are withheld (ReasonWait) if it ends first. It changes nothing else: an
+// entry that runs is decided as r decides it, and a running decision is not stopped by ctx. A redactor without a
+// context waits at most maxHeapWait.
+func (r *Redactor) WithContext(ctx context.Context) *Redactor {
+	c := *r
+	c.ctx = ctx
+	return &c
 }
 
-// meteredOn is metered with the budget given.
-func meteredOn[T any](size int, steps int64, f func(wm *meter.Meter) T) (out T, ok bool) {
+// metered runs f, the redaction of an entry of size bytes, on r's budget of that entry, and returns its result
+// and true; or the zero value and false when the entry is withheld: longer than MaxEntry or its wait for the heap
+// limit ended (f is not run), or its budget ran out (f stopped).
+func metered[T any](r *Redactor, size int, f func(wm *meter.Meter) T) (out T, ok bool) {
+	ctx := r.ctx
+	if ctx == nil {
+		ctx = context.Background() // the wait ends after maxHeapWait
+	}
+	return meteredOn(ctx, size, r.budgetOf(size), f)
+}
+
+// meteredOn is metered with the budget given, its wait for the heap limit ending with ctx or at maxHeapWait.
+func meteredOn[T any](ctx context.Context, size int, steps int64, f func(wm *meter.Meter) T) (out T, ok bool) {
+	out, why := meteredWhy(ctx, size, steps, f)
+	return out, why == ""
+}
+
+// meteredWhy is meteredOn with the reason the entry was withheld (ReasonSize, ReasonWait or ReasonWork), or ""
+// when it was decided.
+func meteredWhy[T any](ctx context.Context, size int, steps int64, f func(wm *meter.Meter) T) (out T, why string) {
 	if size > MaxEntry {
 		withheldTotal.WithLabelValues(ReasonSize).Inc()
-		return out, false
+		return out, ReasonSize
 	}
+	// The heap of the redactions running at once (heaplimit.go): given back on every return and on a panic.
+	release, ok := redactionHeap.acquire(ctx, size)
+	if !ok {
+		withheldTotal.WithLabelValues(ReasonWait).Inc()
+		return out, ReasonWait
+	}
+	defer release()
+	if out, ok = onBudget(steps, f); !ok {
+		return out, ReasonWork
+	}
+	return out, ""
+}
+
+// onBudget runs f on a meter of steps steps and returns its result and true, or the zero value and false, counted
+// as ReasonWork, when the meter ran out.
+func onBudget[T any](steps int64, f func(wm *meter.Meter) T) (out T, ok bool) {
 	over := false
 	func() {
 		defer meter.Catch(&over)

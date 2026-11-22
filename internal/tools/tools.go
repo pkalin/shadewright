@@ -31,6 +31,7 @@ import (
 
 	"github.com/pkalin/shadewright/internal/incidentcontext"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // Timeouts of a tool's reads.
@@ -382,6 +383,20 @@ func (s *Set) Definitions() []providers.ToolDefinition {
 	return d
 }
 
+// within returns s with its redactor's wait for the heap limit of the redactions running at once ending with ctx
+// (redact.Redactor.WithContext), or s itself when the redactor takes no context.
+func (s *Set) within(ctx context.Context) *Set {
+	cr, ok := s.redactor.(interface {
+		WithContext(ctx context.Context) *redact.Redactor
+	})
+	if !ok {
+		return s
+	}
+	c := *s
+	c.redactor = cr.WithContext(ctx)
+	return &c
+}
+
 // Call runs one call of the model. The arguments are checked before any read; a refusal, a missing source
 // and a failed read are results, not errors. Call returns an error only when ctx is done, so that the
 // analysis stops instead of showing the model a failure it did not cause.
@@ -394,6 +409,9 @@ func (s *Set) Call(ctx context.Context, call providers.ToolCall) (Result, error)
 		return Result{Tool: "unknown", Status: StatusRefused, Text: "refused: no tool has this name\n"}, nil
 	}
 	r := Result{Tool: t.name}
+	cctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	s = s.within(cctx)
 	run, err := t.parse(s, call.Arguments)
 	if err != nil {
 		r.Status = StatusRefused
@@ -408,8 +426,6 @@ func (s *Set) Call(ctx context.Context, call providers.ToolCall) (Result, error)
 		r.Status, r.Text = StatusNotAvailable, notAvailableText(t.name)
 		return r, nil
 	}
-	cctx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
 	r.Status = StatusOK
 	if err := run(cctx, &r); err != nil {
 		return Result{}, err

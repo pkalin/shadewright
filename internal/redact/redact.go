@@ -418,9 +418,10 @@ func mergeRanges(wm *meter.Meter, rs []span) []span {
 func ReplaceWhole(s string, words map[string]string) string {
 	keys := make([]string, 0, len(words))
 	for k := range words {
+		tick(nil, 1)
 		keys = append(keys, k)
 	}
-	occ := wholeOccurrences(s, keys)
+	occ := wholeOccurrences(nil, s, keys)
 	if len(occ) == 0 {
 		return s
 	}
@@ -428,6 +429,7 @@ func ReplaceWhole(s string, words map[string]string) string {
 	b.Grow(len(s))
 	pos := 0
 	for _, o := range occ {
+		tick(nil, 1)
 		b.WriteString(s[pos:o.start])
 		b.WriteString(words[s[o.start:o.end]])
 		pos = o.end

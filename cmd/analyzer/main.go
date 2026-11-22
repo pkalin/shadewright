@@ -127,6 +127,8 @@ func main() {
 		setupLog.Error(nil, "Invalid --max-incidents: it must be at least 1", "value", maxIncidents)
 		os.Exit(1)
 	}
+	// A memory limit under the one redaction's heap limit was measured for: one warning, no other change.
+	redact.WarnIfMemoryUnderMeasured(setupLog)
 	analyzer.SetWatchedNamespaces(len(watched))
 	if len(watched) == 0 {
 		setupLog.Info("Watching no namespaces: no events or pods are read and no Incident is recorded; "+

@@ -99,6 +99,7 @@ const (
 	errTooLarge        fixedError = "azureblob: the record is larger than 1 MiB"
 	errNotJSON         fixedError = "azureblob: the record is not valid JSON"
 	errRedactable      fixedError = "azureblob: the record still holds data the redactor removes; nothing was sent"
+	errCheckWaited     fixedError = "azureblob: the redaction check of the record did not run: it waited too long for others to finish; nothing was sent"
 	errExists          fixedError = "azureblob: the analysis record already exists; it was not overwritten"
 	errNoAnswer        fixedError = "azureblob: no answer from Blob Storage"
 	errTLS             fixedError = "azureblob: the certificate of Blob Storage was refused"
@@ -203,8 +204,10 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // check refuses a record before anything is sent: a bad ID or fingerprint, a verified value that is not an
-// object name, no data, data too large or not JSON, or data the redactor would still change (see clean).
-func (s *Store) check(rec providers.AnalysisRecord) error {
+// object name, no data, data too large or not JSON, or data the redactor would still change (see clean). A
+// redaction check that did not run, because its wait for the heap limit of the redactions running at once ended
+// with ctx or at the redactor's longest wait, is a retryable failure, not a refusal: the same record may pass later.
+func (s *Store) check(ctx context.Context, rec providers.AnalysisRecord) error {
 	for _, v := range rec.Verified {
 		if !v.Valid() {
 			return fmt.Errorf("%w: %w", errBadVerified, providers.ErrRejected)
@@ -226,7 +229,11 @@ func (s *Store) check(rec providers.AnalysisRecord) error {
 	for _, v := range rec.Verified {
 		keep = append(keep, string(v))
 	}
-	if !s.clean(rec.Data, keep) {
+	clean, err := s.clean(s.redactor.WithContext(ctx), rec.Data, keep)
+	switch {
+	case errors.Is(err, redact.ErrWait):
+		return &providers.RetryableError{Err: errCheckWaited}
+	case !clean:
 		return fmt.Errorf("%w: %w", errRedactable, providers.ErrRejected)
 	}
 	return nil
@@ -237,44 +244,44 @@ func (s *Store) check(rec providers.AnalysisRecord) error {
 // more as "key: value" when the value is a string, a number, a boolean or null, so that a key that names a
 // credential is seen with its value, and each key alone. It does not check the JSON text as a whole: there
 // the redactor takes an unquoted value to run on over the quote and the members after it, and refuses clean
-// records.
-func (s *Store) clean(data []byte, keep []string) bool {
+// records. It stops at the first check that is not clean, and returns redact.ErrWait when a check did not run.
+func (s *Store) clean(red *redact.Redactor, data []byte, keep []string) (bool, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return false
+		return false, nil
 	}
-	return s.cleanValue(v, keep)
+	return cleanValue(red, v, keep)
 }
 
-func (s *Store) cleanValue(v any, keep []string) bool {
+func cleanValue(red *redact.Redactor, v any, keep []string) (bool, error) {
 	switch x := v.(type) {
 	case string:
-		return s.redactor.Clean(x, keep...)
+		return red.CleanChecked(x, keep...)
 	case []any:
 		for _, e := range x {
-			if !s.cleanValue(e, keep) {
-				return false
+			if ok, err := cleanValue(red, e, keep); !ok || err != nil {
+				return false, err
 			}
 		}
 	case map[string]any:
 		for k, e := range x {
-			if !s.redactor.Clean(k, keep...) {
-				return false
+			if ok, err := red.CleanChecked(k, keep...); !ok || err != nil {
+				return false, err
 			}
 			switch e.(type) {
 			case string, json.Number, bool, nil:
-				if !s.redactor.Clean(k+": "+fmt.Sprint(e), keep...) {
-					return false
+				if ok, err := red.CleanChecked(k+": "+fmt.Sprint(e), keep...); !ok || err != nil {
+					return false, err
 				}
 			}
-			if !s.cleanValue(e, keep) {
-				return false
+			if ok, err := cleanValue(red, e, keep); !ok || err != nil {
+				return false, err
 			}
 		}
 	}
-	return true
+	return true, nil
 }
 
 // Put writes rec as "<ID>.json" with If-None-Match: *, and returns the blob's URL. A blob that exists is
@@ -285,7 +292,7 @@ func (s *Store) Put(ctx context.Context, rec providers.AnalysisRecord) (string, 
 	if err := ctx.Err(); err != nil {
 		return "", ctxError(err)
 	}
-	if err := s.check(rec); err != nil {
+	if err := s.check(ctx, rec); err != nil {
 		return "", err
 	}
 	blob := s.container.JoinPath(rec.ID + ".json")

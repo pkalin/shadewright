@@ -177,7 +177,19 @@ const (
 )
 
 func normalize(o Observation, mode quantityMode) string {
-	return normalizeWith(redact.ReplaceChecked, o, mode)
+	return normalizeWith(replaceFor(o.Note), o, mode)
+}
+
+// replaceFor returns the redaction of a note: a note of at most redact.MaxShortEntry bytes (four times the 1 KiB the
+// events API gives a note, and every note the collector writes from pod status) goes through redact.ReplaceCheckedShort, which
+// takes no share of the limit on the heap of the redactions running at once and never waits for an analysis, so
+// one event has one fingerprint on a busy and an idle analyzer (#1087, decision of 2026-11-22). A longer note goes
+// through redact.ReplaceChecked, which may wait for that limit and withholds the note when its wait ends.
+func replaceFor(note string) replaceChecked {
+	if len(note) <= redact.MaxShortEntry {
+		return redact.ReplaceCheckedShort
+	}
+	return redact.ReplaceChecked
 }
 
 // replaceChecked is the signature of redact.ReplaceChecked.
@@ -301,8 +313,12 @@ func rawPlaceholder(kind, text string) string {
 	return placeholderRedacted
 }
 
-// redactText redacts s and turns the markers into placeholders.
+// redactText redacts s and turns the markers into placeholders. The symptom it checks is cut to
+// MaxSymptomLength first, so it takes the short entry point, which never waits for an analysis.
 func redactText(s string) string {
+	if len(s) <= redact.MaxShortEntry {
+		return apply(redact.StringShort(s), markerRules)
+	}
 	return apply(redact.String(s), markerRules)
 }
 

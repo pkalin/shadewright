@@ -113,6 +113,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"iter"
 	"math"
@@ -342,6 +343,25 @@ func (r *Redactor) stringKeeping(wm *meter.Meter, s string, keep []string) strin
 func (r *Redactor) Clean(s string, keep ...string) bool {
 	clean, ok := metered(r, len(s), func(wm *meter.Meter) bool { return r.clean(wm, s, keep) })
 	return ok && clean
+}
+
+// ErrWait is the error of [Redactor.CleanChecked] when the check did not run: its wait for the limit on the heap
+// of the redactions running at once ended first (heaplimit.go). The same text may be checked again later.
+var ErrWait = errors.New("redaction did not run: its wait for the heap limit ended")
+
+// CleanChecked is Clean that tells a check that did not run from one that ran: it returns ErrWait, and false,
+// when the wait for the heap limit ended before the check could run. Any other withheld entry (longer than
+// MaxEntry, or over its work budget) is not clean, with no error, as in Clean: checking it again decides the same.
+func (r *Redactor) CleanChecked(s string, keep ...string) (bool, error) {
+	ctx := r.ctx
+	if ctx == nil {
+		ctx = context.Background() // the wait ends after maxHeapWait
+	}
+	clean, why := meteredWhy(ctx, len(s), r.budgetOf(len(s)), func(wm *meter.Meter) bool { return r.clean(wm, s, keep) })
+	if why == ReasonWait {
+		return false, ErrWait
+	}
+	return why == "" && clean, nil
 }
 
 // clean is Clean on the budget wm.

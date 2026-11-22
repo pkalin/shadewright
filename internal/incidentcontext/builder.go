@@ -225,12 +225,17 @@ func (b *Builder) build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 		return nil, fmt.Errorf("building the context: %w", err)
 	}
 	w := windowOf(inc, b.now().UTC())
-	ctx = context.WithValue(ctx, buildDeadlineKey{}, time.Now().Add(b.buildTimeout))
+	deadline := time.Now().Add(b.buildTimeout)
+	ctx = context.WithValue(ctx, buildDeadlineKey{}, deadline)
 	if cr, ok := b.redactor.(contextRedactor); ok {
 		// The redactions of this build wait for the heap limit of the redactions at once only as long as the build
-		// may run (redact.Redactor.WithContext).
+		// may run (redact.Redactor.WithContext): their context has the build deadline as its own deadline, so a
+		// wait past it ends and its block is withheld, a failed source. ctx keeps the deadline as a value only, so
+		// the build itself is not abandoned by it.
+		rctx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
 		within := *b
-		within.redactor = cr.WithContext(ctx)
+		within.redactor = cr.WithContext(rctx)
 		b = &within
 	}
 	c := &Context{}

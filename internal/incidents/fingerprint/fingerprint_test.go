@@ -17,9 +17,12 @@ limitations under the License.
 package fingerprint
 
 import (
+	"context"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/redact"
@@ -565,5 +568,57 @@ func TestWithheldNoteIsRedacted(t *testing.T) {
 	low := redacttest.LowBudget(red)
 	if got := normalizeWith(low.ReplaceChecked, Observation{Note: redacttest.OverLowBudget}, keepAfterKeyOrWhole); got != placeholderRedacted {
 		t.Fatalf("normalize = %q, want %q", got[:min(len(got), 80)], placeholderRedacted)
+	}
+}
+
+// A fingerprint does not wait for the limit on the heap of the redactions running at once and does not depend on
+// it (#1087, decision of 2026-11-22): with the limit held whole by an analysis's redaction, the fingerprint of an
+// event returns at once with the value it has on an idle analyzer, and its note is never the placeholder.
+func TestFingerprintDoesNotWaitForTheHeapLimit(t *testing.T) {
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := Observation{ClusterID: "c", Namespace: "web", OwnerUID: deploymentUID, Reason: reasonBackOff,
+		Note: `Failed to pull image "registry.example/app:1.2": password=hunter2 rejected`, RegardingKind: kindPod,
+		RegardingName: "app-7d9f8b6c5-x2k4p", Source: SourceEvent}
+	idle, idleNote := Fingerprint(o), Normalize(o)
+	if idleNote == placeholderRedacted {
+		t.Fatalf("on an idle analyzer the note is the placeholder: %q", idleNote)
+	}
+	// An entry of 700 KiB weighs more than the whole limit of a test binary (64 MiB, no Go memory limit), so it
+	// takes all of it while its fits function runs; the ordinary entry below checks that it does.
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer close(done)
+		big := "pwd=abcdef " + strings.Repeat("lorem ipsum ", (700<<10)/12)
+		red.PiecesFitting([]redact.Piece{{Text: big, Data: true}}, func([]string) bool {
+			once.Do(func() { close(entered) })
+			<-release
+			return true
+		})
+	}()
+	defer func() { <-done }()
+	defer close(release)
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the heavy entry did not start")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, ok := red.WithContext(ctx).ReplaceChecked(o.Note, rawPlaceholder, sanitize); ok {
+		t.Fatal("an ordinary entry ran beside the one that holds the limit: the test does not hold it")
+	}
+	got := make(chan [2]string, 1)
+	go func() { got <- [2]string{Fingerprint(o), Normalize(o)} }()
+	select {
+	case g := <-got:
+		if g[0] != idle || g[1] != idleNote {
+			t.Errorf("with the limit held: fingerprint %s, note %q; on an idle analyzer %s, %q", g[0], g[1], idle, idleNote)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a fingerprint waited for the heap limit")
 	}
 }

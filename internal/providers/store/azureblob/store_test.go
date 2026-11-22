@@ -749,3 +749,55 @@ func TestNewWithoutWorkloadIdentity(t *testing.T) {
 		t.Fatalf("New = %v, want invalid configuration", err)
 	}
 }
+
+// A record whose redaction check did not run, because its wait for the limit on the heap of the redactions running
+// at once ended, is a retryable failure and nothing is sent; it is not refused (#1087, decision of 2026-11-22).
+// Once the limit is free the same record is written, and a record whose check ran and found a secret is still
+// refused.
+func TestPutRetryableWhenTheRedactionCheckWaited(t *testing.T) {
+	srv := newServer(t, status(http.StatusCreated))
+	st, _ := testStore(t, srv)
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An entry of 700 KiB weighs more than the whole limit of a test binary (64 MiB, no Go memory limit), so it
+	// takes all of it while its fits function runs.
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once, freed sync.Once
+	free := func() { freed.Do(func() { close(release); <-done }) }
+	go func() {
+		defer close(done)
+		big := "pwd=abcdef " + strings.Repeat("lorem ipsum ", (700<<10)/12)
+		red.PiecesFitting([]redact.Piece{{Text: big, Data: true}}, func([]string) bool {
+			once.Do(func() { close(entered) })
+			<-release
+			return true
+		})
+	}()
+	defer free()
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the heavy entry did not start")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err = st.Put(ctx, testRecord())
+	if !providers.IsRetryable(err) || providers.IsRejected(err) {
+		t.Fatalf("a check that waited past the write's context: %v (retryable %v, rejected %v)", err,
+			providers.IsRetryable(err), providers.IsRejected(err))
+	}
+	if n := len(srv.requests()); n != 0 {
+		t.Fatalf("%d requests sent for a record whose check did not run", n)
+	}
+	free()
+	if _, err := st.Put(context.Background(), testRecord()); err != nil {
+		t.Fatalf("the same record once the limit is free: %v", err)
+	}
+	secret := testRecord()
+	secret.Data = []byte(`{"summary":"password: hunter2xyz9"}`)
+	if _, err := st.Put(context.Background(), secret); !providers.IsRejected(err) || providers.IsRetryable(err) {
+		t.Fatalf("a record whose check found a secret: %v", err)
+	}
+}

@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/semaphore"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -35,9 +36,9 @@ import (
 // entry) and gives it back when the decision is done, on every return and on a panic.
 //
 // HeapWeightPerByte is not a bound proven shape by shape: it is the worst heap per byte measured over every entry
-// point and every shape known (TestHeapPerByteOfEveryShape), with a margin. A heavier shape found later (the fuzz
-// target FuzzHeapWithinWeight looks for one) makes entries wait longer; it does not let the redactions running at
-// once hold more than was measured for them.
+// point and every shape known (TestHeapPerByteOfEveryShape), with a margin. The weight of an entry depends on its
+// size only, not on its content, so a shape heavier than HeapWeightPerByte, not yet found, holds more than its
+// share until the constant is raised in a release; the fuzz target FuzzHeapWithinWeight looks for one.
 //
 // The limit is half of the Go memory limit of the process (GOMEMLIMIT, which both install paths set to 90 percent
 // of the analyzer's memory limit: about 115 MiB of its 256 Mi), read at the first decision; the other half is for
@@ -47,9 +48,12 @@ import (
 // they came, so a heavy entry is not starved by light ones. So the redactions running at once hold at most the
 // limit, or one entry's weight when that is more.
 //
-// A wait ends when the context of the redactor ends (WithContext: the analysis's tool calls, its context build
-// and its log reads pass theirs) or after maxHeapWait, whichever is first; the entry points take no context, so
-// a redactor without one waits at most maxHeapWait. An entry whose wait ends is withheld (ReasonWait), like an
+// Who waits at the limit: every caller of the ordinary entry points in the process. In the analyzer the analysis's
+// tool calls, its context build and its log reads pass their context (WithContext), and so does the analysis
+// record's redaction check (the write's context). The collector's fingerprint and symptom of a note of at most
+// MaxShortEntry bytes do not wait: they take the short entry points (shortentry.go), outside the limit. A wait
+// ends when the context of the redactor ends or after maxHeapWait, whichever is first; the entry points take no
+// context, so a redactor without one waits at most maxHeapWait. An entry whose wait ends is withheld (ReasonWait), like an
 // entry over its budget: the caller shows the source as failed. A caller must not decide another entry inside a
 // decision (a fits function of PiecesFitting that called an entry point would wait on the share its own decision
 // holds).
@@ -103,6 +107,27 @@ func (l *heapLimiter) size() {
 		}
 		l.sem, l.maxWait = semaphore.NewWeighted(l.limit), maxHeapWait
 	})
+}
+
+// MeasuredGoMemoryLimit is the Go memory limit the room next to the heap limit was measured for: 90 percent of
+// the analyzer's 256 Mi, as both install paths set it.
+const MeasuredGoMemoryLimit = 256 << 20 * 9 / 10
+
+// WarnIfMemoryUnderMeasured logs one warning on log, and returns true, when the process has a Go memory limit
+// under MeasuredGoMemoryLimit: the analyzer's memory limit was set under 256 Mi. Nothing else changes: the heap
+// limit is still half of the Go memory limit, and an entry heavier than it still runs alone, holding up to its
+// measured worst case (about 110 MiB for the largest object), which a smaller memory limit may not hold; the risk
+// is an out-of-memory kill, not a longer wait. The analyzer calls it once at start.
+func WarnIfMemoryUnderMeasured(log logr.Logger) bool {
+	gomem := debug.SetMemoryLimit(-1)
+	if gomem <= 0 || gomem == math.MaxInt64 || gomem >= MeasuredGoMemoryLimit {
+		return false
+	}
+	log.Info("Warning: the Go memory limit (GOMEMLIMIT) is under the size redaction's heap limit was measured for; "+
+		"one large entry can still hold about 110 MiB and the analyzer may be killed for its memory. Set the "+
+		"analyzer's memory limit to at least 256Mi",
+		"goMemoryLimitBytes", gomem, "measuredForBytes", int64(MeasuredGoMemoryLimit))
+	return true
 }
 
 // heapWeight is the share of the limit an entry of size bytes takes.

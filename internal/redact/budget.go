@@ -166,17 +166,33 @@ func metered[T any](r *Redactor, size int, f func(wm *meter.Meter) T) (out T, ok
 
 // meteredOn is metered with the budget given, its wait for the heap limit ending with ctx or at maxHeapWait.
 func meteredOn[T any](ctx context.Context, size int, steps int64, f func(wm *meter.Meter) T) (out T, ok bool) {
+	out, why := meteredWhy(ctx, size, steps, f)
+	return out, why == ""
+}
+
+// meteredWhy is meteredOn with the reason the entry was withheld (ReasonSize, ReasonWait or ReasonWork), or ""
+// when it was decided.
+func meteredWhy[T any](ctx context.Context, size int, steps int64, f func(wm *meter.Meter) T) (out T, why string) {
 	if size > MaxEntry {
 		withheldTotal.WithLabelValues(ReasonSize).Inc()
-		return out, false
+		return out, ReasonSize
 	}
 	// The heap of the redactions running at once (heaplimit.go): given back on every return and on a panic.
 	release, ok := redactionHeap.acquire(ctx, size)
 	if !ok {
 		withheldTotal.WithLabelValues(ReasonWait).Inc()
-		return out, false
+		return out, ReasonWait
 	}
 	defer release()
+	if out, ok = onBudget(steps, f); !ok {
+		return out, ReasonWork
+	}
+	return out, ""
+}
+
+// onBudget runs f on a meter of steps steps and returns its result and true, or the zero value and false, counted
+// as ReasonWork, when the meter ran out.
+func onBudget[T any](steps int64, f func(wm *meter.Meter) T) (out T, ok bool) {
 	over := false
 	func() {
 		defer meter.Catch(&over)

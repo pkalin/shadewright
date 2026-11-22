@@ -397,6 +397,7 @@ func (r *shortReader) carriesOn(k, col int, item, key bool) bool {
 func afterItemDash(wm *meter.Meter, s string, i int) bool {
 	x := i
 	for range 3 {
+		tick(wm, 1)
 		b := x
 		for b > 0 && (s[b-1] == ' ' || s[b-1] == '\t') {
 			tick(wm, 1)

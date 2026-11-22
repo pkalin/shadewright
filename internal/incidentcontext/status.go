@@ -568,7 +568,8 @@ func (b *Builder) podLines(l *lines, t *target) {
 		}
 		var deleting string
 		if p.DeletionTimestamp != nil {
-			deleting = ", being deleted (grace period ends " + stamp(*p.DeletionTimestamp) + ")"
+			deleting = ", being deleted (requested " + stamp(metav1.NewTime(deletionStart(p))) +
+				", grace period ends " + stamp(*p.DeletionTimestamp) + ")"
 		}
 		l.add("pod %s%s, phase %s, created %s%s", l.data(b.value(p.Name)), owner, l.data(b.value(string(p.Status.Phase))),
 			stamp(p.CreationTimestamp), deleting)
@@ -588,7 +589,7 @@ func (b *Builder) podLines(l *lines, t *target) {
 
 // containerLine describes one container of a running pod, with the memory limit of that pod's own spec,
 // labelled as the pod's: during a rollout it may differ from the pod template's. The current exit of a
-// container of a pod being deleted, other than an OOM kill, is marked as that pod's shutdown ([shutdown]).
+// container stopped by its pod's deletion is marked as that pod's shutdown ([shutdown]).
 func (b *Builder) containerLine(l *lines, p *corev1.Pod, cs containerStatus) {
 	kind := "container"
 	if cs.init {

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -32,10 +33,16 @@ const errorReason = "Error"
 
 const shutdownNote = "this exit is the shutdown of a pod being deleted, not counted as a failure"
 
+// deletionGrace is the grace period of the deletions of these tests.
+const deletionGrace = 30
+
 // deleting marks p as being deleted, with its container stopped by the deletion: reason and exit code as the
-// kubelet records them (137 after the grace period, 143 on SIGTERM, 137 with OOMKilled for an OOM kill).
+// kubelet records them (137 after the grace period, 143 on SIGTERM, 137 with OOMKilled for an OOM kill). The
+// deletion began 20 seconds before the container finished, at recent, and its grace period ends 10 seconds
+// after.
 func deleting(p *corev1.Pod, reason string, exit int32) *corev1.Pod {
-	p.DeletionTimestamp = ptrTime(testNow.Add(30 * time.Second))
+	p.DeletionTimestamp = ptrTime(recent.Add(10 * time.Second))
+	p.DeletionGracePeriodSeconds = new(int64(deletionGrace))
 	// The fake client refuses an object with a deletionTimestamp and no finalizer.
 	p.Finalizers = []string{"example.com/hold"}
 	p.Status.ContainerStatuses[0] = corev1.ContainerStatus{
@@ -86,7 +93,8 @@ func TestDeletedPodShutdownIsNotAFailure(t *testing.T) {
 				t.Errorf("pod order %v, want %v\n%s", got, want, text)
 			}
 			if !strings.Contains(text, "pod web-abc-3, controlled by ReplicaSet web-abc, phase Running, created "+
-				stamp(longAgo)+", being deleted (grace period ends "+stamp(*gone.DeletionTimestamp)+")") {
+				stamp(longAgo)+", being deleted (requested "+stamp(metav1.NewTime(recent.Add(-20*time.Second)))+
+				", grace period ends "+stamp(*gone.DeletionTimestamp)+")") {
 				t.Errorf("the pod is not shown as being deleted:\n%s", text)
 			}
 			if strings.Count(text, shutdownNote) != 1 {
@@ -122,6 +130,11 @@ func TestDeletedPodKeepsOOMAndEarlierCrashes(t *testing.T) {
 	if tr := troubleOf(earlier); tr.broken != 1 || tr.restarts != 2 || tr.unready != 0 {
 		t.Errorf("trouble of a pod being deleted after a crash %+v, want broken 1, restarts 2, unready 0", tr)
 	}
+	// The instance that crashed is read first, not the shutdown that followed it.
+	if picks := logPicks(onePodTarget(earlier), windowOf(incident(deploymentRef()), testNow)); len(picks) != 1 ||
+		!picks[0].previous || !picks[0].other {
+		t.Errorf("log picks %+v, want the previous instance first", picks)
+	}
 
 	alive := deleting(pod("web-abc-5", labels, longAgo, ref), errorReason, 137)
 	alive.DeletionTimestamp, alive.Finalizers = nil, nil
@@ -132,5 +145,87 @@ func TestDeletedPodKeepsOOMAndEarlierCrashes(t *testing.T) {
 	c := build(t, newBuilder(t, reader(t, rolloutObjects(oom)...), webSources(), nil), incident(deploymentRef()))
 	if text := one(t, c, SectionStatus).Text; strings.Contains(text, shutdownNote) {
 		t.Errorf("an OOM kill is marked as a shutdown:\n%s", text)
+	}
+}
+
+// An exit that finished before the deletion began (deletionTimestamp minus the grace period) is a failure like
+// any other: it ranks the pod, its logs are read, and it is not marked. A missing finish time is not excused,
+// and a missing grace period counts as zero: the deletion began at the deletionTimestamp.
+func TestDeletedPodEarlierExitStaysTrouble(t *testing.T) {
+	ref := controllerRef(kindReplicaSet, "web-abc", "uid-rs-abc")
+	w := windowOf(incident(deploymentRef()), testNow)
+	for name, change := range map[string]func(p *corev1.Pod){
+		"an hour before": func(p *corev1.Pod) { p.DeletionTimestamp = ptrTime(recent.Add(time.Hour)) },
+		"a second before": func(p *corev1.Pod) {
+			p.DeletionTimestamp = ptrTime(recent.Add((deletionGrace + 1) * time.Second))
+		},
+		"no finish time":  func(p *corev1.Pod) { p.Status.ContainerStatuses[0].State.Terminated.FinishedAt = metav1.Time{} },
+		"no grace period": func(p *corev1.Pod) { p.DeletionGracePeriodSeconds = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := deleting(pod("web-abc-3", webLabels(), longAgo, ref), errorReason, 1)
+			change(p)
+			if tr := troubleOf(p); tr.broken != 1 || tr.unready != 1 {
+				t.Errorf("trouble %+v, want broken and unready", tr)
+			}
+			if picks := logPicks(onePodTarget(p), w); len(picks) != 1 || picks[0].score != 2 {
+				t.Errorf("log picks %+v, want the exit picked as trouble", picks)
+			}
+			c := build(t, newBuilder(t, reader(t, rolloutObjects(p)...), webSources(), nil), incident(deploymentRef()))
+			text := one(t, c, SectionStatus).Text
+			if strings.Contains(text, shutdownNote) {
+				t.Errorf("an exit before the deletion is marked as its shutdown:\n%s", text)
+			}
+			if got := statusOrder(t, c); !slices.Equal(got, []string{crashPod, "web-abc-3", secondPod}) {
+				t.Errorf("pod order %v, want the deleted pod ranked as troubled\n%s", got, text)
+			}
+		})
+	}
+	// With no grace period recorded, an exit at the deletionTimestamp itself is the shutdown.
+	p := deleting(pod("web-abc-3", webLabels(), longAgo, ref), errorReason, 143)
+	p.DeletionGracePeriodSeconds = nil
+	p.DeletionTimestamp = ptrTime(recent.Time)
+	if tr := troubleOf(p); tr != (trouble{}) {
+		t.Errorf("trouble of an exit at the deletionTimestamp with no grace period %+v, want none", tr)
+	}
+}
+
+// A container that ran to completion (an init container that exited 0) is not marked as the shutdown, even
+// when it finished after the deletion began.
+func TestDeletedPodCompletedContainerIsNotMarked(t *testing.T) {
+	ref := controllerRef(kindReplicaSet, "web-abc", "uid-rs-abc")
+	p := deleting(pod("web-abc-3", webLabels(), longAgo, ref), errorReason, 143)
+	p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+		Name: "setup",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: "Completed", ExitCode: 0, StartedAt: longAgo, FinishedAt: recent,
+		}},
+	}}
+	c := build(t, newBuilder(t, reader(t, rolloutObjects(p)...), webSources(), nil), incident(deploymentRef()))
+	text := one(t, c, SectionStatus).Text
+	if n := strings.Count(text, shutdownNote); n != 1 {
+		t.Errorf("%d shutdown notes, want only the app container's:\n%s", n, text)
+	}
+	for line := range strings.SplitSeq(text, "\n") {
+		if strings.Contains(line, "setup") && strings.Contains(line, shutdownNote) {
+			t.Errorf("the completed init container is marked: %s", line)
+		}
+	}
+}
+
+// A pod past its grace period, held by a finalizer, whose containers still run: it is shown as being deleted,
+// nothing is marked as a shutdown, and it is no trouble.
+func TestDeletedPodPastGraceStillRunning(t *testing.T) {
+	ref := controllerRef(kindReplicaSet, "web-abc", "uid-rs-abc")
+	p := pod("web-abc-3", webLabels(), longAgo, ref)
+	p.DeletionTimestamp, p.DeletionGracePeriodSeconds = ptrTime(recent.Time), new(int64(deletionGrace))
+	p.Finalizers = []string{"example.com/hold"}
+	if tr := troubleOf(p); tr != (trouble{}) {
+		t.Errorf("trouble %+v, want none", tr)
+	}
+	c := build(t, newBuilder(t, reader(t, rolloutObjects(p)...), webSources(), nil), incident(deploymentRef()))
+	text := one(t, c, SectionStatus).Text
+	if strings.Contains(text, shutdownNote) || !strings.Contains(text, ", being deleted (requested ") {
+		t.Errorf("a running pod being deleted:\n%s", text)
 	}
 }

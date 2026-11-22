@@ -90,6 +90,7 @@ const (
 	attrToolStatus      = attribute.Key("shadewright.tool.status")
 	attrQuotable        = attribute.Key("shadewright.tool.quotable")
 	attrOutside         = attribute.Key("shadewright.tool.outside_attribution")
+	attrHeldControls    = attribute.Key("shadewright.tool.held_controls")
 )
 
 // Fixed result labels of the context, reserve and call spans (attrResult), besides the Reasons.

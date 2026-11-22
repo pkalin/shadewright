@@ -106,7 +106,9 @@ limitations under the License.
 // strings (a container's arguments, the name and value of a metric label) redacts it with [Redactor.Strings],
 // which takes the decision String takes on the strings joined by line breaks and so also sees a key in one
 // string and its value in a later one. The folded view is a second reading of the same text, not of a rule's
-// output: its matches count on the bytes they were folded from.
+// output: its matches count on the bytes they were folded from. So is the controls view (controls.go, #852): every
+// text is also read without its control characters, and what that reading finds is added, so a key or a token a
+// control splits is hidden; the reading of the text as it is runs first and unchanged, so it only adds.
 package redact
 
 import (
@@ -585,7 +587,16 @@ func (r *Redactor) ruleMatches(wm *meter.Meter, s string) []span {
 
 // ruleMatchesWith is ruleMatches with the long windows read before in ids (windows.go): the reads of one decision
 // share them, so a value read alone and again in its answer is read once by each expression.
+//
+// When s holds a control character ([Control]), the matches of the same reading of s without its controls (its
+// controls view, controls.go, #852) are added, each counted on the bytes of s it was read from: the reading of s
+// as it is runs first and unchanged, so the controls view only adds to what is hidden.
 func (r *Redactor) ruleMatchesWith(wm *meter.Meter, s string, ids *windowIDs) []span {
+	return r.withControlsView(wm, s, r.ruleMatchesAsRead(wm, s, ids))
+}
+
+// ruleMatchesAsRead is the reading of ruleMatchesWith on s as it is, in its folded view too.
+func (r *Redactor) ruleMatchesAsRead(wm *meter.Meter, s string, ids *windowIDs) []span {
 	spans := r.ruleSpans(wm, s, nil, false, ids)
 	if f, ok := foldView(wm, s); ok {
 		spans = r.ruleSpans(wm, f.text, spans, true, ids)

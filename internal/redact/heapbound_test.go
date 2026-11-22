@@ -76,9 +76,32 @@ var heapShapes = []heapShape{
 	// Many short lines, each with a secret: as many matches as lines. Each match holds its spans in every reading
 	// (this package's rules, each pass of the release before's) for the whole decision: over the bound at the
 	// largest entry for StringTwiceChecked, StringsChecked and the Pieces entry points.
+	// A character and a control alternating: the controls view (controls.go, #852) holds a gap for every two bytes.
+	{name: controlShapeESC, text: func(n int) string { return repeatTo("a\x1b", n) }, over: controlsOverPieces,
+		overAt: []string{epPiecesWithin, epPiecesWithin + "/values", epPiecesFitting}},
+	// Characters and different controls (C0, DEL, C1) alternating.
+	{name: controlShapeMixed, text: func(n int) string { return repeatTo("a\x00b\x7fc\u0085d\x1b", n) }, over: controlsOverPieces,
+		overAt: []string{epPiecesWithin, epPiecesWithin + "/values", epPiecesFitting}},
+	// Secrets a control splits, on many short lines: as many matches of the controls view as lines, which hold their
+	// spans for the whole decision as the shape "secrets" does.
+	{name: controlShapeSplit, text: func(n int) string { return repeatTo("pass\x00word=hunter2\n", n) }, over: "spans held per match",
+		overAt: []string{"Redactor.StringsChecked"}},
 	{name: "secrets", text: func(n int) string { return repeatTo("password=hunter2\n", n) }, over: "spans held per match",
 		overAt: []string{"Redactor.StringTwiceChecked", "Redactor.StringsChecked", epPiecesWithin, epPiecesWithin + "/values", epPiecesFitting}},
 }
+
+// The control-dense shapes of heapShapes, which TestHeapOfControlDenseTextIsBounded also measures at 512 KiB.
+const (
+	controlShapeESC   = "a ESC"
+	controlShapeMixed = "alternating controls"
+	controlShapeSplit = "split secrets"
+)
+
+// controlsOverPieces says why the control-dense shapes are held only under heapCeiling at the Pieces entry points:
+// a control is a unit of six bytes in a JSON answer, and the answer's map of units is over the bound on origin/main
+// too (108.5 MiB at 1.5 MiB of "a" ESC, 56 MiB of alternating controls, measured 2026-11-22); #1087 bounds it. The
+// controls view adds about 9 bytes per byte there.
+const controlsOverPieces = "the units of a JSON answer of controls, over on origin/main too (#1087)"
 
 // heapEntryPoint is an entry point of the package, with the largest entry it can get.
 type heapEntryPoint struct {
@@ -254,5 +277,39 @@ func TestHeapOfAHiddenPieceIsBounded(t *testing.T) {
 	if peak > bound {
 		t.Errorf("a hidden piece of %d bytes of escapes held %.1f MiB, above the bound of %.1f MiB", largestObject,
 			mib(peak), mib(bound))
+	}
+}
+
+// The controls view (controls.go, #852) on control-dense text at 512 KiB, besides the largest entry that
+// TestHeapOfOneEntryIsBounded measures: the peak live heap of one entry at every entry point is at most HeapPerByte
+// times its bytes plus HeapFixed. It logs the heap per byte of each.
+func TestHeapOfControlDenseTextIsBounded(t *testing.T) {
+	if raceDetector {
+		t.Skip("measures the heap of the product build")
+	}
+	for _, ep := range heapEntryPoints {
+		for _, sh := range heapShapes {
+			if sh.name != controlShapeESC && sh.name != controlShapeMixed && sh.name != controlShapeSplit {
+				continue
+			}
+			t.Run(ep.name+"/"+sh.name, func(t *testing.T) {
+				run, size := ep.call(defaultRedactor, sh.text(512<<10))
+				var ok bool
+				peak := peakLiveHeap(func() { ok = run() })
+				t.Logf("%s on %s, an entry of %d bytes: peak %.1f MiB, %.1f bytes per byte (bound %.1f MiB), decided %v",
+					ep.name, sh.name, size, mib(peak), float64(peak)/float64(size), mib(heapBound(size)), ok)
+				if sh.over != "" && slices.Contains(sh.overAt, ep.name) {
+					if peak > heapCeiling {
+						t.Errorf("%s on an entry of %d bytes of %s held %.1f MiB, above the ceiling (%s)", ep.name, size,
+							sh.name, mib(peak), sh.over)
+					}
+					return
+				}
+				if peak > heapBound(size) {
+					t.Errorf("%s on an entry of %d bytes of %s held %.1f MiB, above the bound of %.1f MiB", ep.name, size,
+						sh.name, mib(peak), mib(heapBound(size)))
+				}
+			})
+		}
 	}
 }

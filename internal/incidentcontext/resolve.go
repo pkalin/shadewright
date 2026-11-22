@@ -442,8 +442,8 @@ func shutdown(p *corev1.Pod, cs containerStatus) bool {
 
 // deletionStart is the start of p's last grace period: its deletionTimestamp, the end of that period, minus
 // deletionGracePeriodSeconds. It is the request time unless a later delete asked for a shorter period that
-// had already ended: the API server then sets the deletionTimestamp to the time of that delete. A pod with no grace period recorded (or a negative one) counts as
-// deleted with none.
+// had already ended: the API server then sets the deletionTimestamp to the time of that delete. A pod with no
+// grace period recorded (or a negative one) counts as deleted with none.
 func deletionStart(p *corev1.Pod) time.Time {
 	var grace int64
 	if p.DeletionGracePeriodSeconds != nil {

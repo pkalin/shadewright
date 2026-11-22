@@ -73,6 +73,11 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        # The Go soft limit the memory limit below is sized for: 241591910 bytes, 90 percent of 256Mi, the same bytes
+        # as the chart's default. Redaction sizes its limit on the heap of the redactions running at once from it
+        # (#1087); change both together.
+        - name: GOMEMLIMIT
+          value: "241591910"
         name: analyzer
         ports:
         - containerPort: 8081
@@ -112,7 +117,8 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 128Mi
+            # 256Mi since #1087: one redaction of the largest object can hold about 110 MiB of heap (design 10.3).
+            memory: 256Mi
           requests:
             cpu: 10m
             memory: 64Mi

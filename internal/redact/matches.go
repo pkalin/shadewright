@@ -54,7 +54,6 @@ type matchList struct {
 	m      []ruleMatch
 	merged int      // the matches at the start of m that are merged
 	kinds  []string // the kinds of the spans of the reading of the release before, by index
-	added  int      // the matches of r's rules added, for heapGate
 }
 
 // newMatchList returns an empty list for r's rules.
@@ -64,7 +63,6 @@ func (r *Redactor) newMatchList() *matchList { return &matchList{r: r} }
 // merge are at least mergeEvery and as many as the merged ones, so the merges sort each match a few times on
 // average and the work stays n log n in the matches.
 func (l *matchList) add(wm *meter.Meter, start, end, rule int) {
-	l.added++
 	l.push(wm, ruleMatch{start: int32(start), end: int32(end), rule: int16(rule), kind: -1}) // #nosec G115 -- an entry is at most MaxEntry bytes, an answer six times that; a redactor has far fewer than 32767 rules
 }
 

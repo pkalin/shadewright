@@ -215,7 +215,7 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 	// The long windows the rules read in the values alone, read again in the answer only where something else
 	// stands around them (windows.go).
 	ids := &windowIDs{}
-	k, matches := 0, 0
+	k := 0
 	for i, p := range ps {
 		tick(wm, 1)
 		w := l.w(i)
@@ -230,7 +230,6 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 				found = r.ownSpansWith(wm, p.Text, ids)
 				read[p.Text] = found
 			}
-			matches += len(found)
 			for _, sp := range found {
 				tick(wm, 1)
 				l.add(i, w.carry(wm, sp))
@@ -242,9 +241,6 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 		k++
 	}
 	l.compact(wm)
-	// The spans of reading 1 stand for the matches of the rules on the values: an answer that holds more than its
-	// bytes allow is withheld before reading 2 and the reading of the release before (heapGate).
-	heapGate(matches, len(l.answer))
 	// Reading 2: the answer as the tool writes it, each match ended at the line breaks of the values.
 	// Each match is ended as it is found (lineKinds, then objectEnds) and merged with the others as
 	// they come (matchList); with joined, also as it was found.
@@ -277,7 +273,6 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 		r.cutAnswer(wm, ps, l.add, settle(wm, answer, whole.spans(wm)), widen, text)
 		l.compact(wm)
 	}
-	heapGate(reading2.added, len(answer)) // before the reading of the release before (reading 3)
 	r.cutAnswer(wm, ps, l.add, settle(wm, answer, reading2.spans(wm)), widen, text)
 	l.compact(wm)
 	r.addReleasedPieces(wm, ps, l) // reading 3

@@ -80,7 +80,6 @@ func (r *Redactor) releasedReading(_ *meter.Meter, onto string, into *matchList)
 	if r.before == nil {
 		return nil
 	}
-	heapGate(into.added, len(onto))
 	return &releasedReading{r: r.before, rule: len(r.rules), hidden: into, onto: onto}
 }
 

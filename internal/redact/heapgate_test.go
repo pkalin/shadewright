@@ -85,38 +85,3 @@ func TestHeapGateWithholdsTooManyParts(t *testing.T) {
 		t.Errorf("StringsChecked: %v entries counted with reason heap, want 1", got)
 	}
 }
-
-// A text with more matches of the rules than its bytes allow (FreeMatches, one for every MatchBytes bytes past it)
-// is withheld whole before the reading of the release before, with the flag and the reason heap, at every entry
-// point that runs that reading; the same lines a little fewer are decided (#1087).
-func TestMatchGateWithholdsDenseText(t *testing.T) {
-	heap := func() float64 { return promtest.ToFloat64(withheldTotal.WithLabelValues(ReasonHeap)) }
-	// "pwd=a" lines: two matches every six bytes, so FreeMatches lets about 60 KiB of them through.
-	decided, withheld := repeatTo("pwd=a\n", 48<<10), repeatTo("pwd=a\n", 96<<10)
-	for _, c := range []struct {
-		name string
-		run  func(s string) (string, bool)
-	}{
-		{"StringChecked", StringChecked},
-		{"StringTwiceChecked", func(s string) (string, bool) { return defaultRedactor.StringTwiceChecked(s, nil) }},
-		{"Redactor.ReplaceFrom", func(s string) (string, bool) {
-			return defaultRedactor.ReplaceFrom(s, 0, func(string) int { return 0 }, func(string, string) string { return "x" },
-				func(s string) string { return s })
-		}},
-		{epPiecesWithin, func(s string) (string, bool) {
-			out, ok := defaultRedactor.PiecesWithin([]Piece{{Data: true, Text: s}}, -1)
-			return strings.Join(out, ""), ok
-		}},
-	} {
-		if out, ok := c.run(decided); !ok || strings.Contains(out, "pwd=a") {
-			t.Errorf("%s on %d bytes: ok %v; want decided and redacted", c.name, len(decided), ok)
-		}
-		before := heap()
-		if out, ok := c.run(withheld); ok || out != Withheld {
-			t.Errorf("%s on %d bytes: ok %v, %d bytes; want withheld", c.name, len(withheld), ok, len(out))
-		}
-		if got := heap() - before; got != 1 {
-			t.Errorf("%s: %v entries counted with reason heap, want 1", c.name, got)
-		}
-	}
-}

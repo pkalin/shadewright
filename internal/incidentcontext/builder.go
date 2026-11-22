@@ -27,6 +27,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // Timeouts of one source call (a cluster read, a metrics query or a log read) and of a whole build. A build
@@ -64,6 +65,12 @@ const maxValueBytes = 1024
 type Redactor interface {
 	String(s string) string
 	StringChecked(s string) (string, bool)
+}
+
+// contextRedactor is a [Redactor] whose wait for the heap limit of the redactions running at once can end with a
+// context (*redact.Redactor's WithContext).
+type contextRedactor interface {
+	WithContext(ctx context.Context) *redact.Redactor
 }
 
 // Config configures a [Builder].
@@ -219,6 +226,13 @@ func (b *Builder) build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 	}
 	w := windowOf(inc, b.now().UTC())
 	ctx = context.WithValue(ctx, buildDeadlineKey{}, time.Now().Add(b.buildTimeout))
+	if cr, ok := b.redactor.(contextRedactor); ok {
+		// The redactions of this build wait for the heap limit of the redactions at once only as long as the build
+		// may run (redact.Redactor.WithContext).
+		within := *b
+		within.redactor = cr.WithContext(ctx)
+		b = &within
+	}
 	c := &Context{}
 	c.Blocks = append(c.Blocks, b.summaryBlock(inc))
 

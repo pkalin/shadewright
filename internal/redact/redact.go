@@ -111,6 +111,7 @@ package redact
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"iter"
@@ -207,6 +208,9 @@ type Redactor struct {
 	// only). False on every redactor New returns.
 	lowered    bool
 	workBudget int64
+	// ctx ends the wait of this redactor's entries for the heap limit of the redactions running at once
+	// (WithContext); nil on every redactor New returns.
+	ctx context.Context
 }
 
 var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)

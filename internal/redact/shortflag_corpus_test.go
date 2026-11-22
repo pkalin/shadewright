@@ -516,6 +516,36 @@ func TestShortFlagNamedLimits(t *testing.T) {
 	}
 }
 
+// The four limits the decision of 2026-11-22 (after the count of 3) leaves open for #1105, with today's output
+// pinned, so a change to any of them is noticed and the docs (design 10.3, the threat model) are updated with it:
+// with CRLF line ends, a comment line between "args:" and the first item makes the glued value read as a flag of
+// a longer name; punctuation inside an earlier argument ends the command before the password flag; a value with
+// a space in one argument is hidden up to the space; and a flag of the image's tool that takes no value before
+// the password flag takes the password flag as its value.
+func TestShortFlagLimitsOfTheDecision(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"args:\r\n  # c\r\n  - -phunter2x\r\nimage: mysql\r\n", "args:\r\n  # c\r\n  - -phunter2x\r\nimage: mysql\r\n"},
+		{`{"command":["curl","-d","{\"a\":1}","-u","admin:Sw2PunctWord"]}`,
+			`{"command":["curl","-d","{\"a\":1}","-u","admin:Sw2PunctWord"]}`},
+		{`{"image":"sqlcmd","args":["-S","db","-p","-P","Sw4NoValueWord"]}`,
+			`{"image":"sqlcmd","args":["-S","db","-p","**","Sw4NoValueWord"]}`},
+	} {
+		if got := String(c.in); got != c.want {
+			t.Errorf("a named limit changed; update design 10.3 and the threat model:\n  in: %q\nwant: %q\n got: %q",
+				c.in, c.want, got)
+		}
+	}
+	for _, c := range []struct{ in, want []string }{
+		{[]string{"curl", "-d", `{"a":1}`, "-u", "admin:Sw2PunctWord"}, []string{"curl", "-d", `{"a":1}`, "-u", "admin:Sw2PunctWord"}},
+		{[]string{shortMySQL, "-pSw3Space Word"}, []string{shortMySQL, "-p*** Word"}},
+	} {
+		if got := Strings(c.in); strings.Join(got, "\n") != strings.Join(c.want, "\n") {
+			t.Errorf("a named limit changed; update design 10.3 and the threat model:\n  in: %q\nwant: %q\n got: %q",
+				c.in, c.want, got)
+		}
+	}
+}
+
 // shortFlagShapes are inputs of about n bytes that make the reading of #1075 do the most per byte: separated
 // values that are the next flag, a run of flags glued by commas that one value takes, the items of a YAML "args"
 // sequence, JSON args of flags, a command word on every line, and a curl value with no colon.
@@ -547,9 +577,11 @@ func shortFlagShapes(n int) map[string]string {
 		"short flag: block scalar items":              "- image: mysql\n  args:\n" + rep("  - |-\n    -pswab\n"),
 		"short flag: anchored block scalar items":     "- image: redis\n  args:\n" + rep("  - &a >-\n    -a\n"),
 		"short flag: comment lines in args":           "- image: redis\n  args:\n" + rep("  # c -a\n  - -a\n"),
-		"short flag: escaped quotes glued":            `{"args":[` + rep(`"-p\"a\"b",`) + `""],"image":"mongo"}`,
-		"short flag: escaped quotes never closed":     `{"msg":"mongosh ` + rep(`-pa\\\"b `) + `"}`,
-		"short flag: quotes glued":                    "mongosh " + rep("-p'a'b\"c\" "),
+		// A flag with no value on every comment line: each looks over the comment lines after it for its value.
+		"short flag: comment lines after a flag with no value": shortCommentRun(n),
+		"short flag: escaped quotes glued":                     `{"args":[` + rep(`"-p\"a\"b",`) + `""],"image":"mongo"}`,
+		"short flag: escaped quotes never closed":              `{"msg":"mongosh ` + rep(`-pa\\\"b `) + `"}`,
+		"short flag: quotes glued":                             "mongosh " + rep("-p'a'b\"c\" "),
 	}
 }
 

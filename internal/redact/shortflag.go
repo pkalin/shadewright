@@ -123,8 +123,16 @@ type shortReader struct {
 	probe, done bool
 	found       commandWord
 	wm          *meter.Meter
+	// skip: the comment lines a flag looked over for its value, shared by the saved states (shortBlanksEnd).
+	skip *commentSkip
 	keyWords
 }
+
+// commentSkip is the last run of comment lines shortBlanksEnd looked over: the line starts from from to to were all
+// read by it, and the reading from any of them goes on at the line start to, so a later flag whose separator
+// reaches one of them goes on at to without reading the lines again. Without it, a flag with no value on each of
+// n comment lines would look over the lines after it n times.
+type commentSkip struct{ from, to int }
 
 // commandWord is the command word of the table a "command" key held: has is false when it held none.
 type commandWord struct {
@@ -231,7 +239,8 @@ func (r *shortReader) commandRow(at int) commandWord {
 	if w, ok := r.commands[at]; ok {
 		return w
 	}
-	p := &shortReader{s: r.s, add: func(int, int) {}, tm: &tokenMemo{}, probe: true, wm: r.wm, keyWords: keyWords{s: r.s}}
+	p := &shortReader{s: r.s, add: func(int, int) {}, tm: &tokenMemo{}, probe: true, wm: r.wm, skip: r.skip,
+		keyWords: keyWords{s: r.s}}
 	p.run(at)
 	if !p.done {
 		p.stop()
@@ -248,7 +257,8 @@ func (r *shortReader) commandRow(at int) commandWord {
 // indentation of a line looked at for a YAML item, and the values of the flags by flagExtent, after which the
 // pass goes on from the end of the value.
 func shortFlagRead(wm *meter.Meter, s string, lines bool, add func(start, end int)) {
-	r := &shortReader{s: s, add: add, tm: &tokenMemo{}, lines: lines, first: lines, wm: wm, keyWords: keyWords{s: s}}
+	r := &shortReader{s: s, add: add, tm: &tokenMemo{}, lines: lines, first: lines, wm: wm, skip: &commentSkip{-1, -1},
+		keyWords: keyWords{s: s}}
 	r.run(0)
 }
 
@@ -555,8 +565,8 @@ func (r *shortReader) value(wm *meter.Meter, i, p, j int) (start, end int, glued
 	case gluedQuote(wm, s, i, p):
 		glued = true
 	default:
-		from = shortSeparatorEnd(wm, s, p)
-		if from == p || from >= len(s) {
+		from = shortSeparatorEnd(wm, s, p, r.skip)
+		if from == p || from >= len(s) || !r.nextItem(wm, p, from) {
 			return 0, 0, false, false
 		}
 	}
@@ -566,7 +576,49 @@ func (r *shortReader) value(wm *meter.Meter, i, p, j int) (start, end int, glued
 	if glued {
 		end = escapedQuotedEnd(wm, s, i, itemEnd(wm, s, i, start, end))
 	}
+	if r.depth > 0 && (end == len(s) || strings.IndexByte(`"'\`, s[end]) < 0) {
+		// A plain item of a flow sequence ends at its comma or closing bracket, which the flag rule's value takes
+		// in ("[-pX]", "[-p, X]"): they are kept. A value that ends at a quote is a string's, whose brackets are
+		// its own.
+		for end > start && strings.IndexByte(",]}", s[end-1]) >= 0 {
+			tick(wm, 1)
+			end--
+		}
+	}
 	return start, end, glued, end > start
+}
+
+// nextItem reports whether the separator from p to from of a flag in a YAML block sequence leads to a value of the
+// flag: one on the flag's line, the next item of the sequence (a dash in the column of the flag's item), or a line
+// of the block scalar item the flag is in, further right than its dash. A line break to any other line (a key of
+// the object, an item of a sequence further left) ends the flag's item with no value. Outside a YAML block
+// sequence a line break between a flag and its value is a blank.
+func (r *shortReader) nextItem(wm *meter.Meter, p, from int) bool {
+	if !r.yaml || r.depth > 0 || r.lines {
+		return true
+	}
+	s := r.s
+	line := from
+	for line > p && (s[line-1] == ' ' || s[line-1] == '\t') {
+		tick(wm, 1)
+		line--
+	}
+	dash := line > p && s[line-1] == '-' && line < from
+	col := from
+	if dash {
+		col = line - 1
+		for line = col; line > p && (s[line-1] == ' ' || s[line-1] == '\t'); line-- {
+			tick(wm, 1)
+		}
+	}
+	switch {
+	case line == p || s[line-1] != '\n' && s[line-1] != '\r':
+		return true // no line break right before the value's line
+	case dash:
+		return col-line == r.itemCol
+	default:
+		return r.scalar && col-line > r.itemCol
+	}
 }
 
 // stringQuote returns, for a flag that starts at i right after a double quote, the number of backslashes before
@@ -672,7 +724,7 @@ func gluedQuote(wm *meter.Meter, s string, i, p int) bool {
 // flag rule reads one (flagSeparatorExpr), or p when there is none: a comma right after the flag or its closing
 // quote then blanks, or the closing quote and blanks, or blanks alone; a blank is a space, a tab, a line end
 // (with a YAML list dash after its indentation) or a backslash before a line end.
-func shortSeparatorEnd(wm *meter.Meter, s string, p int) int {
+func shortSeparatorEnd(wm *meter.Meter, s string, p int, skip *commentSkip) int {
 	k := p
 	for k < len(s) && s[k] == '\\' {
 		tick(wm, 1)
@@ -680,21 +732,23 @@ func shortSeparatorEnd(wm *meter.Meter, s string, p int) int {
 	}
 	if k < len(s) && (s[k] == '"' || s[k] == '\'') {
 		if k+1 < len(s) && s[k+1] == ',' {
-			return shortBlanksEnd(wm, s, k+2)
+			return shortBlanksEnd(wm, s, k+2, skip)
 		}
-		if e := shortBlanksEnd(wm, s, k+1); e > k+1 {
+		if e := shortBlanksEnd(wm, s, k+1, skip); e > k+1 {
 			return e
 		}
 		return p
 	}
 	if p < len(s) && s[p] == ',' {
-		return shortBlanksEnd(wm, s, p+1)
+		return shortBlanksEnd(wm, s, p+1, skip)
 	}
-	return shortBlanksEnd(wm, s, p)
+	return shortBlanksEnd(wm, s, p, skip)
 }
 
-// shortBlanksEnd returns the end of the blanks of flagSpaceExpr from k.
-func shortBlanksEnd(wm *meter.Meter, s string, k int) int {
+// shortBlanksEnd returns the end of the blanks of flagSpaceExpr from k. Comment lines after a line break are blanks
+// too; the run of them it looks over is kept in skip, and a line start inside the last run kept goes on at its end.
+func shortBlanksEnd(wm *meter.Meter, s string, k int, skip *commentSkip) int {
+	from := -1
 	for k < len(s) {
 		tick(wm, 1)
 		switch c := s[k]; {
@@ -705,6 +759,12 @@ func shortBlanksEnd(wm *meter.Meter, s string, k int) int {
 			if c == '\r' && k < len(s) && s[k] == '\n' {
 				k++
 			}
+			if skip.from <= k && k < skip.to {
+				k = skip.to // read by an earlier flag: the same lines lead to the same line start
+			}
+			if from >= 0 {
+				skip.from, skip.to = from, k
+			}
 			d := k
 			for d < len(s) && (s[d] == ' ' || s[d] == '\t') {
 				tick(wm, 1)
@@ -712,6 +772,9 @@ func shortBlanksEnd(wm *meter.Meter, s string, k int) int {
 			}
 			if d < len(s) && s[d] == '#' {
 				// A comment line between a flag and its value: the value is after it.
+				if from < 0 {
+					from = k
+				}
 				for d < len(s) && s[d] != '\n' && s[d] != '\r' {
 					tick(wm, 1)
 					d++

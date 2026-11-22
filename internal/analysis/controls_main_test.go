@@ -97,7 +97,7 @@ func jsonText(s string, escapeAll bool) string {
 func storedOf(t *testing.T, f *fixture, out Outcome) []string {
 	t.Helper()
 	inc := incident()
-	inc.Name, inc.UID = "inc-1", "0b0e3c1c-7f4a-4c55-9c39-6a3e2d2f0a02"
+	inc.Name, inc.UID = "inc-2", "0b0e3c1c-7f4a-4c55-9c39-6a3e2d2f0a03"
 	inc.Status.LastAnalysisTime = &metav1.Time{Time: time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)}
 	a, err := New(f.cfg)
 	if err != nil {
@@ -119,16 +119,34 @@ func storedOf(t *testing.T, f *fixture, out Outcome) []string {
 func TestModelTextHidesWhatMainHid(t *testing.T) {
 	rows := readModelTextMainTable(t)
 	cases := modelTextCases()
-	hiddenOnMain, checked := 0, 0
 	fail := func(c modelTextCase, field, got string) {
 		t.Helper()
 		t.Errorf("%s of form %d, place %d, control %U, prefix %q: stored %q shows %q", field, c.form, c.pos, c.ctl,
 			modelTextPrefixes[c.prefix], got, c.secret)
 	}
-	// Stored fields: the summary and ten items of missing data per analysis.
+	hiddenOnMain, checked := storedFieldsHide(t, rows, cases, fail)
+	checked += unstoredFieldsHide(t, cases, fail)
+	checked += toolCallsHide(t, cases, fail)
+	t.Logf("%d cases, %d checks, %d hidden on origin/main in a stored field", len(cases), checked, hiddenOnMain)
+	if hiddenOnMain == 0 {
+		t.Fatal("no case was hidden on origin/main: the oracle is not read")
+	}
+}
+
+// fieldSummary and fieldMissing name the stored fields in the failures.
+const (
+	fieldSummary = "summary"
+	fieldMissing = "missing data"
+)
+
+// storedFieldsHide runs the cases as the summary and ten items of missing data per analysis, and returns how many
+// origin/main hid and how many were checked.
+func storedFieldsHide(t *testing.T, rows map[string]string, cases []modelTextCase,
+	fail func(c modelTextCase, field, got string)) (hiddenOnMain, checked int) {
+	t.Helper()
 	for from := 0; from < len(cases); from += 11 {
 		batch := cases[from:min(from+11, len(cases))]
-		var missing []string
+		missing := make([]string, 0, len(batch)-1)
 		for i, c := range batch[1:] {
 			missing = append(missing, jsonText(c.text, (from+i)%2 == 0))
 		}
@@ -137,7 +155,7 @@ func TestModelTextHidesWhatMainHid(t *testing.T) {
 		f := newFixture()
 		f.triage.steps = []step{reply(res)}
 		out := f.analyze(t, testLimits())
-		if out.Reason != ReasonMissingData && !(len(batch) == 1 && out.Reason == ReasonNoProposal) {
+		if want := ReasonMissingData; len(batch) == 1 && out.Reason != ReasonNoProposal || len(batch) > 1 && out.Reason != want {
 			t.Fatalf("cases %d..: reason %s, want MissingData", from, out.Reason)
 		}
 		if len(out.MissingData) != len(batch)-1 {
@@ -145,10 +163,9 @@ func TestModelTextHidesWhatMainHid(t *testing.T) {
 		}
 		stored := storedOf(t, f, out)
 		for i, c := range batch {
-			got := out.Summary
-			field := "summary"
+			got, field := out.Summary, fieldSummary
 			if i > 0 {
-				got, field = out.MissingData[i-1], "missing data"
+				got, field = out.MissingData[i-1], fieldMissing
 			}
 			if heldControl(got) {
 				t.Errorf("%s %q holds a control", field, got)
@@ -169,7 +186,13 @@ func TestModelTextHidesWhatMainHid(t *testing.T) {
 			}
 		}
 	}
-	// Fields never stored: five hypotheses, the uncertainty and ten quotes per analysis.
+	return hiddenOnMain, checked
+}
+
+// unstoredFieldsHide runs the cases as five hypotheses, the uncertainty and ten quotes per analysis, fields that
+// are never stored, and returns how many checks it made.
+func unstoredFieldsHide(t *testing.T, cases []modelTextCase, fail func(c modelTextCase, field, got string)) (checked int) {
+	t.Helper()
 	for from := 0; from < len(cases); from += 16 {
 		batch := cases[from:min(from+16, len(cases))]
 		var hyp, ev []string
@@ -199,8 +222,13 @@ func TestModelTextHidesWhatMainHid(t *testing.T) {
 			}
 		}
 	}
-	// Tool calls: a call whose argument holds a control is refused with a fixed text; one case in seven, four calls
-	// per analysis.
+	return checked
+}
+
+// toolCallsHide runs one case in seven as the argument of a tool call, four calls per analysis: each is refused
+// with a fixed text and shows up in nothing stored. It returns how many checks it made.
+func toolCallsHide(t *testing.T, cases []modelTextCase, fail func(c modelTextCase, field, got string)) (checked int) {
+	t.Helper()
 	var sample []modelTextCase
 	for i, c := range cases {
 		if i%7 == 0 {
@@ -209,16 +237,14 @@ func TestModelTextHidesWhatMainHid(t *testing.T) {
 	}
 	for from := 0; from < len(sample); from += 4 {
 		batch := sample[from:min(from+4, len(sample))]
-		var calls []step
-		var tcs = toolReply()
+		tcs := toolReply()
 		for i, c := range batch {
 			tcs.c.ToolCalls = append(tcs.c.ToolCalls, toolCall(fmt.Sprintf("c%d", i), tools.NameListEvents,
 				`{"namespace":`+jsonText(c.text, i%2 == 0)+`}`))
 		}
-		calls = append(calls, tcs, reply(noProposal))
 		f := newFixture()
 		f.builder.c.Truncated = true
-		f.escalation.steps = calls
+		f.escalation.steps = []step{tcs, reply(noProposal)}
 		out := f.analyze(t, testLimits())
 		if len(f.tools.calls) != 0 {
 			t.Fatalf("a call that held a control ran: %s", f.tools.calls[0].Arguments)
@@ -232,10 +258,7 @@ func TestModelTextHidesWhatMainHid(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("%d cases, %d checks, %d hidden on origin/main in a stored field", len(cases), checked, hiddenOnMain)
-	if hiddenOnMain == 0 {
-		t.Fatal("no case was hidden on origin/main: the oracle is not read")
-	}
+	return checked
 }
 
 // anyShownOnMain reports whether origin/main showed secret in another case of batch: the record and the log line

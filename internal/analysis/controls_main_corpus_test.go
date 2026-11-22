@@ -64,11 +64,16 @@ var modelTextPrefixes = []string{"x", "see "}
 func modelTextControls() []rune {
 	var out []rune
 	for r := rune(0); r <= 0x9f; r++ {
-		if (r < 0x20 && r != '\n' && r != '\t') || r >= 0x7f {
+		if modelTextControl(r) {
 			out = append(out, r)
 		}
 	}
 	return out
+}
+
+// modelTextControl reports whether r is Cc but newline and tab.
+func modelTextControl(r rune) bool {
+	return (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f)
 }
 
 // modelTextCase is one input: the text, the secret in it, and where it came from.
@@ -102,7 +107,7 @@ func modelTextShown(text, secret string) bool {
 	var b strings.Builder
 	for i := 0; i < len(text); {
 		r, n := utf8.DecodeRuneInString(text[i:])
-		if !((r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f)) || r == utf8.RuneError {
+		if r == utf8.RuneError || !modelTextControl(r) {
 			b.WriteString(text[i : i+n])
 		}
 		i += n
@@ -131,9 +136,9 @@ func TestWriteModelTextMainTable(t *testing.T) {
 			order = append(order, k)
 		}
 		if modelTextShown(redact.StringKeeping(c.text, incident().Name), c.secret) {
-			rows[k].WriteByte('s')
+			_ = rows[k].WriteByte('s')
 		} else {
-			rows[k].WriteByte('h')
+			_ = rows[k].WriteByte('h')
 		}
 	}
 	var b strings.Builder
@@ -142,7 +147,7 @@ func TestWriteModelTextMainTable(t *testing.T) {
 	for _, k := range order {
 		b.WriteString(k + "\t" + rows[k].String() + "\n")
 	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil { // #nosec G703 -- the path is the test runner's own setting
 		t.Fatal(err)
 	}
 }

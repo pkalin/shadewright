@@ -262,9 +262,7 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 	}
 	reading2 := endAtValueLines(wm, ps, l.w, answer, matches)
 	r.cutAnswer(wm, ps, l.add, settle(wm, answer, endAtObjectValues(wm, ps, wsize, reading2)), widen, text)
-	if writtenWithoutControls(wm, ps) {
-		r.readWithControls(wm, ps, n, l, ids, joined)
-	}
+	r.readWithControls(wm, ps, n, l, ids, joined)
 	// Reading 3: the release before, on the pieces as they were read.
 	hidden := mergeSpans(wm, r.releasedPieces(wm, ps))
 	off, h := 0, 0
@@ -348,6 +346,9 @@ func writtenWithoutControls(wm *meter.Meter, ps []Piece) bool {
 // secret origin/main hides). With joined, the reading of the whole answer of [Redactor.Strings] is taken on it
 // too. The work is linear in the length of the pieces, as reading 2's.
 func (r *Redactor) readWithControls(wm *meter.Meter, ps []Piece, n int, l *answerLayout, ids *windowIDs, joined bool) {
+	if !writtenWithoutControls(wm, ps) {
+		return
+	}
 	m := newAnswerLayoutAs(wm, ps, n, true)
 	matches := r.ruleMatchesWith(wm, m.answer, ids)
 	widen := func(i int, sp span) span { return m.w(i).widen(wm, sp) }
@@ -393,6 +394,7 @@ func (w written) valueSpans(wm *meter.Meter, got []pieceSpan) []span {
 	out := make([]span, 0, len(got))
 	if !w.mapped() {
 		for _, g := range got {
+			tick(wm, 1)
 			out = append(out, g.sp)
 		}
 		return out
@@ -401,6 +403,7 @@ func (w written) valueSpans(wm *meter.Meter, got []pieceSpan) []span {
 	w.eachUnit(func(vs, ve, us, ue int) {
 		tick(wm, 1)
 		for k < len(got) {
+			tick(wm, 1)
 			sp := got[k].sp
 			if !open {
 				if us < sp.start {

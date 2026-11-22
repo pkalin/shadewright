@@ -52,12 +52,19 @@ const entriesSecret = "Qz900339SecretValue" // #nosec G101 -- not a credential: 
 // word key[1] and key[2] joined; the control goes inside the key word at the middle of key[1].
 type entriesForm struct{ key [3]string }
 
+// Words of the forms, and the type of the events.
+const (
+	entriesPassword = "password"
+	entriesToken    = "token"
+	eventWarning    = "Warning"
+)
+
 // entriesForms are the forms of the corpus.
 var entriesForms = []entriesForm{
-	{key: [3]string{"postgres://u:p@h/db---", "password", ""}},
-	{key: [3]string{"--", "password", ""}},
-	{key: [3]string{"", "password", ""}},
-	{key: [3]string{"", "token", ":"}},
+	{key: [3]string{"postgres://u:p@h/db---", entriesPassword, ""}},
+	{key: [3]string{"--", entriesPassword, ""}},
+	{key: [3]string{"", entriesPassword, ""}},
+	{key: [3]string{"", entriesToken, ":"}},
 	{key: [3]string{"Authorization: ", "Bearer", ""}},
 	{key: [3]string{"db_", "pass", "="}},
 	{key: [3]string{"postgres://u:p@h/db", "---password", ""}},
@@ -75,7 +82,7 @@ func entriesControls(all bool) []rune {
 	}
 	var out []rune
 	for r := rune(0); r <= 0x9f; r++ {
-		if (r < 0x20 && r != '\n' && r != '\t') || r >= 0x7f {
+		if entriesControl(r) {
 			out = append(out, r)
 		}
 	}
@@ -154,12 +161,12 @@ func entriesLayouts() []entriesLayout {
 				Waiting: &corev1.ContainerStateWaiting{Reason: createConfigError,
 					Message: fmt.Sprintf("couldn't find key k in Secret %v/db", testNS)},
 			}}}
-			var evs []eventsv1.Event
+			evs := make([]eventsv1.Event, 0, 2)
 			for i, note := range []string{a, b} {
 				evs = append(evs, eventsv1.Event{
 					ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("e%d", i), Namespace: testNS},
-					EventTime:  metav1.NewMicroTime(testNow.Add(-time.Minute)), Type: "Warning", Reason: "FailedMount", Note: note,
-					Regarding: corev1.ObjectReference{Kind: "Pod", Name: podName, Namespace: testNS},
+					EventTime:  metav1.NewMicroTime(testNow.Add(-time.Minute)), Type: eventWarning, Reason: "FailedMount", Note: note,
+					Regarding: corev1.ObjectReference{Kind: kindPod, Name: podName, Namespace: testNS},
 				})
 			}
 			return src.run(set, diffScene{pod: p, events: evs}, NameCheckMissingReference, map[string]any{
@@ -211,6 +218,11 @@ func entriesCases() []entriesCase {
 	return out
 }
 
+// entriesControl reports whether c is Cc but newline and tab.
+func entriesControl(c rune) bool {
+	return (c < 0x20 && c != '\n' && c != '\t') || (c >= 0x7f && c <= 0x9f)
+}
+
 // entriesShown reports whether r shows the secret to a reader that ignores control characters. An answer
 // withheld whole shows nothing.
 func entriesShown(r Result) bool {
@@ -220,7 +232,7 @@ func entriesShown(r Result) bool {
 	var b strings.Builder
 	for i := 0; i < len(r.Text); {
 		c, n := utf8.DecodeRuneInString(r.Text[i:])
-		if !((c < 0x20 && c != '\n' && c != '\t') || (c >= 0x7f && c <= 0x9f)) || c == utf8.RuneError {
+		if c == utf8.RuneError || !entriesControl(c) {
 			b.WriteString(r.Text[i : i+n])
 		}
 		i += n
@@ -250,9 +262,9 @@ func TestWriteEntriesMainTable(t *testing.T) {
 			order = append(order, k)
 		}
 		if entriesShown(layouts[c.layout].run(set, src, c.a, c.b)) {
-			rows[k].WriteByte('s')
+			_ = rows[k].WriteByte('s')
 		} else {
-			rows[k].WriteByte('h')
+			_ = rows[k].WriteByte('h')
 		}
 	}
 	var b strings.Builder
@@ -261,7 +273,7 @@ func TestWriteEntriesMainTable(t *testing.T) {
 	for _, k := range order {
 		b.WriteString(k + "\t" + rows[k].String() + "\n")
 	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil { // #nosec G703 -- the path is the test runner's own setting
 		t.Fatal(err)
 	}
 }

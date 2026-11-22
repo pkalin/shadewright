@@ -51,10 +51,13 @@ func collectorInputs() (names, texts []string) {
 	return names, texts
 }
 
+// collectorRegardingKind is the kind of the object the inputs are about.
+const collectorRegardingKind = "Pod"
+
 // collectorRow is what the collector's readings make of one input, each output quoted, tab separated.
 func collectorRow(text string) string {
 	o := fingerprint.Observation{ClusterID: "c", Namespace: "ns", OwnerUID: "uid-1", Reason: "BackOff", Type: "Warning",
-		ReportingController: "kubelet", Note: text, RegardingKind: "Pod", RegardingName: "web-abc-1"}
+		ReportingController: "kubelet", Note: text, RegardingKind: collectorRegardingKind, RegardingName: "web-abc-1"}
 	return strings.Join([]string{
 		strconv.Quote(fingerprint.Normalize(o)), strconv.Quote(fingerprint.Symptom(o)),
 		strconv.Quote(fingerprint.Value(text)), strconv.Quote(BoundValue(text)), fingerprint.Fingerprint(o),

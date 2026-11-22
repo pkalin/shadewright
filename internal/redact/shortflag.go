@@ -59,7 +59,7 @@ var shortFlagTools = map[string]shortFlagTool{
 	"mongo": {letter: 'p'}, "mongosh": {letter: 'p'}, "cqlsh": {letter: 'p'}, "rabbitmqadmin": {letter: 'p'},
 	"sshpass":   {letter: 'p'},
 	"redis-cli": {letter: 'a'},
-	"sqlcmd":    {letter: 'P'}, "mosquitto_pub": {letter: 'P'}, "mosquitto_sub": {letter: 'P'},
+	"sqlcmd":    {letter: 'P'}, "mosquitto_pub": {letter: 'P'}, "mosquitto_sub": {letter: 'P'}, //nolint:misspell // the MQTT clients' names
 	"curl": {letter: 'u', colon: true},
 }
 

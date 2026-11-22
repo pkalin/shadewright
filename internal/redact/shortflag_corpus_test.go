@@ -43,12 +43,15 @@ type shortTool struct {
 	colon bool
 }
 
+// shortMySQL is the first tool of the table, the one that reads its password glued only.
+const shortMySQL = "mysql"
+
 var shortTools = []shortTool{
-	{name: "mysql", letter: 'p', glued: true}, {name: "mariadb", letter: 'p', glued: true},
+	{name: shortMySQL, letter: 'p', glued: true}, {name: "mariadb", letter: 'p', glued: true},
 	{name: "mongo", letter: 'p'}, {name: "mongosh", letter: 'p'}, {name: "cqlsh", letter: 'p'},
 	{name: "rabbitmqadmin", letter: 'p'}, {name: "sshpass", letter: 'p'},
 	{name: "redis-cli", letter: 'a'},
-	{name: "sqlcmd", letter: 'P'}, {name: "mosquitto_pub", letter: 'P'}, {name: "mosquitto_sub", letter: 'P'},
+	{name: "sqlcmd", letter: 'P'}, {name: "mosquitto_pub", letter: 'P'}, {name: "mosquitto_sub", letter: 'P'}, //nolint:misspell // the MQTT clients' names
 	{name: "curl", letter: 'u', colon: true},
 }
 
@@ -186,10 +189,12 @@ var shortContexts = []shortContext{
 }
 
 // shortTail is the text after the password flag in a command, and shortHead the argument before it: words that
-// must stay.
+// must stay. shortLogLevel and shortDebug are the argument before the flag in arguments with no command word.
 const (
-	shortHead = "--connect-timeout"
-	shortTail = "--verbose"
+	shortHead     = "--connect-timeout"
+	shortTail     = "--verbose"
+	shortLogLevel = "--log-level"
+	shortDebug    = "debug"
 )
 
 // shortToolCorpus returns, for every tool of the table, every argument form the tool reads its password in
@@ -257,22 +262,22 @@ var shortArgsFlags = []shortTool{{letter: 'p'}, {letter: 'P'}, {letter: 'a'}, {l
 // stay.
 func shortArgsCorpus() []shortFlagCase {
 	rng := rand.New(rand.NewPCG(1075, 2)) //nolint:gosec // a fixed seed keeps the corpus the same on every run
-	var out []shortFlagCase
+	out := make([]shortFlagCase, 0, len(shortArgsFlags)*3*len(shortArgsContexts))
 	i := 0
 	for _, t := range shortArgsFlags {
 		for _, f := range shortArgForms[:3] {
 			for _, ctx := range shortArgsContexts {
 				secret := shortSecret(rng, i)
 				i++
-				args := append([]string{"--log-level", "debug"}, f.words(t, shortValue(t, secret))...)
+				args := append([]string{shortLogLevel, shortDebug}, f.words(t, shortValue(t, secret))...)
 				if strings.HasPrefix(ctx.name, "sequence") || strings.HasPrefix(ctx.name, "strings") {
-					args = append(f.words(t, shortValue(t, secret)), "--log-level", "debug")
+					args = append(f.words(t, shortValue(t, secret)), shortLogLevel, shortDebug)
 				}
 				args = append(args, shortTail)
 				in, items := ctx.text("", args)
 				out = append(out, shortFlagCase{
 					form: "args " + f.name + ", " + ctx.name, in: in, items: items,
-					secrets: []string{secret}, kept: []string{"--log-level", shortTail},
+					secrets: []string{secret}, kept: []string{shortLogLevel, shortTail},
 				})
 			}
 		}
@@ -304,7 +309,8 @@ func shortKeptCases() []shortFlagCase {
 	add("other meaning of a table tool's flag",
 		"mysql -h db -P 3306 -u app orders", "mysql -u app -p orders", "mariadb -P 3307 -p shop",
 		"curl -u admin https://example.com/api", "curl -s -u deploy https://example.com/x",
-		"redis-cli -p 6380 -h cache ping", "sqlcmd -S db -p", "mosquitto_sub -p 1883 -t sensors/#",
+		"redis-cli -p 6380 -h cache ping", "sqlcmd -S db -p",
+		"mosquitto_sub -p 1883 -t sensors/#", //nolint:misspell // the MQTT client's name
 	)
 	add("port with no command word",
 		`{"args":["-p","5432","--log-level","debug"]}`, `{"args":["-p5432"]}`, `{"args":["-P=3306"]}`,
@@ -321,7 +327,7 @@ func shortKeptCases() []shortFlagCase {
 // shortSequenceKept are sequences of strings that come out as main redacts them, whole: a command word with
 // a port, and arguments with no command word whose value is a port.
 var shortSequenceKept = [][]string{
-	{"psql", "-p", "5432"}, {"ssh", "-p", "22", "host"}, {"mkdir", "-p", "/data"}, {"mysql", "-P", "3306"},
+	{"psql", "-p", "5432"}, {"ssh", "-p", "22", "host"}, {"mkdir", "-p", "/data"}, {shortMySQL, "-P", "3306"},
 	{"-p", "5432", "--verbose"}, {"-P", "3306"}, {"-u", "db:6379"},
 }
 
@@ -432,8 +438,9 @@ func TestWriteShortFlagMainTable(t *testing.T) {
 	if path == "" {
 		t.Skip("SHORTFLAG_MAIN_TABLE is not set")
 	}
-	var rows []any
-	for _, in := range shortTableInputs() {
+	inputs := shortTableInputs()
+	rows := make([]any, 0, len(inputs))
+	for _, in := range inputs {
 		c := mainRedaction{In: in, Out: String(in)}
 		for _, sp := range defaultRedactor.spans(nil, in) {
 			c.Spans = append(c.Spans, [2]int{sp.start, sp.end})

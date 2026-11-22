@@ -57,8 +57,8 @@ func ShortContainers() []ShortContainer {
 				ShortContainer{Form: "args " + f.name, Args: append(f.words(t, shortValue(t, secret)), shortTail),
 					Secret: secret, Kept: []string{shortTail}},
 				ShortContainer{Form: "args after a flag " + f.name,
-					Args:   append(append([]string{"--log-level", "debug"}, f.words(t, shortValue(t, secret))...), shortTail),
-					Secret: secret, Kept: []string{"--log-level", shortTail}})
+					Args:   append(append([]string{shortLogLevel, shortDebug}, f.words(t, shortValue(t, secret))...), shortTail),
+					Secret: secret, Kept: []string{shortLogLevel, shortTail}})
 		}
 	}
 	return out

@@ -164,7 +164,7 @@ Every issue names the ADRs it is tied to:
   its kept reading of the release before and of the context builder) runs with that tag. The budget stops the work of an entry where it would pass its bound and withholds
   the entry whole, whatever its shape; the fuzz targets check that nothing withheld is released in part, not how
   the work grows. Growth is checked by the corpus tests (`TestCorpusWorkGrowsLinearly`: the work at 64 KiB at most
-  2.3 times the work at 32 KiB on every shape, two quadratic shapes of #962 excused by name). A failing input it finds is committed to
+  2.3 times the work at 32 KiB on every shape, none excused by name since #962). A failing input it finds is committed to
   the package's `testdata/fuzz/` with the fix, or listed as a known failure with its issue.
 
 ## Design choices

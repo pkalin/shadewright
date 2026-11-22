@@ -84,7 +84,7 @@ func withoutControls(wm *meter.Meter, s string) string {
 
 // hasControl reports whether s holds a code point of [Control].
 func hasControl(wm *meter.Meter, s string) bool {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		tick(wm, 1)
 		if controlLen(wm, s, i) > 0 {
 			return true

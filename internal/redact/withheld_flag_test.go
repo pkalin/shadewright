@@ -65,10 +65,12 @@ var flaggedEntries = []flagged{
 
 // Withheld is told by a flag, never by the text (#873, decision of 2026-11-20): an entry that spells the marker,
 // alone or as the first value of an answer with nothing after it, is decided (ok true) and shows the marker as
-// text; an entry over the work budget is withheld (ok false) and is Withheld with nothing else.
+// text; an entry withheld (ok false) is Withheld with nothing else. The entry withheld is one byte longer than
+// MaxEntry: no shape of the corpora is known to pass the work budget since #962, and an entry withheld for its size
+// is withheld by the same flag and with the same output as one withheld for its work.
 func TestWithheldIsAFlagNotAText(t *testing.T) {
 	parallelUnderRace(t)
-	over := strings.Repeat("--token,}", 4096)
+	over := strings.Repeat("x", MaxEntry+1)
 	for _, e := range flaggedEntries {
 		for _, in := range []string{Withheld, Withheld + "\n"} {
 			out, ok := e.run(in)
@@ -81,7 +83,7 @@ func TestWithheldIsAFlagNotAText(t *testing.T) {
 		want := make([]string, e.parts(over))
 		want[0] = Withheld
 		if ok || !slices.Equal(out, want) {
-			t.Errorf("%s on %d bytes over the budget: ok %v, %d strings %.80q; want ok false and %q", e.name, len(over),
+			t.Errorf("%s on %d bytes over the size bound: ok %v, %d strings %.80q; want ok false and %q", e.name, len(over),
 				ok, len(out), out, want)
 		}
 	}

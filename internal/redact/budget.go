@@ -36,11 +36,11 @@ import (
 const (
 	// WorkPerByte is the steps the budget gives each byte of an entry. It is a bound on work, not a promise that
 	// every linear shape fits (decision of 2026-11-21 on #873): a shape whose cost is linear but above it is
-	// withheld from the size where it passes the budget. The known ones are glued quoted pairs (auth="a"
-	// repeated), TOKEN="a" repeated before a long blank line, and "--token,}" and "-password," repeated, whose
-	// reading of the release before grows with the square of the text until #962; TestBudgetWithholdSizes holds
-	// the size from which each is withheld at each entry point. The work tests check that work grows linearly
-	// with the text on every other shape of the corpus (TestCorpusWorkGrowsLinearly).
+	// withheld from the size where it passes the budget. No shape of the corpus is known to pass it since #962
+	// made the reading of the release before linear on the last four that did ("--token,}" and "-password,"
+	// repeated, glued quoted pairs, TOKEN="a" repeated before a long blank line); the costliest found while
+	// building #962 take under 500 steps per byte at String. The work tests check that work grows linearly with the text on every shape of the corpus
+	// (TestCorpusWorkGrowsLinearly).
 	WorkPerByte = 1024
 	// WorkFixed is the steps the budget gives every entry besides WorkPerByte per byte: the fixed cost of a call
 	// on a short entry.

@@ -42,17 +42,16 @@ import (
 //	    redactwork; without it the property is not checked).
 //	P5: the output is the decision without a budget or the entry withheld whole (Withheld, the other strings
 //	    empty), never a part of it. A withheld entry shows nothing, so P1 holds of it without the release's
-//	    reading, which is then not run: on the inputs where its own work outgrows the text ("--token,}" repeated,
-//	    released.tokenEnd) that oracle alone would hold a fuzzing worker past its limit.
+//	    reading, which is then not run: on an input whose work outgrows the text ("--token,}" repeated, until
+//	    #962 made the release's reading linear on it) that oracle alone would hold a fuzzing worker past its limit.
 //	P4: the output is valid UTF-8 when the input is, and nothing panics. Valid UTF-8 whatever the input is a
 //	    property of the tool results and the incident context (decided 2026-11-19): these entry points keep the
 //	    bytes they do not hide, invalid ones included, as the release's String does (released.String("a\xffb")
 //	    returns it unchanged).
 //
 // The targets check no bound on how the work grows with the size of an input (decision of 2026-11-21 on #873):
-// the budget bounds the work of every entry whatever its shape (P3, P5), and mutations of "--token,}" and
-// "-password," repeated, whose release reading grows with the square of the text until #962, would fail such a
-// check on every run. The corpus tests check growth instead (TestCorpusWorkGrowsLinearly); #962 adds it here.
+// the budget bounds the work of every entry whatever its shape (P3, P5). The corpus tests check growth instead
+// (TestCorpusWorkGrowsLinearly, and released.TestFlagRunsAndTokenPairsWorkIsLinear for the shapes of #962).
 //
 // The inputs known to fail (knownDiffFailures) are seeds in testdata/fuzz: they skip, naming the property, until
 // the rule is fixed, and fail once they pass, so that the fix removes them.
@@ -150,8 +149,8 @@ var diffSeeds = [][]byte{
 	redacttest.RawSeed(1, "192.168.1.1--password", "\x01"),
 	seedPairsBeforeABlankLine, // TOKEN="a" repeated, a quote, a line end, 4,096 blanks, a quote and a fullwidth colon
 	{0xf1, 0, 242, 0, 7, 0},   // a run of one invalid byte and an "x", 3,150 times
-	// "--token,}" repeated to 36 KiB (#873): the release's reading reads each value to the end of the run
-	// (released.tokenEnd), so the entry is withheld (P3, P5; the sizes of TestBudgetWithholdSizes).
+	// "--token,}" repeated to 36 KiB (#873): the release's reading read each value to the end of the run and the
+	// entry was withheld (P3, P5), until #962 made that reading linear.
 	seedTokenRepeat,
 }
 
@@ -411,8 +410,8 @@ func TestStringTwiceWorkOnALineWithNoBlank(t *testing.T) {
 
 // Found by FuzzDiffReplaceFrom in its three and ten minute runs (#845, fifteenth decision): "-password,"
 // repeated, 10,250 bytes with no blank. Each flag read its value, the rest of the run, to the first blank, so the
-// own work grew with the square of the run (1,060 steps per byte here). The release's reading of it still grows
-// so (#962), but inside the budget at this size (decision of 2026-11-21 on #873): every property holds.
+// own work grew with the square of the run (1,060 steps per byte here). The release's reading of it grew so too,
+// until #962: every property holds.
 func TestReplaceFromWorkOnGluedFlags(t *testing.T) {
 	skipUncounted(t)
 	data := []byte("10\x060\x052<12")

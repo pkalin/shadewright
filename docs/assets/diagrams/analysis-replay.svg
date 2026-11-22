@@ -29,40 +29,40 @@
         .g,.ln{opacity:.28}
         .raw{opacity:0}
         .red{opacity:0}
-        .g1{animation:lg1 28.0s linear infinite}
-        .g2{animation:lg2 28.0s linear infinite}
-        .g3{animation:lg3 28.0s linear infinite}
-        .g4{animation:lg4 28.0s linear infinite}
-        .g5{animation:lg5 28.0s linear infinite}
-        .g6{animation:lg6 28.0s linear infinite}
-        .g7{animation:lg7 28.0s linear infinite}
-        .g8{animation:lg8 28.0s linear infinite}
-        .g9{animation:lg9 28.0s linear infinite}
-        .g10{animation:lg10 28.0s linear infinite}
-        .l1{animation:ll1 28.0s linear infinite}
-        .d1{offset-path:path('M176 116H236');offset-rotate:0deg;animation:mv1 28.0s linear infinite}
-        .l2{animation:ll2 28.0s linear infinite}
-        .d2{offset-path:path('M376 116H436');offset-rotate:0deg;animation:mv2 28.0s linear infinite}
-        .l3{animation:ll3 28.0s linear infinite}
-        .d3{offset-path:path('M668 116H728');offset-rotate:0deg;animation:mv3 28.0s linear infinite}
-        .l4{animation:ll4 28.0s linear infinite}
-        .d4{offset-path:path('M868 116H928');offset-rotate:0deg;animation:mv4 28.0s linear infinite}
-        .l5{animation:ll5 28.0s linear infinite}
-        .d5{offset-path:path('M1050 148V324');offset-rotate:0deg;animation:mv5 28.0s linear infinite}
-        .l6{animation:ll6 28.0s linear infinite}
-        .d6{offset-path:path('M928 356H868');offset-rotate:0deg;animation:mv6 28.0s linear infinite}
-        .l7{animation:ll7 28.0s linear infinite}
-        .d7{offset-path:path('M728 356H668');offset-rotate:0deg;animation:mv7 28.0s linear infinite}
-        .l8{animation:ll8 28.0s linear infinite}
-        .d8{offset-path:path('M436 356H376');offset-rotate:0deg;animation:mv8 28.0s linear infinite}
-        .l9{animation:ll9 28.0s linear infinite}
-        .d9{offset-path:path('M306 388V470');offset-rotate:0deg;animation:mv9 28.0s linear infinite}
-        .l10{animation:ll10 28.0s linear infinite}
-        .d10{offset-path:path('M236 356H176');offset-rotate:0deg;animation:mv10 28.0s linear infinite}
-        .l11{animation:ll11 28.0s linear infinite}
-        .d11{offset-path:path('M110 388V470');offset-rotate:0deg;animation:mv11 28.0s linear infinite}
-        .gw{animation:lw 28.0s linear infinite}
-        .raw{animation:raw 28.0s linear infinite}.red{animation:red 28.0s linear infinite}
+        .g1{animation:lg1 16.0s linear infinite}
+        .g2{animation:lg2 16.0s linear infinite}
+        .g3{animation:lg3 16.0s linear infinite}
+        .g4{animation:lg4 16.0s linear infinite}
+        .g5{animation:lg5 16.0s linear infinite}
+        .g6{animation:lg6 16.0s linear infinite}
+        .g7{animation:lg7 16.0s linear infinite}
+        .g8{animation:lg8 16.0s linear infinite}
+        .g9{animation:lg9 16.0s linear infinite}
+        .g10{animation:lg10 16.0s linear infinite}
+        .l1{animation:ll1 16.0s linear infinite}
+        .d1{offset-path:path('M176 116H236');offset-rotate:0deg;animation:mv1 16.0s linear infinite}
+        .l2{animation:ll2 16.0s linear infinite}
+        .d2{offset-path:path('M376 116H436');offset-rotate:0deg;animation:mv2 16.0s linear infinite}
+        .l3{animation:ll3 16.0s linear infinite}
+        .d3{offset-path:path('M668 116H728');offset-rotate:0deg;animation:mv3 16.0s linear infinite}
+        .l4{animation:ll4 16.0s linear infinite}
+        .d4{offset-path:path('M868 116H928');offset-rotate:0deg;animation:mv4 16.0s linear infinite}
+        .l5{animation:ll5 16.0s linear infinite}
+        .d5{offset-path:path('M1050 148V324');offset-rotate:0deg;animation:mv5 16.0s linear infinite}
+        .l6{animation:ll6 16.0s linear infinite}
+        .d6{offset-path:path('M928 356H868');offset-rotate:0deg;animation:mv6 16.0s linear infinite}
+        .l7{animation:ll7 16.0s linear infinite}
+        .d7{offset-path:path('M728 356H668');offset-rotate:0deg;animation:mv7 16.0s linear infinite}
+        .l8{animation:ll8 16.0s linear infinite}
+        .d8{offset-path:path('M436 356H376');offset-rotate:0deg;animation:mv8 16.0s linear infinite}
+        .l9{animation:ll9 16.0s linear infinite}
+        .d9{offset-path:path('M306 388V470');offset-rotate:0deg;animation:mv9 16.0s linear infinite}
+        .l10{animation:ll10 16.0s linear infinite}
+        .d10{offset-path:path('M236 356H176');offset-rotate:0deg;animation:mv10 16.0s linear infinite}
+        .l11{animation:ll11 16.0s linear infinite}
+        .d11{offset-path:path('M110 388V470');offset-rotate:0deg;animation:mv11 16.0s linear infinite}
+        .gw{animation:lw 16.0s linear infinite}
+        .raw{animation:raw 16.0s linear infinite}.red{animation:red 16.0s linear infinite}
       }
       @media (prefers-reduced-motion:reduce){
         .dot,.raw{display:none}

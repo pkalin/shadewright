@@ -8,7 +8,7 @@ Shadewright watches a Kubernetes cluster for symptoms, works out a fix, and prop
 
 [![Looping replay of one recorded analysis, from an event to a verified pull request. No path leads from the agent or the model to the workloads.](../assets/diagrams/analysis-replay.svg)](../assets/diagrams/analysis-replay.svg "Open full size")
 
-A replay, not a live view: release v0.3.0-rc.2, scenario `oom`. There the first OOMKilled event took 3 min 34 s to become a pull request, with one model call; the replay takes 28 seconds. The record has no later timings. The model call and the steps after the merge are off by default.
+A replay, not a live view: release v0.3.0-rc.2, scenario `oom`. There the first OOMKilled event took 3 min 34 s to become a pull request, with one model call; the replay takes 16 seconds. The record has no later timings. The model call and the steps after the merge are off by default.
 
 ## Rules the design enforces
 

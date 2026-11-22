@@ -26,33 +26,33 @@
       .dot{fill:#a879ff;opacity:0}
       @media (prefers-reduced-motion:no-preference){
         .g,.ln{opacity:.28}
-        .gRa{animation:lgRa 24.0s linear infinite}
-        .gRb{animation:lgRb 24.0s linear infinite}
-        .gRc{animation:lgRc 24.0s linear infinite}
-        .gRd{animation:lgRd 24.0s linear infinite}
-        .gC{animation:lgC 24.0s linear infinite}
-        .gSA{animation:lgSA 24.0s linear infinite}
-        .gSB{animation:lgSB 24.0s linear infinite}
-        .gSC{animation:lgSC 24.0s linear infinite}
-        .gI{animation:lgI 24.0s linear infinite}
-        .gR{animation:lgR 24.0s linear infinite}
-        .no1{animation:lno1 24.0s linear infinite}
-        .do1{offset-path:path('M264 488H332');offset-rotate:0deg;animation:mo1 24.0s linear infinite}
-        .no2{animation:lno2 24.0s linear infinite}
-        .do2{offset-path:path('M532 488H600');offset-rotate:0deg;animation:mo2 24.0s linear infinite}
-        .no3{animation:lno3 24.0s linear infinite}
-        .do3{offset-path:path('M800 488H900');offset-rotate:0deg;animation:mo3 24.0s linear infinite}
-        .no4{animation:lno4 24.0s linear infinite}
-        .do4{offset-path:path('M988 456V260');offset-rotate:0deg;animation:mo4 24.0s linear infinite}
-        .nr1{animation:lnr1 24.0s linear infinite}
-        .dr1{offset-path:path('M264 120H640');offset-rotate:0deg;animation:mr1 24.0s linear infinite}
-        .nr2{animation:lnr2 24.0s linear infinite}
-        .dr2{offset-path:path('M264 224H640');offset-rotate:0deg;animation:mr2 24.0s linear infinite}
-        .nr3{animation:lnr3 24.0s linear infinite}
-        .dr3{offset-path:path('M264 328H640');offset-rotate:0deg;animation:mr3 24.0s linear infinite}
-        .ns{animation:lns 24.0s linear infinite}
-        .ds{offset-path:path('M840 116H900');offset-rotate:0deg;animation:ms 24.0s linear infinite}
-        .nk{animation:lnk 24.0s linear infinite}
+        .gRa{animation:lgRa 14.0s linear infinite}
+        .gRb{animation:lgRb 14.0s linear infinite}
+        .gRc{animation:lgRc 14.0s linear infinite}
+        .gRd{animation:lgRd 14.0s linear infinite}
+        .gC{animation:lgC 14.0s linear infinite}
+        .gSA{animation:lgSA 14.0s linear infinite}
+        .gSB{animation:lgSB 14.0s linear infinite}
+        .gSC{animation:lgSC 14.0s linear infinite}
+        .gI{animation:lgI 14.0s linear infinite}
+        .gR{animation:lgR 14.0s linear infinite}
+        .no1{animation:lno1 14.0s linear infinite}
+        .do1{offset-path:path('M264 488H332');offset-rotate:0deg;animation:mo1 14.0s linear infinite}
+        .no2{animation:lno2 14.0s linear infinite}
+        .do2{offset-path:path('M532 488H600');offset-rotate:0deg;animation:mo2 14.0s linear infinite}
+        .no3{animation:lno3 14.0s linear infinite}
+        .do3{offset-path:path('M800 488H900');offset-rotate:0deg;animation:mo3 14.0s linear infinite}
+        .no4{animation:lno4 14.0s linear infinite}
+        .do4{offset-path:path('M988 456V260');offset-rotate:0deg;animation:mo4 14.0s linear infinite}
+        .nr1{animation:lnr1 14.0s linear infinite}
+        .dr1{offset-path:path('M264 120H640');offset-rotate:0deg;animation:mr1 14.0s linear infinite}
+        .nr2{animation:lnr2 14.0s linear infinite}
+        .dr2{offset-path:path('M264 224H640');offset-rotate:0deg;animation:mr2 14.0s linear infinite}
+        .nr3{animation:lnr3 14.0s linear infinite}
+        .dr3{offset-path:path('M264 328H640');offset-rotate:0deg;animation:mr3 14.0s linear infinite}
+        .ns{animation:lns 14.0s linear infinite}
+        .ds{offset-path:path('M840 116H900');offset-rotate:0deg;animation:ms 14.0s linear infinite}
+        .nk{animation:lnk 14.0s linear infinite}
       }
       @media (prefers-reduced-motion:reduce){ .dot{display:none} }
       @keyframes lgRa{0%,1.25%{opacity:.28}2.5%,92.5%{opacity:1}97.5%,100%{opacity:.28}}

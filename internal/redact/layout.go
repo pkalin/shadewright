@@ -34,20 +34,21 @@ import (
 // after it on an Event's line) is seen, and nothing is redacted after the decision.
 
 // Form says how a tool writes a value from a source into its answer. Every form writes each character of the
-// value as one unit of its own, so a match on the answer is widened to whole units and a match on the value is
-// carried to the units it was written as.
+// value as one unit of its own (a control character the form leaves out as an empty one), so a match on the
+// answer is widened to whole units and a match on the value is carried to the units it was written as.
 type Form int
 
 const (
 	// AsIs writes the value as it is.
 	AsIs Form = iota
-	// Line writes the value on one line of the answer, as incidentcontext.Shown does: a control character,
-	// U+2028 and U+2029 become a space, and an invalid byte becomes "?".
+	// Line writes the value on one line of the answer, as incidentcontext.Shown does: a newline, a tab, U+2028 and
+	// U+2029 become a space, every other control character ([Control]) is left out (#852), and an invalid byte
+	// becomes "?".
 	Line
 	// JSON writes the value as the content of a JSON string, as encoding/json does without HTML escapes: '"' and
-	// '\\' escaped, a control character as "\n", "\r", "\t", "\b", "\f" or "\u00XX", U+2028 and U+2029 as
-	// "\u2028" and "\u2029", and a run of invalid bytes as one "?", as the release before made each value valid
-	// UTF-8 before it was encoded.
+	// '\\' escaped, a newline and a tab as "\n" and "\t", U+2028 and U+2029 as "\u2028" and "\u2029", and a run of
+	// invalid bytes as one "?", as the release before made each value valid UTF-8 before it was encoded. Every
+	// other control character ([Control]) is left out (#852), so neither its escape nor a raw DEL or C1 is written.
 	JSON
 )
 
@@ -78,7 +79,8 @@ var secretKeyName = regexp.MustCompile(`(?i)^(?:` + bareKeyExpr + `)$`)
 
 // SecretKey reports whether a key the object gives (a map key, a field name, a metric label's name) is a
 // secret key, decided from the key alone by the rule main applied to a quoted key (#845, fifth decision of
-// 2026-11-18): the whole key, read in its folded view (an invisible character dropped, a look-alike folded) and
+// 2026-11-18): the whole key, without its control characters (as it is shown, #852) and read in its folded view
+// (an invisible character dropped, a look-alike folded) and
 // without blanks around it, is a key name that holds a secret word or ends in a short key name ("auth",
 // "pass", "DB_PASS", "storageSas"), and is no reference (isReference). Unlike the rule for prose, which reads a
 // bare short key ("auth: failed") only before a value shaped like a credential, it needs no value. The work is
@@ -87,6 +89,7 @@ func SecretKey(key string) bool { return secretKey(nil, key) }
 
 // secretKey is SecretKey on the budget wm.
 func secretKey(wm *meter.Meter, key string) bool {
+	key = withoutControls(wm, key) // the key as it is shown (#852)
 	if f, ok := foldView(wm, key); ok {
 		key = f.text
 	}
@@ -106,6 +109,7 @@ var secretCollectionName = regexp.MustCompile(`(?i)^[A-Za-z0-9_.-]*` + secretWor
 // block, where a reference child ("secretName", "path") keeps its value as in any text. Whether those names
 // may be shown is #860. The work is linear in the length of name.
 func SecretCollection(name string) bool {
+	name = WithoutControls(name) // the name as it is shown (#852)
 	return secretCollectionName.MatchString(name) && !isReference(nil, name)
 }
 
@@ -794,7 +798,9 @@ func write(wm *meter.Meter, p Piece) written {
 				size++
 			}
 			b.WriteByte('?')
-		} else {
+		} else if !Control(c) {
+			// A control character is shown in no form but AsIs (#852): its unit is empty. writeUnit still writes it
+			// as the release before wrote it, for that release's reading (jsonTrace, shownTrace).
 			writeUnit(wm, &b, p.Form, p.Text[i:i+size], c, size)
 		}
 		to := b.Len()
@@ -811,14 +817,14 @@ func write(wm *meter.Meter, p Piece) written {
 	return w
 }
 
-// plain reports whether every byte of s is ASCII that form f writes as itself: no control character, no DEL on
-// a line, no quote or backslash in JSON.
+// plain reports whether every byte of s is ASCII that form f writes as itself: no control character (DEL
+// included, which every form but AsIs leaves out, #852), no quote or backslash in JSON.
 func plain(f Form, s string) bool {
 	for i := range len(s) {
 		switch c := s[i]; {
-		case c >= utf8.RuneSelf, c < 0x20:
+		case c >= utf8.RuneSelf, c < 0x20, c == 0x7f:
 			return false
-		case f == Line && c == 0x7f, f == JSON && (c == '"' || c == '\\'):
+		case f == JSON && (c == '"' || c == '\\'):
 			return false
 		}
 	}
@@ -833,7 +839,7 @@ func writtenLen(p Piece) int {
 	n := 0
 	for i := 0; i < len(p.Text); {
 		c, size := utf8.DecodeRuneInString(p.Text[i:])
-		n += unitWidth(p.Form, c, size)
+		n += shownWidth(p.Form, c, size)
 		if p.Form == JSON && c == utf8.RuneError && size == 1 {
 			for i+size < len(p.Text) && invalidAt(p.Text, i+size) {
 				size++
@@ -850,7 +856,17 @@ func invalidAt(s string, i int) bool {
 	return c == utf8.RuneError && size == 1
 }
 
-// unitWidth is the length writeUnit writes for the character c of size bytes in form f.
+// shownWidth is the length write writes for the character c of size bytes in form f: 0 for a control character
+// ([Control]), which the answer leaves out (#852), else [unitWidth].
+func shownWidth(f Form, c rune, size int) int {
+	if Control(c) {
+		return 0
+	}
+	return unitWidth(f, c, size)
+}
+
+// unitWidth is the length writeUnit writes for the character c of size bytes in form f, as the release before
+// wrote it, a control character included.
 func unitWidth(f Form, c rune, size int) int {
 	invalid := c == utf8.RuneError && size == 1
 	switch f {
@@ -886,7 +902,7 @@ func (w written) eachUnit(f func(vs, ve, us, ue int)) {
 	pos := 0
 	for i := 0; i < len(w.value); {
 		c, size := utf8.DecodeRuneInString(w.value[i:])
-		width := unitWidth(w.form, c, size)
+		width := shownWidth(w.form, c, size)
 		if w.form == JSON && c == utf8.RuneError && size == 1 {
 			for i+size < len(w.value) && invalidAt(w.value, i+size) {
 				size++
@@ -920,7 +936,7 @@ func (w written) unitOfValue(j int) (us, ue int) {
 			i, pos = p+1, pos+1
 			continue
 		}
-		width := unitWidth(w.form, c, size)
+		width := shownWidth(w.form, c, size)
 		if j < i+size {
 			return pos, pos + width
 		}

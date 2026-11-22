@@ -178,7 +178,7 @@ func decide(r Redactor, ps frag, quotes int) (text string, values []string, with
 		if !decided {
 			return "", nil, true
 		}
-		text = strings.ToValidUTF8(redacted, "?")
+		text = ShownText(redacted)
 	}
 	return text, vs, false
 }
@@ -205,7 +205,7 @@ func decidedPieces(r pieceRedactor, ps frag) (pieces []decidedPiece, withheld bo
 	for i, p := range ps {
 		out[i] = decidedPiece{text: decided[i], data: p.Data}
 		if p.Data {
-			out[i].text = Shown(strings.ToValidUTF8(decided[i], "?"))
+			out[i].text = Shown(ShownText(decided[i]))
 		}
 	}
 	return out, false

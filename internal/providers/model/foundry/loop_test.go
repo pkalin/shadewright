@@ -19,6 +19,7 @@ package foundry
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"slices"
 	"strconv"
@@ -49,6 +50,7 @@ func (loopContext) BuildWithin(context.Context, *remediationv1alpha1.Incident, i
 type loopTools struct {
 	mu    sync.Mutex
 	calls []string
+	args  []string
 }
 
 func (*loopTools) Definitions() []providers.ToolDefinition {
@@ -63,6 +65,7 @@ func (l *loopTools) Call(_ context.Context, call providers.ToolCall) (tools.Resu
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.calls = append(l.calls, call.Name)
+	l.args = append(l.args, string(call.Arguments))
 	return tools.Result{Tool: call.Name, Status: tools.StatusOK, Text: "no events\n"}, nil
 }
 
@@ -70,10 +73,19 @@ func (l *loopTools) Call(_ context.Context, call providers.ToolCall) (tools.Resu
 type sentRequest struct {
 	tools       []string
 	lastContent string
+	// body is the whole request.
+	body []byte
 }
 
 // runLoop runs one analysis whose escalation model is the adapter, answering the calls with replies in order.
 func runLoop(t *testing.T, maxToolSteps int, replies ...string) (analysis.Outcome, []sentRequest, *loopTools) {
+	t.Helper()
+	return runLoopWith(t, nil, maxToolSteps, replies...)
+}
+
+// runLoopWith is runLoop with the adapter's configuration changed by mod, when not nil.
+func runLoopWith(t *testing.T, mod func(*Config), maxToolSteps int, replies ...string) (analysis.Outcome,
+	[]sentRequest, *loopTools) {
 	t.Helper()
 	var mu sync.Mutex
 	var sent []sentRequest
@@ -86,12 +98,13 @@ func runLoop(t *testing.T, maxToolSteps int, replies ...string) (analysis.Outcom
 				Content string `json:"content"`
 			} `json:"messages"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil || json.Unmarshal(raw, &body) != nil {
 			t.Errorf("decoding the request: %v", err)
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		var s sentRequest
+		s := sentRequest{body: raw}
 		for _, tl := range body.Tools {
 			s.tools = append(s.tools, tl.Function.Name)
 		}
@@ -104,7 +117,7 @@ func runLoop(t *testing.T, maxToolSteps int, replies ...string) (analysis.Outcom
 			return
 		}
 		reply(w, replies[len(sent)-1])
-	}, nil)
+	}, mod)
 	lt := &loopTools{}
 	a, err := analysis.New(analysis.Config{
 		Builder: loopContext{},

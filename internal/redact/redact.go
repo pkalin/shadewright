@@ -106,7 +106,11 @@ limitations under the License.
 // strings (a container's arguments, the name and value of a metric label) redacts it with [Redactor.Strings],
 // which takes the decision String takes on the strings joined by line breaks and so also sees a key in one
 // string and its value in a later one. The folded view is a second reading of the same text, not of a rule's
-// output: its matches count on the bytes they were folded from.
+// output: its matches count on the bytes they were folded from. So is the controls view (controls.go, #852): a
+// text the model is shown without its control characters is decided with [Redactor.StringShownChecked] or
+// [Redactor.StringTwiceShownChecked], which also read it without them, so a key or a token that removing a control
+// would join is hidden by the decision on the text as it was read, and the caller that removes the controls
+// afterwards uncovers nothing. The pieces of a tool's answer get the same from the forms that write them.
 package redact
 
 import (

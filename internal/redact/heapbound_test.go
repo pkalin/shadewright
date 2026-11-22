@@ -73,11 +73,18 @@ var heapShapes = []heapShape{
 	{name: "blank lines", text: func(n int) string { return repeatTo("\n", n) }},
 	// Lines of one letter: two bytes a line, as many pieces or strings as the gates let through.
 	{name: "letters", text: func(n int) string { return repeatTo("x\n", n) }},
+	// Words with a control inside each and a carriage return before each line break: a controls view as long as
+	// the text, with one removed run every few bytes (#852).
+	{name: "controls", text: func(n int) string { return repeatTo("lor\x1bem ip\x00sum\r\n", n) }},
+	// Secrets that a removed control joins: a match in the controls view on every line (#852).
+	{name: "joined secrets", text: func(n int) string { return repeatTo("pass\x1bword=hunter2\r\n", n) }, over: "spans held per match",
+		overAt: []string{"Redactor.StringTwiceChecked", epStringTwiceShownChecked, "Redactor.StringsChecked", epPiecesWithin,
+			epPiecesWithin + "/values", epPiecesFitting}},
 	// Many short lines, each with a secret: as many matches as lines. Each match holds its spans in every reading
 	// (this package's rules, each pass of the release before's) for the whole decision: over the bound at the
 	// largest entry for StringTwiceChecked, StringsChecked and the Pieces entry points.
 	{name: "secrets", text: func(n int) string { return repeatTo("password=hunter2\n", n) }, over: "spans held per match",
-		overAt: []string{"Redactor.StringTwiceChecked", "Redactor.StringsChecked", epPiecesWithin, epPiecesWithin + "/values", epPiecesFitting}},
+		overAt: []string{"Redactor.StringTwiceChecked", epStringTwiceShownChecked, "Redactor.StringsChecked", epPiecesWithin, epPiecesWithin + "/values", epPiecesFitting}},
 }
 
 // heapEntryPoint is an entry point of the package, with the largest entry it can get.
@@ -126,6 +133,15 @@ var heapEntryPoints = []heapEntryPoint{
 		_, ok := r.StringTwiceChecked(s, nil)
 		return ok
 	})},
+	// The decisions on a text shown without its controls (#852): their controls view is one more reading.
+	{epStringShownChecked, largestObject, text(func(r *Redactor, s string) bool {
+		_, ok := r.StringShownChecked(s, "hunter")
+		return ok
+	})},
+	{epStringTwiceShownChecked, largestObject, text(func(r *Redactor, s string) bool {
+		_, ok := r.StringTwiceShownChecked(s, nil)
+		return ok
+	})},
 	{"Redactor.StringKeepingChecked", largestObject, text(func(r *Redactor, s string) bool {
 		_, ok := r.StringKeepingChecked(s, "hunter")
 		return ok
@@ -156,6 +172,12 @@ var heapEntryPoints = []heapEntryPoint{
 const (
 	epPiecesWithin  = "Redactor.PiecesWithin"
 	epPiecesFitting = "Redactor.PiecesFitting"
+)
+
+// The names of the entry points of a text shown without its controls in the heap tests (#852).
+const (
+	epStringShownChecked      = "Redactor.StringShownChecked"
+	epStringTwiceShownChecked = "Redactor.StringTwiceShownChecked"
 )
 
 // heapBound is the bound of the decision for an entry of n bytes.

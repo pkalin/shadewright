@@ -21,9 +21,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // RedactFunc redacts text. Its output must never be longer than its input, as package redact guarantees.
@@ -38,11 +38,22 @@ type twicer interface {
 	StringTwiceChecked(s string, cut func(string) int) (string, bool)
 }
 
+// shownTwicer is a [twicer] that also reads a text as the model is shown it, without its control characters
+// (redact.Redactor.StringTwiceShownChecked, #852). Every place that redacts twice shows its text that way
+// ([ShownText]), so it is preferred where a redactor has it.
+type shownTwicer interface {
+	StringTwiceShownChecked(s string, cut func(string) int) (string, bool)
+}
+
 // checkedTwice redacts s as [Twice] of r does (with cut, as StringTwice takes it, when r is a twicer) and reports
 // false when redaction withheld it whole. Withheld is told by the redactor's flag, never by the text, so a value
 // from the cluster that spells redact.Withheld is text like any other (#873, decision of 2026-11-20). Every
-// [Redactor] has the flag (StringChecked), so none is taken for one that never withholds.
+// [Redactor] has the flag (StringChecked), so none is taken for one that never withholds. A redactor with
+// StringTwiceShownChecked decides with it, so a key or a token that removing a control joins is hidden too (#852).
 func checkedTwice(r Redactor, s string, cut func(string) int) (string, bool) {
+	if t, ok := r.(shownTwicer); ok {
+		return t.StringTwiceShownChecked(s, cut)
+	}
 	if t, ok := r.(twicer); ok {
 		return t.StringTwiceChecked(s, cut)
 	}
@@ -52,33 +63,52 @@ func checkedTwice(r Redactor, s string, cut func(string) int) (string, bool) {
 // checkedValue is [Value] of s with [checkedTwice]: false when redaction withheld s whole.
 func checkedValue(r Redactor, s string) (string, bool) {
 	out, ok := checkedTwice(r, s, nil)
-	return Shown(strings.ToValidUTF8(out, "?")), ok
+	return Shown(ShownText(out)), ok
 }
 
 // Twice returns the RedactFunc for a place where the release before #845 redacted a text twice ([Redact],
-// [Value], a log excerpt): r's StringTwice when it has one, so that what that release hid there is still hidden
-// (#845, thirteenth decision of 2026-11-18), and its String otherwise.
+// [Value], a log excerpt): r's decision of [checkedTwice] when it has StringTwiceShownChecked or
+// StringTwiceChecked, so that what that release hid there is still hidden (#845, thirteenth decision of
+// 2026-11-18) and a key that removing a control joins is hidden too (#852), and its String otherwise. A
+// RedactFunc has no flag: a withheld text is redact.Withheld, as text; a caller that shows a withheld text apart
+// uses [checkedTwice].
 func Twice(r Redactor) RedactFunc {
-	if t, ok := r.(twicer); ok {
+	_, shown := r.(shownTwicer)
+	if _, ok := r.(twicer); ok || shown {
 		return func(s string) string {
-			out, _ := t.StringTwiceChecked(s, nil)
+			out, _ := checkedTwice(r, s, nil)
 			return out
 		}
 	}
 	return r.String
 }
 
-// Redact redacts s with r once, as it was read, and makes the result valid UTF-8 (each invalid run becomes one
-// "?", so it never grows): no character is replaced before redaction has seen the text (#840), and the repaired
-// text is not redacted again, since redaction decides on the text as it was read (#845).
+// Redact redacts s with r once, as it was read, and returns the result as it is shown ([ShownText]): valid UTF-8
+// (each invalid run becomes one "?", so it never grows) and without control characters but newline and tab. No
+// character is replaced before redaction has seen the text (#840), and the shown text is not redacted again,
+// since redaction decides on the text as it was read (#845). r must also read s as it is shown, without its
+// controls: [Twice] of a *redact.Redactor does (#852).
 func Redact(r RedactFunc, s string) string {
-	return strings.ToValidUTF8(r(s), "?")
+	return ShownText(r(s))
+}
+
+// ShownText returns decided text as the model is shown it (#852): each invalid run becomes one "?", then every
+// code point of redact.Control (Unicode category Cc but newline and tab) is removed. The order is the safe one:
+// redaction decides first, on the text as it was read, and *redact.Redactor also reads that text without its
+// controls (its controls view), so a key or a token that removing a control joins is hidden by the decision
+// itself (redact.Redactor.StringTwiceShownChecked, [Twice]); removing controls from the decided text then takes away
+// no marker and uncovers nothing a reading hid.
+// The invalid runs are replaced before the controls go, so two invalid bytes a control separated never join
+// into a character. The work is linear in the length of s.
+func ShownText(s string) string {
+	return redact.WithoutControls(strings.ToValidUTF8(s, "?"))
 }
 
 // Value redacts one value from the cluster for a result line: a value longer than maxValueBytes once redacted
-// is left out whole, never cut, and replaced by a note of its size; control characters and Unicode line and
-// paragraph separators become spaces, so a value never adds lines of its own, nor anything a reader could
-// take for a line break. Package internal/tools shows values the same way.
+// is left out whole, never cut, and replaced by a note of its size. [Redact] has removed its control
+// characters but newline and tab; those two and the Unicode line and paragraph separators become spaces, so a
+// value never adds lines of its own, nor anything a reader could take for a line break. Package
+// internal/tools shows values the same way (redact.Line).
 func Value(r RedactFunc, s string) string {
 	return Shown(Redact(r, s))
 }
@@ -90,7 +120,10 @@ func Shown(v string) string {
 		return LeftOut(len(v))
 	}
 	return strings.Map(func(c rune) rune {
-		if unicode.IsControl(c) || c == '\u2028' || c == '\u2029' {
+		switch {
+		case redact.Control(c):
+			return -1
+		case c == '\n' || c == '\t' || c == '\u2028' || c == '\u2029':
 			return ' '
 		}
 		return c
@@ -211,13 +244,16 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		v.Truncated, v.EndMissing, v.InstanceUncertain = ex.Truncated, ex.EndMissing, ex.InstanceUncertain
 	}
 	_, ok := red.(twicer)
+	if _, shown := red.(shownTwicer); shown {
+		ok = true
+	}
 	if !refit || !ok {
 		header, okHeader := checkedTwice(red, h.String(), nil)
 		redacted, okBody := checkedTwice(red, body, nil)
 		if v.Read != LogReadWithheld && (!okHeader || !okBody) {
 			return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 		}
-		header, redacted = strings.ToValidUTF8(header, "?"), strings.ToValidUTF8(redacted, "?")
+		header, redacted = ShownText(header), ShownText(redacted)
 		head, _ := keepHead(header, budget)
 		tail, cut := keepTail(redacted, min(asked, budget-len(head)))
 		v.Text, v.HeadLen, v.Cut = head+tail, len(head), cut
@@ -227,7 +263,7 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 	if v.Read != LogReadWithheld && !okHeader {
 		return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 	}
-	head, _ := keepHead(strings.ToValidUTF8(header, "?"), budget)
+	head, _ := keepHead(ShownText(header), budget)
 	n := min(asked, budget-len(head))
 	// The release before cut its excerpt to its newest lines in n bytes, then redacted what it kept again.
 	newest := func(t string) int {
@@ -238,7 +274,7 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 	if v.Read != LogReadWithheld && !okBody {
 		return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 	}
-	tail, cut := keepTail(strings.ToValidUTF8(redacted, "?"), n)
+	tail, cut := keepTail(ShownText(redacted), n)
 	v.Text, v.HeadLen, v.Cut = head+tail, len(head), cut
 	return v
 }

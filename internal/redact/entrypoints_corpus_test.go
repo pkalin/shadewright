@@ -140,5 +140,9 @@ var defaultRedactor = sync.OnceValue(func() *redact.Redactor {
 })
 
 // stringTwice is what incidentcontext.Value redacts a value with in the product (incidentcontext.Twice of a
-// redact.Redactor): String, and the reading of the release before as it redacted a value twice.
-func stringTwice(s string) string { return redact.StringTwice(s, nil) }
+// redact.Redactor): String, the reading of the release before as it redacted a value twice, and the text as it
+// is shown, without its control characters (StringTwiceShownChecked, #852).
+func stringTwice(s string) string {
+	out, _ := defaultRedactor().StringTwiceShownChecked(s, nil)
+	return out
+}

@@ -87,8 +87,9 @@ func layoutWord(r *rand.Rand, n int) string {
 // a secret.
 func TestJSONAnswerKeepsEveryValueItDoesNotHide(t *testing.T) {
 	// answered is a value as the answer gives it: each run of invalid bytes one "?", as the release before made each
-	// value valid UTF-8 before it encoded it (#845, fifteenth decision, P4).
-	answered := func(s string) string { return strings.ToValidUTF8(s, "?") }
+	// value valid UTF-8 before it encoded it (#845, fifteenth decision, P4), and without its control characters but
+	// newline and tab (#852).
+	answered := func(s string) string { return redact.WithoutControls(strings.ToValidUTF8(s, "?")) }
 	const secret = "Qz7secretValue1"
 	e := newEnv(t, nil)
 	r := rand.New(rand.NewPCG(845, 7)) // #nosec G404 -- a reproducible test corpus, not a secret
@@ -138,7 +139,13 @@ func TestJSONAnswerKeepsEveryValueItDoesNotHide(t *testing.T) {
 		for k, v := range labels {
 			wantLabels[answered(k)] = answered(v)
 		}
-		if (len(got.Labels) > 0 || len(wantLabels) > 0) && !reflect.DeepEqual(got.Labels, wantLabels) {
+		if len(wantLabels) < len(labels) {
+			// Two keys that differ only by control characters are shown alike, and the answer renames the second
+			// ("k-a (2)", as for any two keys decided alike): every entry is still there.
+			if len(got.Labels) != len(labels) {
+				t.Errorf("turn %d: labels %q, want %d entries", turn, got.Labels, len(labels))
+			}
+		} else if (len(got.Labels) > 0 || len(wantLabels) > 0) && !reflect.DeepEqual(got.Labels, wantLabels) {
 			t.Errorf("turn %d: labels %q, want %q", turn, got.Labels, wantLabels)
 		}
 		if p := got.Spec.Containers[0].LivenessProbe.TCPSocket.Port.String(); p != answered(port) {

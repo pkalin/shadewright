@@ -96,6 +96,28 @@ func writtenAnswer(ps []redact.Piece) string {
 	return b.String()
 }
 
+// mainWrittenAnswer is the answer of ps as main's writer wrote it (readingsWrite): a control character on a line
+// as a space, in JSON as its escape, where the layout leaves it out (#852). Nothing is redacted.
+func mainWrittenAnswer(ps []redact.Piece) string {
+	forms := map[redact.Form]int{redact.AsIs: readingsAsIs, redact.Line: readingsLine, redact.JSON: readingsJSON}
+	var b strings.Builder
+	for _, p := range ps {
+		if p.Data {
+			b.WriteString(readingsWrite(forms[p.Form], p.Text))
+		} else {
+			b.WriteString(p.Text)
+		}
+	}
+	return b.String()
+}
+
+// readingsLosesNeighbour reports whether the decision got hides the neighbouring word that String keeps over the
+// answer raw and over the answer of ps as main wrote it.
+func readingsLosesNeighbour(ps []redact.Piece, raw, got string) bool {
+	return strings.Contains(redact.String(raw), readingsNeighbour) &&
+		strings.Contains(redact.String(mainWrittenAnswer(ps)), readingsNeighbour) && !strings.Contains(got, readingsNeighbour)
+}
+
 // readingsValueAloneHides reports whether String hides secret in the value of ps that holds it, read alone.
 func readingsValueAloneHides(ps []redact.Piece, secret string) bool {
 	for _, p := range ps {
@@ -119,7 +141,7 @@ func layoutPieces(ps []readingsPiece) []redact.Piece {
 }
 
 // The writer of readings_main_test.go, which main's table was written with, writes each generated value as the
-// layout does.
+// layout does, once the value has lost the control characters the layout leaves out (#852).
 func TestReadingsWriteAsTheLayout(t *testing.T) {
 	for i, f := range signalForms() {
 		for _, pl := range readingsPlaces {
@@ -127,7 +149,7 @@ func TestReadingsWriteAsTheLayout(t *testing.T) {
 				if !p.data {
 					continue
 				}
-				if got, want := readingsWrite(p.form, p.text), redact.Written(readingsForms[p.form], p.text); got != want {
+				if got, want := readingsWrite(p.form, redact.WithoutControls(p.text)), redact.Written(readingsForms[p.form], p.text); got != want {
 					t.Fatalf("%s, %s: written %q, the layout writes %q", pl.name, f.name, got, want)
 				}
 			}
@@ -136,9 +158,9 @@ func TestReadingsWriteAsTheLayout(t *testing.T) {
 }
 
 // readingsCheckAsMainRows checks, for a run without sampling, the rows decided as main: asMain are exactly the
-// split forms in the places of one value, and oneLine the three with "_authorization=" after a connection string
-// and a line break, on the line of the secret (twelfth decision of 2026-11-18, #868): String over the answer hides
-// them, main and the value alone show them.
+// split forms in the places of one value, and oneLine the two with "_authorization=" after a connection string
+// and a line feed, on the line of the secret (twelfth decision of 2026-11-18, #868): String over the answer hides
+// them, main, the value alone and the decision show them.
 func readingsCheckAsMainRows(t *testing.T, forms []signalForm, asMain, oneLine int) {
 	t.Helper()
 	want := 0
@@ -152,8 +174,10 @@ func readingsCheckAsMainRows(t *testing.T, forms []signalForm, asMain, oneLine i
 	if asMain != want || want == 0 {
 		t.Errorf("%d rows decided as main, %d split forms in a value", asMain, want)
 	}
-	if oneLine != 3 {
-		t.Errorf("%d rows of one value that main and the value alone show, want 3", oneLine)
+	// Three before #852; the third, with a lone carriage return as the line break, is shown joined since, and
+	// String over it and the decision hide the secret.
+	if oneLine != 2 {
+		t.Errorf("%d rows of one value that main and the value alone show, want 2", oneLine)
 	}
 }
 
@@ -197,17 +221,24 @@ func readingsEncode(t *testing.T, v any) string {
 // list_events for two events with those notes (with a neutral text, which no rule hides, in place of the form).
 // Before, the list items were one line of JSON, which no tool writes.
 func TestReadingsPlacesAreTheToolsAnswers(t *testing.T) {
-	answer := func(ps []readingsPiece) string {
+	// answer writes the generated pieces as main's writer did; shown writes them as the tools show them, without
+	// the control characters the layout leaves out (#852).
+	write := func(ps []readingsPiece, shown bool) string {
 		var b strings.Builder
 		for _, p := range ps {
-			if p.data {
+			switch {
+			case p.data && shown:
+				b.WriteString(readingsWrite(p.form, redact.WithoutControls(p.text)))
+			case p.data:
 				b.WriteString(readingsWrite(p.form, p.text))
-			} else {
+			default:
 				b.WriteString(p.text)
 			}
 		}
 		return b.String()
 	}
+	answer := func(ps []readingsPiece) string { return write(ps, false) }
+	shown := func(ps []readingsPiece) string { return write(ps, true) }
 	byName := map[string]readingsPlace{}
 	for _, pl := range readingsPlaces {
 		byName[pl.name] = pl
@@ -227,7 +258,7 @@ func TestReadingsPlacesAreTheToolsAnswers(t *testing.T) {
 	}
 	// list_events writes the free text as generated, for a neutral form with a line break that no rule hides.
 	neutral, word := signalForm{name: "neutral", prefix: "alpha\r\nbeta", sep: " "}, "gamma"
-	want := answer(byName["free text"].ps(neutral, word))
+	want := shown(byName["free text"].ps(neutral, word))
 	ts := newReadingsToolSet(readingsRedactor())
 	got := ts.call(tools.NameListEvents, map[string]any{argNamespace: readingsNS, argKind: readingsKind, argName: readingsPod, readingsArgLimit: 2},
 		[]string{neutral.prefix + neutral.sep + word, readingsNeighbour}, nil)
@@ -236,7 +267,7 @@ func TestReadingsPlacesAreTheToolsAnswers(t *testing.T) {
 	}
 	// query_metrics writes the labels as generated.
 	items := readingsListItems(neutral, word)
-	want = answer(byName["labels of a series"].ps(neutral, word))
+	want = shown(byName["labels of a series"].ps(neutral, word))
 	got = ts.call(tools.NameQueryMetrics, map[string]any{argNamespace: readingsNS, readingsArgPod: readingsPod, readingsArgTempl: readingsTemplate},
 		nil, []providers.Series{readingsSeries(map[string]string{"arg0": items[0], "arg1": items[1], readingsOther: readingsNeighbour})})
 	if got != want {
@@ -279,7 +310,10 @@ func TestReadingsKeepTheSignalOfAHiddenText(t *testing.T) {
 			}
 			stringHides := !strings.Contains(redact.String(raw), secret) || !strings.Contains(redact.String(marked), secret)
 			switch {
-			case pl.oneValue && !f.split && stringHides && !hid && !readingsValueAloneHides(ps, secret):
+			case pl.oneValue && !f.split && stringHides && !hid && !readingsValueAloneHides(ps, secret) && shown:
+				// The rows of #868 that the decision shows. A row of one value with a lone carriage return between the carrier and the key
+				// word is not one: the answer shows the two joined (#852), String over it hides the secret, and so
+				// does the decision.
 				oneLine++
 			case pl.oneValue && f.split:
 				asMain++
@@ -295,7 +329,11 @@ func TestReadingsKeepTheSignalOfAHiddenText(t *testing.T) {
 					t.Errorf("%s, %s: the secret shows, String hides it\n  answer:  %q\n  decided: %q", pl.name, f.name, raw, got)
 				}
 			}
-			if strings.Contains(redact.String(raw), readingsNeighbour) && !strings.Contains(got, readingsNeighbour) {
+			// The neighbour is lost when String keeps it over the answer as shown and over the answer as main wrote it,
+			// with a control as a space or an escape: where the answer as shown joins a carrier and a key word that a
+			// lone carriage return kept apart (#852), String over it can swallow the key word and keep the neighbour,
+			// while the decision hides as it did.
+			if readingsLosesNeighbour(ps, raw, got) {
 				if lostNeighbour++; lostNeighbour <= 10 {
 					t.Errorf("%s, %s: the neighbouring word is hidden\n  decided: %q", pl.name, f.name, got)
 				}

@@ -45,7 +45,8 @@ limitations under the License.
 // authorization): they choose what to read within those bounds, never how. A refusal says which rule refused in a
 // fixed text and never echoes an argument. Results are cluster data, untrusted too: every piece of text goes through
 // the [Redactor] before any cut; in an answer written as lines, a value longer than 1 KiB once decided is left out
-// whole and its control characters become spaces, and only whole lines are cut from redacted text (get_resource
+// whole, its line breaks and tabs become spaces and its other control characters are removed (Unicode category Cc,
+// read by the decision as shown, #852), and only whole lines are cut from redacted text (get_resource
 // bounds its JSON instead, by leaveOut below); the assembled text is not redacted again (#845). A
 // log excerpt is rendered by package incidentcontext's RenderLog, as in the context: it first loses the leading
 // lines that may continue an entry whose first line the source left out, before redaction, its header is budgeted

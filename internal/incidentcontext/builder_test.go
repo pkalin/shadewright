@@ -345,11 +345,12 @@ func TestCancelledAfterLastSourceReturnsAnError(t *testing.T) {
 	}
 }
 
-// A value from the cluster never adds a line, or anything that reads as a line break, to its section.
+// A value from the cluster never adds a line, or anything that reads as a line break, to its section: newline,
+// tab and the Unicode separators become spaces, and every other control character is removed (#852).
 func TestValueStaysOnOneLine(t *testing.T) {
 	b := newBuilder(t, reader(t), sources{}, func(c *Config) { c.Redactor = canary{} })
 	in := "a\nb\rc\vd\fe\u0085f\u2028g\u2029h\ti"
-	if got := b.shown(in); got != "a b c d e f g h i" {
+	if got := b.shown(in); got != "a bcdef g h i" {
 		t.Fatalf("value(%q) = %q", in, got)
 	}
 }

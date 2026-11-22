@@ -31,6 +31,9 @@ import (
 // errorReason is the reason the kubelet records for a non-zero exit.
 const errorReason = "Error"
 
+// completedReason is the reason the kubelet records for a container that ran to completion.
+const completedReason = "Completed"
+
 const shutdownNote = "this exit is the shutdown of a pod being deleted, not counted as a failure"
 
 // deletionGrace is the grace period of the deletions of these tests.
@@ -82,7 +85,7 @@ func TestDeletedPodShutdownIsNotAFailure(t *testing.T) {
 	for _, tc := range []struct {
 		reason string
 		exit   int32
-	}{{errorReason, 137}, {errorReason, 143}, {"Completed", 143}} {
+	}{{errorReason, 137}, {errorReason, 143}, {completedReason, 143}} {
 		t.Run(fmt.Sprintf("%s-%d", tc.reason, tc.exit), func(t *testing.T) {
 			ref := controllerRef(kindReplicaSet, "web-abc", "uid-rs-abc")
 			gone := deleting(pod("web-abc-3", webLabels(), longAgo, ref),
@@ -198,7 +201,7 @@ func TestDeletedPodCompletedContainerIsNotMarked(t *testing.T) {
 	p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
 		Name: "setup",
 		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-			Reason: "Completed", ExitCode: 0, StartedAt: longAgo, FinishedAt: recent,
+			Reason: completedReason, ExitCode: 0, StartedAt: longAgo, FinishedAt: recent,
 		}},
 	}}
 	c := build(t, newBuilder(t, reader(t, rolloutObjects(p)...), webSources(), nil), incident(deploymentRef()))

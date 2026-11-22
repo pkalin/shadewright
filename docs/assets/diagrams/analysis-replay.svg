@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 572" role="img" aria-labelledby="t d" data-diagram="analysis-replay" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
-  <title id="t">One analysis, replayed</title>
-  <desc id="d">A looping replay of one recorded analysis, from a Warning event to a verified pull request, in about 28 seconds. An OOMKilled event becomes an Incident. The analyzer builds the context and redacts it: a secret value in the input is replaced by the placeholder [REDACTED:credential]. The triage model answers with one call, and the answer becomes a typed proposal. If triage is unsure, an escalation model may be asked; this run did not use it, so that path is drawn dim. The executor checks the proposal against the fixed list of changes and the policy, then opens a pull request in the GitOps repository. A person reviews and merges it, Flux applies the commit, and the verifier reads the pods and ends the request. Shown in red: nothing, neither the analyzer, the model nor the executor, has a path to the workloads; only Flux changes them. With reduced motion set, the picture is still and shows every step at once. Replay of release v0.3.0-rc.2, scenario oom, not live: 3 min 34 s from symptom to pull request.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 592" role="img" aria-labelledby="t d" data-diagram="analysis-replay" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">One analysis, replayed, then escalated</title>
+  <desc id="d">A looping picture in two laps of about 13 seconds each, 26 seconds in all. A chip row at the top says which lap is playing. Lap 1 is a recording of one analysis, from a Warning event to a verified pull request: release v0.3.0-rc.2, scenario oom, 3 min 34 s from symptom to pull request. An OOMKilled event becomes an Incident. The analyzer builds the context and redacts it: a secret value in the input is replaced by the placeholder [REDACTED:credential]. The triage model answers with one call, and the answer becomes a typed proposal. The escalation path is always drawn: from the triage model a branch leads to an escalation model, with the read tools offered to it (get_resource, list_events, get_pod_logs, query_metrics, check_missing_reference), and from there back to the proposal. It is taken when the context builder cut the context or could not fetch a source, or when the triage reply failed schema validation after one retry. In the recorded run it was not taken, so lap 1 draws it dim and says so. Lap 2 is an illustration, not a recording, and carries no numbers: the same flow, with the dot going through the escalation model. The read tools are drawn as offered to the model by a dashed line; the picture does not show a tool call. The executor checks the proposal against the fixed list of changes and the policy, then opens a pull request in the GitOps repository. A person reviews and merges it, Flux applies the commit, and the verifier reads the pods and ends the request. Shown in red: nothing, neither the analyzer, the model nor the executor, has a path to the workloads; only Flux changes them. With reduced motion set, the picture is still and shows both paths, both lap labels and both captions at once.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -8,6 +8,7 @@
     <style>
       .lane{fill:#13121c;stroke:#2a2740}
       .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .chip{fill:#c6a8ff;font-size:13px;font-weight:600}
       .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
       .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
       .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
@@ -20,136 +21,172 @@
       .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
       .x{stroke:#7a3348;stroke-width:1.8;fill:none;stroke-dasharray:4 4}
       .xx{stroke:#ff8fa3;stroke-width:1.8;fill:none}
-      .dim{opacity:.4}
       .dot{fill:#a879ff;opacity:0}
       .raw,.red{opacity:0}
-      .stat{opacity:1}
-      .stillred{opacity:1}
       @media (prefers-reduced-motion:no-preference){
-        .g,.ln{opacity:.28}
-        .raw{opacity:0}
-        .red{opacity:0}
-        .g1{animation:lg1 16.0s linear infinite}
-        .g2{animation:lg2 16.0s linear infinite}
-        .g3{animation:lg3 16.0s linear infinite}
-        .g4{animation:lg4 16.0s linear infinite}
-        .g5{animation:lg5 16.0s linear infinite}
-        .g6{animation:lg6 16.0s linear infinite}
-        .g7{animation:lg7 16.0s linear infinite}
-        .g8{animation:lg8 16.0s linear infinite}
-        .g9{animation:lg9 16.0s linear infinite}
-        .g10{animation:lg10 16.0s linear infinite}
-        .l1{animation:ll1 16.0s linear infinite}
-        .d1{offset-path:path('M176 116H236');offset-rotate:0deg;animation:mv1 16.0s linear infinite}
-        .l2{animation:ll2 16.0s linear infinite}
-        .d2{offset-path:path('M376 116H436');offset-rotate:0deg;animation:mv2 16.0s linear infinite}
-        .l3{animation:ll3 16.0s linear infinite}
-        .d3{offset-path:path('M668 116H728');offset-rotate:0deg;animation:mv3 16.0s linear infinite}
-        .l4{animation:ll4 16.0s linear infinite}
-        .d4{offset-path:path('M868 116H928');offset-rotate:0deg;animation:mv4 16.0s linear infinite}
-        .l5{animation:ll5 16.0s linear infinite}
-        .d5{offset-path:path('M1050 148V324');offset-rotate:0deg;animation:mv5 16.0s linear infinite}
-        .l6{animation:ll6 16.0s linear infinite}
-        .d6{offset-path:path('M928 356H868');offset-rotate:0deg;animation:mv6 16.0s linear infinite}
-        .l7{animation:ll7 16.0s linear infinite}
-        .d7{offset-path:path('M728 356H668');offset-rotate:0deg;animation:mv7 16.0s linear infinite}
-        .l8{animation:ll8 16.0s linear infinite}
-        .d8{offset-path:path('M436 356H376');offset-rotate:0deg;animation:mv8 16.0s linear infinite}
-        .l9{animation:ll9 16.0s linear infinite}
-        .d9{offset-path:path('M306 388V470');offset-rotate:0deg;animation:mv9 16.0s linear infinite}
-        .l10{animation:ll10 16.0s linear infinite}
-        .d10{offset-path:path('M236 356H176');offset-rotate:0deg;animation:mv10 16.0s linear infinite}
-        .l11{animation:ll11 16.0s linear infinite}
-        .d11{offset-path:path('M110 388V470');offset-rotate:0deg;animation:mv11 16.0s linear infinite}
-        .gw{animation:lw 16.0s linear infinite}
-        .raw{animation:raw 16.0s linear infinite}.red{animation:red 16.0s linear infinite}
+        .a_g1,.a_l1,.a_g2,.a_l2,.a_g3,.a_l3,.a_g4,.a_l4,.a_g5,.a_l5,.a_g6,.a_l6,.a_g7,.a_l7,.a_g8,.a_l8,.a_g9,.a_l9,.a_gw,.a_l10,.a_g10,.a_l11,.g,.ln{opacity:.28}
+        .a_le1,.a_ge,.a_gt,.a_lt,.a_le2{opacity:.4}
+        .a_g1{animation:k_g1 26.0s linear infinite}
+        .a_l1{animation:k_l1 26.0s linear infinite}
+        .a_g2{animation:k_g2 26.0s linear infinite}
+        .a_l2{animation:k_l2 26.0s linear infinite}
+        .a_g3{animation:k_g3 26.0s linear infinite}
+        .a_l3{animation:k_l3 26.0s linear infinite}
+        .a_g4{animation:k_g4 26.0s linear infinite}
+        .a_l4{animation:k_l4 26.0s linear infinite}
+        .a_g5{animation:k_g5 26.0s linear infinite}
+        .a_l5{animation:k_l5 26.0s linear infinite}
+        .a_g6{animation:k_g6 26.0s linear infinite}
+        .a_l6{animation:k_l6 26.0s linear infinite}
+        .a_g7{animation:k_g7 26.0s linear infinite}
+        .a_l7{animation:k_l7 26.0s linear infinite}
+        .a_g8{animation:k_g8 26.0s linear infinite}
+        .a_l8{animation:k_l8 26.0s linear infinite}
+        .a_g9{animation:k_g9 26.0s linear infinite}
+        .a_l9{animation:k_l9 26.0s linear infinite}
+        .a_gw{animation:k_gw 26.0s linear infinite}
+        .a_l10{animation:k_l10 26.0s linear infinite}
+        .a_g10{animation:k_g10 26.0s linear infinite}
+        .a_l11{animation:k_l11 26.0s linear infinite}
+        .a_le1{animation:k_le1 26.0s linear infinite}
+        .a_ge{animation:k_ge 26.0s linear infinite}
+        .a_gt{animation:k_gt 26.0s linear infinite}
+        .a_lt{animation:k_lt 26.0s linear infinite}
+        .a_le2{animation:k_le2 26.0s linear infinite}
+        .d1{animation:m_d1 26.0s linear infinite}
+        .d2{animation:m_d2 26.0s linear infinite}
+        .d3{animation:m_d3 26.0s linear infinite}
+        .d4{animation:m_d4 26.0s linear infinite}
+        .d5{animation:m_d5 26.0s linear infinite}
+        .d6{animation:m_d6 26.0s linear infinite}
+        .d7{animation:m_d7 26.0s linear infinite}
+        .d8{animation:m_d8 26.0s linear infinite}
+        .d9{animation:m_d9 26.0s linear infinite}
+        .d10{animation:m_d10 26.0s linear infinite}
+        .d11{animation:m_d11 26.0s linear infinite}
+        .de1{animation:m_de1 26.0s linear infinite}
+        .de2{animation:m_de2 26.0s linear infinite}
+        .lapA{animation:lapA 26.0s linear infinite}
+        .lapB{animation:lapB 26.0s linear infinite}
+        .chipA{animation:chipA 26.0s linear infinite}
+        .chipB{animation:chipB 26.0s linear infinite}
+        .raw{animation:raw 26.0s linear infinite}.red{animation:red 26.0s linear infinite}
+        .d1{offset-path:path('M176 116H236');offset-rotate:0deg}
+        .d2{offset-path:path('M376 116H436');offset-rotate:0deg}
+        .d3{offset-path:path('M668 116H728');offset-rotate:0deg}
+        .d4{offset-path:path('M868 116H928');offset-rotate:0deg}
+        .d5{offset-path:path('M1050 148V324');offset-rotate:0deg}
+        .d6{offset-path:path('M928 356H868');offset-rotate:0deg}
+        .d7{offset-path:path('M728 356H668');offset-rotate:0deg}
+        .d8{offset-path:path('M436 356H376');offset-rotate:0deg}
+        .d9{offset-path:path('M306 388V470');offset-rotate:0deg}
+        .d10{offset-path:path('M236 356H176');offset-rotate:0deg}
+        .d11{offset-path:path('M110 388V470');offset-rotate:0deg}
+        .de1{offset-path:path('M798 148V184');offset-rotate:0deg}
+        .de2{offset-path:path('M892 234H1000V152');offset-rotate:0deg}
       }
       @media (prefers-reduced-motion:reduce){
-        .dot,.raw{display:none}
+        .dot,.raw,.nn{display:none}
         .red{opacity:1}
+        .esc{opacity:.7}
       }
-      @keyframes lg1{0%,0.0%{opacity:0.28}1.071%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes lg2{0%,8.536%{opacity:0.28}9.607%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes lg3{0%,17.107%{opacity:0.28}18.179%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes lg4{0%,35.679%{opacity:0.28}36.75%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes lg5{0%,44.25%{opacity:0.28}45.321%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes lg6{0%,53.536%{opacity:0.28}54.607%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes lg7{0%,62.107%{opacity:0.28}63.179%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes lg8{0%,70.679%{opacity:0.28}71.75%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes lg9{0%,79.25%{opacity:0.28}80.321%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes lg10{0%,92.107%{opacity:0.28}93.179%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes ll1{0%,3.571%{opacity:0.28}4.643%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes ll2{0%,12.143%{opacity:0.28}13.214%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes ll3{0%,30.714%{opacity:0.28}31.786%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes ll4{0%,39.286%{opacity:0.28}40.357%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes ll5{0%,47.857%{opacity:0.28}48.929%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes ll6{0%,57.143%{opacity:0.28}58.214%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes ll7{0%,65.714%{opacity:0.28}66.786%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes ll8{0%,74.286%{opacity:0.28}75.357%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes ll9{0%,82.143%{opacity:0.28}83.214%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes ll10{0%,87.143%{opacity:0.28}88.214%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes ll11{0%,93.571%{opacity:0.28}94.643%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes lw{0%,85.714%{opacity:0.28}86.786%,94.286%{opacity:1}98.571%,100%{opacity:0.28}}
-      @keyframes raw{0%,17.143%{opacity:0}18.571%,23.571%{opacity:1}25.0%,100%{opacity:0}}
-      @keyframes red{0%,23.571%{opacity:0}26.429%,94.286%{opacity:1}98.571%,100%{opacity:0}}
-      @keyframes mv1{0%,3.571%{offset-distance:0%;opacity:0}3.75%{opacity:1}8.571%{offset-distance:100%;opacity:1}9.464%,100%{offset-distance:100%;opacity:0}}
-      @keyframes mv2{0%,12.143%{offset-distance:0%;opacity:0}12.321%{opacity:1}17.143%{offset-distance:100%;opacity:1}18.036%,100%{offset-distance:100%;opacity:0}}
-      @keyframes mv3{0%,30.714%{offset-distance:0%;opacity:0}30.893%{opacity:1}35.714%{offset-distance:100%;opacity:1}36.607%,100%{offset-distance:100%;opacity:0}}
-      @keyframes mv4{0%,39.286%{offset-distance:0%;opacity:0}39.464%{opacity:1}44.286%{offset-distance:100%;opacity:1}45.179%,100%{offset-distance:100%;opacity:0}}
-      @keyframes mv5{0%,47.857%{offset-distance:0%;opacity:0}48.036%{opacity:1}53.571%{offset-distance:100%;opacity:1}54.464%,100%{offset-distance:100%;opacity:0}}
-      @keyframes mv6{0%,57.143%{offset-distance:0%;opacity:0}57.321%{opacity:1}62.143%{offset-distance:100%;opacity:1}63.036%,100%{offset-distance:100%;opacity:0}}
-      @keyframes mv7{0%,65.714%{offset-distance:0%;opacity:0}65.893%{opacity:1}70.714%{offset-distance:100%;opacity:1}71.607%,100%{offset-distance:100%;opacity:0}}
-      @keyframes mv8{0%,74.286%{offset-distance:0%;opacity:0}74.464%{opacity:1}79.286%{offset-distance:100%;opacity:1}80.179%,100%{offset-distance:100%;opacity:0}}
-      @keyframes mv9{0%,82.143%{offset-distance:0%;opacity:0}82.321%{opacity:1}85.714%{offset-distance:100%;opacity:1}86.607%,100%{offset-distance:100%;opacity:0}}
-      @keyframes mv10{0%,87.143%{offset-distance:0%;opacity:0}87.321%{opacity:1}92.143%{offset-distance:100%;opacity:1}93.036%,100%{offset-distance:100%;opacity:0}}
-      @keyframes mv11{0%,93.571%{offset-distance:0%;opacity:0}93.75%{opacity:1}96.429%{offset-distance:100%;opacity:1}97.321%,100%{offset-distance:100%;opacity:0}}
+      @keyframes k_g1{0%{opacity:0.28}0.8%{opacity:0.28}1.6%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}50.8%{opacity:0.28}51.6%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_l1{0%{opacity:0.28}0.8%{opacity:0.28}1.6%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}50.8%{opacity:0.28}51.6%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_g2{0%{opacity:0.28}4.13%{opacity:0.28}4.93%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}53.852%{opacity:0.28}54.652%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_l2{0%{opacity:0.28}4.5%{opacity:0.28}5.3%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}54.192%{opacity:0.28}54.992%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_g3{0%{opacity:0.28}7.83%{opacity:0.28}8.63%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}57.244%{opacity:0.28}58.044%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_l3{0%{opacity:0.28}9.7%{opacity:0.28}10.5%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}59.083%{opacity:0.28}59.883%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_g4{0%{opacity:0.28}13.03%{opacity:0.28}13.83%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}62.136%{opacity:0.28}62.936%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_l4{0%{opacity:0.28}13.4%{opacity:0.28}14.2%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_g5{0%{opacity:0.28}16.73%{opacity:0.28}17.53%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}68.919%{opacity:0.28}69.719%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_l5{0%{opacity:0.28}17.1%{opacity:0.28}17.9%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}69.258%{opacity:0.28}70.058%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_g6{0%{opacity:0.28}20.43%{opacity:0.28}21.23%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}72.311%{opacity:0.28}73.111%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_l6{0%{opacity:0.28}20.8%{opacity:0.28}21.6%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}72.65%{opacity:0.28}73.45%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_g7{0%{opacity:0.28}24.13%{opacity:0.28}24.93%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}75.702%{opacity:0.28}76.502%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_l7{0%{opacity:0.28}24.5%{opacity:0.28}25.3%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}76.042%{opacity:0.28}76.842%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_g8{0%{opacity:0.28}27.83%{opacity:0.28}28.63%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}79.094%{opacity:0.28}79.894%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_l8{0%{opacity:0.28}28.2%{opacity:0.28}29%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}79.433%{opacity:0.28}80.233%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_g9{0%{opacity:0.28}31.53%{opacity:0.28}32.33%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}82.486%{opacity:0.28}83.286%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_l9{0%{opacity:0.28}31.9%{opacity:0.28}32.7%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}82.825%{opacity:0.28}83.625%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_gw{0%{opacity:0.28}35.23%{opacity:0.28}36.03%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}85.877%{opacity:0.28}86.677%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_l10{0%{opacity:0.28}35.6%{opacity:0.28}36.4%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}86.217%{opacity:0.28}87.017%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_g10{0%{opacity:0.28}38.93%{opacity:0.28}39.73%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}89.269%{opacity:0.28}90.069%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_l11{0%{opacity:0.28}39.3%{opacity:0.28}40.1%{opacity:1}46.5%{opacity:1}49.5%{opacity:0.28}89.608%{opacity:0.28}90.408%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.28}100%{opacity:0.28}}
+      @keyframes k_le1{0%{opacity:0.4}62.475%{opacity:0.4}63.275%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.4}100%{opacity:0.4}}
+      @keyframes k_ge{0%{opacity:0.4}65.527%{opacity:0.4}66.327%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.4}100%{opacity:0.4}}
+      @keyframes k_gt{0%{opacity:0.4}65.527%{opacity:0.4}66.327%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.4}100%{opacity:0.4}}
+      @keyframes k_lt{0%{opacity:0.4}65.527%{opacity:0.4}66.327%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.4}100%{opacity:0.4}}
+      @keyframes k_le2{0%{opacity:0.4}65.867%{opacity:0.4}66.667%{opacity:1}96.5%{opacity:1}99.5%{opacity:0.4}100%{opacity:0.4}}
+      @keyframes m_d1{0%{offset-distance:0%;opacity:0}1%{offset-distance:0%;opacity:0}1.1%{opacity:1}3.945%{offset-distance:100%;opacity:1}4.345%{offset-distance:100%;opacity:0}51%{offset-distance:0%;opacity:0}51.1%{opacity:1}53.683%{offset-distance:100%;opacity:1}54.083%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_d2{0%{offset-distance:0%;opacity:0}4.7%{offset-distance:0%;opacity:0}4.8%{opacity:1}7.645%{offset-distance:100%;opacity:1}8.045%{offset-distance:100%;opacity:0}54.392%{offset-distance:0%;opacity:0}54.492%{opacity:1}57.075%{offset-distance:100%;opacity:1}57.475%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_d3{0%{offset-distance:0%;opacity:0}9.9%{offset-distance:0%;opacity:0}10%{opacity:1}12.845%{offset-distance:100%;opacity:1}13.245%{offset-distance:100%;opacity:0}59.283%{offset-distance:0%;opacity:0}59.383%{opacity:1}61.966%{offset-distance:100%;opacity:1}62.366%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_d4{0%{offset-distance:0%;opacity:0}13.6%{offset-distance:0%;opacity:0}13.7%{opacity:1}16.545%{offset-distance:100%;opacity:1}16.945%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_d5{0%{offset-distance:0%;opacity:0}17.3%{offset-distance:0%;opacity:0}17.4%{opacity:1}20.245%{offset-distance:100%;opacity:1}20.645%{offset-distance:100%;opacity:0}69.458%{offset-distance:0%;opacity:0}69.558%{opacity:1}72.141%{offset-distance:100%;opacity:1}72.541%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_d6{0%{offset-distance:0%;opacity:0}21%{offset-distance:0%;opacity:0}21.1%{opacity:1}23.945%{offset-distance:100%;opacity:1}24.345%{offset-distance:100%;opacity:0}72.85%{offset-distance:0%;opacity:0}72.95%{opacity:1}75.533%{offset-distance:100%;opacity:1}75.933%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_d7{0%{offset-distance:0%;opacity:0}24.7%{offset-distance:0%;opacity:0}24.8%{opacity:1}27.645%{offset-distance:100%;opacity:1}28.045%{offset-distance:100%;opacity:0}76.242%{offset-distance:0%;opacity:0}76.342%{opacity:1}78.925%{offset-distance:100%;opacity:1}79.325%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_d8{0%{offset-distance:0%;opacity:0}28.4%{offset-distance:0%;opacity:0}28.5%{opacity:1}31.345%{offset-distance:100%;opacity:1}31.745%{offset-distance:100%;opacity:0}79.633%{offset-distance:0%;opacity:0}79.733%{opacity:1}82.316%{offset-distance:100%;opacity:1}82.716%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_d9{0%{offset-distance:0%;opacity:0}32.1%{offset-distance:0%;opacity:0}32.2%{opacity:1}35.045%{offset-distance:100%;opacity:1}35.445%{offset-distance:100%;opacity:0}83.025%{offset-distance:0%;opacity:0}83.125%{opacity:1}85.708%{offset-distance:100%;opacity:1}86.108%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_d10{0%{offset-distance:0%;opacity:0}35.8%{offset-distance:0%;opacity:0}35.9%{opacity:1}38.745%{offset-distance:100%;opacity:1}39.145%{offset-distance:100%;opacity:0}86.417%{offset-distance:0%;opacity:0}86.517%{opacity:1}89.1%{offset-distance:100%;opacity:1}89.5%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_d11{0%{offset-distance:0%;opacity:0}39.5%{offset-distance:0%;opacity:0}39.6%{opacity:1}42.445%{offset-distance:100%;opacity:1}42.845%{offset-distance:100%;opacity:0}89.808%{offset-distance:0%;opacity:0}89.908%{opacity:1}92.491%{offset-distance:100%;opacity:1}92.891%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_de1{0%{offset-distance:0%;opacity:0}62.675%{offset-distance:0%;opacity:0}62.775%{opacity:1}65.358%{offset-distance:100%;opacity:1}65.758%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes m_de2{0%{offset-distance:0%;opacity:0}66.067%{offset-distance:0%;opacity:0}66.167%{opacity:1}68.75%{offset-distance:100%;opacity:1}69.15%{offset-distance:100%;opacity:0}100%{offset-distance:100%;opacity:0}}
+      @keyframes raw{0%{opacity:0}7.83%{opacity:0}8.23%{opacity:1}9.73%{opacity:1}10.33%{opacity:0}100%{opacity:0}}
+      @keyframes red{0%{opacity:0}9.73%{opacity:0}10.13%{opacity:1}46.5%{opacity:1}49.5%{opacity:0}57.244%{opacity:0}57.644%{opacity:1}96.5%{opacity:1}99.5%{opacity:0}100%{opacity:0}}
+      @keyframes lapA{0%,48%{opacity:1}49.5%,98%{opacity:0}99.5%,100%{opacity:1}}
+      @keyframes lapB{0%,48%{opacity:0}49.5%,98%{opacity:1}99.5%,100%{opacity:0}}
+      @keyframes chipA{0%,48%{opacity:1}49.5%,98%{opacity:.35}99.5%,100%{opacity:1}}
+      @keyframes chipB{0%,48%{opacity:.35}49.5%,98%{opacity:1}99.5%,100%{opacity:.35}}
     </style>
   </defs>
-  <rect width="1120" height="572" rx="18" fill="#0e0e16"/>
-  <rect class="lane" x="24" y="24" width="1072" height="228" rx="14"/>
+  <rect width="1120" height="592" rx="18" fill="#0e0e16"/>
+  <rect class="lane" x="24" y="24" width="1072" height="238" rx="14"/>
   <text class="lanet" x="44" y="54">ANALYZER · READ-ONLY</text>
+  <text class="chip chipA" x="330" y="54">1  Recorded run, v0.3.0-rc.2, scenario oom</text>
+  <text class="chip chipB" x="700" y="54">2  Illustration: an analysis that escalates</text>
   <rect class="lane" x="24" y="272" width="1072" height="156" rx="14"/>
   <text class="lanet" x="44" y="302">EXECUTOR · GIT HOST · FLUX · VERIFIER</text>
 
-  <g class="dim">
-    <rect class="box" x="728" y="168" width="140" height="64" rx="10"/>
-    <text class="h" x="744" y="194">Escalation</text>
-    <text class="s" x="744" y="215">not used in this run</text>
-    <path class="f" d="M798 148V168" marker-end="url(#a)"/>
-    <path class="f" d="M868 200H980V152" marker-end="url(#a)"/>
-  </g>
-  <text class="lbl" x="808" y="162">if unsure</text>
+  <g class="esc a_le1"><path class="f" d="M798 148V184" marker-end="url(#a)"/><text class="lbl" x="808" y="162">cut context or failed source,</text><text class="lbl" x="808" y="177">or invalid reply twice</text></g>
+  <g class="esc a_ge"><rect class="box" x="728" y="184" width="164" height="66" rx="10"/><text class="h" x="744" y="210">Escalation model</text><text class="s" x="744" y="231">stronger, with tools</text></g>
+  <g class="esc a_gt"><rect class="box" x="330" y="184" width="360" height="66" rx="10"/><text class="h" x="346" y="206">Read tools, offered</text><text class="s" x="346" y="224">get_resource, list_events, get_pod_logs,</text><text class="s" x="346" y="240">query_metrics, check_missing_reference</text></g>
+  <g class="esc a_lt"><path class="r" d="M690 217H728" marker-end="url(#m)"/></g>
+  <g class="esc a_le2"><path class="f" d="M892 234H1000V152" marker-end="url(#a)"/></g>
+  <text class="lbl lapA" x="902" y="203">not taken</text>
+  <text class="lbl lapA" x="902" y="218">in this run</text>
 
-  <g class="ln l1"><path class="f" d="M176 116H236" marker-end="url(#a)"/></g>
-  <g class="ln l2"><path class="f" d="M376 116H436" marker-end="url(#a)"/></g>
-  <g class="ln l3"><path class="f" d="M668 116H728" marker-end="url(#a)"/><text class="lbl" x="698" y="108" text-anchor="middle">context</text></g>
-  <g class="ln l4"><path class="f" d="M868 116H928" marker-end="url(#a)"/><text class="lbl" x="898" y="108" text-anchor="middle">answer</text></g>
-  <g class="ln l5"><path class="f" d="M1050 148V324" marker-end="url(#a)"/><text class="lbl" x="1042" y="240" text-anchor="middle">proposal</text></g>
-  <g class="ln l6"><path class="f" d="M928 356H868" marker-end="url(#a)"/><text class="lbl" x="898" y="348" text-anchor="middle">opens PR</text></g>
-  <g class="ln l7"><path class="f" d="M728 356H668" marker-end="url(#a)"/><text class="lbl" x="698" y="348" text-anchor="middle">review</text></g>
-  <g class="ln l8"><path class="f" d="M436 356H376" marker-end="url(#a)"/><text class="lbl" x="406" y="348" text-anchor="middle">merged</text></g>
-  <g class="ln l9"><path class="f" d="M306 388V470" marker-end="url(#a)"/><text class="lbl" x="316" y="436" text-anchor="middle">applies</text></g>
-  <g class="ln l10"><path class="f" d="M236 356H176" marker-end="url(#a)"/><text class="lbl" x="206" y="348" text-anchor="middle">applied</text></g>
-  <g class="ln l11"><path class="r" d="M110 388V470" marker-end="url(#m)"/><text class="lbl" x="120" y="436" text-anchor="middle">reads pods</text></g>
-  <g class="g g1"><rect class="box" x="44" y="84" width="132" height="64" rx="10"/><text class="h" x="60" y="110">Event</text><text class="s" x="60" y="131">OOMKilled</text></g>
-  <g class="g g2"><rect class="box" x="236" y="84" width="140" height="64" rx="10"/><text class="h" x="252" y="110">Incident</text><text class="s" x="252" y="131">debounced</text></g>
-  <g class="g g3"><rect class="key" x="436" y="84" width="232" height="64" rx="12"/><text class="h" x="452" y="110">Context, redacted</text><text class="raw no" x="452" y="131">api_key=s3cr3t-9f2a</text><text class="red lbl" x="452" y="131">api_key=[REDACTED:credential]</text></g>
-  <g class="g g4"><rect class="box" x="728" y="84" width="140" height="64" rx="10"/><text class="h" x="744" y="110">Triage model</text><text class="s" x="744" y="131">one model call</text></g>
-  <g class="g g5"><rect class="box" x="928" y="84" width="152" height="64" rx="10"/><text class="h" x="944" y="110">Proposal</text><text class="s" x="944" y="131">typed, not applied</text></g>
-  <g class="g g6"><rect class="box" x="928" y="324" width="152" height="64" rx="10"/><text class="h" x="944" y="350">Policy check</text><text class="s" x="944" y="371">source, bounds</text></g>
-  <g class="g g7"><rect class="ext" x="728" y="324" width="140" height="64" rx="10"/><text class="h" x="744" y="350">Pull request</text><text class="s" x="744" y="371">in the GitOps repo</text></g>
-  <g class="g g8"><rect class="box" x="436" y="324" width="232" height="64" rx="10"/><text class="h" x="452" y="350">Person merges</text><text class="s" x="452" y="371">your branch rules apply</text></g>
-  <g class="g g9"><rect class="box" x="236" y="324" width="140" height="64" rx="10"/><text class="h" x="252" y="350">Flux sync</text><text class="s" x="252" y="371">applies the commit</text></g>
-  <g class="g g10"><rect class="box" x="44" y="324" width="132" height="64" rx="10"/><text class="h" x="60" y="350">Verify</text><text class="s" x="60" y="371">reads the pods</text></g>
-  <text class="cap" x="236" y="172">2 min 16 s</text>
-  <text class="cap" x="436" y="172">10 s, context and model call</text>
-  <text class="cap" x="928" y="410">26 s, source and policy</text>
-  <text class="cap" x="728" y="410">42 s</text>
+  <g class="ln a_l1"><path class="f" d="M176 116H236" marker-end="url(#a)"/></g>
+  <g class="ln a_l2"><path class="f" d="M376 116H436" marker-end="url(#a)"/></g>
+  <g class="ln a_l3"><path class="f" d="M668 116H728" marker-end="url(#a)"/><text class="lbl" x="698" y="108" text-anchor="middle">context</text></g>
+  <g class="ln a_l4"><path class="f" d="M868 116H928" marker-end="url(#a)"/><text class="lbl" x="898" y="108" text-anchor="middle">answer</text></g>
+  <g class="ln a_l5"><path class="f" d="M1050 148V324" marker-end="url(#a)"/><text class="lbl" x="1042" y="240" text-anchor="middle">proposal</text></g>
+  <g class="ln a_l6"><path class="f" d="M928 356H868" marker-end="url(#a)"/><text class="lbl" x="898" y="348" text-anchor="middle">opens PR</text></g>
+  <g class="ln a_l7"><path class="f" d="M728 356H668" marker-end="url(#a)"/><text class="lbl" x="698" y="348" text-anchor="middle">review</text></g>
+  <g class="ln a_l8"><path class="f" d="M436 356H376" marker-end="url(#a)"/><text class="lbl" x="406" y="348" text-anchor="middle">merged</text></g>
+  <g class="ln a_l9"><path class="f" d="M306 388V470" marker-end="url(#a)"/><text class="lbl" x="316" y="436" text-anchor="middle">applies</text></g>
+  <g class="ln a_l10"><path class="f" d="M236 356H176" marker-end="url(#a)"/><text class="lbl" x="206" y="348" text-anchor="middle">applied</text></g>
+  <g class="ln a_l11"><path class="r" d="M110 388V470" marker-end="url(#m)"/><text class="lbl" x="120" y="436" text-anchor="middle">reads pods</text></g>
+  <g class="g a_g1"><rect class="box" x="44" y="84" width="132" height="64" rx="10"/><text class="h" x="60" y="110">Event</text><text class="s" x="60" y="131">OOMKilled</text></g>
+  <g class="g a_g2"><rect class="box" x="236" y="84" width="140" height="64" rx="10"/><text class="h" x="252" y="110">Incident</text><text class="s" x="252" y="131">debounced</text></g>
+  <g class="g a_g3"><rect class="key" x="436" y="84" width="232" height="64" rx="12"/><text class="h" x="452" y="110">Context, redacted</text><text class="raw no" x="452" y="131">api_key=s3cr3t-9f2a</text><text class="red lbl" x="452" y="131">api_key=[REDACTED:credential]</text></g>
+  <g class="g a_g4"><rect class="box" x="728" y="84" width="140" height="64" rx="10"/><text class="h" x="744" y="110">Triage model</text><text class="s lapA" x="744" y="131">one model call</text><text class="s nn lapB" x="744" y="131">first call</text></g>
+  <g class="g a_g5"><rect class="box" x="928" y="84" width="152" height="64" rx="10"/><text class="h" x="944" y="110">Proposal</text><text class="s" x="944" y="131">typed, not applied</text></g>
+  <g class="g a_g6"><rect class="box" x="928" y="324" width="152" height="64" rx="10"/><text class="h" x="944" y="350">Policy check</text><text class="s" x="944" y="371">source, bounds</text></g>
+  <g class="g a_g7"><rect class="ext" x="728" y="324" width="140" height="64" rx="10"/><text class="h" x="744" y="350">Pull request</text><text class="s" x="744" y="371">in the GitOps repo</text></g>
+  <g class="g a_g8"><rect class="box" x="436" y="324" width="232" height="64" rx="10"/><text class="h" x="452" y="350">Person merges</text><text class="s" x="452" y="371">your branch rules apply</text></g>
+  <g class="g a_g9"><rect class="box" x="236" y="324" width="140" height="64" rx="10"/><text class="h" x="252" y="350">Flux sync</text><text class="s" x="252" y="371">applies the commit</text></g>
+  <g class="g a_g10"><rect class="box" x="44" y="324" width="132" height="64" rx="10"/><text class="h" x="60" y="350">Verify</text><text class="s" x="60" y="371">reads the pods</text></g>
+  <g class="lapA">
+    <text class="cap" x="236" y="172">2 min 16 s</text>
+    <text class="cap" x="436" y="172">10 s, context and model call</text>
+    <text class="cap" x="928" y="410">26 s, source and policy</text>
+    <text class="cap" x="728" y="410">42 s</text>
+  </g>
   <path class="x" d="M1004 388V430"/>
   <path class="xx" d="M998 436l12 12M1010 436l-12 12"/>
   <text class="no" x="1020" y="448">no write</text>
-  <g class="gw"><rect class="box" x="44" y="470" width="1036" height="60" rx="10"/><text class="h" x="60" y="496">Workloads in the cluster</text><text class="s" x="60" y="517">changed only by Flux, after a person merges</text></g>
-  <text class="cap" x="44" y="556">Replay of one recorded run, not live: v0.3.0-rc.2, scenario oom. 3 min 34 s from symptom to pull request, shown here in 28 s.</text>
+  <g class="a_gw"><rect class="box" x="44" y="470" width="1036" height="60" rx="10"/><text class="h" x="60" y="496">Workloads in the cluster</text><text class="s" x="60" y="517">changed only by Flux, after a person merges</text></g>
+  <text class="cap lapA" x="44" y="556">Lap 1, recorded run, not live: v0.3.0-rc.2, scenario oom. 3 min 34 s from symptom to pull request, shown here in 13 s. The escalation path was not taken.</text>
+  <text class="cap lapB" x="44" y="574">Lap 2, illustration, not a recording and without numbers: the same flow through the escalation model. The read tools are offered to it; no call is shown.</text>
   <circle class="dot d1" r="4"/>
   <circle class="dot d2" r="4"/>
   <circle class="dot d3" r="4"/>
@@ -161,4 +198,6 @@
   <circle class="dot d9" r="4"/>
   <circle class="dot d10" r="4"/>
   <circle class="dot d11" r="4"/>
+  <circle class="dot de1" r="4"/>
+  <circle class="dot de2" r="4"/>
 </svg>

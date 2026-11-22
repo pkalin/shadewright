@@ -6,9 +6,9 @@ title: How it works
 
 Shadewright watches a Kubernetes cluster for symptoms, works out a fix, and proposes it as a pull request to your GitOps repository. A person reviews and merges it, your GitOps controller delivers it, and Shadewright checks that the symptom went away. This section follows one symptom from start to end in seven short pages.
 
-[![Looping replay of one recorded analysis, from an event to a verified pull request. No path leads from the agent or the model to the workloads.](../assets/diagrams/analysis-replay.svg)](../assets/diagrams/analysis-replay.svg "Open full size")
+[![Two-lap loop from an event to a verified pull request: a recorded analysis that did not escalate, then an illustration of one that does. No path leads from the agent or the model to the workloads.](../assets/diagrams/analysis-replay.svg)](../assets/diagrams/analysis-replay.svg "Open full size")
 
-A replay, not a live view: release v0.3.0-rc.2, scenario `oom`. There the first OOMKilled event took 3 min 34 s to become a pull request, with one model call; the replay takes 16 seconds. The record has no later timings. The model call and the steps after the merge are off by default.
+Two laps, 13 seconds each. Lap 1 replays a recording: release v0.3.0-rc.2, scenario `oom`. The first OOMKilled event took 3 min 34 s to become a pull request, with one model call, so the dim escalation path was not taken. The model call and the steps after the merge are off by default. Lap 2 is an illustration with no numbers: the same flow through the escalation model, with read tools offered, no call shown.
 
 ## Rules the design enforces
 

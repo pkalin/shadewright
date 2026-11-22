@@ -232,7 +232,8 @@ func (s *Store) check(rec providers.AnalysisRecord) error {
 // redactor's longest wait, is a retryable failure marked [providers.ErrNotChecked], not a refusal: Put tries it
 // again, and the same record may pass then.
 func (s *Store) checkClean(ctx context.Context, rec providers.AnalysisRecord) error {
-	keep := []string{rec.ID, rec.Fingerprint}
+	keep := make([]string, 0, 2+len(rec.Verified))
+	keep = append(keep, rec.ID, rec.Fingerprint)
 	for _, v := range rec.Verified {
 		keep = append(keep, string(v))
 	}

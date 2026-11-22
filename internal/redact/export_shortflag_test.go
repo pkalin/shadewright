@@ -16,7 +16,11 @@ limitations under the License.
 
 package redact
 
-import "math/rand/v2"
+import (
+	"math/rand/v2"
+
+	corev1 "k8s.io/api/core/v1"
+)
 
 // ShortContainer is a container's command and arguments with a password flag in them (#1075), the secret its
 // value holds and the words that must stay.
@@ -59,6 +63,48 @@ func ShortContainers() []ShortContainer {
 				ShortContainer{Form: "args after a flag " + f.name,
 					Args:   append(append([]string{shortLogLevel, shortDebug}, f.words(t, shortValue(t, secret))...), shortTail),
 					Secret: secret, Kept: []string{shortLogLevel, shortTail}})
+		}
+	}
+	return out
+}
+
+// ShortImagePod is a pod spec whose container of a table image holds its tool's password flag in its arguments,
+// with no command (#1075, the image row), the secret and the words that must stay.
+type ShortImagePod struct {
+	Form   string
+	Spec   corev1.PodSpec
+	Secret string
+	Kept   []string
+}
+
+// ShortImagePods returns, for every image of the table and every flag form its tool reads the password in, the
+// container alone, before and after a container of another image whose "-p" is a port, and as an init and an
+// ephemeral container next to it.
+func ShortImagePods() []ShortImagePod {
+	rng := rand.New(rand.NewPCG(1075, 6)) //nolint:gosec // a fixed seed keeps the corpus the same on every run
+	var out []ShortImagePod
+	i := 0
+	for _, row := range shortImageRows() {
+		for _, f := range shortArgForms[:3] {
+			if f.separated && row.tool.glued {
+				continue
+			}
+			for _, p := range shortPlacements[:5] {
+				secret := shortImageSecret(rng, row.tool, f)
+				image := shortImageRefs[i%len(shortImageRefs)](row.image)
+				i++
+				args := append(append([]string{shortLogLevel, shortDebug}, f.words(row.tool, shortValue(row.tool, secret))...),
+					shortTail)
+				db := corev1.Container{Name: "db", Image: image, Args: args}
+				app := corev1.Container{Name: "app", Image: shortAppImage, Args: shortAppArgs}
+				kept := []string{shortLogLevel, shortTail}
+				if p.name != "one container" {
+					kept = append(kept, `"`+shortAppPort+`"`)
+				}
+				pod, _ := p.object(db, app).(*corev1.Pod)
+				out = append(out, ShortImagePod{Form: row.image + " " + f.name + ", " + p.name, Spec: pod.Spec,
+					Secret: secret, Kept: kept})
+			}
 		}
 	}
 	return out

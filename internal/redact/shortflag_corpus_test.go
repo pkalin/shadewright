@@ -529,7 +529,37 @@ func shortFlagShapes(n int) map[string]string {
 		"short flag: a command on every line":  rep("mysql -vvvvvvvvpX\n"),
 		"short flag: curl value with no colon": "curl -u " + rep("a"),
 		"short flag: blank lines after -p":     "mongosh -p" + rep("\n   "),
+		"short flag: many containers, JSON":    shortManyContainersJSON(n),
+		"short flag: many containers, YAML":    shortManyContainersYAML(n),
+		// Objects opened and never closed, each with an image and an "args" key: every one is closed at the end.
+		"short flag: open objects with images": rep(`{"args":["-p","1"],"image":"mongo",`),
+		// A YAML item per line, each one column further right: every mapping stays open to the end.
+		"short flag: YAML staircase of images": shortImageStair(n),
 	}
+}
+
+// shortManyContainersJSON is a pod of about n bytes of containers, each of a table image after its arguments.
+func shortManyContainersJSON(n int) string {
+	unit := `{"name":"db","args":["-pswabc12","-p","8080"],"image":"registry.example:5000/library/mysql:8.4"},`
+	return `{"kind":"Pod","spec":{"containers":[` + strings.Repeat(unit, n/len(unit)+1) + `{}]}}`
+}
+
+// shortManyContainersYAML is a pod of about n bytes of containers in YAML, each of a table image after its
+// arguments.
+func shortManyContainersYAML(n int) string {
+	unit := "  - args:\n    - -pswabc12\n    - -p\n    - \"8080\"\n    image: bitnami/redis:7\n    name: db\n"
+	return "kind: Pod\nspec:\n  containers:\n" + strings.Repeat(unit, n/len(unit)+1)
+}
+
+// shortImageStair is about n bytes of YAML items, each one column right of the one before, with an image and
+// arguments.
+func shortImageStair(n int) string {
+	var b strings.Builder
+	for d := 0; b.Len() < n; d++ {
+		pad := strings.Repeat(" ", d%512)
+		b.WriteString(pad + "- image: mongo\n" + pad + "  args: [-p, x]\n")
+	}
+	return b.String()
 }
 
 // The shapes of shortFlagShapes are decided within the package's budget at 16 KiB, and withheld whole on a low

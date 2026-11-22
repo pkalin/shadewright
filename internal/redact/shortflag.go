@@ -105,28 +105,46 @@ type shortReader struct {
 	// command word of the table it held (pendingTool, pendingHas), for the "args" sequence after it.
 	command, pending, pendingHas bool
 	pendingTool                  shortFlagTool
-	// The last two words read, as byte ranges, to find the key before a sequence.
+	// images: the row of the table each "args" key with no "command" in its object takes from the object's
+	// "image", by the start of the key (shortImages).
+	images map[int]shortFlagTool
+	keyWords
+}
+
+// keyWords holds the last two words read, as byte ranges, to find the key before a value or a sequence.
+type keyWords struct {
+	s           string
 	prev, prev2 [2]int
+}
+
+// push records the word s[i:j] as the last read.
+func (k *keyWords) push(i, j int) { k.prev2, k.prev = k.prev, [2]int{i, j} }
+
+// keyAt reports whether the last words read are the key name ("name:", or "name" and ":"), and where the name
+// starts.
+func (k *keyWords) keyAt(name string) (int, bool) {
+	w := k.s[k.prev[0]:k.prev[1]]
+	if len(w) == len(name)+1 && w[len(name)] == ':' && strings.EqualFold(w[:len(name)], name) {
+		return k.prev[0], true
+	}
+	if w == ":" && strings.EqualFold(k.s[k.prev2[0]:k.prev2[1]], name) {
+		return k.prev2[0], true
+	}
+	return 0, false
 }
 
 // end ends the command: no command word, no sequence item pending.
 func (r *shortReader) end() { r.hasTool, r.args, r.first = false, false, false }
 
-// keyIs reports whether the last words read are the key name: "name:", or "name" and ":".
-func (r *shortReader) keyIs(name string) bool {
-	w := r.s[r.prev[0]:r.prev[1]]
-	if len(w) == len(name)+1 && w[len(name)] == ':' && strings.EqualFold(w[:len(name)], name) {
-		return true
-	}
-	return w == ":" && strings.EqualFold(r.s[r.prev2[0]:r.prev2[1]], name)
-}
-
 // startSequence starts a sequence. The value of an "args" key has no command word, unless a "command" sequence
 // came before it in the same object: then the command word of that one, if it held one of the table, is its own
-// (a container's command and arguments, as get_resource writes them). Any other sequence starts with its first
-// item, which decides.
+// (a container's command and arguments, as get_resource writes them). With no command, the base name of the
+// object's "image" is its command word when it names a row of the table (shortImages), and the arguments keep
+// the reading of arguments with no command word as well. Any other sequence starts with its first item, which
+// decides.
 func (r *shortReader) startSequence() {
-	args, command := r.keyIs("args"), r.keyIs("command")
+	at, args := r.keyAt("args")
+	_, command := r.keyAt("command")
 	r.end()
 	r.command = command
 	switch {
@@ -134,6 +152,9 @@ func (r *shortReader) startSequence() {
 		r.hasTool, r.tool = r.pendingHas, r.pendingTool
 	case args:
 		r.args = true
+		if t, ok := r.images[at]; ok {
+			r.hasTool, r.tool = true, t
+		}
 	default:
 		r.first = true
 	}
@@ -154,7 +175,8 @@ func (r *shortReader) endSequence() {
 // indentation of a line looked at for a YAML item, and the values of the flags by flagExtent, after which the
 // pass goes on from the end of the value.
 func shortFlagRead(wm *meter.Meter, s string, lines bool, add func(start, end int)) {
-	r := &shortReader{s: s, add: add, tm: &tokenMemo{}, lines: lines, first: lines}
+	r := &shortReader{s: s, add: add, tm: &tokenMemo{}, lines: lines, first: lines, images: shortImages(wm, s),
+		keyWords: keyWords{s: s}}
 	for i := 0; i < len(s); {
 		tick(wm, 1)
 		switch c := s[i]; {
@@ -197,7 +219,8 @@ func shortDelimiter(wm *meter.Meter, c byte) bool {
 
 // lineBreak reads the line break at i: inside a sequence, after a line continuation or before the next item of a
 // YAML block sequence it ends no command; before the first item of one it starts the sequence (with no command
-// word after an "args:" key); any other ends the command.
+// word after an "args:" key), and so does an item after an "args:" or "command:" key inside an item of the
+// sequence being read; any other ends the command.
 func (r *shortReader) lineBreak(wm *meter.Meter, i int) {
 	s := r.s
 	if r.lines || r.depth > 0 {
@@ -218,7 +241,14 @@ func (r *shortReader) lineBreak(wm *meter.Meter, i int) {
 		k++
 	}
 	item := k < len(s) && s[k] == '-' && (k+1 == len(s) || isSpace(wm, s[k+1]))
+	_, args := r.keyAt("args")
+	_, command := r.keyAt("command")
 	switch {
+	case item && r.yaml && (args || command):
+		// A sequence inside an item of the one being read ("- args:" and its items below it, as YAML writes
+		// a container): it starts here and is read as its own.
+		r.endSequence()
+		r.startSequence()
 	case item && r.yaml:
 	case item:
 		r.startSequence()
@@ -234,7 +264,7 @@ func (r *shortReader) lineBreak(wm *meter.Meter, i int) {
 // word reads the word s[i:j] and returns where the pass goes on: after the word, or after the value of a flag.
 func (r *shortReader) word(wm *meter.Meter, i, j int) int {
 	w := r.s[i:j]
-	r.prev2, r.prev = r.prev, [2]int{i, j}
+	r.push(i, j)
 	if w == "-" {
 		return j // the dash of a YAML block sequence item
 	}

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -80,5 +81,60 @@ func TestShortFlagThroughGetResource(t *testing.T) {
 	}
 	if leaked > 0 {
 		t.Errorf("%d of %d containers leak their secret through get_resource", leaked, len(cases))
+	}
+}
+
+// podSpecReader answers get_resource with a pod, a Deployment or a StatefulSet whose pod spec is spec.
+type podSpecReader struct {
+	client.Reader
+	spec corev1.PodSpec
+}
+
+func (r *podSpecReader) Get(_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	meta := metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}
+	switch o := obj.(type) {
+	case *corev1.Pod:
+		*o = corev1.Pod{ObjectMeta: meta, Spec: r.spec}
+	case *appsv1.Deployment:
+		*o = appsv1.Deployment{ObjectMeta: meta, Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: r.spec}}}
+	case *appsv1.StatefulSet:
+		*o = appsv1.StatefulSet{ObjectMeta: meta, Spec: appsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{Spec: r.spec}}}
+	default:
+		return fmt.Errorf("unexpected kind %T", obj)
+	}
+	return nil
+}
+
+// get_resource shows a pod, a Deployment and a StatefulSet whose container of a table image (no command) holds
+// its tool's password flag in a form the arguments with no command word show: the image decides, the secret is
+// hidden, and a container of another image next to it keeps its port (#1075, the image row).
+func TestShortFlagImageThroughGetResource(t *testing.T) {
+	reader := &podSpecReader{}
+	set, err := tools.New(tools.Config{Pods: reader, Events: reader, Objects: reader, Redactor: defaultRedactor(),
+		Namespaces: []string{toolNS}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := redact.ShortImagePods()
+	leaked := 0
+	for i, c := range cases {
+		kind := []string{toolKind, "Deployment", "StatefulSet"}[i%3]
+		reader.spec = c.Spec
+		out := callTool(set, tools.NameGetResource, map[string]any{argKind: kind, argNamespace: toolNS, argName: toolPod})
+		if strings.Contains(out, c.Secret) {
+			leaked++
+			if leaked <= 5 {
+				t.Errorf("%s (%s): the secret %q is left:\n%s", c.Form, kind, c.Secret, out)
+			}
+			continue
+		}
+		for _, k := range c.Kept {
+			if !strings.Contains(out, k) {
+				t.Errorf("%s (%s): %q is gone:\n%s", c.Form, kind, k, out)
+			}
+		}
+	}
+	if leaked > 0 {
+		t.Errorf("%d of %d pod specs leak their secret through get_resource", leaked, len(cases))
 	}
 }

@@ -47,21 +47,19 @@ func longNoteObservation(note string) Observation {
 		Note: note, RegardingKind: kindPod, RegardingName: "app-7d9f8b6c5-x2k4p", Source: SourceEvent}
 }
 
-// A note over 4 KiB is not read for the fingerprint (#1087, decision of 2026-11-22): the fixed marker stands in, so
-// its fingerprint returns at once and is the same with the limit on the heap of the redactions running at once
-// held whole by an analysis and with it free. The shown symptom still reads the note.
-func TestLongNoteFingerprintDoesNotWait(t *testing.T) {
+// A note over 4 KiB is not read (#1087, decisions of 2026-11-22): the fixed marker stands in for the fingerprint,
+// and a marker with the note's length for the shown symptom and an evidence value. So each returns at once and is
+// the same with the limit on the heap of the redactions running at once held whole by an analysis and with it free.
+func TestLongNoteDoesNotWait(t *testing.T) {
 	red, err := redact.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	o := longNoteObservation(longNote("a", 5<<10))
-	idle, idleNote := Fingerprint(o), Normalize(o)
-	if idleNote != placeholderLongNote {
-		t.Fatalf("Normalize of a 5 KiB note = %q, want %q", idleNote[:min(len(idleNote), 80)], placeholderLongNote)
-	}
-	if s := Symptom(o); s == placeholderLongNote || !strings.Contains(s, "registry.example/a:1.2") || strings.Contains(s, "s3cr3taValue") {
-		t.Fatalf("Symptom of a 5 KiB note on an idle analyzer = %q, want the note read and redacted", s[:min(len(s), 120)])
+	const shown, value = "<long note: 5120 bytes>", "<long value: 5120 bytes>"
+	idle := Fingerprint(o)
+	if got := [3]string{Normalize(o), Symptom(o), Value(o.Note)}; got != [3]string{placeholderLongNote, shown, value} {
+		t.Fatalf("a 5 KiB note on an idle analyzer: Normalize, Symptom, Value = %q, want %q, %q, %q", got, placeholderLongNote, shown, value)
 	}
 	redacttest.HoldHeapLimit(t, func(block func()) {
 		red.PiecesFitting([]redact.Piece{{Text: "pwd=abcdef", Data: true}}, func([]string) bool { block(); return true })
@@ -71,15 +69,15 @@ func TestLongNoteFingerprintDoesNotWait(t *testing.T) {
 		_, ok := red.WithContext(ctx).ReplaceChecked(o.Note, rawPlaceholder, sanitize)
 		return !ok
 	})
-	got := make(chan [2]string, 1)
-	go func() { got <- [2]string{Fingerprint(o), Normalize(o)} }()
+	got := make(chan [4]string, 1)
+	go func() { got <- [4]string{Fingerprint(o), Normalize(o), Symptom(o), Value(o.Note)} }()
 	select {
 	case g := <-got:
-		if g[0] != idle || g[1] != idleNote {
-			t.Errorf("with the limit held: fingerprint %s, note %q; with it free %s, %q", g[0], g[1], idle, idleNote)
+		if want := [4]string{idle, placeholderLongNote, shown, value}; g != want {
+			t.Errorf("with the limit held: %q; with it free %q", g, want)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("the fingerprint of a 5 KiB note waited for the heap limit")
+		t.Fatal("the fingerprint, symptom or value of a 5 KiB note waited for the heap limit")
 	}
 }
 
@@ -89,8 +87,8 @@ func TestLongNotesOfOneSubjectShareAFingerprint(t *testing.T) {
 	if Fingerprint(a) != Fingerprint(b) {
 		t.Errorf("two 5 KiB notes of one subject and reason: fingerprints %s and %s, want one", Fingerprint(a), Fingerprint(b))
 	}
-	if Symptom(a) == Symptom(b) {
-		t.Errorf("the shown symptoms of two different notes are equal: %q", Symptom(a))
+	if Symptom(a) == Symptom(b) || strings.Contains(Symptom(a), "s3cr3t") {
+		t.Errorf("the shown symptoms of two long notes of different lengths: %q and %q, want the two markers", Symptom(a), Symptom(b))
 	}
 }
 

@@ -24,20 +24,20 @@ import (
 	"github.com/pkalin/shadewright/internal/redact/meter"
 )
 
-// Short entries (#1087, decision of 2026-11-22). The collector redacts each event note before it fingerprints it
-// (package fingerprint), on one worker for every namespace. A fingerprint must not depend on what the analyses are
-// doing, so a short entry does not take a share of the limit on the heap of the redactions running at once
-// (heaplimit.go) and never waits for it. It cannot be used for large text: an entry longer than MaxShortEntry is
-// withheld (ReasonSize) before any work, and the caller redacts it through the ordinary entry points instead.
+// Short entries (#1087, decisions of 2026-11-22). The collector redacts event notes, symptoms and module evidence
+// values (package fingerprint, package modules) on one worker for every namespace. A fingerprint or a symptom must
+// not depend on what the analyses are doing, so a short entry does not take a share of the limit on the heap of
+// the redactions running at once (heaplimit.go) and never waits for it. It cannot be used for large text: an entry
+// longer than MaxShortEntry is withheld (ReasonSize) before any work; the collector does not read such a note at all.
 //
 // The heap of the short entries is counted next to that limit, not in it: at most shortEntrySlots of them run at
 // once, each holding at most ShortEntryHeap (TestHeapOfAShortEntry measures every shape known at MaxShortEntry).
 // One more short entry waits only for another short entry to finish, never for an analysis.
 
 const (
-	// MaxShortEntry is the longest entry, in bytes, the short entry points take: four times the 1 KiB the events
-	// API gives a note. A note written through the older core API can be longer; it takes the ordinary entry
-	// points.
+	// MaxShortEntry is the longest entry, in bytes, the short entry points take: four times the 1,024 bytes the API
+	// server allows the note of an event that has an eventTime (every event created through events.k8s.io/v1). An
+	// event without one, written through the core API, is not checked for its note length there.
 	MaxShortEntry = 4 << 10
 	// ShortEntryHeap bounds the heap one short entry holds (TestHeapOfAShortEntry).
 	ShortEntryHeap = 1 << 20

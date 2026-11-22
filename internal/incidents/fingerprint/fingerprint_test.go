@@ -469,8 +469,8 @@ func TestNormalizeRedacts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			o := Observation{Note: tt.note}
-			// A note over redact.MaxShortEntry is not read for the fingerprint (#1087): the shown symptom still
-			// reads it with the full redactor, so that is where its redaction is checked.
+			// A note over redact.MaxShortEntry is not read (#1087): the fingerprint takes "<long note>" and the
+			// shown symptom "<long note: N bytes>", so no part of it is kept.
 			if len(tt.note) > redact.MaxShortEntry {
 				if got := Normalize(o); got != placeholderLongNote {
 					t.Errorf("Normalize of a note of %d bytes = %q, want %q", len(tt.note), got, placeholderLongNote)
@@ -480,7 +480,7 @@ func TestNormalizeRedacts(t *testing.T) {
 				if strings.Contains(got, tt.secret) {
 					t.Errorf("%s: secret %q kept in %q", name, tt.secret, got)
 				}
-				if got != placeholderLongNote && !strings.Contains(got, placeholderRedacted) {
+				if !strings.HasPrefix(got, "<long note") && !strings.Contains(got, placeholderRedacted) {
 					t.Errorf("%s: no redaction placeholder in %q", name, got)
 				}
 				if unredacted(got) {

@@ -53,7 +53,7 @@ const (
 	// most HeapPerByte bytes for each byte of the entry plus HeapFixed, 46 MiB for the largest entry a caller passes
 	// (an object of about 1.5 MiB), inside the 48 MiB the decision allows. It is the bound of the shapes the heap
 	// tests list as within it (heapShape.overAt), not of every shape: text dense in matches or in control characters
-	// holds more, at worst 69.6 bytes per byte measured (#1087, TestHeapPerByteOfEveryShapePieces). The redactions
+	// holds more, at worst 71.7 bytes per byte measured (#1087, TestHeapPerByteOfEveryShapePieces). The redactions
 	// running at once are weighed for that worst case instead (HeapWeightPerByte, heaplimit.go).
 	HeapPerByte = 28
 	HeapFixed   = 4 << 20

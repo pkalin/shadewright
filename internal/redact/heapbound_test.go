@@ -100,6 +100,9 @@ var heapShapes = []heapShape{
 		overAt: append([]string{epStrings}, pieces...)},
 	// A list of addresses, and of IPv4 addresses: a match every few bytes.
 	{name: "addresses", text: func(n int) string { return repeatTo("ab"+"@"+"cd.ef, ", n) }, overAt: pieces},
+	// Addresses each followed by a control character (#1087, fifth pass of 2026-11-22): the heaviest shape measured,
+	// 71.7 bytes per byte past HeapFixed through PiecesWithin at the largest object (111.6 MiB).
+	{name: "addresses and control", text: func(n int) string { return repeatTo("ab"+"@"+"cd.ef\x01", n) }, overAt: pieces},
 	{name: "ipv4 addresses", text: func(n int) string { return repeatTo("10.0.0.1\n", n) }},
 	// A run of slashes alone: the long-token rule reads it as empty parts between slashes (base64Windows), each
 	// of which it held in 56 bytes before #1087.
@@ -240,6 +243,11 @@ func peakLiveHeap(f func()) uint64 {
 	return peak - min(base, peak)
 }
 
+// overTestLine reports whether h holds more than the line every heap test of a shape holds an entry to: more
+// than heapWeightRoom percent of HeapWeightPerByte per byte past HeapFixed, at the entry's own size.
+// TestHeapPerByteOfEveryShape and FuzzHeapWithinWeight both fail on it.
+func (h heapRatio) overTestLine() bool { return h.perByte() > HeapWeightPerByte*heapWeightRoom/100 }
+
 // heapSizes are the sizes of entry TestHeapPerByteOfEveryShape measures each shape at: small, middle and the
 // largest object (the largest log for ReplaceFrom).
 var heapSizes = []int{64 << 10, 512 << 10, largestObject}
@@ -321,7 +329,7 @@ func heapPerByteOf(t *testing.T, names []string) {
 					ratios = append(ratios, h)
 					t.Logf("an entry of %d bytes: peak %.1f MiB, %.1f bytes per byte past HeapFixed, decided %v", size,
 						mib(peak), h.perByte(), ok)
-					if h.perByte() > HeapWeightPerByte*heapWeightRoom/100 {
+					if h.overTestLine() {
 						t.Errorf("%s on an entry of %d bytes of %s held %.1f MiB, %.1f bytes per byte past HeapFixed: over %d percent of HeapWeightPerByte (%d)",
 							ep.name, size, sh.name, mib(peak), h.perByte(), heapWeightRoom, HeapWeightPerByte)
 					}
@@ -369,5 +377,28 @@ func TestHeapOfAHiddenPieceIsBounded(t *testing.T) {
 	if peak > bound {
 		t.Errorf("a hidden piece of %d bytes of escapes held %.1f MiB, above the bound of %.1f MiB", largestObject,
 			mib(peak), mib(bound))
+	}
+}
+
+// measuredHeapUnits are the units of the shapes the passes on #1087 measured at every entry point (2026-11-21 and
+// 2026-11-22), the heaviest of them `ab@cd.ef\x01` (71.7 bytes per byte past HeapFixed through PiecesWithin).
+// Each is a shape of heapShapes, so the table test measures it in every run.
+var measuredHeapUnits = []string{
+	"\x01", "x\x01", "x\u0085", "Ab3\x01dE5\x01gH7\x01 ", "lorem ipsum dolor sit amet ", "/", `"pwd":"a",`,
+	"ab" + "@" + "cd.ef, ", "ab" + "@" + "cd.ef\x01", "password=hunter2\n",
+}
+
+func TestHeapShapesHoldTheMeasuredOnes(t *testing.T) {
+	for _, unit := range measuredHeapUnits {
+		found := false
+		for _, sh := range heapShapes {
+			if sh.text(4*len(unit)) == repeatTo(unit, 4*len(unit)) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("the measured shape %q repeated is not in heapShapes", unit)
+		}
 	}
 }

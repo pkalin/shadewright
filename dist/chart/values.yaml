@@ -353,8 +353,8 @@ analyzer:
       # @section -- Analyzer
       cpu: 500m
       # -- Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never
-      # unbounded. 256Mi since #1087: one redaction of the largest object can hold about 110 MiB of heap, and the
-      # redactions running at once share half of `goMemLimit`.
+      # unbounded. 256Mi since #1087: one redaction of the largest object can hold up to about 117 MiB of heap, and
+      # the redactions running at once share half of `goMemLimit`.
       # @section -- Analyzer
       memory: 256Mi
     requests:

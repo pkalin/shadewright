@@ -117,7 +117,7 @@ spec:
         resources:
           limits:
             cpu: 500m
-            # 256Mi since #1087: one redaction of the largest object can hold about 110 MiB of heap (design 10.3).
+            # 256Mi since #1087: one redaction of the largest object can hold up to about 117 MiB of heap (design 10.3).
             memory: 256Mi
           requests:
             cpu: 10m

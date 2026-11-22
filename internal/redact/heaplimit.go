@@ -30,34 +30,32 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-// The heap of the redactions running at once (#1087, decision of 2026-11-22). The analyzer runs up to eight
-// analyses at once, and each may redact an entry of up to about 1.5 MiB. Every entry point takes, before its
-// decision, a share of a process-wide limit (heapWeight: HeapFixed plus HeapWeightPerByte for each byte of the
-// entry) and gives it back when the decision is done, on every return and on a panic.
+// The heap of the redactions running at once (#1087, decisions of 2026-11-22). The analyzer runs up to eight
+// analyses at once, and each may redact an entry of up to about 1.5 MiB. Every ordinary entry point takes, before
+// its decision, a share of a process-wide limit (heapWeight: HeapFixed plus HeapWeightPerByte for each byte of the
+// entry) and gives it back when the decision is done, on every return and on a panic (budget.go, meteredWhy).
 //
-// HeapWeightPerByte is not a bound proven shape by shape: it is the worst heap per byte measured over every entry
-// point and every shape known (TestHeapPerByteOfEveryShape), with a margin. The weight of an entry depends on its
-// size only, not on its content, so a shape heavier than HeapWeightPerByte, not yet found, holds more than its
-// share until the constant is raised in a release; the fuzz target FuzzHeapWithinWeight looks for one.
+// HeapWeightPerByte is not a bound proven shape by shape: the heap tests (TestHeapPerByteOfEveryShape) and the fuzz
+// target FuzzHeapWithinWeight fail when an entry holds more than heapWeightRoom percent of it per byte past
+// HeapFixed; the worst measured is 71.7 (PiecesWithin on "ab@cd.ef\x01" repeated, 111.6 MiB at 1.5 MiB). The
+// weight of an entry depends on its size only, not on its content, so a shape heavier than HeapWeightPerByte, not
+// yet found, holds more than its share until the constant is raised in a release.
 //
 // The limit is half of the Go memory limit of the process (GOMEMLIMIT, which both install paths set to 90 percent
-// of the analyzer's memory limit: about 115 MiB of its 256 Mi), read at the first decision; the other half is for
-// the rest of the process and for one entry over the limit. Without a Go memory limit the limit is
-// fallbackHeapLimit, logged once: it is never off. An entry whose weight is over the whole limit takes all of it:
-// it runs alone, after the ones running when it came, and none starts beside it. Waiters are served in the order
-// they came, so a heavy entry is not starved by light ones. So the redactions running at once hold at most the
-// limit, or one entry's weight when that is more.
+// of the analyzer's memory limit: 115.2 MiB of its 256 Mi), read at the first decision. Without a Go memory limit
+// the limit is fallbackHeapLimit, logged once: it is never off. An entry whose weight is over the whole limit takes
+// all of it: it runs alone, after the ones running when it came, and none starts beside it. Waiters are served in
+// the order they came, so a heavy entry is not starved by light ones. So the entries running at once hold at most
+// the larger of the limit and one entry at the tests' line (HeapFixed plus 75 bytes per byte: 116.5 MiB at 1.5 MiB),
+// as TestRedactionsAtOnceStayUnderTheLimit checks.
 //
-// Who waits at the limit: every caller of the ordinary entry points in the process. In the analyzer the analysis's
-// tool calls, its context build and its log reads pass their context (WithContext), and so does the analysis
-// record's redaction check (the write's context). The collector's fingerprint never waits: a note of at most
-// MaxShortEntry bytes takes the short entry points (shortentry.go), outside the limit, and a longer one is not
-// read for it (package fingerprint). The shown symptom of a longer note waits like any other entry. A wait
-// ends when the context of the redactor ends or after maxHeapWait, whichever is first; the entry points take no
-// context, so a redactor without one waits at most maxHeapWait. An entry whose wait ends is withheld (ReasonWait), like an
-// entry over its budget: the caller shows the source as failed. A caller must not decide another entry inside a
-// decision (a fits function of PiecesFitting that called an entry point would wait on the share its own decision
-// holds).
+// Who waits at the limit: every caller of the ordinary entry points in the process. In the analyzer the read
+// tools, the context build and the log source pass their context (WithContext), and the analysis store passes one
+// of at most a try's timeout for each try of a record's check. A caller that passes none waits at most maxHeapWait.
+// The collector never waits: it calls only the short entry points (shortentry.go), and a note or value longer than
+// MaxShortEntry is not read (package fingerprint). An entry whose wait ends is withheld (ReasonWait), like an entry
+// over its budget. A caller must not decide another entry inside a decision (a fits function of PiecesFitting that
+// called an entry point would wait on the share its own decision holds).
 
 const (
 	// HeapWeightPerByte is the heap one redaction is counted for in the limit, per byte of its entry, on top of
@@ -116,8 +114,8 @@ const MeasuredGoMemoryLimit = 256 << 20 * 9 / 10
 
 // WarnIfMemoryUnderMeasured logs one warning on log, and returns true, when the process has a Go memory limit
 // under MeasuredGoMemoryLimit: the analyzer's memory limit was set under 256 Mi. Nothing else changes: the heap
-// limit is still half of the Go memory limit, and an entry heavier than it still runs alone, holding up to its
-// measured worst case (about 110 MiB for the largest object), which a smaller memory limit may not hold; the risk
+// limit is still half of the Go memory limit, and an entry heavier than it still runs alone, holding up to the
+// tests' line (about 117 MiB for the largest object), which a smaller memory limit may not hold; the risk
 // is an out-of-memory kill, not a longer wait. The analyzer calls it once at start.
 func WarnIfMemoryUnderMeasured(log logr.Logger) bool {
 	gomem := debug.SetMemoryLimit(-1)
@@ -125,7 +123,7 @@ func WarnIfMemoryUnderMeasured(log logr.Logger) bool {
 		return false
 	}
 	log.Info("Warning: the Go memory limit (GOMEMLIMIT) is under the size redaction's heap limit was measured for; "+
-		"one large entry can still hold about 110 MiB and the analyzer may be killed for its memory. Set the "+
+		"one large entry can still hold up to about 117 MiB and the analyzer may be killed for its memory. Set the "+
 		"analyzer's memory limit to at least 256Mi",
 		"goMemoryLimitBytes", gomem, "measuredForBytes", int64(MeasuredGoMemoryLimit))
 	return true

@@ -86,7 +86,7 @@ const withholdSizes = `
 -password,        Strings       4440   4450
 TOKEN-blank-line  String        30517  30526
 TOKEN-blank-line  StringTwice   25360  25369
-TOKEN-blank-line  Strings       11482  11491
+TOKEN-blank-line  Strings       11572  11581
 glued-auth        String        34776  34784
 glued-auth        StringTwice   31464  31472
 glued-auth        Strings       9736   9744

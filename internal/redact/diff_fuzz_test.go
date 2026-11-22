@@ -20,9 +20,12 @@ import (
 	"bytes"
 	"fmt"
 	"maps"
+	"runtime/debug"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/providers"
@@ -175,6 +178,12 @@ func fuzzDiff(f *testing.F, target string) {
 	}
 	body := diffBodies[target]
 	f.Fuzz(func(t *testing.T, data []byte) {
+		if raceDetector && target == "FuzzDiffStrings" {
+			dec := redacttest.Decode(data, 6)
+			if n := stringsSize(dec.Fields[:int(dec.Knob)%6+1]); n > raceStringsBound {
+				t.Skipf("%d bytes: under -race only the seeds run, and those over %d bytes run without it (#962)", n, raceStringsBound)
+			}
+		}
 		fails, counted := body(data)
 		checkDiff(t, target, data, counted, fails)
 	})
@@ -229,11 +238,22 @@ func FuzzDiffStrings(f *testing.F) { fuzzDiff(f, "FuzzDiffStrings") }
 
 func diffStrings(data []byte) ([]string, bool) {
 	dec := redacttest.Decode(data, 6)
-	items := dec.Fields[:int(dec.Knob)%6+1]
+	return diffStringsOf(dec.Fields[:int(dec.Knob)%6+1])
+}
+
+// diffStringsOf is the check of FuzzDiffStrings on the strings items.
+func diffStringsOf(items []string) ([]string, bool) {
 	joined := strings.Join(items, "\n")
 	var out []string
 	var ok bool
-	total, release, counted := measureWork(func() { out, ok = StringsChecked(items) })
+	var total, release int64
+	var counted bool
+	if !returnsWithin(productDeadline, func() {
+		total, release, counted = measureWork(func() { out, ok = StringsChecked(items) })
+	}) {
+		return []string{fmt.Sprintf("P3: Strings did not return within %v on %d strings of %d bytes",
+			productDeadline, len(items), stringsSize(items))}, false
+	}
 	fails := workFails("Strings", total, release, stringsSize(items))
 	if len(out) != len(items) {
 		fails = append(fails, fmt.Sprintf("P4: Strings returned %d strings for %d", len(out), len(items)))
@@ -241,6 +261,12 @@ func diffStrings(data []byte) ([]string, bool) {
 	if fails = append(fails, withheldFails("Strings", joined, out, ok)...); !ok {
 		return fails, counted
 	}
+	if counted && total > oracleStepCap {
+		// The oracles below cost about twice the product's work again (#962): past the cap they would hold a
+		// fuzzing worker near its limit of a minute, so only the product's own checks above hold of this entry.
+		return fails, counted
+	}
+	diffStringsOracles.Add(1)
 	fails = append(fails, decidedFails("Strings", out, defaultRedactor.strings(nil, items))...)
 	rec := redacttest.NewRecorder()
 	twice := releasedTwice(rec)
@@ -256,6 +282,65 @@ func diffStrings(data []byte) ([]string, bool) {
 	}
 	fails = append(fails, utf8Fails("Strings", joined, apart)...)
 	return fails, counted
+}
+
+// productDeadline is how long FuzzDiffStrings waits for the product's Strings on one input before it fails the
+// input as P3, the input kept: below the minute after which Go's fuzzing worker kills itself and reports only
+// "hung or terminated unexpectedly" (time.AfterFunc of 60 seconds in internal/fuzz RunFuzzWorker, go1.27.4). The
+// product's work is bounded by its budget (P3), so this catches a loop that spends no counted step, or a reading so
+// slow per step that the budget no longer bounds its time. On the test runner under the fuzzer's coverage
+// instrumentation an entry of 80 KiB at 208 steps per byte took 2.6 seconds alone (#962).
+// Under the race detector, where nothing is fuzzed and the reading is many times slower, it is five minutes. A
+// variable only so that a test can shorten it.
+var productDeadline = func() time.Duration {
+	if raceDetector {
+		return 5 * time.Minute
+	}
+	return 40 * time.Second
+}()
+
+// oracleStepCap is the product's counted work above which FuzzDiffStrings does not run its oracles on an entry
+// (the decision without a budget for P5, the release's reading for P1, String of the strings joined for P2). They
+// took 4.8 of the 7.3 seconds of an entry of 17 million steps on the test runner under the fuzzer's coverage
+// instrumentation, 12.5 seconds with 24 such entries at once (#962): at this cap an entry stays near 11 seconds
+// alone. The cap is in counted steps, not bytes, so it bounds the cost of the oracles whatever the input's shape,
+// and it applies only where work is counted (the build tag redactwork, which the fuzzing runs use).
+const oracleStepCap = 24 << 20
+
+// raceStringsBound is the largest entry FuzzDiffStrings reads under the race detector, where only its seeds run:
+// the seed of 80 KiB found-962-strings-80k took 51 seconds there on the test runner, and 1.4 seconds without it
+// (#962). The run with the tag redactwork, without the race detector, reads every seed.
+const raceStringsBound = 64 << 10
+
+// diffStringsOracles counts the entries FuzzDiffStrings ran its oracles on, for the test of oracleStepCap.
+var diffStringsOracles atomic.Int64
+
+// returnsWithin runs f in its own goroutine and reports whether it returned within d. A panic of f is raised again
+// in the caller, so that the fuzzing engine reports it with its input as a panic of the target (P4). After a false
+// result f may still be running: the caller fails the input and stops.
+func returnsWithin(d time.Duration, f func()) bool {
+	done := make(chan any, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Sprintf("%v\n%s", r, debug.Stack())
+				return
+			}
+			done <- nil
+		}()
+		f()
+	}()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		if r != nil {
+			panic(r)
+		}
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // FuzzDiffReplaceFrom checks the excerpt of a log (ReplaceFrom, as the log source calls it in

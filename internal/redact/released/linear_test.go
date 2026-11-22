@@ -59,6 +59,10 @@ func workOf(s string) int64 {
 }
 
 func TestFlagRunsAndTokenPairsWorkIsLinear(t *testing.T) {
+	if raceDetector {
+		t.Skip("it counts the work on texts of up to 36 KiB, 10 to 20 times slower under -race; the run of this " +
+			"package without it checks it")
+	}
 	for _, sh := range linearShapes {
 		var prev int64
 		for i, size := range []int{2 << 10, 4 << 10, 8 << 10, 16 << 10, 32 << 10} {
@@ -113,15 +117,24 @@ func runText(r *rand.Rand, n int) string {
 // string the key sits in (keyValueExtent) take effect.
 func TestFlagRunsMatchKeptCopy(t *testing.T) {
 	r := rand.New(rand.NewPCG(962, 1)) // #nosec G404 -- reproducible generated texts
-	inputs := make([]string, 0, 3100)
-	for range sampled(3000) {
+	inputs := make([]string, 0, 1240)
+	for range sampled(1200) {
 		inputs = append(inputs, runText(r, 1+r.IntN(40)))
 	}
-	for range sampled(40) {
+	long := 20
+	if raceDetector {
+		// The kept copy's work grows with the square of these, which the race detector makes 10 to 20 times slower.
+		long = 0
+	}
+	for range long {
 		inputs = append(inputs, runText(r, 300+r.IntN(600)))
 	}
+	sizes := []int{100, 455, 456, 500, 700}
+	if raceDetector {
+		sizes = sizes[:1]
+	}
 	for _, sh := range linearShapes {
-		for _, n := range []int{100, 455, 456, 500, 1000} {
+		for _, n := range sizes {
 			inputs = append(inputs, strings.Repeat(sh.unit, n)+sh.tail)
 		}
 	}

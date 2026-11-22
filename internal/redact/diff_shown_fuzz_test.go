@@ -17,6 +17,7 @@ limitations under the License.
 package redact
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -47,6 +48,9 @@ func FuzzDiffStringShown(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
+		if n := len(redacttest.Decode(data, 1).Joined("")); raceDetector && n > raceStringsBound {
+			t.Skipf("%d bytes: under -race only the seeds run, and those over %d bytes run without it (#962)", n, raceStringsBound)
+		}
 		fails, counted := diffStringShown(data)
 		checkDiff(t, "FuzzDiffStringShown", data, counted, fails)
 	})
@@ -56,13 +60,28 @@ func diffStringShown(data []byte) ([]string, bool) {
 	in := redacttest.Decode(data, 1).Joined("")
 	const keep = "api"
 	var shown, twice string
-	var okShown, okTwice bool
-	totalShown, releaseShown, counted := measureWork(func() { shown, okShown = StringShownChecked(in, keep) })
-	totalTwice, releaseTwice, _ := measureWork(func() { twice, okTwice = StringTwiceShownChecked(in, nil) })
+	var okShown, okTwice, counted bool
+	var totalShown, releaseShown, totalTwice, releaseTwice int64
+	// The product's calls under the deadline of FuzzDiffStrings, so that a loop that spends no counted step fails
+	// the input as P3 before the fuzzing worker's minute (#962).
+	productsRunning.Add(1)
+	if !returnsWithin(productDeadline, func() {
+		defer productsRunning.Done()
+		totalShown, releaseShown, counted = measureWork(func() { shown, okShown = StringShownChecked(in, keep) })
+		totalTwice, releaseTwice, _ = measureWork(func() { twice, okTwice = StringTwiceShownChecked(in, nil) })
+	}) {
+		return []string{fmt.Sprintf("P3: StringShown and StringTwiceShown did not return within %v on %d bytes",
+			productDeadline, len(in))}, false
+	}
 	fails := workFails("StringShown", totalShown, releaseShown, len(in))
 	fails = append(fails, workFails("StringTwiceShown", totalTwice, releaseTwice, len(in))...)
 	fails = append(fails, withheldFails("StringShown", in, []string{shown}, okShown)...)
 	fails = append(fails, withheldFails("StringTwiceShown", in, []string{twice}, okTwice)...)
+	if counted && max(totalShown, totalTwice) > oracleStepCap {
+		// Past the cap of FuzzDiffStrings the oracles below would hold a fuzzing worker near its limit (#962): only
+		// the product's own checks above hold of this entry.
+		return fails, counted
+	}
 	shownView := WithoutControls(in)
 	rules := redacttest.Hiding(shownView, render(nil, shownView, settle(nil, shownView, defaultRedactor.ruleMatches(nil, shownView))))
 	if okShown {

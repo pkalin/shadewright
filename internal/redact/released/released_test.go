@@ -32,8 +32,9 @@ import (
 )
 
 // The files of the release before are kept byte for byte: the sums are those of redact.go, extent.go and work.go
-// of package redact at origin/main 0701cd3a with "package released" for "package redact", and the change of #873,
-// which made the work linear without changing the output (lines.go is new with it). What the code computes is
+// of package redact at origin/main 0701cd3a with "package released" for "package redact", and the changes of #873
+// and #962, which made the work linear without changing the output (lines.go is new with #873; #962 added the
+// memories of the flag rules, tokenMemo and plainRun, and the cut in keyValueExtent). What the code computes is
 // checked against that release's results by TestReleasedReproducesTheReleaseBefore (package redact), and against
 // the code before #873 (testdata/v052) by the tests of kept_test.go and TestReleasedSpansMatchKeptCopy.
 //
@@ -41,8 +42,8 @@ import (
 // bytes: the sums are of the files with it taken out (unmetered), printed by go/printer.
 func TestReleasedIsTheReleaseBefore(t *testing.T) {
 	for name, want := range map[string]string{
-		"redact.go": "f1c529161cef604df2e6d6741caa0d589fff7959969aef33981cbba97e81e031",
-		"extent.go": "83c7cd9d2f8b1de7af41019e7631c88eeb23962bfa3952a5f2edc6f54d0ba0aa",
+		"redact.go": "114fb82515066d807a778f20a1d8a9869023699cf44294d53a306723bcf6a9f6",
+		"extent.go": "428089ea0b18b850bdc19d825d15fef74b2926cf251a1a9da0fd01457d74fe6d",
 		"work.go":   "02ba296592fb1f3ac8f8d5cda941abe1ee782c89e7d1f7901844d6ae7211e3f5",
 		"lines.go":  "7ba72fa9847d6bce30faecc36b3385f67d85fe2e12ea512746a33452469b6a0c",
 	} {

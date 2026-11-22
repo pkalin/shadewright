@@ -1,4 +1,4 @@
-# Outputs of the entry points on the control-free corpus of #852, by input, at origin/main 1de48193.
+# Outputs of the entry points on the control-free corpus of #852, by input, at origin/main cd4fca8f.
 # entry points: check_missing_reference,fingerprint.Normalize,fingerprint.Symptom,fingerprint.Value,get_delivery_status,get_pod_logs,get_resource,get_resource of the strings,incidentcontext.Value,incidentcontext.Value of the symptom,kube.Excerpt,list_events,modules.BoundValue,query_metrics,query_metrics of the labels,redact.SecretCollection,redact.SecretKey,redact.StringChecked,redact.StringKeepingChecked,redact.StringTwiceChecked,redact.StringsChecked
 ab78fc1a2790f89a	15d8af	2a5783	2a5783	2a5783	8c4d73	e7214f	2cf14d	-	887121	c83bd6	363a90	34db10	2a5783	3566bf	-	c92217	c92217	cd3af9	cd3af9	cd3af9	2cd620
 aef963b80e5156f4	6005db	780c86	780c86	780c86	db142a	173a88	3d3e47	-	58ce2e	1b951d	708884	b5dd0d	780c86	6b1d2f	-	c92217	c92217	eeaa57	eeaa57	eeaa57	8a9f86

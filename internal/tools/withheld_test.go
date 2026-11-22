@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,10 +32,27 @@ import (
 	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
-// tokenRun is "--token,}" repeated to 72 KiB: the reading of the release before reads each value to the end of
-// the run (released.tokenEnd), so its work outgrows the budget of redaction and every entry point withholds it
-// (#873, decision of 2026-11-20).
-var tokenRun = strings.Repeat("--token,}", 8192)
+// tokenRun is "--token,}" repeated to 72 KiB, twice redacttest.OverLowBudget: a redactor of redacttest.LowBudget
+// withholds it, and the first quarter of it, for their work (#873, decision of 2026-11-22 on #962).
+var tokenRun = strings.Repeat(redacttest.OverLowBudget, 2)
+
+// lowBudgetSet is diffSet with the redactor on the lowered work budget of redacttest.
+func lowBudgetSet(t testing.TB) (*Set, *sceneSources) {
+	t.Helper()
+	src := &sceneSources{}
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := New(Config{
+		Pods: src, Events: src, Objects: src, Logs: src, Metrics: src, Delivery: src, Redactor: redacttest.LowBudget(red),
+		Namespaces: []string{testNS}, DeliveryNamespaces: []string{fluxNS}, Now: func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return set, src
+}
 
 // withheldLogs is a log source whose redaction withheld the excerpt (providers.ErrWithheld).
 type withheldLogs struct{ *sceneSources }
@@ -58,9 +76,10 @@ func checkWithheld(t *testing.T, what string, r Result) {
 }
 
 // An answer redaction withholds is shown as a source that failed, at every read tool: could not fetch, labelled
-// withheld by redaction, with no value of it (#873).
+// withheld by redaction, with no value of it (#873). The tools' redactor has the lowered work budget of
+// redacttest.
 func TestToolsShowAWithheldAnswerAsCouldNotFetch(t *testing.T) {
-	set, src := diffSet(t)
+	set, src := lowBudgetSet(t)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: testNS},
 		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: container, Args: []string{tokenRun}}}},

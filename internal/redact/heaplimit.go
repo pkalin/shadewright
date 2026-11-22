@@ -50,8 +50,9 @@ import (
 //
 // Who waits at the limit: every caller of the ordinary entry points in the process. In the analyzer the analysis's
 // tool calls, its context build and its log reads pass their context (WithContext), and so does the analysis
-// record's redaction check (the write's context). The collector's fingerprint and symptom of a note of at most
-// MaxShortEntry bytes do not wait: they take the short entry points (shortentry.go), outside the limit. A wait
+// record's redaction check (the write's context). The collector's fingerprint never waits: a note of at most
+// MaxShortEntry bytes takes the short entry points (shortentry.go), outside the limit, and a longer one is not
+// read for it (package fingerprint). The shown symptom of a longer note waits like any other entry. A wait
 // ends when the context of the redactor ends or after maxHeapWait, whichever is first; the entry points take no
 // context, so a redactor without one waits at most maxHeapWait. An entry whose wait ends is withheld (ReasonWait), like an
 // entry over its budget: the caller shows the source as failed. A caller must not decide another entry inside a

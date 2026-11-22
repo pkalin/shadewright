@@ -49,6 +49,9 @@ const (
 	placeholderDigest   = "<digest>"
 	placeholderPod      = "<pod>"
 	placeholderHash     = "<hash>"
+	// placeholderLongNote is the normalized symptom of every note longer than redact.MaxShortEntry bytes: its
+	// text is not part of the fingerprint (#1087, decision of 2026-11-22).
+	placeholderLongNote = "<long note>"
 )
 
 // rule replaces a part of the text which changes between occurrences of the same problem.
@@ -145,7 +148,17 @@ var durationRules = []rule{
 //
 // A Kubernetes milli quantity ("averageValue=6500m") reads as minutes here and becomes a placeholder: a value
 // that changes while the problem lasts must not split its Incident. The text that is shown uses [Symptom].
+//
+// A note longer than redact.MaxShortEntry bytes (the events API takes notes up to 1 MiB) is not read: the
+// symptom is the fixed "<long note>", whatever the note says and whatever the analyzer is doing. Its redaction
+// could wait for the limit on the heap of the redactions running at once, and a fingerprint must not depend on
+// that wait. The note is not cut to the short bound instead, because a cut can end inside a secret and leave a
+// part the full reading would hide. So two long notes of one subject and reason are one Incident (#1087, decision
+// of 2026-11-22). [Symptom] still reads the whole note with the full redactor.
 func Normalize(o Observation) string {
+	if len(o.Note) > redact.MaxShortEntry {
+		return placeholderLongNote
+	}
 	return normalize(o, keepNone)
 }
 
@@ -183,8 +196,9 @@ func normalize(o Observation, mode quantityMode) string {
 // replaceFor returns the redaction of a note: a note of at most redact.MaxShortEntry bytes (four times the 1 KiB the
 // events API gives a note, and every note the collector writes from pod status) goes through redact.ReplaceCheckedShort, which
 // takes no share of the limit on the heap of the redactions running at once and never waits for an analysis, so
-// one event has one fingerprint on a busy and an idle analyzer (#1087, decision of 2026-11-22). A longer note goes
-// through redact.ReplaceChecked, which may wait for that limit and withholds the note when its wait ends.
+// one event has one fingerprint on a busy and an idle analyzer (#1087, decision of 2026-11-22). A longer note
+// ([Symptom] and [Value] only: [Normalize] does not read it) goes through redact.ReplaceChecked, which may wait for
+// that limit and withholds the whole note, as "<redacted>", when its wait ends.
 func replaceFor(note string) replaceChecked {
 	if len(note) <= redact.MaxShortEntry {
 		return redact.ReplaceCheckedShort

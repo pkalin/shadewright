@@ -1020,3 +1020,29 @@ func TestKeyFileThatAppearsAsALinkToAnotherDeclarationIsRefused(t *testing.T) {
 		t.Fatalf("control: %d requests, err %v", h.requests.Load(), err)
 	}
 }
+
+// A 200 whose body cannot be read was billed and is retried under the default attempts, so a caller that
+// reserves each call once at its maximum (the scoring intake, ADR-0047 section 6) sets MaxAttempts to 1: then
+// only one attempt is sent.
+func TestBilledBodyReadFailureFollowsMaxAttempts(t *testing.T) {
+	for _, c := range []struct {
+		attempts, want int32
+	}{{0, DefaultMaxAttempts}, {1, 1}} {
+		t.Run(fmt.Sprintf("max attempts %d", c.attempts), func(t *testing.T) {
+			h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Length", "4096")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"id":"msg_`)) // the connection closes before the rest
+			})
+			if c.attempts > 0 {
+				h.p.attempts = int(c.attempts)
+			}
+			_, err := h.p.Complete(context.Background(), structuredRequest())
+			if !providers.IsRetryable(err) || h.requests.Load() != c.want {
+				t.Fatalf("err = %v, %d requests; want a retryable error after %d", err, h.requests.Load(), c.want)
+			}
+		})
+	}
+}

@@ -33,8 +33,10 @@ func init() { diffBodies["FuzzDiffStringShown"] = diffStringShown }
 // and:
 //
 //	P6: what this package's rules find in the text without its controls is hidden in the decided text once its
-//	    controls are removed (WithoutControls), as the caller shows it: removing the controls after the decision
-//	    uncovers nothing the rules would hide in the text as shown.
+//	    controls are removed (WithoutControls): removing the controls after the decision uncovers nothing the
+//	    rules would hide in the text without them. Both sides keep their invalid bytes: the caller's repair of
+//	    each invalid run as "?" comes after the decision, as on origin/main, and is not this property (a "?" can
+//	    complete a form the raw byte did not, "TOKEN: X" before "îː", as it could on origin/main).
 func FuzzDiffStringShown(f *testing.F) {
 	diffSeeds := append(diffSeeds,
 		redacttest.RawSeed(0, "pass\x1bword=\x01"),
@@ -61,7 +63,7 @@ func diffStringShown(data []byte) ([]string, bool) {
 	fails = append(fails, workFails("StringTwiceShown", totalTwice, releaseTwice, len(in))...)
 	fails = append(fails, withheldFails("StringShown", in, []string{shown}, okShown)...)
 	fails = append(fails, withheldFails("StringTwiceShown", in, []string{twice}, okTwice)...)
-	shownView := WithoutControls(strings.ToValidUTF8(in, "?"))
+	shownView := WithoutControls(in)
 	rules := redacttest.Hiding(shownView, render(nil, shownView, settle(nil, shownView, defaultRedactor.ruleMatches(nil, shownView))))
 	if okShown {
 		fails = append(fails, decidedFails("StringShown", []string{shown},
@@ -70,7 +72,7 @@ func diffStringShown(data []byte) ([]string, bool) {
 		rec.Wrap(released.String)(in)
 		fails = append(fails, leaks(rec, "StringShown", shown)...)
 		fails = append(fails, utf8Fails("StringShown", in, shown)...)
-		out := WithoutControls(strings.ToValidUTF8(shown, "?"))
+		out := WithoutControls(shown)
 		if l := rules.Leaks(out); len(l) > 0 && !strings.Contains(in, keep) {
 			fails = append(fails, redacttest.LeakLine("P6", "StringShown shows what the rules hide in the text as shown", l, out))
 		}
@@ -82,7 +84,7 @@ func diffStringShown(data []byte) ([]string, bool) {
 		releasedTwice(rec)(in)
 		fails = append(fails, leaks(rec, "StringTwiceShown", twice)...)
 		fails = append(fails, utf8Fails("StringTwiceShown", in, twice)...)
-		out := WithoutControls(strings.ToValidUTF8(twice, "?"))
+		out := WithoutControls(twice)
 		if l := rules.Leaks(out); len(l) > 0 {
 			fails = append(fails, redacttest.LeakLine("P6", "StringTwiceShown shows what the rules hide in the text as shown", l, out))
 		}

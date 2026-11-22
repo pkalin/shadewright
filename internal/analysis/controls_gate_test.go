@@ -130,7 +130,7 @@ func TestModelGateHidesWhatMainHid(t *testing.T) {
 		if len(want[i]) != 3 || want[i][0] != c.Name {
 			t.Fatalf("%s row %d does not match the input %q", modelGateMainTable, i+1, c.Name)
 		}
-		for k, field := range []string{"summary", "missing data"} {
+		for k, field := range []string{"the summary", "the missing data"} {
 			if got[i][k] == "" && want[i][k+1] == "" {
 				continue
 			}
@@ -144,7 +144,7 @@ func TestModelGateHidesWhatMainHid(t *testing.T) {
 			}
 			if b&^m != 0 {
 				if shows++; shows <= 3 {
-					t.Errorf("the stored %s shows more of %q than origin/main on %s: main %s, now %s", field, c.Probe, c.Name, want[i][k+1], got[i][k])
+					t.Errorf("%s stored shows more of %q than origin/main on %s: main %s, now %s", field, c.Probe, c.Name, want[i][k+1], got[i][k])
 				}
 			}
 		}

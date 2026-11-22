@@ -48,7 +48,7 @@ func buildGateText(t testing.TB, c redacttest.GateCase) string {
 	key := fake.LogKey{Namespace: testNS, Pod: crashPod, Container: appName, Previous: true}
 	s.logs.Set(key, "starting\n"+c.Text()+"\n")
 	s.logs.SetInstance(key, providers.LogInstance{PodUID: "uid-web-abc-1", RestartCount: 4}, false)
-	labels := map[string]string{"pod": crashPod, "container": appName, "note": c.Text()}
+	labels := map[string]string{labelPod: crashPod, labelContainer: appName, "note": c.Text()}
 	if c.Key != "" {
 		labels[c.Key] = c.Value
 	}

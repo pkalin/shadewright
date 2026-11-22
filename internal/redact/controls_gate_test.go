@@ -52,6 +52,9 @@ import (
 // gateMainTable is the table of origin/main's answers.
 const gateMainTable = "testdata/controls-gate-main.tsv"
 
+// gateEntryString is the entry point redact.String in the gate's tables.
+const gateEntryString = "redact.String"
+
 // gateInput is one input of the gate: a generated case, or one of the four known inputs with its own pieces.
 type gateInput struct {
 	redacttest.GateCase
@@ -73,12 +76,13 @@ func gateSeeds() []gateInput {
 		return redact.Piece{Text: text, Data: true, Form: form, Key: key}
 	}
 	tool := func(text string) redact.Piece { return redact.Piece{Text: text} }
-	out := []gateInput{
+	out := make([]gateInput, 0, 7)
+	out = append(out,
 		seed("CR before Bearer", "Qz7secretValue1", []string{"x\rBearer Qz7secretValue1"}),
 		seed("flag split by ESC as Line", value, nil, tool("args: "), data("--pass"+zw+"word\x1b"+value, redact.Line, "")),
 		seed("flag split by CR as JSON", value, nil, tool(`{"a":"`), data("'pass"+zw+"word':|\r"+value, redact.JSON, ""), tool(`"}`)),
 		kv,
-	}
+	)
 	for _, f := range []redact.Form{redact.AsIs, redact.Line, redact.JSON} {
 		out = append(out, seed("three pieces key with NUL form "+strconv.Itoa(int(f)), hunter, nil,
 			tool("pass"+zw+"word: \""), data("open ", f, "pass\x00word"), data(hunter+"\"", f, "other")))
@@ -135,7 +139,7 @@ func gateEntries() map[string]func(c gateInput) []string {
 		}
 	}
 	m := map[string]func(c gateInput) []string{
-		"redact.String":         text(func(s string) []string { return []string{r.String(s)} }),
+		gateEntryString:         text(func(s string) []string { return []string{r.String(s)} }),
 		"redact.StringTwice":    text(func(s string) []string { return []string{r.StringTwice(s, nil)} }),
 		"redact.StringKeeping":  text(func(s string) []string { return []string{r.StringKeeping(s, "hunter")} }),
 		"redact.ReplaceChecked": text(func(s string) []string { out, _ := r.ReplaceChecked(s, gateMark, gateSame); return []string{out} }),
@@ -147,14 +151,14 @@ func gateEntries() map[string]func(c gateInput) []string {
 		},
 		"incidentcontext.RenderLog": text(func(s string) []string {
 			ex := providers.LogExcerpt{Text: s, CollectedAt: time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC)}
-			var out []string
+			out := make([]string, 0, 2)
 			for _, refit := range []bool{false, true} {
 				out = append(out, incidentcontext.RenderLog(r, refit, "log", ex, nil, 4096, 8192).Text)
 			}
 			return out
 		}),
 		"redact.Pieces": func(c gateInput) []string {
-			var out []string
+			out := make([]string, 0, 16)
 			for _, ps := range gateLayouts(c) {
 				out = append(out, r.Pieces(ps)...)
 			}
@@ -215,8 +219,9 @@ func gateMark(kind, _ string) string { return "<" + kind + ">" }
 
 // gateNames returns the names of gateEntries in order.
 func gateNames() []string {
-	names := make([]string, 0)
-	for n := range gateEntries() {
+	entries := gateEntries()
+	names := make([]string, 0, len(entries))
+	for n := range entries {
 		names = append(names, n)
 	}
 	slices.Sort(names)
@@ -320,7 +325,7 @@ func TestWriteControlsGateMainTable(t *testing.T) {
 // one column per entry point.
 func readGateTable(t *testing.T, path string) (names []string, rows [][]string) {
 	t.Helper()
-	b, err := os.ReadFile(path) //nolint:gosec // a table of the test's own testdata
+	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}

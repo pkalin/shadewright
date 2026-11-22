@@ -17,6 +17,7 @@ limitations under the License.
 package redacttest
 
 import (
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -65,6 +66,13 @@ const (
 	gateProbeAPIKey   = "Wq5Rt7Yu9Io2Pa"
 )
 
+// Words of the forms.
+const (
+	gatePassword = "password"
+	gateWord     = "word"
+	gateToken    = "token"
+)
+
 // GateProbeToken is the GitHub token of Samples (rule 2), made up, the probe of the token forms.
 var GateProbeToken = Samples()[2].Secret
 
@@ -72,21 +80,21 @@ var GateProbeToken = Samples()[2].Secret
 func gateForms() []gateForm {
 	tok := GateProbeToken
 	return []gateForm{
-		{"key=value", []string{"password", "=", GateProbeValue}, 1, GateProbeValue},
-		{"split key=value", []string{"pass", "word", "=", GateProbeValue}, 2, GateProbeValue},
-		{"split key: value", []string{"pass", "word", ":", " ", GateProbeHunter}, 2, GateProbeHunter},
+		{"key=value", []string{gatePassword, "=", GateProbeValue}, 1, GateProbeValue},
+		{"split key=value", []string{"pass", gateWord, "=", GateProbeValue}, 2, GateProbeValue},
+		{"split key: value", []string{"pass", gateWord, ":", " ", GateProbeHunter}, 2, GateProbeHunter},
 		{"json member", []string{`"password"`, ":", `"`, GateProbeValue, `"`}, 1, GateProbeValue},
-		{"split flag", []string{"--pass", "word", " ", GateProbeValue}, 2, GateProbeValue},
+		{"split flag", []string{"--pass", gateWord, " ", GateProbeValue}, 2, GateProbeValue},
 		{"flag=", []string{"--password", "=", GateProbeHunter}, 1, GateProbeHunter},
 		{"authorization", []string{"Authorization", ":", " ", "Bearer", " ", gateProbeBearer}, 1, gateProbeBearer},
 		{"glued bearer", []string{"x", "Bearer", " ", gateProbeBearer}, 2, gateProbeBearer},
 		{"split token", []string{tok[:20], tok[20:]}, -1, tok},
 		{"connection string", []string{"postgres://", "u", ":", gateProbeConnPass, "@", "db.example", "/app"}, 2, gateProbeConnPass},
 		{"split env", []string{"DB_PASS", "WORD", "=", GateProbeHunter}, 2, GateProbeHunter},
-		{"block", []string{"password", ":", " ", "|", "\n", "  ", GateProbeValue}, 1, GateProbeValue},
-		{"split value", []string{"password", "=", GateProbeHunter[:7], GateProbeHunter[7:]}, 1, GateProbeHunter},
+		{"block", []string{gatePassword, ":", " ", "|", "\n", "  ", GateProbeValue}, 1, GateProbeValue},
+		{"split value", []string{gatePassword, "=", GateProbeHunter[:7], GateProbeHunter[7:]}, 1, GateProbeHunter},
 		{"api key", []string{"api_key", ":", " ", gateProbeAPIKey}, 1, gateProbeAPIKey},
-		{"token", []string{"token", ":", GateProbeValue}, 1, GateProbeValue},
+		{gateToken, []string{gateToken, ":", GateProbeValue}, 1, GateProbeValue},
 	}
 }
 
@@ -139,7 +147,7 @@ func gateCase(f gateForm, pos, fi int, prefix string) GateCase {
 	parts = append(parts, fill)
 	parts = append(parts, f.parts[pos:]...)
 	parts = append(parts, " ok")
-	c := GateCase{Name: f.name + " " + strings.TrimSpace(prefix) + " filler " + quoteFill(fill) + " at " + itoa(pos),
+	c := GateCase{Name: f.name + " " + strings.TrimSpace(prefix) + " filler " + quoteFill(fill) + " at " + strconv.Itoa(pos),
 		Parts: parts, Probe: f.probe}
 	if f.sep < 0 {
 		c.Value = c.Text()
@@ -181,13 +189,6 @@ func quoteFill(s string) string {
 		}
 	}
 	return b.String()
-}
-
-func itoa(n int) string {
-	if n < 10 {
-		return string(rune('0' + n))
-	}
-	return itoa(n/10) + string(rune('0'+n%10))
 }
 
 // gateGram is the length of the parts of a probe [VisibleGrams] looks for.

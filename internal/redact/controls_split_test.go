@@ -35,7 +35,7 @@ func TestSecretsSplitByAControlAreHidden(t *testing.T) {
 		{"token " + tok[:20] + "\x00" + tok[20:], tok[20:]},
 		{"pass\x1bword=Hunter2Secret9x", "Hunter2Secret9x"},
 	}
-	names := []string{"kube.Excerpt", "incidentcontext.Value", tools.NameGetPodLogs, tools.NameListEvents,
+	names := []string{canonEntryExcerpt, canonEntryValue, tools.NameGetPodLogs, tools.NameListEvents,
 		tools.NameGetResource, tools.NameQueryMetrics, tools.NameGetDeliveryStatus}
 	for _, c := range cases {
 		for _, name := range names {

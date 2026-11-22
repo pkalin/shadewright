@@ -85,7 +85,7 @@ var heapShapes = []heapShape{
 	// Secrets a control splits, on many short lines: as many matches of the controls view as lines, which hold their
 	// spans for the whole decision as the shape "secrets" does.
 	{name: controlShapeSplit, text: func(n int) string { return repeatTo("pass\x00word=hunter2\n", n) }, over: "spans held per match",
-		overAt: []string{"Redactor.StringsChecked"}},
+		overAt: []string{epStringsChecked}},
 	{name: "secrets", text: func(n int) string { return repeatTo("password=hunter2\n", n) }, over: "spans held per match",
 		overAt: []string{"Redactor.StringTwiceChecked", "Redactor.StringsChecked", epPiecesWithin, epPiecesWithin + "/values", epPiecesFitting}},
 }
@@ -177,8 +177,9 @@ var heapEntryPoints = []heapEntryPoint{
 
 // The names of the Pieces entry points in the heap tests.
 const (
-	epPiecesWithin  = "Redactor.PiecesWithin"
-	epPiecesFitting = "Redactor.PiecesFitting"
+	epStringsChecked = "Redactor.StringsChecked"
+	epPiecesWithin   = "Redactor.PiecesWithin"
+	epPiecesFitting  = "Redactor.PiecesFitting"
 )
 
 // heapBound is the bound of the decision for an entry of n bytes.

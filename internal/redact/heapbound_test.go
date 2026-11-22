@@ -78,13 +78,13 @@ var heapShapes = []heapShape{
 	{name: "controls", text: func(n int) string { return repeatTo("lor\x1bem ip\x00sum\r\n", n) }},
 	// Secrets that a removed control joins: a match in the controls view on every line (#852).
 	{name: "joined secrets", text: func(n int) string { return repeatTo("pass\x1bword=hunter2\r\n", n) }, over: "spans held per match",
-		overAt: []string{epStringTwiceChecked, epStringTwiceShownChecked, "Redactor.StringsChecked", epPiecesWithin,
+		overAt: []string{epStringTwiceChecked, epStringTwiceShownChecked, epStringsChecked, epPiecesWithin,
 			epPiecesWithin + "/values", epPiecesFitting}},
 	// Many short lines, each with a secret: as many matches as lines. Each match holds its spans in every reading
 	// (this package's rules, each pass of the release before's) for the whole decision: over the bound at the
 	// largest entry for StringTwiceChecked, StringsChecked and the Pieces entry points.
 	{name: "secrets", text: func(n int) string { return repeatTo("password=hunter2\n", n) }, over: "spans held per match",
-		overAt: []string{epStringTwiceChecked, epStringTwiceShownChecked, "Redactor.StringsChecked", epPiecesWithin, epPiecesWithin + "/values", epPiecesFitting}},
+		overAt: []string{epStringTwiceChecked, epStringTwiceShownChecked, epStringsChecked, epPiecesWithin, epPiecesWithin + "/values", epPiecesFitting}},
 }
 
 // heapEntryPoint is an entry point of the package, with the largest entry it can get.
@@ -146,7 +146,7 @@ var heapEntryPoints = []heapEntryPoint{
 		_, ok := r.StringKeepingChecked(s, "hunter")
 		return ok
 	})},
-	{"Redactor.StringsChecked", largestObject, func(r *Redactor, s string) (func() bool, int) {
+	{epStringsChecked, largestObject, func(r *Redactor, s string) (func() bool, int) {
 		items := strings.Split(s, "\n")
 		return func() bool { _, ok := r.StringsChecked(items); return ok }, len(s) + 1
 	}},
@@ -178,6 +178,7 @@ const (
 // tests (#852).
 const (
 	epStringTwiceChecked      = "Redactor.StringTwiceChecked"
+	epStringsChecked          = "Redactor.StringsChecked"
 	epStringShownChecked      = "Redactor.StringShownChecked"
 	epStringTwiceShownChecked = "Redactor.StringTwiceShownChecked"
 )

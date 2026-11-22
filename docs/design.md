@@ -19,6 +19,12 @@ Status: draft for the MVP.
 - The Prometheus metrics of the three components ([reference](reference/metrics.md)).
 - Optional OpenTelemetry traces per analysis, off by default ([reference](reference/traces.md)).
 
+**Built outside the operator**
+
+A command run outside every cluster and installation, so it is not in the operator's status lists or the README's.
+
+- The scoring intake (`cmd/intake`) of ADR-0047 as a command that scores one record file ([reference](reference/intake.md)). The job and its trigger are planned.
+
 **Built, but not used by the analyzer yet**
 
 - The Prometheus `MetricsSource` adapter, with its approved query templates, and the pod logs `LogSource` adapter, bounded and redacted. The analyzer creates both from its flags and gives them to the context builder.

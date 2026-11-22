@@ -258,10 +258,11 @@ verify-generated: ## Regenerate all generated files from scratch and fail if the
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build the executor (bin/manager), analyzer and verifier binaries.
+build: manifests generate fmt vet ## Build the executor (bin/manager), analyzer, verifier and scoring intake (bin/intake) binaries.
 	go build -o bin/manager cmd/main.go
 	go build -o bin/analyzer ./cmd/analyzer
 	go build -o bin/verifier ./cmd/verifier
+	go build -o bin/intake ./cmd/intake
 
 # PLUGIN_VERSION is stamped into the plugin (kubectl shadewright version); status compares it with the CRDs' version label.
 PLUGIN_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)

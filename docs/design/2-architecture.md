@@ -69,7 +69,7 @@ A controller compares desired and actual state no matter which event woke it up.
 
 ### 2.2.1. Three binaries
 
-The analyzer, the remediation controller and the verifier are separate binaries in one Go module (`cmd/analyzer`, `cmd/main.go`, `cmd/verifier`). They are deployed as separate Deployments with separate ServiceAccounts and identities, and three images (`shadewright-analyzer`, `shadewright-executor`, `shadewright-verifier`). A slow model call must never block the controller's other reconciles.
+The analyzer, the remediation controller and the verifier are separate binaries in one Go module (`cmd/analyzer`, `cmd/main.go`, `cmd/verifier`). They are deployed as separate Deployments with separate ServiceAccounts and identities, and three images (`shadewright-analyzer`, `shadewright-executor`, `shadewright-verifier`). A slow model call must never block the controller's other reconciles. A fourth binary, the scoring intake (`cmd/intake`, [ADR-0047](../adr/0047-scoring-analysis-records-outside-the-cluster.md)), is built from the same module but never runs in a cluster and is not part of an installation: it scores analysis records outside every cluster. The command that is built runs with the model keys of whoever runs it; the identity of its own belongs to the planned job that runs it (#991).
 
 - The collector, the incident store and the analyzer run in the analyzer binary.
 - The policy engine, the remediation controller and the GitOps adapter run in the executor (`cmd/main.go`).
@@ -169,7 +169,7 @@ What it does: every 30 seconds, for each `RemediationRequest` in phase `Verifyin
 
 The executor reads the report as untrusted evidence and decides the outcome (<span class="sw-status sw-built">built</span>, #683, 2.2.3 and 6). It writes no report for a revert, a request with `spec.reverts` (<span class="sw-status sw-built">built</span>, #96, ADR-0030 section 8).
 
-None of the three binaries can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
+None of the three binaries that run in the cluster can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 
 ## 2.3. Provider interfaces
 

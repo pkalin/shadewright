@@ -83,7 +83,7 @@ var boundedLoops = map[string]string{
 	"writtenLenAs#1":             "the bytes of a run of invalid bytes, counted again by write on the same piece",
 	"plain#0":                    "the bytes of the value, counted by write on the same value",
 	"plainWithControls#0":        "the bytes of the value, counted by writeAs on the same value",
-	"newAnswerLayoutAs#0":        "the pieces, counted by the loop after it",
+	"newAnswerLayout#0":          "the pieces, counted by the loop after it",
 	"(*Redactor).piecesWithin#0": "the pieces, counted by the loop after it",
 	"jsonTrace#0":                "the characters of the text, counted by the loop after it",
 	"(*traceBuilder).copy#0":     "the segments of the bytes copied, at most one a byte, counted by the tick of those bytes",

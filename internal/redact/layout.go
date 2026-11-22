@@ -262,7 +262,7 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 	}
 	reading2 := endAtValueLines(wm, ps, l.w, answer, matches)
 	r.cutAnswer(wm, ps, l.add, settle(wm, answer, endAtObjectValues(wm, ps, wsize, reading2)), widen, text)
-	r.readWithControls(wm, ps, n, l, ids, joined)
+	r.readWithControls(wm, ps, l, ids, joined)
 	// Reading 3: the release before, on the pieces as they were read.
 	hidden := mergeSpans(wm, r.releasedPieces(wm, ps))
 	off, h := 0, 0
@@ -345,15 +345,27 @@ func writtenWithoutControls(wm *meter.Meter, ps []Piece) bool {
 // hidden once the control is left out, and removing it uncovers nothing (decision of 2026-11-22: no input shows a
 // secret origin/main hides). With joined, the reading of the whole answer of [Redactor.Strings] is taken on it
 // too. The work is linear in the length of the pieces, as reading 2's.
-func (r *Redactor) readWithControls(wm *meter.Meter, ps []Piece, n int, l *answerLayout, ids *windowIDs, joined bool) {
+func (r *Redactor) readWithControls(wm *meter.Meter, ps []Piece, l *answerLayout, ids *windowIDs, joined bool) {
 	if !writtenWithoutControls(wm, ps) {
 		return
 	}
-	m := newAnswerLayoutAs(wm, ps, n, true)
-	matches := r.ruleMatchesWith(wm, m.answer, ids)
-	widen := func(i int, sp span) span { return m.w(i).widen(wm, sp) }
-	text := func(i int) string { return m.w(i).text }
-	// cut adds the spans of one reading of m's answer to l, through the values.
+	// The answer as origin/main wrote it is held as its text and where each piece starts; a piece's map of units is
+	// written again where a reading needs it (mw) and dropped after, so this reading adds about the answer's bytes to
+	// the heap of the decision, not a map for each piece as well (TestHeapOfOneEntryIsBounded, #873).
+	answer, off := answerWithControls(wm, ps)
+	mw := func(i int) written {
+		if !ps[i].Data {
+			return written{text: answer[off[i]:off[i+1]]}
+		}
+		return writeAs(wm, ps[i], true)
+	}
+	matches := r.ruleMatchesWith(wm, answer, ids)
+	if len(matches) == 0 && !joined {
+		return
+	}
+	widen := func(i int, sp span) span { return mw(i).widen(wm, sp) }
+	text := func(i int) string { return answer[off[i]:off[i+1]] }
+	// cut adds the spans of one reading of the answer to l, through the values.
 	cut := func(spans []span) {
 		var got []pieceSpan // in the order of the pieces, and of the spans within one
 		r.cutAnswer(wm, ps, func(i int, sp span) { got = append(got, pieceSpan{i, sp}) }, spans, widen, text)
@@ -365,7 +377,7 @@ func (r *Redactor) readWithControls(wm *meter.Meter, ps []Piece, n int, l *answe
 				to++
 			}
 			i := got[from].piece
-			for _, vsp := range m.w(i).valueSpans(wm, got[from:to]) {
+			for _, vsp := range mw(i).valueSpans(wm, got[from:to]) {
 				tick(wm, 1)
 				if sp := l.w(i).carry(wm, vsp); sp.end > sp.start {
 					l.add(i, sp)
@@ -375,10 +387,29 @@ func (r *Redactor) readWithControls(wm *meter.Meter, ps []Piece, n int, l *answe
 		}
 	}
 	if joined {
-		cut(settle(wm, m.answer, append(slices.Clone(matches), r.releasedString(wm, m.answer, false, nil)...)))
+		cut(settle(wm, answer, append(slices.Clone(matches), r.releasedString(wm, answer, false, nil)...)))
 	}
-	size := func(i int) int { return int(m.off[i+1] - m.off[i]) }
-	cut(settle(wm, m.answer, endAtObjectValues(wm, ps, size, endAtValueLines(wm, ps, m.w, m.answer, matches))))
+	size := func(i int) int { return int(off[i+1] - off[i]) }
+	cut(settle(wm, answer, endAtObjectValues(wm, ps, size, endAtValueLines(wm, ps, mw, answer, matches))))
+}
+
+// answerWithControls returns the answer the pieces ps make as origin/main wrote it before #852 (writeAs with
+// controls), and where each piece starts in it, the last offset its length.
+func answerWithControls(wm *meter.Meter, ps []Piece) (string, []int32) {
+	off := make([]int32, len(ps)+1)
+	total := 0
+	for _, p := range ps {
+		tick(wm, 1)
+		total += writtenLenAs(p, true)
+	}
+	var b strings.Builder
+	b.Grow(total)
+	for i, p := range ps {
+		tick(wm, 1)
+		b.WriteString(writeAs(wm, p, true).text)
+		off[i+1] = int32(b.Len()) // #nosec G115 -- an answer is at most six times an entry
+	}
+	return b.String(), off
 }
 
 // pieceSpan is a span of the written text of piece piece.
@@ -442,23 +473,17 @@ type answerLayout struct {
 
 // newAnswerLayout writes the pieces ps, n of which are data pieces, as the answer writes them.
 func newAnswerLayout(wm *meter.Meter, ps []Piece, n int) *answerLayout {
-	return newAnswerLayoutAs(wm, ps, n, false)
-}
-
-// newAnswerLayoutAs is newAnswerLayout; with controls, each control character is written as origin/main wrote it
-// before #852 (writeUnit), for readWithControls.
-func newAnswerLayoutAs(wm *meter.Meter, ps []Piece, n int, controls bool) *answerLayout {
 	l := &answerLayout{off: make([]int32, len(ps)+1), data: make([]int32, len(ps)), units: make([]*units, 0, n),
 		from: make([]int32, n+1)}
 	total := 0
 	for _, p := range ps {
-		total += writtenLenAs(p, controls)
+		total += writtenLen(p)
 	}
 	var raw strings.Builder
 	raw.Grow(total) // sized once, so the answer is not held twice while it grows
 	for i, p := range ps {
 		tick(wm, 1)
-		w := writeAs(wm, p, controls)
+		w := write(wm, p)
 		l.data[i] = -1
 		if p.Data {
 			l.data[i] = int32(len(l.units)) // #nosec G115 -- an entry is at most MaxEntry bytes

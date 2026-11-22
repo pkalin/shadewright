@@ -106,8 +106,11 @@ type shortReader struct {
 	command, pending, pendingHas bool
 	pendingTool                  shortFlagTool
 	// images: the row of the table each "args" key with no "command" in its object takes from the object's
-	// "image", by the start of the key (shortImages).
-	images map[int]shortFlagTool
+	// "image", by the start of the key (shortImages), read once, at the first "args" sequence with no command
+	// before it (imagesRead), so a text with none pays nothing for it.
+	images     map[int]shortFlagTool
+	imagesRead bool
+	wm         *meter.Meter
 	keyWords
 }
 
@@ -152,6 +155,9 @@ func (r *shortReader) startSequence() {
 		r.hasTool, r.tool = r.pendingHas, r.pendingTool
 	case args:
 		r.args = true
+		if !r.imagesRead {
+			r.images, r.imagesRead = shortImages(r.wm, r.s), true
+		}
 		if t, ok := r.images[at]; ok {
 			r.hasTool, r.tool = true, t
 		}
@@ -175,8 +181,7 @@ func (r *shortReader) endSequence() {
 // indentation of a line looked at for a YAML item, and the values of the flags by flagExtent, after which the
 // pass goes on from the end of the value.
 func shortFlagRead(wm *meter.Meter, s string, lines bool, add func(start, end int)) {
-	r := &shortReader{s: s, add: add, tm: &tokenMemo{}, lines: lines, first: lines, images: shortImages(wm, s),
-		keyWords: keyWords{s: s}}
+	r := &shortReader{s: s, add: add, tm: &tokenMemo{}, lines: lines, first: lines, wm: wm, keyWords: keyWords{s: s}}
 	for i := 0; i < len(s); {
 		tick(wm, 1)
 		switch c := s[i]; {

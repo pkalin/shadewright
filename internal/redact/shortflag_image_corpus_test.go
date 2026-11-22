@@ -51,7 +51,7 @@ func shortImageRows() []shortImageRow {
 	for _, t := range shortTools {
 		out = append(out, shortImageRow{image: t.name, tool: t})
 		if t.name == "redis-cli" {
-			out = append(out, shortImageRow{image: "redis", tool: t})
+			out = append(out, shortImageRow{image: shortRedis, tool: t})
 		}
 	}
 	return out
@@ -73,6 +73,9 @@ var shortImageRefs = []func(name string) string{
 // shortAppImage and shortAppArgs are a container of an image not in the table whose "-p" is a port: its words stay
 // whatever container stands next to it.
 const (
+	shortAppName  = "app"
+	shortOneDB    = "one container"
+	shortRedis    = "redis"
 	shortAppImage = "example.com/team/web:2"
 	shortAppPort  = "8080"
 )
@@ -127,7 +130,7 @@ func shortTemplate(spec corev1.PodSpec) corev1.PodTemplateSpec {
 }
 
 var shortPlacements = []shortPlacement{
-	{name: "one container", hand: true, object: func(db, _ corev1.Container) any {
+	{name: shortOneDB, hand: true, object: func(db, _ corev1.Container) any {
 		return shortPod(corev1.PodSpec{Containers: []corev1.Container{db}})
 	}},
 	{name: "before another image", hand: true, object: func(db, app corev1.Container) any {
@@ -256,9 +259,9 @@ func shortImageCorpus() []shortImageCase {
 					args := append(append([]string{shortLogLevel, shortDebug}, f.words(row.tool, shortValue(row.tool, secret))...),
 						shortTail)
 					db := corev1.Container{Name: "db", Image: image, Args: args}
-					app := corev1.Container{Name: "app", Image: shortAppImage, Args: shortAppArgs}
+					app := corev1.Container{Name: shortAppName, Image: shortAppImage, Args: shortAppArgs}
 					kept := []string{shortLogLevel, shortTail}
-					if p.name != "one container" {
+					if p.name != shortOneDB {
 						kept = append(kept, `"`+shortAppPort+`"`, shortAppImage)
 					}
 					in := l.write(p.object(db, app), shortPodContainers(p, db, app))
@@ -278,7 +281,7 @@ func shortImageKeptCases() []shortImageCase {
 	var out []shortImageCase
 	add := func(form, image string, command, args []string, kept ...string) {
 		c := corev1.Container{Name: "db", Image: image, Command: command, Args: args}
-		app := corev1.Container{Name: "app", Image: shortAppImage, Args: shortAppArgs}
+		app := corev1.Container{Name: shortAppName, Image: shortAppImage, Args: shortAppArgs}
 		pod := shortPod(corev1.PodSpec{Containers: []corev1.Container{c, app}})
 		for _, l := range shortLayouts {
 			if l.hand && command != nil {
@@ -294,9 +297,9 @@ func shortImageKeptCases() []shortImageCase {
 	add("image not in the table that wraps a tool", "acme/mysql-client:1", nil, []string{"-pswrapped9"}, "-pswrapped9")
 	add("mysql port flag", "mysql:8.4", nil, []string{"-P", "3306", "-h", "db"}, `"3306"`)
 	add("redis port", "bitnami/redis:7", nil, []string{"-p", "6379", "-h", "cache"}, `"6379"`)
-	add("curl user with no password", "curlimages/curl:8", nil, []string{"-u", "admin", "https://example.com/x"}, "admin")
+	add("curl user with no password", "curlimages/curl:8", nil, []string{"-u", "deploy", "https://example.com/x"}, "deploy")
 	add("mysql with a command", "mysql:8.4", []string{"/docker-entrypoint.sh"}, []string{"-pswcommand9"}, "-pswcommand9")
-	add("redis image with a command", "redis:7", []string{"redis-server"}, []string{"-p", "6380"}, `"6380"`)
+	add("redis image with a command", shortRedis+":7", []string{"redis-server"}, []string{"-p", "6380"}, `"6380"`)
 	return out
 }
 

@@ -96,9 +96,9 @@ func ShortImagePods() []ShortImagePod {
 				args := append(append([]string{shortLogLevel, shortDebug}, f.words(row.tool, shortValue(row.tool, secret))...),
 					shortTail)
 				db := corev1.Container{Name: "db", Image: image, Args: args}
-				app := corev1.Container{Name: "app", Image: shortAppImage, Args: shortAppArgs}
+				app := corev1.Container{Name: shortAppName, Image: shortAppImage, Args: shortAppArgs}
 				kept := []string{shortLogLevel, shortTail}
-				if p.name != "one container" {
+				if p.name != shortOneDB {
 					kept = append(kept, `"`+shortAppPort+`"`)
 				}
 				pod, _ := p.object(db, app).(*corev1.Pod)

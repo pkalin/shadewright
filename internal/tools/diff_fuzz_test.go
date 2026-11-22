@@ -224,10 +224,11 @@ var diffToolSeeds = [][]byte{
 	redacttest.RawSeed(2, "192.168.1.1--password\n\x01\n"),
 	redacttest.RawSeed(3, "--password", "\x01", "token", "\x01"),
 	{0xf1, 0, 242, 0, 7, 0}, // a run of one invalid byte and an "x", 3,150 times (the first argument with knob 0)
-	// "--token,}" repeated to 36 KiB in every field, which redaction withholds (#873): each target that shows a
-	// field checks the withheld result (withheldResult) before it skips the release's oracle.
+	// "--token,}" repeated to 36 KiB in every field, which redaction withheld until #962 made its reading linear: a
+	// long field the budget now decides. The withheld answer of each tool is tested on a redactor of
+	// redacttest.LowBudget (TestToolsShowAWithheldAnswerAsCouldNotFetch).
 	redacttest.RawSeed(0, slices.Repeat([]string{strings.Repeat("--token,}", 4096)}, 6)...),
-	// The same with the knob 0x10, so that get_pod_logs reads it through the log source, which withholds it.
+	// The same with the knob 0x10, so that get_pod_logs reads it through the log source.
 	redacttest.RawSeed(0x10, slices.Repeat([]string{strings.Repeat("--token,}", 4096)}, 6)...),
 	// A path and a ref the Git tools accept, so that they reach the answer that they are not available.
 	redacttest.RawSeed(0, "deploy/app.yaml", ""),

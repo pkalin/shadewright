@@ -23,8 +23,8 @@ import (
 )
 
 // This package is the redactor of the release before #845 (origin/main at 0701cd3a): redact.go, extent.go and
-// work.go are that release's files of package redact, apart from the package clause and the change of #873, and
-// must not be edited otherwise (TestReleasedIsTheReleaseBefore pins them). #873 made its work linear on the
+// work.go are that release's files of package redact, apart from the package clause and the changes of #873 and
+// #962, and must not be edited otherwise (TestReleasedIsTheReleaseBefore pins them). #873 made its work linear on the
 // shapes where it was not (lines.go, the line index of a text, and the reach of the comma key expression in
 // extent.go) without changing what it hides: the code before that change is kept in testdata/v052, and the
 // tests check that both find the same spans on every input of the corpora and on generated ones. Package redact applies it as one reading of each text, at
@@ -38,8 +38,10 @@ import (
 //
 // The package comment of the kept redact.go says that matching takes time linear in the input. That holds of one
 // pass of the engine, not of a text: a rule is tried again after each match and an attempt may read the rest of
-// the text (rule.findAll), so the work on some shapes grows with the square of the text ("--token,}" and
-// "-password," repeated, #962). Only the entry points that take a meter stop at a work budget:
+// the text (rule.findAll), and the work on "--token,}" and "-password," repeated grew with the square of the text
+// until #962 gave the flag rules a memory of the values they read in one pass (tokenMemo, plainRun) and cut the
+// extent of a key glued to the quote before it without reading it (keyValueExtent), again without changing what
+// it hides (TestFlagRunsMatchKeptCopy). Only the entry points that take a meter stop at a work budget:
 // [Redactor.SpansWithin] and [Redactor.StringWithin], which package redact calls with the budget of its own
 // entry. [String], [Spans], [Replace], [StringKeeping], [Clean] and their methods on [Redactor] pass no meter
 // and run with no budget.

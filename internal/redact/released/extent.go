@@ -522,9 +522,17 @@ func commaKeyReach(wm *meter.Meter, s string, j, limit int) int {
 // whitespace, one of ";|&<>()", a quote, or a group that does not close. A quote ends it because an unquoted
 // value in free text that meets a quote is often inside a JSON or logfmt string, whose fields after it stay
 // (tokenEnd). It returns pos when no group or escaped blank is glued to the text. With wide false any quote
-// ends it, as on main before #769 (keyValueSpans).
-func plainWordEnd(wm *meter.Meter, s string, pos, limit, keyPos int, wide bool) int {
+// ends it, as on main before #769 (keyValueSpans). pr, unless nil, is the plain run read before in the same
+// pass over s: a read that starts inside it goes on from its end (#962).
+func plainWordEnd(wm *meter.Meter, s string, pos, limit, keyPos int, wide bool, pr *plainRun) int {
 	end, glued := pos, false
+	// s[run:end] holds only bytes the loop steps over by its last case whatever pos, limit, keyPos and wide are.
+	run := pos
+	if pr != nil && pr.from <= pos && pos < pr.to {
+		tick(wm, 1)
+		end, run = min(pr.to, limit), pr.from
+	}
+loop:
 	for end < limit {
 		tick(wm, 1)
 		c := s[end]
@@ -532,26 +540,51 @@ func plainWordEnd(wm *meter.Meter, s string, pos, limit, keyPos int, wide bool) 
 		case c == '$' && end+1 < limit && s[end+1] == '(', c == '`':
 			e, ok := groupEnd(wm, s, end, limit, 0, keyPos, true)
 			if !ok {
-				return wordEnd(wm, pos, end, glued)
+				break loop
 			}
-			end, glued = e, true
+			end, glued, run = e, true, e
 		case c == '\\' && end+1 < limit && (s[end+1] == ' ' || s[end+1] == '\t'):
 			end, glued = end+2, true
+			run = end
 		case c == '\\' && end+1 < limit && !isSpace(wm, s[end+1]) && s[end+1] != '"' && s[end+1] != '\'':
 			end += 2
+			run = end
 		case wide && (c == '"' || c == '\'') && end > pos:
 			e := gluedQuoteEnd(wm, s, end, limit, keyPos)
 			if e < 0 {
-				return wordEnd(wm, pos, end, glued)
+				break loop
 			}
-			end, glued = e, true
+			end, glued, run = e, true, e
 		case isSpace(wm, c), c == '"', c == '\'', c == '\\', strings.IndexByte(";|&<>()", c) >= 0:
-			return wordEnd(wm, pos, end, glued)
+			break loop
 		default:
 			end++
+			if c == '$' {
+				// A "$" is plain here only because "(" does not follow it before limit: a read with a
+				// larger limit may not step over it.
+				run = end
+			}
 		}
 	}
+	pr.extend(run, end)
 	return wordEnd(wm, pos, end, glued)
+}
+
+// plainRun is the run of plain text that reaches furthest of those plainWordEnd read in one pass of a rule over
+// one text: s[from:to] holds only bytes its loop steps over as plain text whatever the start, limit, key and
+// width of the read, so a read that starts inside the run would step over the rest of it too and goes on from
+// to at once (up to its own limit). Without it a run of flags glued with no blank ("--token,}" repeated, #962)
+// read up to maxValueExtent bytes per flag. It is package redact's memory of the same name (#873); the ends found
+// are the same as without it (TestPlainWordEndMemoMatches).
+type plainRun struct {
+	from, to int
+}
+
+// extend keeps s[from:to] when it reaches further than the run kept; on a nil plainRun it does nothing.
+func (pr *plainRun) extend(from, to int) {
+	if pr != nil && to > pr.to && from < to {
+		pr.from, pr.to = from, to
+	}
 }
 
 // gluedQuoteEnd returns the end of a quoted piece that opens at q, glued to plain text before it ("ab\"c d\"",
@@ -784,7 +817,7 @@ func nodeProperties(wm *meter.Meter, s string, pos int) int {
 // sequence: the following lines indented deeper than the item's dash, the first of which starts at col of
 // its line, up to the last non-blank one. With no content it is the indicator. It reads at most
 // maxValueExtent bytes; a longer block ends at that bound.
-func listBlockScalarSpan(wm *meter.Meter, s string, pos, col int) (int, int) {
+func listBlockScalarSpan(wm *meter.Meter, s string, pos, col int, tm *tokenMemo) (int, int) {
 	limit := extentLimit(wm, s, pos)
 	i := pos
 	for i < limit && s[i] != '\n' {
@@ -822,7 +855,7 @@ func listBlockScalarSpan(wm *meter.Meter, s string, pos, col int) (int, int) {
 		end = text
 	}
 	if start < 0 {
-		return pos, tokenEnd(wm, s, pos)
+		return pos, tm.tokenEnd(wm, s, pos)
 	}
 	return start, end
 }

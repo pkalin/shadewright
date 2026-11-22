@@ -59,8 +59,8 @@ type logPick struct {
 
 // logPicks chooses the containers to read, most relevant first: one whose last instance terminated inside
 // the window, then one that waits with a reason or terminated with an error, then one that is not ready. A
-// termination that finished before the window, and a container that ran to completion (a finished init
-// container), are not trouble. When no container shows trouble, the first regular container of the most
+// termination that finished before the window, a container that ran to completion (a finished init
+// container) and one stopped by its pod's deletion ([shutdown]) are not trouble. When no container shows trouble, the first regular container of the most
 // troubled pod is read.
 //
 // Which instance is read first: for a container whose current instance has terminated, that instance, the
@@ -82,9 +82,9 @@ func logPicks(t *target, w window) []logPick {
 			case last != nil && last.FinishedAt.After(w.start):
 				pick.score, pick.previous = 3, !pick.currentDead
 			case cs.State.Waiting != nil && cs.State.Waiting.Reason != "",
-				cs.State.Terminated != nil && !completed(cs):
+				cs.State.Terminated != nil && !settled(p, cs):
 				pick.score = 2
-			case !cs.Ready && !completed(cs):
+			case !cs.Ready && !settled(p, cs):
 				pick.score = 1
 			}
 			// The current instance always exists; a previous one only after a termination.

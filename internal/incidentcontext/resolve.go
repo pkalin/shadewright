@@ -409,15 +409,35 @@ func completed(cs containerStatus) bool {
 	return cs.State.Terminated != nil && cs.State.Terminated.ExitCode == 0
 }
 
+// reasonOOMKilled is the termination reason of a container the kernel killed for memory. It stays evidence
+// even when the pod is being deleted ([shutdown]).
+const reasonOOMKilled = "OOMKilled"
+
+// shutdown reports a container whose current instance terminated, other than by an OOM kill, while its pod
+// is being deleted (deletionTimestamp set): the deletion stops it, with exit code 137 after the grace period
+// or 143 for a runtime that exits on SIGTERM, so a rollout, a scale down or a node drain shows such exits.
+// The collector takes no symptom from them either (#966). Only the current instance is meant: the kubelet
+// restarts no container of a pod being deleted, so the last termination, when there is one, ended an earlier
+// instance and stays trouble. The decision reads the pod's own state and compares no times (#969).
+func shutdown(p *corev1.Pod, cs containerStatus) bool {
+	return p.DeletionTimestamp != nil && cs.State.Terminated != nil && cs.State.Terminated.Reason != reasonOOMKilled
+}
+
+// settled reports a container whose current instance is no trouble although it is not ready: it ran to
+// completion ([completed]) or was stopped by its pod's deletion ([shutdown]).
+func settled(p *corev1.Pod, cs containerStatus) bool {
+	return completed(cs) || shutdown(p, cs)
+}
+
 func troubleOf(p *corev1.Pod) trouble {
 	var t trouble
 	for _, cs := range allStatuses(p) {
 		if (cs.State.Waiting != nil && cs.State.Waiting.Reason != "") ||
-			(cs.State.Terminated != nil && !completed(cs)) || cs.LastTerminationState.Terminated != nil {
+			(cs.State.Terminated != nil && !settled(p, cs)) || cs.LastTerminationState.Terminated != nil {
 			t.broken++
 		}
 		t.restarts += max(cs.RestartCount, 0)
-		if !cs.Ready && !completed(cs) {
+		if !cs.Ready && !settled(p, cs) {
 			t.unready++
 		}
 	}

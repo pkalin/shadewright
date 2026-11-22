@@ -282,7 +282,7 @@ var heapPerByteGroups = [4][]string{
 
 // The four TestHeapPerByteOfEveryShape tests measure every entry point of heapEntryPoints, each once.
 func TestHeapPerByteCoversEveryEntryPoint(t *testing.T) {
-	var names, grouped []string
+	names, grouped := make([]string, 0, len(heapEntryPoints)), []string{}
 	for _, ep := range heapEntryPoints {
 		names = append(names, ep.name)
 	}

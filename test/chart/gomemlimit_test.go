@@ -28,11 +28,14 @@ import (
 	"github.com/pkalin/shadewright/internal/gitops/semdiff"
 )
 
+// goMemLimitEnv is the variable the chart and the manifests set the Go memory limit in.
+const goMemLimitEnv = "GOMEMLIMIT"
+
 func goMemLimit(t *testing.T, r rendered, k string) string {
 	t.Helper()
 	var found []string
 	for _, e := range container(t, r, k).Env {
-		if e.Name == "GOMEMLIMIT" {
+		if e.Name == goMemLimitEnv {
 			found = append(found, e.Value)
 		}
 	}
@@ -266,7 +269,7 @@ func TestManifestsSetTheChartsGoMemLimit(t *testing.T) {
 		d := convert[appsv1.Deployment](t, u)
 		var got []string
 		for _, e := range d.Spec.Template.Spec.Containers[0].Env {
-			if e.Name == "GOMEMLIMIT" {
+			if e.Name == goMemLimitEnv {
 				got = append(got, e.Value)
 			}
 		}

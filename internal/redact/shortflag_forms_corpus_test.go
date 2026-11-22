@@ -42,6 +42,9 @@ type shortBox struct {
 	order         []string
 }
 
+// shortRedisCLI is the redis client of the table.
+const shortRedisCLI = "redis" + "-cli"
+
 const (
 	keyName    = "name"
 	keyImage   = "image"
@@ -126,9 +129,11 @@ func (b shortBox) flow() string {
 	return "{" + strings.Join(parts, ", ") + "}"
 }
 
-// block writes the box as an item of a YAML block sequence whose dash stands at column ind; with scalar set the
-// items of its args are block scalars with that indicator ("- >-" and the item on the next line).
-func (b shortBox) block(ind, scalar string) string {
+// block writes the box as an item of a YAML block sequence whose dash stands at column 2, as under
+// "containers:"; with scalar set the items of its args are block scalars with that header ("- >-" and the item on
+// the next line).
+func (b shortBox) block(scalar string) string {
+	const ind = "  "
 	var sb strings.Builder
 	first := true
 	for _, k := range b.order {
@@ -175,7 +180,7 @@ func shortBlockPod(scalar string) func(bs []shortBox) string {
 		var sb strings.Builder
 		sb.WriteString("kind: Pod\nspec:\n  containers:\n")
 		for _, b := range bs {
-			sb.WriteString(b.block("  ", scalar))
+			sb.WriteString(b.block(scalar))
 		}
 		sb.WriteString("  restartPolicy: Always\n")
 		return sb.String()
@@ -207,7 +212,7 @@ func shortAppBox(order []string) shortBox {
 
 // shortImageOf returns the image base name of the tool t ("redis" for redis-cli, as kubectl users name it).
 func shortImageOf(t shortTool) string {
-	if t.name == "redis-cli" {
+	if t.letter == 'a' { // redis-cli, the one tool of the table whose flag is -a
 		return shortRedis
 	}
 	return t.name
@@ -256,13 +261,15 @@ func shortKeyOrderCorpus() []shortFlagCase {
 						db.command, db.image = nil, shortImageOf(t)+":8"
 						form = fmt.Sprintf("key order: %s %s, image after args, no command, %s", t.name, f.name, l.name)
 					}
-					boxes := []shortBox{db}
+					boxes := make([]shortBox, 0, 2)
 					kept := []string{shortLogLevel, shortTail}
 					switch i % 3 {
 					case 1:
-						boxes = []shortBox{shortAppBox(shortAlphabetical), db}
+						boxes = append(boxes, shortAppBox(shortAlphabetical), db)
 					case 2:
-						boxes = append(boxes, shortAppBox(shortAlphabetical))
+						boxes = append(boxes, db, shortAppBox(shortAlphabetical))
+					default:
+						boxes = append(boxes, db)
 					}
 					if len(boxes) > 1 {
 						kept = append(kept, shortAppPort)
@@ -438,13 +445,15 @@ func shortScalarCorpus() []shortFlagCase {
 					case "command after args":
 						db.image, db.command, db.order = shortAppImage, []string{row.tool.name}, shortAlphabetical
 					}
-					boxes := []shortBox{db}
+					boxes := make([]shortBox, 0, 2)
 					kept := []string{shortLogLevel, shortTail}
 					switch i % 3 {
 					case 1:
-						boxes = []shortBox{shortAppBox(shortNameFirst), db}
+						boxes = append(boxes, shortAppBox(shortNameFirst), db)
 					case 2:
-						boxes = append(boxes, shortAppBox(shortAlphabetical))
+						boxes = append(boxes, db, shortAppBox(shortAlphabetical))
+					default:
+						boxes = append(boxes, db)
 					}
 					if len(boxes) > 1 {
 						kept = append(kept, shortAppPort)
@@ -470,14 +479,14 @@ var shortOtherVariants = []struct {
 	write   func(db, app shortBox) string
 }{
 	{name: "comment after the args key", write: func(db, app shortBox) string {
-		return strings.Replace(shortBlockPod("")([]shortBox{app, db}), "args:\n", "args:\n    # the arguments\n", -1)
+		return strings.ReplaceAll(shortBlockPod("")([]shortBox{app, db}), "args:\n", "args:\n    # the arguments\n")
 	}},
 	{name: "comment before every item", write: func(db, app shortBox) string {
 		return strings.ReplaceAll(shortBlockPod("")([]shortBox{db, app}), "\n    - ", "\n    # next\n    - ")
 	}},
 	{name: "args as one plain string", write: func(db, app shortBox) string {
 		return "kind: Pod\nspec:\n  containers:\n  - name: db\n    image: " + db.image + "\n    args: " +
-			strings.Join(db.args, " ") + "\n" + app.block("  ", "")
+			strings.Join(db.args, " ") + "\n" + app.block("")
 	}},
 	{name: "args as one JSON string", write: func(db, app shortBox) string {
 		return `{"kind":"Pod","spec":{"containers":[` + app.json() + `,{"name":"db","image":` + mustJSON(db.image) +
@@ -485,8 +494,8 @@ var shortOtherVariants = []struct {
 	}},
 	{name: "command as one string after args, YAML", command: true, write: func(db, app shortBox) string {
 		db.order = []string{keyArgs, keyImage, keyName}
-		return "kind: Pod\nspec:\n  containers:\n" + db.block("  ", "") + "    command: " + db.command[0] + "\n" +
-			app.block("  ", "")
+		return "kind: Pod\nspec:\n  containers:\n" + db.block("") + "    command: " + db.command[0] + "\n" +
+			app.block("")
 	}},
 	{name: "command as one string after args, JSON", command: true, write: func(db, app shortBox) string {
 		return `{"kind":"Pod","spec":{"containers":[{"name":"db","args":` + mustJSON(db.args) + `,"command":` +
@@ -541,14 +550,14 @@ func shortOtherCorpus() []shortFlagCase {
 // table after arguments under an image of the table (the command decides, and it has no row), the port of a
 // table tool after its arguments, and the next item's port after a command of the table.
 func shortFormsKeptCases() []shortFlagCase {
-	var out []shortFlagCase
+	out := make([]shortFlagCase, 0, 4*len(shortPodLayouts))
 	for _, l := range shortPodLayouts {
 		for _, b := range []shortBox{
 			{name: "db", image: "mysql:8.4", command: []string{"/docker-entrypoint.sh"}, args: []string{"-pswcommand9"},
 				order: shortAlphabetical},
 			{name: "db", image: "mysql:8.4", command: []string{shortMySQL}, args: []string{"-P", "3306", "-h", "db"},
 				order: shortAlphabetical},
-			{name: "cache", image: "redis:7", command: []string{"redis-cli"}, args: []string{"-p", "6380"},
+			{name: "cache", image: "redis:7", command: []string{shortRedisCLI}, args: []string{"-p", "6380"},
 				order: shortAlphabetical},
 		} {
 			in := l.write([]shortBox{b, shortAppBox(shortNameFirst)})
@@ -579,10 +588,10 @@ func shortFormsGroups() []struct {
 // shortFormsEntries are the entry points every text of the five groups goes through: String and each entry with
 // a flag that redacts one text whole.
 func shortFormsEntries() []flagged {
-	out := []flagged{{name: "String", run: func(in string) ([]string, bool) { return []string{String(in)}, true }}}
+	out := []flagged{{name: "String (plain)", run: func(in string) ([]string, bool) { return []string{String(in)}, true }}}
 	for _, e := range flaggedEntries {
-		switch e.name {
-		case "StringsChecked", "PiecesWithin", "PiecesFitting":
+		// Strings and the pieces entries split the text; the others redact it whole.
+		if strings.HasPrefix(e.name, "Strings") || strings.HasPrefix(e.name, "Pieces") {
 			continue
 		}
 		out = append(out, e)

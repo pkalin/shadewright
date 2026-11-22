@@ -336,24 +336,9 @@ func (r *shortReader) lineBreak(wm *meter.Meter, i int) int {
 		k++
 	}
 	item := k < len(s) && s[k] == '-' && (k+1 == len(s) || isSpace(wm, s[k+1]))
-	blank := k == len(s) || s[k] == '\n' || s[k] == '\r'
-	header := r.header
-	r.header = false
-	if r.yaml && !item && (r.scalar || header) && (blank || k-line > r.itemCol) {
-		// The content of a block scalar item ("- >-" and the lines right of its dash): the item goes on.
-		r.scalar = true
-		return i + 1
-	}
-	r.scalar = false
 	_, args := r.keyAt("args")
 	_, command := r.keyAt("command")
-	if k < len(s) && s[k] == '#' && (r.yaml || args || command) {
-		// A comment line in a YAML block sequence, or between its key and its first item: read as a line of its
-		// own, with no command word, and the sequence goes on after it as before it (resume).
-		saved := *r
-		r.saved = &saved
-		r.end()
-		r.yaml, r.command, r.depth = false, false, 0
+	if r.carriesOn(k, k-line, item, args || command) {
 		return i + 1
 	}
 	if item {
@@ -380,6 +365,31 @@ func (r *shortReader) lineBreak(wm *meter.Meter, i int) int {
 		r.end()
 	}
 	return i + 1
+}
+
+// carriesOn reports, for the line whose first byte that is no blank is at k, in column col, whether the line
+// break before it leaves the reading as it is: the content of a block scalar item ("- >-" and the lines right of
+// its dash, or blank), where the item goes on; or a comment line in a YAML block sequence, or between an "args"
+// or "command" key (key) and its first item, which is read as a line of its own with no command word, the
+// sequence going on after it as before it (resume).
+func (r *shortReader) carriesOn(k, col int, item, key bool) bool {
+	s := r.s
+	blank := k == len(s) || s[k] == '\n' || s[k] == '\r'
+	header := r.header
+	r.header = false
+	if r.yaml && !item && (r.scalar || header) && (blank || col > r.itemCol) {
+		r.scalar = true
+		return true
+	}
+	r.scalar = false
+	if k < len(s) && s[k] == '#' && (r.yaml || key) {
+		saved := *r
+		r.saved = &saved
+		r.end()
+		r.yaml, r.command, r.depth = false, false, 0
+		return true
+	}
+	return false
 }
 
 // afterItemDash reports whether i follows the dash of a YAML block sequence item and a blank, with at most an

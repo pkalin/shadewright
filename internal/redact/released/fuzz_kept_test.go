@@ -33,8 +33,8 @@ const keptFuzzBound = 4 << 10
 func FuzzReleasedMatchesKeptCopy(f *testing.F) {
 	for _, s := range []string{
 		"pass: |\n  hunter2\n",
-		strings.Repeat("--token,}", 12),
-		strings.Repeat("-password,", 12),
+		strings.Repeat(tokenFlagUnit, 12),
+		strings.Repeat(passwordFlagUnit, 12),
 		strings.Repeat(`TOKEN="a"`, 12) + "\"\n" + strings.Repeat(" ", 300) + "\"\uff1a",
 		strings.Repeat(`auth="a"`, 12) + "\uff1ax",
 		strings.Repeat(fuzzLabelUnit, 4),

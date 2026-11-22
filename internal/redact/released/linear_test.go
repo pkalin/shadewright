@@ -36,12 +36,18 @@ import (
 // linearSlack is how much more than twice the work a doubling may cost.
 const linearSlack = 1.1
 
+// The units of the two flag shapes of #962.
+const (
+	tokenFlagUnit    = "--token,}"
+	passwordFlagUnit = "-password,"
+)
+
 // linearShapes are the three shapes of #962, each a unit repeated and a fixed tail.
 var linearShapes = []struct {
 	name, unit, tail string
 }{
-	{"--token,} repeated", "--token,}", ""},
-	{"-password, repeated", "-password,", ""},
+	{"--token,} repeated", tokenFlagUnit, ""},
+	{"-password, repeated", passwordFlagUnit, ""},
 	{`TOKEN="a" before a blank line`, `TOKEN="a"`, "\"\n" + strings.Repeat(" ", 4096) + "\"："},
 }
 
@@ -72,7 +78,7 @@ func TestFlagRunsAndTokenPairsWorkIsLinear(t *testing.T) {
 // the bytes that end a value or open a group, and the tails that close or leave open a quote after a blank line.
 var (
 	runUnits = []string{
-		"--token,", "--token,}", "-password,", "--password", "-token", "--client-secret,", "TOKEN=\"a\"",
+		"--token,", tokenFlagUnit, passwordFlagUnit, "--password", "-token", "--client-secret,", "TOKEN=\"a\"",
 		"TOKEN='a'", "password=\"a\"", "auth=\"a\"", "TOKEN=\"a\",b,", "TOKEN=a", "--token=", "-password=\"a\"",
 	}
 	runGlue = []string{
@@ -172,7 +178,7 @@ func TestPlainWordEndMemoMatches(t *testing.T) {
 // The memory of the last value end (tokenMemo, #962) changes no result: on generated texts, every tokenEnd through
 // one memory, at positions in any order, gives what tokenEnd gives alone.
 func TestTokenMemoMatches(t *testing.T) {
-	pieces := []string{"\\\\\"", "\\\\\\\"", "\\\\x", "\\'", "\\", "-password,", "--token,}", "a", " ", "\t", "\n",
+	pieces := []string{"\\\\\"", "\\\\\\\"", "\\\\x", "\\'", "\\", passwordFlagUnit, tokenFlagUnit, "a", " ", "\t", "\n",
 		"\"", "'", ",", "}"}
 	r := rand.New(rand.NewPCG(962, 3)) // #nosec G404 -- reproducible generated texts
 	calls, hits := 0, 0

@@ -95,7 +95,7 @@ func TestCompletedInitContainerIsNotPicked(t *testing.T) {
 	p := pod(crashPod, nil, longAgo)
 	p.Status.InitContainerStatuses = []corev1.ContainerStatus{{
 		Name: "migrate", Ready: false,
-		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Completed", ExitCode: 0, FinishedAt: longAgo}},
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: completedReason, ExitCode: 0, FinishedAt: longAgo}},
 	}}
 	picks := logPicks(onePodTarget(p), w)
 	if len(picks) != 1 || picks[0].init || picks[0].container != appName {

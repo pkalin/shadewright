@@ -61,6 +61,7 @@ func TestDiffStringsFailsAProductPastItsDeadline(t *testing.T) {
 	productDeadline = time.Millisecond
 	t.Cleanup(func() { productDeadline = old })
 	fails, _ := diffStrings(seedStrings80K)
+	productsRunning.Wait()
 	if len(fails) != 1 || !strings.HasPrefix(fails[0], "P3: Strings did not return within 1ms") {
 		t.Fatalf("got %q, want one P3 failure for the deadline", fails)
 	}

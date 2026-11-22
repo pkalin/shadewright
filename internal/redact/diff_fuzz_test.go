@@ -23,6 +23,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -248,7 +249,9 @@ func diffStringsOf(items []string) ([]string, bool) {
 	var ok bool
 	var total, release int64
 	var counted bool
+	productsRunning.Add(1)
 	if !returnsWithin(productDeadline, func() {
+		defer productsRunning.Done()
 		total, release, counted = measureWork(func() { out, ok = StringsChecked(items) })
 	}) {
 		return []string{fmt.Sprintf("P3: Strings did not return within %v on %d strings of %d bytes",
@@ -311,6 +314,11 @@ const oracleStepCap = 24 << 20
 // the seed of 80 KiB found-962-strings-80k took 51 seconds there on the test runner, and 1.4 seconds without it
 // (#962). The run with the tag redactwork, without the race detector, reads every seed.
 const raceStringsBound = 64 << 10
+
+// productsRunning counts the calls of Strings diffStringsOf started and that have not returned: one that passed
+// productDeadline goes on after the input failed, and a test that shortens the deadline waits for it, so that it
+// does not run into the measurements of the tests after it.
+var productsRunning sync.WaitGroup
 
 // diffStringsOracles counts the entries FuzzDiffStrings ran its oracles on, for the test of oracleStepCap.
 var diffStringsOracles atomic.Int64

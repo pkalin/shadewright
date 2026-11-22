@@ -49,6 +49,7 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
 	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 	fx "github.com/pkalin/shadewright/internal/testfixtures"
 )
 
@@ -434,9 +435,14 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 	})
 
 	It("refuses a hint redaction withholds whole as not redactable, never storing the marker (#873)", func() {
-		// "--token,}" repeated costs the reading of the release before more than the budget of redaction, so the
-		// hint redacts to redact.Withheld, which is short and clean but is not the hint.
-		withheld := byWriter("/shadewright reanalyze: " + strings.Repeat("--token,}", 6144))
+		// On the lowered work budget of redacttest the hint is withheld for its work: it redacts to
+		// redact.Withheld, which is short and clean but is not the hint.
+		red, err := redact.New()
+		Expect(err).NotTo(HaveOccurred())
+		saved := hintRedact
+		hintRedact = redacttest.LowBudget(red).StringChecked
+		DeferCleanup(func() { hintRedact = saved })
+		withheld := byWriter("/shadewright reanalyze: " + redacttest.OverLowBudget)
 		poll()
 		Expect(refusals()).To(HaveKeyWithValue(withheld, remediationv1alpha1.HintRefusalNotRedactable))
 		Expect(fetch().Status.Hints).To(BeEmpty())

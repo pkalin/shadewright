@@ -196,6 +196,10 @@ type Redactor struct {
 	before *released.Redactor
 	// wins are the expressions of the rules with their alphabets, read by windows (windows.go).
 	wins []*windowed
+	// lowered and workBudget: the work budget of every entry is at most workBudget steps (WithWorkBudget, tests
+	// only). False on every redactor New returns.
+	lowered    bool
+	workBudget int64
 }
 
 var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -294,7 +298,7 @@ func (r *Redactor) StringKeeping(s string, keep ...string) string {
 // StringKeepingChecked is StringKeeping with a flag: ok is false when it withholds s (budget.go), and out is then
 // Withheld. A caller that shows a withheld value apart (the body of a pull request) reads the flag, never the text.
 func (r *Redactor) StringKeepingChecked(s string, keep ...string) (out string, ok bool) {
-	return meteredText(len(s), func(wm *meter.Meter) string { return r.stringKeeping(wm, s, keep) })
+	return meteredText(r, len(s), func(wm *meter.Meter) string { return r.stringKeeping(wm, s, keep) })
 }
 
 // stringKeeping is StringKeeping on the budget wm.
@@ -325,7 +329,7 @@ func (r *Redactor) stringKeeping(wm *meter.Meter, s string, keep []string) strin
 //
 // An entry it withholds (package budget.go) is not clean: Clean returns false.
 func (r *Redactor) Clean(s string, keep ...string) bool {
-	clean, ok := metered(len(s), func(wm *meter.Meter) bool { return r.clean(wm, s, keep) })
+	clean, ok := metered(r, len(s), func(wm *meter.Meter) bool { return r.clean(wm, s, keep) })
 	return ok && clean
 }
 
@@ -524,7 +528,7 @@ func (r *Redactor) String(s string) string {
 
 // StringChecked is String with a flag: ok is false when the entry is withheld, and the text is then Withheld.
 func (r *Redactor) StringChecked(s string) (out string, ok bool) {
-	return meteredText(len(s), func(wm *meter.Meter) string { return render(wm, s, r.spans(wm, s)) })
+	return meteredText(r, len(s), func(wm *meter.Meter) string { return render(wm, s, r.spans(wm, s)) })
 }
 
 // spans returns the matches of every rule in s, sorted, with overlapping matches merged into one named after
@@ -704,7 +708,7 @@ func (r *Redactor) Replace(s string, repl func(kind, text string) string, betwee
 
 // ReplaceChecked is Replace with a flag: ok is false when the entry is withheld, and the text is then Withheld.
 func (r *Redactor) ReplaceChecked(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
-	spans, ok := metered(len(s), func(wm *meter.Meter) []span { return r.spans(wm, s) })
+	spans, ok := metered(r, len(s), func(wm *meter.Meter) []span { return r.spans(wm, s) })
 	if !ok {
 		return Withheld, false
 	}

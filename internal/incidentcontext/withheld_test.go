@@ -25,14 +25,15 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/fake"
 	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 // A section redaction withholds whole is could not fetch, labelled withheld by redaction, with a fixed text and
 // nothing of the source, and its section is a failed source, so the context escalates (#873, decision of
-// 2026-11-20). "--token,}" repeated costs the reading of the release before more than the budget of redaction
-// (released.tokenEnd), so every entry point withholds it.
+// 2026-11-20). The builder's redactor has the lowered work budget of redacttest, which withholds OverLowBudget for
+// its work at every entry point.
 func TestWithheldSectionsAreFailedSources(t *testing.T) {
-	run := strings.Repeat("--token,}", 8192)
+	run := redacttest.OverLowBudget
 	d := deployment()
 	d.Status.Conditions[0].Message = run
 	rs := replicaSet("web-abc", "uid-rs-abc", d, longAgo)
@@ -41,7 +42,8 @@ func TestWithheldSectionsAreFailedSources(t *testing.T) {
 	src.metrics.Set("container_restarts_total", []providers.Series{{
 		Labels: map[string]string{labelPod: crashPod, labelContainer: run}, Samples: []providers.Sample{{Value: 4}},
 	}})
-	c := build(t, newBuilder(t, reader(t, d, rs, p), src, nil), incident(deploymentRef()))
+	lowBudget := func(c *Config) { c.Redactor = redacttest.LowBudget(c.Redactor.(*redact.Redactor)) }
+	c := build(t, newBuilder(t, reader(t, d, rs, p), src, lowBudget), incident(deploymentRef()))
 	for _, s := range []Section{SectionStatus, SectionMetrics} {
 		blk := one(t, c, s)
 		if blk.Availability != CouldNotFetch || !slices.Contains(blk.Labels, LabelWithheld) || len(blk.Values) != 0 ||
@@ -66,13 +68,15 @@ func TestWithheldSectionsAreFailedSources(t *testing.T) {
 // A value of the log header that redaction withholds (the container ID or the pod UID of the instance) is a
 // withheld excerpt, as a withheld body is: the read is LogReadWithheld, the header says withheld by redaction,
 // and nothing of the answer is shown, neither the marker in the header nor the body (#873, decision of
-// 2026-11-20). Both modes: the context builder (refit false) and get_pod_logs (refit true).
+// 2026-11-20). Both modes: the context builder (refit false) and get_pod_logs (refit true). The redactor has the
+// lowered work budget of redacttest, which withholds OverLowBudget for its work.
 func TestRenderLogWithheldHeaderValue(t *testing.T) {
 	red, err := redact.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := strings.Repeat("--token,}", 8192)
+	red = redacttest.LowBudget(red)
+	run := redacttest.OverLowBudget
 	const body = "starting server on port 8080\n"
 	for _, field := range []string{"ContainerID", "PodUID"} {
 		in := providers.LogInstance{PodUID: "uid-1", ContainerID: "containerd://abc"}

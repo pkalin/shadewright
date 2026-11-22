@@ -177,13 +177,22 @@ const (
 )
 
 func normalize(o Observation, mode quantityMode) string {
+	return normalizeWith(redact.ReplaceChecked, o, mode)
+}
+
+// replaceChecked is the signature of redact.ReplaceChecked.
+type replaceChecked func(s string, repl func(kind, text string) string, between func(string) string) (string, bool)
+
+// normalizeWith is normalize with the redaction given: redact.ReplaceChecked, or in a test the same method of a
+// redactor on a lowered work budget (#962).
+func normalizeWith(replace replaceChecked, o Observation, mode quantityMode) string {
 	if len(o.Note) > maxInputLength {
 		return placeholderRedacted
 	}
 	// Redact the note as it was read, before any character is replaced: sanitize turns ">" into ")", which
 	// would hide a folded block scalar indicator from the rules (#840). Each match becomes its placeholder
 	// at once, and only the text between matches is sanitized.
-	s, ok := redact.ReplaceChecked(o.Note, rawPlaceholder, sanitize)
+	s, ok := replace(o.Note, rawPlaceholder, sanitize)
 	if !ok {
 		// Redaction withheld the note whole (its work budget ran out): it stands as a note too long to read. The
 		// flag says so, never the text: a note that spells the marker is a note like any other (#873).

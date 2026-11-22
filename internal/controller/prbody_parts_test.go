@@ -26,6 +26,7 @@ import (
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
 	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 // partBound stands in for the size bound of the redactor of #873 (redact.MaxEntry there): an entry longer than
@@ -390,13 +391,17 @@ func TestPullRequestBodyWithheldContainerKeepsTheFieldWords(t *testing.T) {
 
 // TestPullRequestBodyValueOverItsBudgetIsWithheld: a value of the body whose redaction uses up its work budget
 // (#873, decision of 2026-11-21) is told by the redactor's flag, so the body shows the marker in its place and the
-// fixed Withheld paragraph, and no text of the value.
+// fixed Withheld paragraph, and no text of the value. The body's values are redacted on the lowered work budget of
+// redacttest, which withholds OverLowBudget for its work and decides the short values of the body.
 func TestPullRequestBodyValueOverItsBudgetIsWithheld(t *testing.T) {
 	rr := bodyRequest()
-	run := strings.Repeat("--token,}", 8192)
-	rr.Status.Source.Path = remediationv1alpha1.GitFilePath(run)
+	rr.Status.Source.Path = remediationv1alpha1.GitFilePath(redacttest.OverLowBudget)
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	body := pullRequestBody(rr, "", nil)
+	body := composeBody(rr, "", nil, redacttest.LowBudget(red).StringKeepingChecked)
 
 	if !strings.Contains(body, "**Scope:** one value in `"+withheldValue+"` on `"+mainBranch+"`.") {
 		t.Errorf("the withheld value is not the marker in its own place:\n%.2000s", body)

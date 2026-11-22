@@ -128,6 +128,10 @@ var hintLoginPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 // redactor misbehaves; tests replace it to prove the refusal.
 var hintClean = func(s string) bool { return redact.Clean(s) }
 
+// hintRedact redacts hint text, with the flag false when redaction withheld it whole (redact.StringChecked); a
+// test replaces it with a redactor on a lowered work budget to prove the refusal of a withheld hint (#962).
+var hintRedact = redact.StringChecked
+
 // maxCursorPage is the largest page status.commentCursor holds (its schema's maximum).
 const maxCursorPage = 100000
 
@@ -476,7 +480,7 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 		// Withheld is told by the flag, never by the text: a hint that spells the marker is a hint like any other.
 		// NotRedactable is decided before TooLong, as HintRefusal says: a long hint whose redaction runs out of its
 		// budget has no redacted length to compare, so it is refused as NotRedactable.
-		stored, decided := redact.StringChecked(text)
+		stored, decided := hintRedact(text)
 		switch {
 		case !decided || !hintClean(stored):
 			refuse(remediationv1alpha1.HintRefusalNotRedactable)

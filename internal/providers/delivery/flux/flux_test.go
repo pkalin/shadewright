@@ -35,6 +35,7 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/delivery/flux"
 	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 const (
@@ -292,19 +293,25 @@ func TestStatusReaderRedactsTheMessageBeforeItIsCut(t *testing.T) {
 }
 
 // A message redaction withholds whole is empty, with MessageWithheld set; a message that spells the withheld
-// marker is text, with MessageWithheld unset: the flag of the redactor decides, never the text (#873).
+// marker is text, with MessageWithheld unset: the flag of the redactor decides, never the text (#873). The
+// redactor has the lowered work budget of redacttest, which withholds OverLowBudget for its work.
 func TestStatusReaderFlagsAWithheldMessage(t *testing.T) {
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	red = redacttest.LowBudget(red)
 	for _, tc := range []struct {
 		message  string
 		withheld bool
 	}{
-		{strings.Repeat("--token,}", 4096), true},
+		{redacttest.OverLowBudget, true},
 		{redact.Withheld, false},
 	} {
 		u := recorded(t, readyFile)
 		u.Object["status"].(map[string]any)["conditions"].([]any)[0].(map[string]any)["message"] = tc.message
 		applied := fluxstatus.AppliedRevision(fluxstatus.Status(u.Object))
-		sr, err := flux.NewStatusReader(&reader{obj: u, others: []*unstructured.Unstructured{source(t, applied)}}, nil)
+		sr, err := flux.NewStatusReader(&reader{obj: u, others: []*unstructured.Unstructured{source(t, applied)}}, red)
 		if err != nil {
 			t.Fatal(err)
 		}

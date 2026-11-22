@@ -33,9 +33,8 @@ import (
 // inside its budget): the budget (budget.go) stops an entry at a work linear in its size, so the work of String
 // itself grows linearly on any shape and could not show one that is not. It is split in two (decision of
 // 2026-11-20 on #873): the work of this package (the total less the reading of the release before,
-// countWorkOfReleased) is held to the bound on every shape, with no exception; the reading of the release before
-// is held to it too, except on the units named in complexityKnownSuperlinear. Whether String withholds a shape is
-// not checked here: the budget withholds a linear shape whose cost per byte is above WorkPerByte too (decision of
+// countWorkOfReleased) and the reading of the release before are each held to the bound on every shape, with no
+// exception (#962 removed the two units excused before). Whether String withholds a shape is not checked here: the budget withholds a linear shape whose cost per byte is above WorkPerByte too (decision of
 // 2026-11-21 on #873), and growth is what tells a superlinear shape.
 
 // complexityOpenings are what a shape starts with.
@@ -56,23 +55,11 @@ var (
 )
 
 // tokenEndRun is a flag followed by a comma with no value: repeated, alone or with a closing brace, it is the
-// fourth shape of #873, on which the reading of the release before reads each value to the end of the run
-// (released.tokenEnd) and its work grows with the square of the text. That reading is the release's code (with the
-// linearity change of #873 that left its output unchanged, TestReleasedIsTheReleaseBefore and kept_test.go), and
-// not fixed for this shape (#962): the budget withholds such an entry instead (TestBudgetWithholdsTheQuadraticTokenShapes). The work
-// of this package on it is linear: the plain run of plainWordEnd reads the run of flags once, where each flag
-// read up to maxValueExtent bytes of it before. The sizes from which the budget withholds it are those of
-// TestBudgetWithholdSizes.
+// fourth shape of #873, on which each flag read its value to the end of the run (tokenEnd) and up to
+// maxValueExtent bytes of the run again (plainWordEnd), so the work grew with the square of the text. This package
+// reads the run once with the memories of #845 and #873 (tokenMemo, plainRun), and the reading of the release
+// before does the same since #962 (released.TestFlagRunsAndTokenPairsWorkIsLinear).
 const tokenEndRun = "--" + canonTokenKey + ","
-
-// complexityKnownSuperlinear are the units on which the reading of the release before (and only it) is known to
-// cost more than twice as much at twice the size, each with the reason. TestTokenShapesWorkIsLinearExceptTwo checks
-// that it still does (so an entry here cannot hide a shape that became linear) and that String withholds it at the
-// largest size; the work of this package on them is held to the linear bound as on every other shape.
-var complexityKnownSuperlinear = map[string]string{
-	tokenEndRun:       "released.tokenEnd reads each value to the end of the run (#873, the fourth shape; #962)",
-	tokenEndRun + "}": "released.tokenEnd reads each value to the end of the run (#873, the fourth shape; #962)",
-}
 
 // complexityUnits returns every unit: each token, and each pair of core tokens.
 func complexityUnits() []string {
@@ -122,9 +109,8 @@ func doublingOver(work, size [4]int64, windowed bool) (units int, before, after 
 
 // The work of this package (the total less the reading of the release before) is held to the linear bound on
 // every shape, with no shape excused: a change to the kept code that makes a shape superlinear fails here
-// whatever the reading of the release does on it. That reading is held to it too, except on the two units named
-// in complexityKnownSuperlinear (#962), where it must still be superlinear and String must withhold the entry.
-func TestTokenShapesWorkIsLinearExceptTwo(t *testing.T) {
+// whatever the reading of the release does on it. That reading is held to it too, on every shape (#962).
+func TestTokenShapesWorkIsLinear(t *testing.T) {
 	shapes, failed := 0, 0
 	fail := func(format string, args ...any) {
 		if failed++; failed <= 10 {
@@ -135,9 +121,8 @@ func TestTokenShapesWorkIsLinearExceptTwo(t *testing.T) {
 		for _, unit := range complexityUnits() {
 			shapes++
 			var own, rel, size [4]int64
-			var in string
 			for i := range own {
-				in = open + strings.Repeat(unit, complexityN<<i)
+				in := open + strings.Repeat(unit, complexityN<<i)
 				total, release := decisionWork(t, in)
 				own[i], rel[i], size[i] = total-release, release, int64(len(in))
 			}
@@ -145,16 +130,7 @@ func TestTokenShapesWorkIsLinearExceptTwo(t *testing.T) {
 				fail("%q + %q x %d: own work %d, at twice as many units %d (own work %v)", open, unit, n, before,
 					after, own)
 			}
-			_, _, _, releaseOver := doublingOver(rel, size, false)
-			if reason, known := complexityKnownSuperlinear[unit]; known {
-				_, decided := StringChecked(in)
-				if withheld := !decided; !releaseOver || !withheld {
-					fail("%q + %q, known superlinear in the release's reading (%s): superlinear %v (release work %v), "+
-						"withheld at %d bytes %v", open, unit, reason, releaseOver, rel, len(in), withheld)
-				}
-				continue
-			}
-			if releaseOver {
+			if _, _, _, releaseOver := doublingOver(rel, size, false); releaseOver {
 				fail("%q + %q: the release's reading is superlinear (release work %v)", open, unit, rel)
 			}
 		}

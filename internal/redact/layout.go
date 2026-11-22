@@ -182,7 +182,7 @@ func (r *Redactor) meteredPieces(ps []Piece, f func(wm *meter.Meter) []string) (
 	if size <= MaxEntry && tooManyParts(len(ps), size, PieceBytes) {
 		return withheldStrings(len(ps)), false
 	}
-	if out, ok := metered(size, f); ok {
+	if out, ok := metered(r, size, f); ok {
 		return out, true
 	}
 	return withheldStrings(len(ps)), false

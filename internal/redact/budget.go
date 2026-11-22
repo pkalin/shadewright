@@ -36,11 +36,10 @@ import (
 const (
 	// WorkPerByte is the steps the budget gives each byte of an entry. It is a bound on work, not a promise that
 	// every linear shape fits (decision of 2026-11-21 on #873): a shape whose cost is linear but above it is
-	// withheld from the size where it passes the budget. The known ones are glued quoted pairs (auth="a"
-	// repeated), TOKEN="a" repeated before a long blank line, and "--token,}" and "-password," repeated, whose
-	// reading of the release before grows with the square of the text until #962; TestBudgetWithholdSizes holds
-	// the size from which each is withheld at each entry point. The work tests check that work grows linearly
-	// with the text on every other shape of the corpus (TestCorpusWorkGrowsLinearly).
+	// withheld from the size where it passes the budget. No shape of the corpus is known to pass it since #962
+	// brought the last four that did under the budget ("--token,}" and "-password," repeated, glued quoted
+	// pairs, TOKEN="a" repeated before a long blank line). The work tests check that work grows linearly with the text on every shape of the corpus
+	// (TestCorpusWorkGrowsLinearly).
 	WorkPerByte = 1024
 	// WorkFixed is the steps the budget gives every entry besides WorkPerByte per byte: the fixed cost of a call
 	// on a short entry.
@@ -146,11 +145,37 @@ func tooManyParts(parts, size, perPart int) bool {
 // budgetOf returns the budget of an entry of size bytes.
 func budgetOf(size int) int64 { return WorkFixed + WorkPerByte*int64(size) }
 
-// metered runs f, the redaction of an entry of size bytes, on the budget of that entry, and returns its result
+// budgetOf returns the budget of an entry of size bytes for r: the package's (budgetOf), or the lower one a test
+// set with WithWorkBudget.
+func (r *Redactor) budgetOf(size int) int64 {
+	b := budgetOf(size)
+	if r.lowered {
+		b = min(b, r.workBudget)
+	}
+	return b
+}
+
+// WithWorkBudget returns a copy of r on which every entry has at most steps steps of work, whatever its size, and
+// withholds an entry that needs more (ReasonWork). It only lowers the budget: an entry keeps its own when that is
+// lower. It is for tests of what a caller does with an entry withheld for its work (#962, decision of
+// 2026-11-22): since #962 no input of the corpora passes the package's budget, so a test that needs one withheld
+// lowers it on its own redactor, through redacttest.LowBudget. Nothing else may call it: the budget of a product
+// binary is the package's constant (ADR-0015), and TestLoweredBudgetOnlyInTests fails if code outside _test.go
+// files and package redacttest uses it.
+func (r *Redactor) WithWorkBudget(steps int64) *Redactor {
+	c := *r
+	c.lowered, c.workBudget = true, max(steps, 0)
+	if r.lowered {
+		c.workBudget = min(c.workBudget, r.workBudget)
+	}
+	return &c
+}
+
+// metered runs f, the redaction of an entry of size bytes, on r's budget of that entry, and returns its result
 // and true; or the zero value and false when the entry is withheld: longer than MaxEntry (f is not run) or its
 // budget ran out (f stopped).
-func metered[T any](size int, f func(wm *meter.Meter) T) (out T, ok bool) {
-	return meteredOn(size, budgetOf(size), f)
+func metered[T any](r *Redactor, size int, f func(wm *meter.Meter) T) (out T, ok bool) {
+	return meteredOn(size, r.budgetOf(size), f)
 }
 
 // meteredOn is metered with the budget given.
@@ -186,8 +211,8 @@ func unstopped() *meter.Meter { return meter.New(math.MaxInt64) }
 
 // meteredText is metered for an entry point that returns a text: Withheld and false in place of an entry
 // withheld.
-func meteredText(size int, f func(wm *meter.Meter) string) (string, bool) {
-	if out, ok := metered(size, f); ok {
+func meteredText(r *Redactor, size int, f func(wm *meter.Meter) string) (string, bool) {
+	if out, ok := metered(r, size, f); ok {
 		return out, true
 	}
 	return Withheld, false

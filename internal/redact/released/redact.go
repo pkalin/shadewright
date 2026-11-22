@@ -134,6 +134,10 @@ type rule struct {
 	// after a header: they get the index of the text's lines of the call (lineIndex, #873).
 	spanLines  func(wm *meter.Meter, s string, m []int, prevEnd int, lines *lineIndex) (start, end int, ok bool)
 	spansLines func(wm *meter.Meter, s string, m []int, prevEnd int, add func(start, end int), lines *lineIndex) int
+	// spanFor and spansFor, when set, replace span and spans with the function they return, made anew for each
+	// pass over a text, for a rule that keeps a memory of what it read in that pass (tokenMemo, #962).
+	spanFor  func() func(wm *meter.Meter, s string, m []int, prevEnd int) (start, end int, ok bool)
+	spansFor func() func(wm *meter.Meter, s string, m []int, prevEnd int, add func(start, end int)) int
 }
 
 // Redactor replaces sensitive data in text. It is safe for concurrent use.
@@ -387,6 +391,12 @@ func (r *Redactor) spans(wm *meter.Meter, s string) []span {
 			if end > start {
 				spans = append(spans, span{start: start, end: end, kind: ru.kind, rule: i})
 			}
+		}
+		if ru.spanFor != nil {
+			ru.span = ru.spanFor()
+		}
+		if ru.spansFor != nil {
+			ru.spans = ru.spansFor()
 		}
 		for _, m := range ru.findAll(wm, s) {
 			tick(wm, 1)
@@ -1786,7 +1796,7 @@ func extendedValueSpan(wm *meter.Meter, s string, pos, boundary, keyCol, ctx, ke
 		return start, end
 	}
 	if boundary == boundaryWhitespace && escapeLevel(wm, s, pos) == 0 && !opensGroup(wm, s, pos) {
-		if end := plainWordEnd(wm, s, pos, extentLimit(wm, s, pos), keyPos, wide); end > pos {
+		if end := plainWordEnd(wm, s, pos, extentLimit(wm, s, pos), keyPos, wide, nil); end > pos {
 			return pos, end
 		}
 	}
@@ -2013,9 +2023,18 @@ func keyValueSpans(boundary int, envName bool) func(wm *meter.Meter, s string, m
 
 // keyValueExtent returns the union of the value start, end and the extent rule's value after the key of m,
 // with the extents #769 widens when wide is true.
+//
+// When the string the key sits in closes at the value's start (TOKEN="a" glued to a quoted value before it), the
+// extent is cut back to that start whatever it is, as extendedValueSpan returns no start or end before the
+// position it reads from (TestExtendedValueSpanEndsAtOrAfterItsStart), so it is not read: in a run of such keys
+// each one read its shell word up to maxValueExtent bytes only for it to be cut (#962).
 func keyValueExtent(wm *meter.Meter, s string, m []int, boundary, start, end int, wide bool, lines *lineIndex) (int, int) {
+	se := enclosingStringEnd(wm, s, m[2], m[1])
+	if se == m[1] {
+		return min(start, se), max(end, se, argumentEnd(wm, s, m, wide))
+	}
 	xs, xe := extendedValueSpan(wm, s, m[1], boundary, m[2]-m[0], keyQuoteLevel(wm, s, m[2]), m[2], wide, lines)
-	xs, xe = clampToString(wm, xs, xe, enclosingStringEnd(wm, s, m[2], m[1]))
+	xs, xe = clampToString(wm, xs, xe, se)
 	return min(start, xs), max(end, xe, argumentEnd(wm, s, m, wide))
 }
 
@@ -2041,7 +2060,7 @@ func skipEnd(_ *meter.Meter, prevEnd, start, end int) int {
 // "--password-file", "--password-stdin") keeps its value. A value that ends inside the previous value is
 // skipped, as it is redacted already; one that starts inside it and runs past its end (a quote opened inside
 // the previous value) is redacted to its own end.
-func flagValueSpan(wm *meter.Meter, s string, m []int, prevEnd int) (int, int, bool) {
+func flagValueSpan(wm *meter.Meter, s string, m []int, prevEnd int, tm *tokenMemo) (int, int, bool) {
 	switch {
 	case m[0] > 0 && isAlnum(wm, s[m[0]-1]), referenceKey(wm, s[m[2]:m[3]], true):
 		return 0, 0, false
@@ -2052,7 +2071,7 @@ func flagValueSpan(wm *meter.Meter, s string, m []int, prevEnd int) (int, int, b
 	sep := s[m[3]:m[1]]
 	q := strings.TrimLeft(sep, `\`)
 	closed := q != "" && (q[0] == '"' || q[0] == '\'')
-	start, end := flagExtent(wm, s, m, closed)
+	start, end := flagExtent(wm, s, m, closed, tm)
 	// A value that lies inside the previous value is redacted already; one that runs past it is not.
 	return start, end, end > prevEnd
 }
@@ -2068,9 +2087,9 @@ func flagValueSpan(wm *meter.Meter, s string, m []int, prevEnd int) (int, int, b
 //
 // The value is the union of keyNameValue's without the extent rule (the value main gave) and the extent
 // rule's, so it is never shorter than main's (TestExtentStillRedactsWhatMainRedacted).
-func flagExtent(wm *meter.Meter, s string, m []int, closed bool) (int, int) {
-	start, end := keyNameValue(wm, s, m[1], m[0], closed, extNone)
-	xs, xe := flagExtendedValue(wm, s, m, closed)
+func flagExtent(wm *meter.Meter, s string, m []int, closed bool, tm *tokenMemo) (int, int) {
+	start, end := keyNameValue(wm, s, m[1], m[0], closed, extNone, tm)
+	xs, xe := flagExtendedValue(wm, s, m, closed, tm)
 	xs, xe = clampToString(wm, xs, xe, enclosingStringEnd(wm, s, m[0], m[1]))
 	if xe > xs {
 		start, end = min(start, xs), max(end, xe)
@@ -2079,7 +2098,7 @@ func flagExtent(wm *meter.Meter, s string, m []int, closed bool) (int, int) {
 }
 
 // flagExtendedValue is the extent rule's part of flagExtent.
-func flagExtendedValue(wm *meter.Meter, s string, m []int, closed bool) (int, int) {
+func flagExtendedValue(wm *meter.Meter, s string, m []int, closed bool, tm *tokenMemo) (int, int) {
 	sep := s[m[3]:m[1]]
 	pos := m[1]
 	list := strings.IndexByte(sep, '-') >= 0
@@ -2091,7 +2110,7 @@ func flagExtendedValue(wm *meter.Meter, s string, m []int, closed bool) (int, in
 	if list {
 		if v := nodeProperties(wm, s, pos); isBlockHeader(wm, s, v) {
 			nl := m[3] + strings.LastIndexAny(sep, "\r\n") + 1
-			start, end := listBlockScalarSpan(wm, s, v, indexByte(wm, s[nl:pos], '-'))
+			start, end := listBlockScalarSpan(wm, s, v, indexByte(wm, s[nl:pos], '-'), tm)
 			if v > pos {
 				start = pos
 			}
@@ -2100,7 +2119,7 @@ func flagExtendedValue(wm *meter.Meter, s string, m []int, closed bool) (int, in
 	}
 	if list || flow {
 		if v := nodeProperties(wm, s, pos); v > pos {
-			_, end := keyNameValue(wm, s, v, m[0], true, ext)
+			_, end := keyNameValue(wm, s, v, m[0], true, ext, tm)
 			switch {
 			case opensGroup(wm, s, v):
 			case flow:
@@ -2111,7 +2130,7 @@ func flagExtendedValue(wm *meter.Meter, s string, m []int, closed bool) (int, in
 			return pos, end
 		}
 	}
-	start, end := keyNameValue(wm, s, pos, m[0], closed, ext)
+	start, end := keyNameValue(wm, s, pos, m[0], closed, ext, tm)
 	if start == pos && pos < len(s) && !opensGroup(wm, s, pos) && s[pos] != '\\' {
 		switch {
 		case flow:
@@ -2180,7 +2199,7 @@ func blockSequenceItem(wm *meter.Meter, s string, m []int) bool {
 // secret-named flag ("--password x", which the flag rule redacts): a match that starts inside a value already
 // taken is skipped ("client_secret db_password --region west" does not read "db_password" as a name), except
 // a secret-named flag, which is judged on its own. Each value is read once, so the cost stays linear.
-func compoundValueSpans(wm *meter.Meter, s string, m []int, prevEnd int, add func(start, end int)) int {
+func compoundValueSpans(wm *meter.Meter, s string, m []int, prevEnd int, add func(start, end int), tm *tokenMemo) int {
 	name := s[m[2]:m[3]]
 	key := strings.TrimLeft(name, "-")
 	dashes := len(name) - len(key)
@@ -2197,7 +2216,7 @@ func compoundValueSpans(wm *meter.Meter, s string, m []int, prevEnd int, add fun
 	if !named && !flag {
 		return prevEnd
 	}
-	start, end := keyNameValue(wm, s, m[1], m[2], false, extNone)
+	start, end := keyNameValue(wm, s, m[1], m[2], false, extNone, tm)
 	if v := s[start:end]; named && opaqueToken(wm, v) && (!spelled || !flagWord(wm, v)) {
 		add(start, end)
 	}
@@ -2299,7 +2318,7 @@ func flagWord(wm *meter.Meter, v string) bool {
 // opens a quote takes the rest of its line (unclosedQuoteEnd), and any other the rules above. The compound
 // rule passes extNone: an opaque token holds no quote or blank, so a longer extent could not change what it
 // redacts.
-func keyNameValue(wm *meter.Meter, s string, pos, keyStart int, closed bool, ext extentMode) (int, int) {
+func keyNameValue(wm *meter.Meter, s string, pos, keyStart int, closed bool, ext extentMode, tm *tokenMemo) (int, int) {
 	if pos >= len(s) {
 		return pos, pos
 	}
@@ -2310,7 +2329,7 @@ func keyNameValue(wm *meter.Meter, s string, pos, keyStart int, closed bool, ext
 		}
 	}
 	if ext != extNone && level == 0 {
-		if start, end, ok := flagWordSpan(wm, s, pos, ext); ok {
+		if start, end, ok := flagWordSpan(wm, s, pos, ext, tm.plain()); ok {
 			return start, end
 		}
 	}
@@ -2325,15 +2344,15 @@ func keyNameValue(wm *meter.Meter, s string, pos, keyStart int, closed bool, ext
 			return start, end
 		}
 		// The escaped quote does not close on its line: the quote and the token after it, as for a plain one.
-		return pos, tokenEnd(wm, s, start)
+		return pos, tm.tokenEnd(wm, s, start)
 	}
 	if c := s[pos]; c == '"' || c == '\'' {
 		if end := quotedEnd(wm, s, pos); end > 0 {
 			return pos + 1, end - 1
 		}
-		return pos, tokenEnd(wm, s, pos+1)
+		return pos, tm.tokenEnd(wm, s, pos+1)
 	}
-	if end := tokenEnd(wm, s, pos); end > pos || s[pos] != '\\' {
+	if end := tm.tokenEnd(wm, s, pos); end > pos || s[pos] != '\\' {
 		return pos, end
 	}
 	// A quote escaped in a way no JSON level gives ("\'"): the quote and the token after it, as for a
@@ -2343,17 +2362,17 @@ func keyNameValue(wm *meter.Meter, s string, pos, keyStart int, closed bool, ext
 		tick(wm, 1)
 		q++
 	}
-	return pos, tokenEnd(wm, s, q+1)
+	return pos, tm.tokenEnd(wm, s, q+1)
 }
 
 // flagWordSpan is the extent rule's part of keyNameValue for a value at pos that opens with no escaped quote:
 // with extShell a shell word (plainWordEnd, quotedWordSpan), with extLiteral a quoted string read literally
 // (groupEnd); a quote that does not close within maxValueExtent takes the rest of its line
 // (unclosedQuoteEnd). ok is false where the rule gives no extent.
-func flagWordSpan(wm *meter.Meter, s string, pos int, ext extentMode) (int, int, bool) {
+func flagWordSpan(wm *meter.Meter, s string, pos int, ext extentMode, pr *plainRun) (int, int, bool) {
 	if !opensGroup(wm, s, pos) {
 		if ext == extShell {
-			if end := plainWordEnd(wm, s, pos, extentLimit(wm, s, pos), noKey, true); end > pos {
+			if end := plainWordEnd(wm, s, pos, extentLimit(wm, s, pos), noKey, true, pr); end > pos {
 				return pos, end, true
 			}
 		}
@@ -2389,6 +2408,58 @@ const (
 	// extLiteral reads a value that is an item of a JSON array or YAML sequence: a quoted item is literal.
 	extLiteral
 )
+
+// flagValueSpanFor returns the span function of the flag rule for one pass over a text (flagValueSpan), with its
+// own memory of the last value end read.
+func flagValueSpanFor() func(wm *meter.Meter, s string, m []int, prevEnd int) (int, int, bool) {
+	tm := &tokenMemo{}
+	return func(wm *meter.Meter, s string, m []int, prevEnd int) (int, int, bool) {
+		return flagValueSpan(wm, s, m, prevEnd, tm)
+	}
+}
+
+// compoundValueSpansFor returns the spans function of the compound key name rule for one pass over a text
+// (compoundValueSpans), with its own memory of the last value end read.
+func compoundValueSpansFor() func(wm *meter.Meter, s string, m []int, prevEnd int, add func(start, end int)) int {
+	tm := &tokenMemo{}
+	return func(wm *meter.Meter, s string, m []int, prevEnd int, add func(start, end int)) int {
+		return compoundValueSpans(wm, s, m, prevEnd, add, tm)
+	}
+}
+
+// tokenMemo is the last value end tokenEnd read in one pass of a rule over one text, so that the values of a run
+// of flags glued with no blank ("-password," or "--token,}" repeated) are read once and not each to the end of the
+// run (#962); nil keeps nothing. tokenEnd(s, p) is the first stop at or after p, so it is the same end for every p
+// from the start of the last read to its end: no stop lies between them. It is package redact's memory of the
+// same name (#845).
+type tokenMemo struct {
+	from, end int
+	ok        bool
+	// words is the plain run plainWordEnd read furthest in the same pass.
+	words plainRun
+}
+
+// plain returns the plain run of the pass for plainWordEnd, or nil when tm keeps nothing.
+func (tm *tokenMemo) plain() *plainRun {
+	if tm == nil {
+		return nil
+	}
+	return &tm.words
+}
+
+// tokenEnd is tokenEnd(s, pos), with the memory of the last read.
+func (tm *tokenMemo) tokenEnd(wm *meter.Meter, s string, pos int) int {
+	if tm == nil {
+		return tokenEnd(wm, s, pos)
+	}
+	if tm.ok && tm.from <= pos && pos <= tm.end {
+		tick(wm, 1)
+		return tm.end
+	}
+	end := tokenEnd(wm, s, pos)
+	tm.from, tm.end, tm.ok = pos, end, true
+	return end
+}
 
 // tokenEnd returns the end of the unquoted value that starts at pos, after a flag or a compound key name: the value ends at whitespace, the line end, or a quote character ("\"", "'", or one escaped
 // by backslashes), and at nothing else. So a key inside a JSON or logfmt string cannot take the fields after
@@ -2583,11 +2654,11 @@ func builtinRules(_ *meter.Meter) []rule {
 		// argument list (JSON, escaped JSON or a YAML list) or after a shell line continuation:
 		// "--client-secret <value>", "\"--password\", \"<value>\"", "- --password\n- <value>"
 		// (flagValueSpan). "--name=value" is the rule above.
-		{kind: KindCredential, span: flagValueSpan, re: regexp.MustCompile(
+		{kind: KindCredential, spanFor: flagValueSpanFor, re: regexp.MustCompile(
 			`(?i)--?(` + bareKeyExpr + `)` + flagSeparatorExpr)},
 		// A key name of two or more words joined by "_", blanks and one token: "aws_secret_access_key <value>"
 		// (compoundValueSpans).
-		{kind: KindCredential, spans: compoundValueSpans, re: regexp.MustCompile(
+		{kind: KindCredential, spansFor: compoundValueSpansFor, re: regexp.MustCompile(
 			`(?i)(` + bareKeyExpr + `)[ \t]+`)},
 		// JSON and YAML flow mappings: a field after "{" or ",", ending at its closing quote or at , } ].
 		// JSON whitespace, newlines included and also escaped, may surround the key and the colon.

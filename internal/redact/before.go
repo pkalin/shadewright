@@ -344,7 +344,7 @@ func (r *Redactor) StringTwice(s string, cut func(string) int) string {
 // StringTwiceChecked is StringTwice with a flag: ok is false when the entry is withheld, and the text is then
 // Withheld.
 func (r *Redactor) StringTwiceChecked(s string, cut func(string) int) (out string, ok bool) {
-	return meteredText(len(s), func(wm *meter.Meter) string { return r.stringTwice(wm, s, cut) })
+	return meteredText(r, len(s), func(wm *meter.Meter) string { return r.stringTwice(wm, s, cut) })
 }
 
 // stringTwice is StringTwice on the budget wm.
@@ -375,7 +375,7 @@ func StringTwiceChecked(s string, cut func(string) int) (out string, ok bool) {
 // called on s.
 func (r *Redactor) ReplaceFrom(s string, from int, drop func(string) int, repl func(kind, text string) string,
 	between func(string) string) (out string, ok bool) {
-	spans, ok := metered(len(s), func(wm *meter.Meter) []span {
+	spans, ok := metered(r, len(s), func(wm *meter.Meter) []span {
 		l := r.newMatchList()
 		r.eachRuleMatch(wm, s, &windowIDs{}, func(start, end, rule int) { l.add(wm, start, end, rule) })
 		r.releasedExcerptInto(wm, s, from, drop, l)
@@ -395,7 +395,7 @@ func (r *Redactor) ReleasedText(s string) string {
 	if r.before == nil {
 		return s
 	}
-	out, _ := meteredText(len(s), func(wm *meter.Meter) string {
+	out, _ := meteredText(r, len(s), func(wm *meter.Meter) string {
 		return r.before.StringWithin(wm, strings.ToValidUTF8(r.before.StringWithin(wm, s), "?"))
 	})
 	return out

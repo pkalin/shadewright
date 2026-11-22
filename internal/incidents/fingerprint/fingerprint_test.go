@@ -21,6 +21,9 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 // crdPattern is the Incident spec.fingerprint pattern.
@@ -552,10 +555,15 @@ func FuzzNormalize(f *testing.F) {
 }
 
 // A note whose redaction is withheld whole (its work ran out of the budget of redaction, #873) stands as a note
-// too long to read: nothing of it reaches the symptom. "--token,}" repeated costs the reading of the release
-// before more than that budget.
+// too long to read: nothing of it reaches the symptom. The redactor has the lowered work budget of redacttest,
+// which withholds OverLowBudget for its work.
 func TestWithheldNoteIsRedacted(t *testing.T) {
-	if got := normalize(Observation{Note: strings.Repeat("--token,}", 4096)}, keepAfterKeyOrWhole); got != placeholderRedacted {
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	low := redacttest.LowBudget(red)
+	if got := normalizeWith(low.ReplaceChecked, Observation{Note: redacttest.OverLowBudget}, keepAfterKeyOrWhole); got != placeholderRedacted {
 		t.Fatalf("normalize = %q, want %q", got[:min(len(got), 80)], placeholderRedacted)
 	}
 }

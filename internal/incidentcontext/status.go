@@ -568,8 +568,9 @@ func (b *Builder) podLines(l *lines, t *target) {
 		}
 		var deleting string
 		if p.DeletionTimestamp != nil {
-			// No request time is computed: a delete that shortens the grace period moves the deletionTimestamp,
-			// so the timestamp minus the period is the start of the last grace period, not the request.
+			// No request time is computed: a later delete whose shorter grace period would already have ended
+			// sets the deletionTimestamp to its own time, so the timestamp minus the period is then the start of
+			// the last grace period, not the request.
 			deleting = ", being deleted, grace period ends " + stamp(*p.DeletionTimestamp)
 		}
 		l.add("pod %s%s, phase %s, created %s%s", l.data(b.value(p.Name)), owner, l.data(b.value(string(p.Status.Phase))),

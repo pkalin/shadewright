@@ -424,9 +424,9 @@ const reasonOOMKilled = "OOMKilled"
 // the last termination, when there is one, ended an earlier instance and stays trouble.
 //
 // Two limits are known and accepted. A real crash during the grace period (a segfault while flushing) reads
-// the same and is not ranked. A pod kept by a finalizer after a delete shortened its grace period to 0 (the
-// kubelet's final delete) has its deletionTimestamp moved past the exits it already had, so they are not
-// marked and rank as trouble.
+// the same and is not ranked. A pod kept by a finalizer after a later delete whose shorter grace period had
+// already ended (the kubelet's final delete, with a period of 0) has its deletionTimestamp set to the time of
+// that delete, past the exits it already had, so they are not marked and rank as trouble.
 //
 // The finish time comes from the kubelet's clock and the deletionTimestamp from the API server's: a kubelet
 // clock that runs behind can show a shutdown as a failure, one that runs ahead can hide a failure of the
@@ -441,8 +441,8 @@ func shutdown(p *corev1.Pod, cs containerStatus) bool {
 }
 
 // deletionStart is the start of p's last grace period: its deletionTimestamp, the end of that period, minus
-// deletionGracePeriodSeconds. It is the request time only when no later delete shortened the period (such a
-// delete moves the deletionTimestamp). A pod with no grace period recorded (or a negative one) counts as
+// deletionGracePeriodSeconds. It is the request time unless a later delete asked for a shorter period that
+// had already ended: the API server then sets the deletionTimestamp to the time of that delete. A pod with no grace period recorded (or a negative one) counts as
 // deleted with none.
 func deletionStart(p *corev1.Pod) time.Time {
 	var grace int64

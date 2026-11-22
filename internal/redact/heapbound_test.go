@@ -381,7 +381,7 @@ func TestHeapOfAHiddenPieceIsBounded(t *testing.T) {
 }
 
 // measuredHeapUnits are the units of the shapes the passes on #1087 measured at every entry point (2026-11-21 and
-// 2026-11-22), the heaviest of them `ab@cd.ef\x01` (71.7 bytes per byte past HeapFixed through PiecesWithin).
+// 2026-11-22), the heaviest of them an address followed by a control byte (the shape "addresses and control" of the test table) (71.7 bytes per byte past HeapFixed through PiecesWithin).
 // Each is a shape of heapShapes, so the table test measures it in every run.
 var measuredHeapUnits = []string{
 	"\x01", "x\x01", "x\u0085", "Ab3\x01dE5\x01gH7\x01 ", "lorem ipsum dolor sit amet ", "/", `"pwd":"a",`,

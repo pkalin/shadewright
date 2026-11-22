@@ -37,7 +37,7 @@ import (
 //
 // HeapWeightPerByte is not a bound proven shape by shape: the heap tests (TestHeapPerByteOfEveryShape) and the fuzz
 // target FuzzHeapWithinWeight fail when an entry holds more than heapWeightRoom percent of it per byte past
-// HeapFixed; the worst measured is 71.7 (PiecesWithin on "ab@cd.ef\x01" repeated, 111.6 MiB at 1.5 MiB). The
+// HeapFixed; the worst measured is 71.7 (PiecesWithin on an address followed by a control byte repeated, 111.6 MiB at 1.5 MiB). The
 // weight of an entry depends on its size only, not on its content, so a shape heavier than HeapWeightPerByte, not
 // yet found, holds more than its share until the constant is raised in a release.
 //

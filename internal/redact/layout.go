@@ -267,7 +267,7 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 	r.eachRuleMatch(wm, answer, ids, add)
 	// The controls view of the answer (controls.go, #852): a match the lists already hold whole, as found and as
 	// ended, is not held a second time.
-	if v, ok := controlsViewOf(wm, answer); ok {
+	eachAddedView(wm, answer, func(v controlsView) {
 		reading2.merge(wm)
 		if whole != nil {
 			whole.merge(wm)
@@ -278,7 +278,7 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 			}
 			add(start, end, rule)
 		})
-	}
+	})
 	widen := func(i int, sp span) span { return l.w(i).widen(wm, sp) }
 	text := func(i int) string { return l.w(i).text }
 	if joined {

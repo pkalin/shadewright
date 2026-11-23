@@ -120,6 +120,22 @@ var heapShapes = []heapShape{
 	{name: "token and control lines", text: func(n int) string { return repeatTo("token:\x01a\n", n) },
 		overAt: append([]string{epPiecesValues}, pieces...)},
 	{name: "split keys", text: func(n int) string { return repeatTo("pass\x00word=hunter2\n", n) }},
+	// Shapes of the shown view (controls.go, decision of 2026-11-23): invalid bytes make the whole text be read
+	// again with each run of them as one "?". Invalid bytes alone, one after every letter (a run and a gap every two
+	// bytes), lone surrogates, dense secrets and addresses with an invalid byte after each, and a key an invalid
+	// byte splits on every line. Measured on 2026-11-23 at the largest object, before and with the shown view: the
+	// same peaks within 0.1 MiB at every entry point, the heaviest addresses and an invalid byte through
+	// PiecesWithin (109.1 MiB, 70.1 bytes per byte past HeapFixed); the entry points of overAt are over the bound of
+	// one entry before it too.
+	{name: "invalid bytes", text: func(n int) string { return repeatTo("\xff", n) }},
+	{name: "letter and invalid byte", text: func(n int) string { return repeatTo("x\x80", n) }},
+	{name: "lone surrogates", text: func(n int) string { return repeatTo("a\xed\xa0\x80", n) },
+		overAt: append([]string{epStrings}, pieces...)},
+	{name: "dense secrets and invalid bytes", text: func(n int) string { return repeatTo("pwd=a\xff\n", n) },
+		overAt: append([]string{epString, epStringTwice, epStringKeeping, epReplaceFrom, epPiecesValues}, pieces...)},
+	{name: "addresses and invalid byte", text: func(n int) string { return repeatTo("ab"+"@"+"cd.ef\xff", n) },
+		overAt: pieces}, // as "addresses and control": PiecesFitting takes the largest entry too since #1106
+	{name: "keys split by invalid bytes", text: func(n int) string { return repeatTo("pass\xffword:a\n", n) }},
 }
 
 // heapEntryPoint is an entry point of the package, with the largest entry it can get.

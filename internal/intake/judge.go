@@ -208,7 +208,8 @@ var answerNames = map[string]bool{"specific": true, "consistent": true, "causeSu
 
 // parseAnswer decodes the judge's answer strictly: no key twice, every property name exactly as in the schema,
 // every score present and 0 to 5, a known verdict, and an optional note of at most MaxNoteBytes bytes
-// (ADR-0047 section 4). The note is kept only when the redactor finds nothing in it.
+// (ADR-0047 section 4). The note is kept without its control characters, and only when the redactor finds
+// nothing in it.
 func parseAnswer(r *redact.Redactor, content string) (Answer, bool) {
 	if checkKeys([]byte(content)) != nil {
 		return Answer{}, false
@@ -251,8 +252,17 @@ func parseAnswer(r *redact.Redactor, content string) (Answer, bool) {
 	if a.Note == nil || *a.Note == "" {
 		return out, true
 	}
-	if ok, _ := redactorClean(r, *a.Note, nil); ok && utf8.ValidString(*a.Note) {
-		out.Note = *a.Note
+	// The note is stored without control characters, like every model text the analyzer stores (#852): a JSON
+	// escape can carry one. It is kept only when the redactor finds nothing in it, read as it came and as stored,
+	// so a key that removing a control joins drops it.
+	note := providers.StripControls(*a.Note)
+	if note == "" {
+		return out, true
+	}
+	clean, _ := redactorClean(r, *a.Note, nil)
+	cleanStored, _ := redactorClean(r, note, nil)
+	if clean && cleanStored && utf8.ValidString(note) {
+		out.Note = note
 	} else {
 		out.NoteDropped = true
 	}

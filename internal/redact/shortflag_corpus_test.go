@@ -527,7 +527,9 @@ func TestShortFlagNamedLimits(t *testing.T) {
 // the password flag takes the password flag as its value.
 func TestShortFlagLimitsOfTheDecision(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
-		{"args:\r\n  # c\r\n  - -phunter2x\r\nimage: mysql\r\n", "args:\r\n  # c\r\n  - -phunter2x\r\nimage: mysql\r\n"},
+		// Hidden since the controls reading (#852) reads the text without its carriage returns; the fingerprint and
+		// the symptom are read without that reading and keep it shown, as on the release before.
+		{"args:\r\n  # c\r\n  - -phunter2x\r\nimage: mysql\r\n", "args:\r\n  # c\r\n  - -p***\r\nimage: mysql\r\n"},
 		{`{"command":["curl","-d","{\"a\":1}","-u","admin:Sw2PunctWord"]}`,
 			`{"command":["curl","-d","{\"a\":1}","-u","admin:Sw2PunctWord"]}`},
 		{`{"image":"sqlcmd","args":["-S","db","-p","-P","Sw4NoValueWord"]}`,

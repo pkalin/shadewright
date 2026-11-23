@@ -618,10 +618,12 @@ func TestKeyNameRulesHoldAtTheirEdges(t *testing.T) {
 	for in, want := range map[string]string{
 		"--password,\"--token 'horse battery staple\" TAILSECRET' --region west": "--password,\"[REDACTED:credential]' --region west",
 		`--password \"horse battery staple --region west`:                        `--password *** battery staple --region west`,
-		"--password\vAbc123 --region west":                                       "--password\v*** --region west",
-		"--password\fAbc123 --region west":                                       "--password\f*** --region west",
-		"--password\r  - hunter2abc --region west":                               "--password\r  - [REDACTED] --region west",
-		"app --client-secret \\\r  hunter2abc --region west":                     "app --client-secret \\\r  [REDACTED] --region west",
+		// The controls view (#852) reads these without their control as well and adds what it finds: the flag
+		// glued to its value takes the next word too, an over-redaction accepted on 2026-11-22.
+		"--password\vAbc123 --region west":                   "--password\v*** *** west",
+		"--password\fAbc123 --region west":                   "--password\f*** *** west",
+		"--password\r  - hunter2abc --region west":           "--password\r  * [REDACTED] --region west",
+		"app --client-secret \\\r  hunter2abc --region west": "app --client-secret *** [REDACTED] --region west",
 	} {
 		if got := String(in); got != want {
 			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)

@@ -108,7 +108,10 @@ limitations under the License.
 // strings (a container's arguments, the name and value of a metric label) redacts it with [Redactor.Strings],
 // which takes the decision String takes on the strings joined by line breaks and so also sees a key in one
 // string and its value in a later one. The folded view is a second reading of the same text, not of a rule's
-// output: its matches count on the bytes they were folded from.
+// output: its matches count on the bytes they were folded from. So is the controls view (controls.go, #852): every
+// text is also read without its control characters, and what that reading finds is added, so a key or a token a
+// control splits is hidden; the reading of the text as it is runs first and unchanged, so it only adds. The short
+// entry points of the collector (shortentry.go) do not read it.
 package redact
 
 import (
@@ -581,11 +584,29 @@ func (r *Redactor) StringChecked(s string) (out string, ok bool) {
 // also its folded view when it has one (foldView: a key with an invisible character inside it, a colon
 // look-alike, an explicit key, a separator of other characters), whose matches count on the bytes of s they were
 // folded from. A merged range takes the invisible characters right after it.
+//
+// When s holds a control character, the matches of its controls view that these readings do not already hold are
+// added (addControlsView, controls.go, #852).
 func (r *Redactor) spans(wm *meter.Meter, s string) []span {
+	l := r.mainMatches(wm, s)
+	r.addControlsView(wm, s, l)
+	return settle(wm, s, l.spans(wm))
+}
+
+// spansAsMain is spans without the controls view: the readings of origin/main alone, which the short entry points
+// take, so that a fingerprint, a symptom and a module's evidence value are decided as they were before #852
+// (decision of 2026-11-22, ADR-0039: a fingerprint is a function of the event).
+func (r *Redactor) spansAsMain(wm *meter.Meter, s string) []span {
+	return settle(wm, s, r.mainMatches(wm, s).spans(wm))
+}
+
+// mainMatches returns the matches of the rules in s and in its folded view, and what String of the release before
+// hid in s, in one list.
+func (r *Redactor) mainMatches(wm *meter.Meter, s string) *matchList {
 	l := r.newMatchList()
 	r.eachRuleMatch(wm, s, &windowIDs{}, func(start, end, rule int) { l.add(wm, start, end, rule) })
 	r.releasedStringInto(wm, s, false, nil, l)
-	return settle(wm, s, l.spans(wm))
+	return l
 }
 
 // ownSpans is spans without the reading of the release before: the rules of this package alone, as Pieces reads
@@ -632,9 +653,14 @@ func (r *Redactor) ruleMatches(wm *meter.Meter, s string) []span {
 
 // ruleMatchesWith is ruleMatches with the long windows read before in ids (windows.go): the reads of one decision
 // share them, so a value read alone and again in its answer is read once by each expression.
+//
+// When s holds a control character ([Control]), the matches of the same reading of s without its controls (its
+// controls view, controls.go, #852) are added, each counted on the bytes of s it was read from: the reading of s
+// as it is runs first and unchanged, so the controls view only adds to what is hidden (addControlsView).
 func (r *Redactor) ruleMatchesWith(wm *meter.Meter, s string, ids *windowIDs) []span {
 	l := r.newMatchList()
 	r.eachRuleMatch(wm, s, ids, func(start, end, rule int) { l.add(wm, start, end, rule) })
+	r.addControlsView(wm, s, l)
 	return l.spans(wm)
 }
 

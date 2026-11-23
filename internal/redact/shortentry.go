@@ -33,6 +33,10 @@ import (
 // The heap of the short entries is counted next to that limit, not in it: at most shortEntrySlots of them run at
 // once, each holding at most ShortEntryHeap (TestHeapOfAShortEntry measures every shape known at MaxShortEntry).
 // One more short entry waits only for another short entry to finish, never for an analysis.
+//
+// A short entry is decided by the readings of origin/main alone, without the controls view (controls.go, #852,
+// decision of 2026-11-22): its callers redact, change the text and redact again, and the added reading there can
+// show a key's bytes the second reading hid. A secret a control splits in an event note is shown there as before.
 
 const (
 	// MaxShortEntry is the longest entry, in bytes, the short entry points take: four times the 1,024 bytes the API
@@ -56,7 +60,7 @@ func ReplaceCheckedShort(s string, repl func(kind, text string) string, between 
 
 // ReplaceCheckedShort is the package's ReplaceCheckedShort with r's rules and work budget.
 func (r *Redactor) ReplaceCheckedShort(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
-	spans, ok := meteredShort(r, len(s), func(wm *meter.Meter) []span { return r.spans(wm, s) })
+	spans, ok := meteredShort(r, len(s), func(wm *meter.Meter) []span { return r.spansAsMain(wm, s) })
 	if !ok {
 		return Withheld, false
 	}
@@ -85,7 +89,7 @@ func StringShort(s string) string {
 
 // StringShort is the package's StringShort with r's rules and work budget.
 func (r *Redactor) StringShort(s string) string {
-	out, ok := meteredShort(r, len(s), func(wm *meter.Meter) string { return render(wm, s, r.spans(wm, s)) })
+	out, ok := meteredShort(r, len(s), func(wm *meter.Meter) string { return render(wm, s, r.spansAsMain(wm, s)) })
 	if !ok {
 		return Withheld
 	}

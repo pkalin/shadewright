@@ -152,8 +152,9 @@ func readingsCheckAsMainRows(t *testing.T, forms []signalForm, asMain, oneLine i
 	if asMain != want || want == 0 {
 		t.Errorf("%d rows decided as main, %d split forms in a value", asMain, want)
 	}
-	if oneLine != 3 {
-		t.Errorf("%d rows of one value that main and the value alone show, want 3", oneLine)
+	// 3 before #852; the controls view of the value alone hides one of them since (decision of 2026-11-22).
+	if oneLine != 2 {
+		t.Errorf("%d rows of one value that main and the value alone show, want 2", oneLine)
 	}
 }
 

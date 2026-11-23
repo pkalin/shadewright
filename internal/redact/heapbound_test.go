@@ -110,6 +110,16 @@ var heapShapes = []heapShape{
 	// segment for each.
 	{name: "dense folds", text: func(n int) string { return repeatTo("pwd\uff1aa\n", n) }, overAt: []string{epPiecesValues}},
 	{name: "folds with words", text: func(n int) string { return repeatTo("pwd\uff1aabcd\n", n) }},
+	// Shapes of the controls view (controls.go, #852, pass of 2026-11-22). One control makes the whole text be read
+	// again without it; before the view kept only the matches the other readings do not hold whole, its matches
+	// were held a second time (StringChecked 62.8 MiB at the largest object). A control on every line of keys and
+	// one-letter values (over the bound at the Pieces entry points on origin/main too, 58.7 MiB). A key a control
+	// splits on every line, whose matches only the view finds.
+	{name: "control then key lines", text: func(n int) string { return "\x01" + repeatTo("password=hunter2\n", n-1) },
+		overAt: []string{epStrings}},
+	{name: "token and control lines", text: func(n int) string { return repeatTo("token:\x01a\n", n) },
+		overAt: append([]string{epPiecesValues}, pieces...)},
+	{name: "split keys", text: func(n int) string { return repeatTo("pass\x00word=hunter2\n", n) }},
 }
 
 // heapEntryPoint is an entry point of the package, with the largest entry it can get.
@@ -344,7 +354,7 @@ func TestHeapOfAHiddenPieceIsBounded(t *testing.T) {
 // Each is a shape of heapShapes, so the table test measures it in every run.
 var measuredHeapUnits = []string{
 	"\x01", "x\x01", "x\u0085", "Ab3\x01dE5\x01gH7\x01 ", "lorem ipsum dolor sit amet ", "/", `"pwd":"a",`,
-	"ab" + "@" + "cd.ef, ", "ab" + "@" + "cd.ef\x01", "password=hunter2\n",
+	"ab" + "@" + "cd.ef, ", "ab" + "@" + "cd.ef\x01", "password=hunter2\n", "token:\x01a\n", "pass\x00word=hunter2\n",
 }
 
 func TestHeapShapesHoldTheMeasuredOnes(t *testing.T) {

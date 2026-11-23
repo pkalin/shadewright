@@ -250,17 +250,35 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 		whole = r.newMatchList()
 	}
 	reading2 := r.newMatchList()
-	r.eachRuleMatch(wm, answer, ids, func(start, end, rule int) {
-		tick(wm, 1)
-		if whole != nil {
-			whole.add(wm, start, end, rule)
-		}
+	ended := func(start, end int) int {
 		end = kinds.endAtValueLine(start, end)
 		if objects != nil {
 			end = objects.cut(wm, start, end)
 		}
-		reading2.add(wm, start, end, rule)
-	})
+		return end
+	}
+	add := func(start, end, rule int) {
+		tick(wm, 1)
+		if whole != nil {
+			whole.add(wm, start, end, rule)
+		}
+		reading2.add(wm, start, ended(start, end), rule)
+	}
+	r.eachRuleMatch(wm, answer, ids, add)
+	// The controls view of the answer (controls.go, #852): a match the lists already hold whole, as found and as
+	// ended, is not held a second time.
+	if v, ok := controlsViewOf(wm, answer); ok {
+		reading2.merge(wm)
+		if whole != nil {
+			whole.merge(wm)
+		}
+		r.eachControlsMatch(wm, v, func(start, end, rule int) {
+			if reading2.covers(wm, start, ended(start, end)) && (whole == nil || whole.covers(wm, start, end)) {
+				return
+			}
+			add(start, end, rule)
+		})
+	}
 	widen := func(i int, sp span) span { return l.w(i).widen(wm, sp) }
 	text := func(i int) string { return l.w(i).text }
 	if joined {

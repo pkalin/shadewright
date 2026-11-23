@@ -23,6 +23,7 @@ import (
 	"math/rand/v2"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/pkalin/shadewright/internal/analysis"
 	"github.com/pkalin/shadewright/internal/providers"
@@ -207,6 +208,40 @@ func TestJudgeAnswerExactCaseNoteOptional(t *testing.T) {
 			}
 			if ok && (a.Note != "" || a.NoteDropped || a.Verdict != "useful" || a.Specific != 4) {
 				t.Fatalf("answer = %+v", a)
+			}
+		})
+	}
+}
+
+// The judge's note is stored without control characters, as every stored model text (decision of 2026-11-22 on
+// #852, threat model G4.15): a JSON escape that carries one is removed, the visible text kept; a note whose key a
+// removed control joins is dropped, never stored.
+func TestJudgeNoteStoredWithoutControls(t *testing.T) {
+	r := newFixture(t).scorer.Redactor
+	answer := func(note string) string {
+		return `{"specific":4,"consistent":5,"causeSupported":3,"missingData":2,"verdict":"useful","note":"` + note + `"}`
+	}
+	for name, c := range map[string]struct {
+		note, stored string
+		dropped      bool
+	}{
+		"ANSI colour":        {`\u001b[31mred\u001b[0m cause`, "[31mred[0m cause", false},
+		"C1 and DEL":         {`one\u0085two\u007fthree\u009b`, "onetwothree", false},
+		"only controls":      {`\u0007\u001b`, "", false},
+		"newline kept":       {`a\nb\tc`, "a\nb\tc", false},
+		"joined secret key":  {`pass\u001bword=Hunter2Secret9x`, "", true},
+		"no control, secret": {`password=Hunter2Secret9x`, "", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, ok := parseAnswer(r, answer(c.note))
+			if !ok {
+				t.Fatalf("answer refused")
+			}
+			if a.Note != c.stored || a.NoteDropped != c.dropped {
+				t.Errorf("note %q stored as %q (dropped %v), want %q (dropped %v)", c.note, a.Note, a.NoteDropped, c.stored, c.dropped)
+			}
+			if strings.ContainsFunc(a.Note, func(r rune) bool { return unicode.Is(unicode.Cc, r) && r != '\n' && r != '\t' }) {
+				t.Errorf("stored note %q holds a control", a.Note)
 			}
 		})
 	}

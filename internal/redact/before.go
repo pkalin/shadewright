@@ -351,6 +351,7 @@ func (r *Redactor) stringTwice(wm *meter.Meter, s string, cut func(string) int) 
 	l := r.newMatchList()
 	r.eachRuleMatch(wm, s, &windowIDs{}, func(start, end, rule int) { l.add(wm, start, end, rule) })
 	r.releasedStringInto(wm, s, true, cut, l)
+	r.addControlsView(wm, s, l)
 	return render(wm, s, settle(wm, s, l.spans(wm)))
 }
 
@@ -378,6 +379,7 @@ func (r *Redactor) ReplaceFrom(s string, from int, drop func(string) int, repl f
 		l := r.newMatchList()
 		r.eachRuleMatch(wm, s, &windowIDs{}, func(start, end, rule int) { l.add(wm, start, end, rule) })
 		r.releasedExcerptInto(wm, s, from, drop, l)
+		r.addControlsView(wm, s, l)
 		return settle(wm, s, l.spans(wm))
 	})
 	if !ok {

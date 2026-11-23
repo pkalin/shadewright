@@ -134,18 +134,15 @@ func controlsViewOf(wm *meter.Meter, s string) (controlsView, bool) {
 // is a gap of its own (repaired): a match that starts at its "?" starts at the run, and one that ends with it ends
 // after the run. The work is linear in the length of s.
 func shownViewOf(wm *meter.Meter, s string) (controlsView, bool) {
-	for i := 0; ; {
-		if i == len(s) {
-			return controlsView{}, false
-		}
+	for i := 0; i < len(s); {
 		tick(wm, 1)
 		c, n := utf8.DecodeRuneInString(s[i:])
 		if c == utf8.RuneError && n == 1 {
-			break
+			return viewOf(wm, s, true), true
 		}
 		i += n
 	}
-	return viewOf(wm, s, true), true
+	return controlsView{}, false
 }
 
 // viewOf returns s without its controls, and with each run of invalid bytes written as one "?" when repair is

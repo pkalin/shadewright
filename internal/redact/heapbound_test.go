@@ -132,9 +132,9 @@ var heapShapes = []heapShape{
 	{name: "lone surrogates", text: func(n int) string { return repeatTo("a\xed\xa0\x80", n) },
 		overAt: append([]string{epStrings}, pieces...)},
 	{name: "dense secrets and invalid bytes", text: func(n int) string { return repeatTo("pwd=a\xff\n", n) },
-		overAt: []string{epString, epStringTwice, epStringKeeping, epReplaceFrom, epPiecesWithin, epPiecesValues}},
+		overAt: append([]string{epString, epStringTwice, epStringKeeping, epReplaceFrom, epPiecesValues}, pieces...)},
 	{name: "addresses and invalid byte", text: func(n int) string { return repeatTo("ab"+"@"+"cd.ef\xff", n) },
-		overAt: []string{epPiecesWithin}},
+		overAt: pieces}, // as "addresses and control": PiecesFitting takes the largest entry too since #1106
 	{name: "keys split by invalid bytes", text: func(n int) string { return repeatTo("pass\xffword:a\n", n) }},
 }
 

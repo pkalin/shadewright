@@ -163,6 +163,9 @@ func TestEntryOverTheLargestEntryIsWithheld(t *testing.T) {
 // status section a failed source. Every other entry of the build stays under the bound, at the widest section
 // bounds the builder accepts and the widest answers of the sources.
 func TestStatusSectionOverTheLargestEntryIsWithheld(t *testing.T) {
+	if raceDetector {
+		t.Skip("decides metrics answers of about 330 KB: checked by the run without the race detector")
+	}
 	red, err := redact.New()
 	if err != nil {
 		t.Fatal(err)

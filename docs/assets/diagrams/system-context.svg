@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 688" role="img" aria-labelledby="t d" data-diagram="components" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Shadewright in its context</title>
+  <desc id="d">Shadewright is one box in the middle; its three components are in the architecture diagram. Two people use it. The operator installs it and sets its policy, and reviews and merges the pull request on the Git host. The developer who owns the broken workload reads the Incident and the pull request. Around it are six systems. From the Kubernetes cluster Shadewright reads events and pods, and it writes only its own objects there, never a workload. It reads metrics from Prometheus and pod logs. It sends redacted context to the model provider (Microsoft Foundry, the Anthropic API or an OpenAI-compatible server) and gets back a diagnosis and a proposal. It writes analysis records to an optional blob container. It opens a pull request on the GitOps repository at the Git host. The GitOps controller, Flux today, fetches the merged change and applies it to the cluster, and Shadewright reads its status. That is the only path from a fix to a workload. Solid lines send, write or apply; dashed lines read; teal boxes are systems outside Shadewright.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .box{fill:#1d1b2b;stroke:#3a3556;stroke-width:1.2}
+      .key{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .cap{fill:#7d7999;font-size:12.5px}
+      .lbl{fill:#c6a8ff;font-size:12px}
+      .no{fill:#ff8fa3;font-size:13px;font-weight:600}
+      .f{stroke:#a879ff;stroke-width:1.8;fill:none}
+      .r{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+    </style>
+  </defs>
+  <rect width="1120" height="688" rx="18" fill="#0e0e16"/>
+
+  <!-- systems on the left -->
+  <rect class="ext" x="44" y="40" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="66">Metrics and logs</text>
+  <text class="s" x="60" y="87">Prometheus, pod logs</text>
+
+  <rect class="ext" x="44" y="136" width="210" height="72" rx="10"/>
+  <text class="h" x="60" y="162">Model provider</text>
+  <text class="s" x="60" y="183">Foundry, Anthropic,</text>
+  <text class="s" x="60" y="200">OpenAI-compatible</text>
+
+  <rect class="ext" x="44" y="292" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="318">Kubernetes cluster</text>
+  <text class="s" x="60" y="339">workloads, events, pods</text>
+
+  <rect class="ext" x="44" y="560" width="210" height="64" rx="10"/>
+  <text class="h" x="60" y="586">GitOps controller</text>
+  <text class="s" x="60" y="607">Flux today</text>
+
+  <!-- the system -->
+  <rect class="key" x="400" y="280" width="330" height="88" rx="12"/>
+  <text class="h" x="420" y="306">Shadewright</text>
+  <text class="s" x="420" y="327">diagnoses a symptom, proposes a fix</text>
+  <text class="s" x="420" y="344">three components: see the architecture</text>
+
+  <rect class="ext" x="520" y="440" width="210" height="64" rx="10"/>
+  <text class="h" x="536" y="466">Analysis records</text>
+  <text class="s" x="536" y="487">blob container, optional</text>
+
+  <!-- people -->
+  <rect class="box" x="700" y="40" width="210" height="64" rx="10"/>
+  <text class="h" x="716" y="66">Developer</text>
+  <text class="s" x="716" y="87">owns the broken workload</text>
+
+  <rect class="box" x="700" y="140" width="210" height="64" rx="10"/>
+  <text class="h" x="716" y="166">Operator</text>
+  <text class="s" x="716" y="187">installs and runs it</text>
+
+  <rect class="ext" x="866" y="292" width="210" height="64" rx="10"/>
+  <text class="h" x="882" y="318">Git host</text>
+  <text class="s" x="882" y="339">GitOps repository</text>
+
+  <!-- reads into Shadewright -->
+  <path class="r" d="M254 72H500V274" marker-end="url(#m)"/>
+  <text class="lbl" x="266" y="64">reads metrics, logs</text>
+  <path class="r" d="M254 312H394" marker-end="url(#m)"/>
+  <text class="lbl" x="264" y="304">reads events, pods</text>
+  <path class="r" d="M254 576H420V374" marker-end="url(#m)"/>
+  <text class="lbl" x="266" y="568">reads status</text>
+
+  <!-- model call -->
+  <path class="f" d="M260 172H420V274" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text class="lbl" x="266" y="164">redacted context</text>
+  <text class="lbl" x="266" y="190">diagnosis, proposal</text>
+
+  <!-- writes -->
+  <path class="f" d="M400 340H260" marker-end="url(#a)"/>
+  <text class="lbl" x="264" y="358">own objects only</text>
+  <text class="no" x="264" y="384">never workloads</text>
+  <path class="f" d="M625 368V434" marker-end="url(#a)"/>
+  <text class="lbl" x="633" y="406">writes records</text>
+
+  <!-- the change -->
+  <path class="f" d="M730 324H860" marker-end="url(#a)"/>
+  <text class="lbl" x="798" y="316" text-anchor="middle">opens PR</text>
+  <path class="f" d="M971 356V608H260" marker-end="url(#a)"/>
+  <text class="lbl" x="600" y="600" text-anchor="middle">fetches the merge</text>
+  <path class="f" d="M149 560V362" marker-end="url(#a)"/>
+  <text class="lbl" x="157" y="470">applies it</text>
+
+  <!-- people -->
+  <path class="f" d="M716 204V274" marker-end="url(#a)"/>
+  <text class="lbl" x="724" y="236">installs, sets policy</text>
+  <path class="f" d="M890 204V286" marker-end="url(#a)"/>
+  <text class="lbl" x="898" y="252">reviews, merges</text>
+  <path class="r" d="M640 280V88H694" marker-end="url(#m)"/>
+  <text class="lbl" x="632" y="226" text-anchor="end">reads Incidents</text>
+  <path class="r" d="M1040 292V72H916" marker-end="url(#m)"/>
+  <text class="lbl" x="978" y="64" text-anchor="middle">reads the PR</text>
+
+  <!-- legend -->
+  <rect class="ext" x="44" y="648" width="28" height="16" rx="4"/>
+  <text class="cap" x="82" y="661">outside Shadewright</text>
+  <path class="f" d="M252 656H288"/>
+  <text class="cap" x="298" y="661">sends, writes or applies</text>
+  <path class="r" d="M478 656H514"/>
+  <text class="cap" x="524" y="661">reads</text>
+</svg>

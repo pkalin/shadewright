@@ -89,7 +89,8 @@ func imagePullPods(n int) []client.Object {
 	objs := webObjects()
 	rs := objs[1]
 	ref := objs[2].GetOwnerReferences()
-	out := []client.Object{objs[0], rs}
+	out := make([]client.Object, 0, 2+n)
+	out = append(out, objs[0], rs)
 	for i := range n {
 		p := pod(fmt.Sprintf("web-abc-%d", i+1), rs.GetLabels(), longAgo, ref...)
 		p.Status.ContainerStatuses = nil
@@ -106,6 +107,9 @@ func imagePullPods(n int) []client.Object {
 	return out
 }
 
+// labelReason is the label of the waiting reason in the answer of container_waiting_reason.
+const labelReason = "reason"
+
 // widestSources answers every metrics template with MaxSeries-sized answers of label values at the Prometheus
 // adapter's bound (253 bytes), and the log source with the most it may return (twice what was asked).
 func widestSources() sources {
@@ -115,7 +119,7 @@ func widestSources() sources {
 		for i := range 50 {
 			series = append(series, providers.Series{Labels: map[string]string{
 				labelPod: fmt.Sprintf("%s%03d", strings.Repeat("p", 250), i), labelContainer: strings.Repeat("c", 253),
-				"reason": strings.Repeat("r", 253)}, Samples: []providers.Sample{{Time: testNow, Value: 1}}})
+				labelReason: strings.Repeat("r", 253)}, Samples: []providers.Sample{{Time: testNow, Value: 1}}})
 		}
 		s.metrics.Set(pl.template, series)
 	}

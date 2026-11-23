@@ -160,7 +160,8 @@ const (
 	// an entry whose first line the source left out (indented lines, YAML sequence entries, blank lines).
 	LabelLeadingLinesDropped Label = "leading continuation lines dropped"
 	// LabelWithheld means redaction withheld what the block would hold, whole (its work ran out of its budget, or
-	// the text was longer than redaction reads; package redact): the block's source counts as failed.
+	// the text was longer than redact.LargestEntry, the largest entry the build passes; package redact): the block's
+	// source counts as failed.
 	LabelWithheld Label = "withheld by redaction"
 	// LabelLogTruncated means the log source cut older lines from the excerpt.
 	LabelLogTruncated Label = "log excerpt truncated by the source"

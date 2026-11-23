@@ -35,6 +35,7 @@ import (
 
 	"github.com/pkalin/shadewright/internal/analyzer/refcheck"
 	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // Kinds of the allow lists.
@@ -323,9 +324,10 @@ func (s *Set) listEvents(ctx context.Context, a listEventsArgs, r *Result) error
 	})
 	// The answer is one text, decided once on the lines it returns (layout.go).
 	var ans answer
-	ans.text(fmt.Sprintf("%d events match; the newest %d are shown\n", len(evs), min(len(evs), a.Limit.v)))
-	var at []int
-	for _, e := range evs[:min(len(evs), a.Limit.v)] {
+	shown := evs[:min(len(evs), a.Limit.v)]
+	header := ans.text(fmt.Sprintf("%d events match; the newest %d are shown\n", len(evs), len(shown)))
+	var at, notes []int
+	for _, e := range shown {
 		ans.text(eventTime(e).UTC().Format(time.RFC3339) + " ")
 		at = append(at, ans.value("type", e.Type))
 		ans.text(" ")
@@ -335,9 +337,11 @@ func (s *Set) listEvents(ctx context.Context, a listEventsArgs, r *Result) error
 		ans.text("/")
 		at = append(at, ans.value("name", e.Regarding.Name))
 		ans.text(fmt.Sprintf(" count %d: ", eventCount(e)))
-		at = append(at, ans.value("note", e.Note))
+		notes = append(notes, ans.value(noteKey, e.Note))
+		at = append(at, notes[len(notes)-1])
 		ans.text("\n")
 	}
+	leaveOutNotes(&ans, header, notes)
 	out, text, ok := s.lines(&ans)
 	if !ok {
 		r.withhold()
@@ -348,6 +352,79 @@ func (s *Set) listEvents(ctx context.Context, a listEventsArgs, r *Result) error
 		r.Values = append(r.Values, out[i])
 	}
 	return nil
+}
+
+// noteKey is the key of an event's note in the answer of list_events.
+const noteKey = "note"
+
+// longNote is what stands in the answer of list_events for a note of n bytes left out unread (leaveOutNotes): its
+// length, in the form the collector shows a long note in (package fingerprint, #1087).
+func longNote(n int) string { return "<long note: " + strconv.Itoa(n) + " bytes>" }
+
+// notesLeftOut is the line of the answer of list_events that says how many notes were left out unread.
+func notesLeftOut(n int) string {
+	return fmt.Sprintf("the notes of %d events are left out unread, each shown as its length: the notes together "+
+		"are longer than one answer may be\n", n)
+}
+
+// leaveOutNotes bounds the answer of list_events to the largest entry the heap of one redaction was measured for
+// (redact.LargestEntry; #1106, decision of 2026-11-22). An answer within it is left as it is, so it is decided as
+// before. A larger one keeps the notes, newest first, that fit (notesWithin); each other note is replaced by
+// longNote, text the tool writes that holds nothing of the note, and the header line is followed by notesLeftOut.
+// notes are the indices of the notes' pieces, newest first. The size is counted on the pieces as written, before
+// any normalisation (redact.PiecesSize). The work is linear in the number of pieces.
+func leaveOutNotes(ans *answer, header int, notes []int) {
+	size := redact.PiecesSize(ans.pieces)
+	if size <= redact.LargestEntry {
+		return
+	}
+	lens := make([]int, len(notes))
+	for k, i := range notes {
+		lens[k] = len(ans.pieces[i].Text)
+		size -= lens[k] + len(noteKey)
+	}
+	// The line is reserved for every note, the most digits it can have.
+	keep, left := notesWithin(redact.LargestEntry, size+len(notesLeftOut(len(notes))), lens)
+	if left == 0 {
+		return
+	}
+	for k, i := range notes {
+		if !keep[k] {
+			ans.pieces[i] = redact.Piece{Text: longNote(lens[k])}
+		}
+	}
+	ans.pieces[header].Text += notesLeftOut(left)
+}
+
+// notesWithin returns which notes of lens bytes each, newest first, an answer of fixed bytes besides them keeps
+// within bound bytes, and how many it leaves out: every note's longNote is reserved first; a note no longer than
+// its longNote (with its key) is always kept, and every other note is kept, newest first, when the bytes it takes
+// past its longNote still fit. So the answer is at most bound bytes whenever fixed and the longNotes fit, no note
+// left out would fit in the room left, and an older note shorter than a newer one left out may still be kept. The
+// work is linear in the number of notes.
+func notesWithin(bound, fixed int, lens []int) (keep []bool, left int) {
+	room := bound - fixed
+	for _, n := range lens {
+		redact.Tick(1)
+		room -= len(longNote(n))
+	}
+	keep = make([]bool, len(lens))
+	left = len(lens)
+	// A note no longer than its marker takes no room: each is kept first, so the room only shrinks after.
+	more := func(n int) int { return n + len(noteKey) - len(longNote(n)) }
+	for k, n := range lens {
+		redact.Tick(1)
+		if more(n) <= 0 {
+			keep[k], room, left = true, room-more(n), left-1
+		}
+	}
+	for k, n := range lens {
+		redact.Tick(1)
+		if !keep[k] && more(n) <= room {
+			keep[k], room, left = true, room-more(n), left-1
+		}
+	}
+	return keep, left
 }
 
 type checkReferenceArgs struct {

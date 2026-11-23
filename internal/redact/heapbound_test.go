@@ -18,14 +18,11 @@ package redact
 
 import (
 	"fmt"
-	"runtime"
-	"runtime/debug"
-	"runtime/metrics"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
+
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 // The heap one entry holds. Two figures are checked against it (TestHeapPerByteOfEveryShape): the bound of one
@@ -37,8 +34,8 @@ import (
 // The largest entries the entry points get (budget.go names the sources).
 const (
 	// largestObject is the largest object a read tool or a context block passes: about 1.5 MiB, etcd's default
-	// request limit.
-	largestObject = 3 << 19
+	// request limit (LargestEntry, which a read tool's answer never passes since #1106).
+	largestObject = LargestEntry
 	// largestLog is the most the log source reads of one stream (kube.MaxReadBytes).
 	largestLog = 1 << 20
 )
@@ -202,46 +199,8 @@ const (
 // heapBound is the bound of the decision for an entry of n bytes.
 func heapBound(n int) uint64 { return uint64(HeapFixed + HeapPerByte*int64(n)) } // #nosec G115 -- n is a size, never negative
 
-// heapSample is the metric the probe samples: the bytes of heap objects, live or not yet swept.
-const heapSample = "/memory/classes/heap/objects:bytes"
-
-// heapProcs is the GOMAXPROCS peakLiveHeap measures under: CI's hosted runners have four cores, and the pacing of
-// the collector, so the garbage a sample still holds, depends on how many run (#1087: ReplaceFrom on secrets held
-// 34.9 MiB on 24 cores and less on four). A fixed count makes the figure the same on every machine.
-const heapProcs = 4
-
-// peakLiveHeap returns the most heap f held at once over the heap before it, sampled every half millisecond
-// while the collector runs at GOGC 10 under a soft limit of 96 MiB and GOMAXPROCS heapProcs, so that a sample
-// stays close to what f keeps alive.
-func peakLiveHeap(f func()) uint64 {
-	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(heapProcs))
-	defer debug.SetGCPercent(debug.SetGCPercent(10))
-	defer debug.SetMemoryLimit(debug.SetMemoryLimit(96 << 20))
-	s := []metrics.Sample{{Name: heapSample}}
-	runtime.GC()
-	metrics.Read(s)
-	base := s[0].Value.Uint64()
-	var (
-		stop atomic.Bool
-		peak uint64
-		done = make(chan struct{})
-	)
-	go func() {
-		defer close(done)
-		x := []metrics.Sample{{Name: heapSample}}
-		for !stop.Load() {
-			metrics.Read(x)
-			peak = max(peak, x[0].Value.Uint64())
-			time.Sleep(500 * time.Microsecond)
-		}
-	}()
-	f()
-	stop.Store(true)
-	<-done
-	metrics.Read(s)
-	peak = max(peak, s[0].Value.Uint64())
-	return peak - min(base, peak)
-}
+// peakLiveHeap is redacttest.PeakLiveHeap: the most heap f held at once over the heap before it.
+func peakLiveHeap(f func()) uint64 { return redacttest.PeakLiveHeap(f) }
 
 // overTestLine reports whether h holds more than the line every heap test of a shape holds an entry to: more
 // than heapWeightRoom percent of HeapWeightPerByte per byte past HeapFixed, at the entry's own size.

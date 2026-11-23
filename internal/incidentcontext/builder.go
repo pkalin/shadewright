@@ -347,6 +347,15 @@ func abandoned(ctx context.Context) error {
 	return nil
 }
 
+// overLargestEntry reports whether an entry of size bytes, a section's pieces or a text the build would pass to
+// the redactor, is larger than the largest entry the heap of one redaction was measured for (redact.LargestEntry,
+// about 1.5 MiB: the largest object), and counts it as withheld with the reason size (#1106, decision of
+// 2026-11-22). Its caller withholds the entry whole, so the block is could not fetch and its section a failed
+// source, as for any entry redaction withholds. The status section is the one that can pass it: it holds the
+// messages of up to MaxPods pods, each an object of up to that size, and no bound of the builder applies before the
+// decision (TestStatusSectionOverTheLargestEntryIsWithheld). redact.MaxEntry stays the last check in the redactor.
+func overLargestEntry(size int) bool { return redact.OverLargestEntry(size) }
+
 // redact makes s valid UTF-8 and redacts it ([Redact]).
 func (b *Builder) redact(s string) string { return Redact(Twice(b.redactor), s) }
 

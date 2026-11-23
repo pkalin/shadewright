@@ -288,6 +288,11 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 		// What String hides in the answer, the reading of the release before included, as String reads it: a match
 		// is not ended at the line breaks of the values (#845, fifteenth decision, P2).
 		r.releasedStringInto(wm, answer, false, nil, whole)
+		// The strings as one sequence: a line break between two of them ends no command (#1075, shortflag.go).
+		for _, sp := range shortFlagSequence(wm, answer, len(r.rules)) {
+			tick(wm, 1)
+			whole.addKind(wm, sp.start, sp.end, sp.rule, sp.kind) // a rule after the redactor's own, as the release before
+		}
 		r.cutAnswer(wm, ps, l.add, settle(wm, answer, whole.spans(wm)), widen, text)
 		l.compact(wm)
 	}

@@ -80,7 +80,9 @@ limitations under the License.
 // than 16 lines after its "name", a base64 secret cut short by slashes with no secret key name
 // before it whose parts read as words or acronyms (whole or in part, see base64Windows), a secret after a
 // one-word key name and a blank without a dash ("set secret x", which only the long-token rule judges,
-// because "kubectl get secret foo" has the same shape), after a single-letter flag ("-p x"), after a key or
+// because "kubectl get secret foo" has the same shape), after a single-letter flag of a tool that is not in
+// the table of shortflag.go ("mysqldump -px"; #1075 hides "mysql -px", "redis-cli -a x" and the others the command
+// word decides, and "-p x" in arguments with no command word unless x is a port number), after a key or
 // flag name written with Unicode escapes, or in a here-document or here-string, the part of a value after a
 // key name past the bound of the extent rule (maxValueExtent, extent.go), a quoted piece glued to an unquoted
 // value that does not close on its line, a backslash and a letter or digit glued to a quoted piece after a
@@ -3087,5 +3089,8 @@ func builtinRules(_ *meter.Meter) []rule {
 		// IPv6 addresses: candidates are confirmed with net/netip, so clock times and similar are kept.
 		{kind: KindIP, span: ipv6Span, re: regexp.MustCompile(
 			`(?:[0-9A-Fa-f]{0,4}:){2,8}(?:[0-9A-Fa-f]{1,4}|(?:[0-9]{1,3}\.){3}[0-9]{1,3})?`)},
+		// The value of a short password flag, decided by the command word, and of "-p", "-P", "-a" and "-u" in
+		// arguments with no command word (#1075, shortflag.go).
+		{kind: KindCredential, scan: shortFlagScan},
 	}
 }

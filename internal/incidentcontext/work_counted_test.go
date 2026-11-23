@@ -174,18 +174,25 @@ func TestBuildWorkIsLinear(t *testing.T) {
 // steps per byte it measures; only this bound is asserted. Measured 897 before the controls reading and 907 with
 // it (a text without controls costs that reading one step per byte at each pass that looks for them); the figure
 // is the same at 40 KiB and 400 KiB (864, 860), so the bound has room and the growth stays linear.
-const repeatedLabelWorkPerByte = 950
+//
+// The label ends with a byte that is not valid UTF-8, so the reading of the text as it is shown (#1100) reads it
+// once more: measured 1013 at 4 KiB and 969 at 40 KiB with it.
+const repeatedLabelWorkPerByte = 1100
 
 // The work of a whole Build on one label name repeated by every metric template stays within
-// repeatedLabelWorkPerByte per byte of the label at 4 KiB, 40 KiB and 400 KiB (#873, second round).
+// repeatedLabelWorkPerByte per byte of the label at 4 KiB, 40 KiB and 80 KiB (#873, second round). A larger label
+// makes the metrics section longer than redact.LargestEntry, which is withheld before any work (#1106).
 func TestBuildWorkOfARepeatedLabel(t *testing.T) {
-	for _, size := range []int{4 << 10, 40 << 10, 400 << 10} {
+	for _, size := range []int{4 << 10, 40 << 10, 80 << 10} {
 		key := metricsKey(size / len("aws_secret_access_key"))
 		b := newBuilder(t, reader(t, webObjects()...), metricsKeyScene(key, 1), nil)
 		total, release := redact.WorkOfReleased(func() { build(t, b, incident(deploymentRef())) })
 		perByte := float64(total) / float64(len(key))
 		t.Logf("%d bytes of label: %.0f steps per byte, the release's reading %.0f", len(key), perByte,
 			float64(release)/float64(len(key)))
+		if total == 0 {
+			t.Errorf("a %d byte label: no work was counted, so the section was not decided", len(key))
+		}
 		if perByte > repeatedLabelWorkPerByte {
 			t.Errorf("a %d byte label repeated by every template: Build takes %.0f steps per byte, over %d", len(key),
 				perByte, repeatedLabelWorkPerByte)

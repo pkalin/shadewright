@@ -24,7 +24,7 @@ import (
 	"testing"
 )
 
-// controlsWorkShapes are the shapes the work of the controls view (#852) is measured on: text without a control,
+// controlsWorkShapes are the shapes the work of the controls view (#852) and the shown view is measured on: text without a control,
 // on which it only scans, control-dense text, a secret form split by controls, and the shape on which the second
 // reading of the layout write of the first build of #852 was superlinear ("--password x" and a control).
 var controlsWorkShapes = []struct{ name, unit string }{
@@ -33,6 +33,13 @@ var controlsWorkShapes = []struct{ name, unit string }{
 	{"alternating controls", "a\x00b\x7fc\u0085d\x1b"},
 	{"split secrets", "pass\x00word=Hunter2Secret9x\n"},
 	{"--password x and a control", "--password x\x01"},
+	// The shown view (decision of 2026-11-23): invalid bytes alone, one after every letter, lone surrogates, a key
+	// an invalid byte splits, and invalid bytes with controls (both views read).
+	{"invalid bytes", "\xff"},
+	{"letter and invalid byte", "x\x80"},
+	{"lone surrogates", "ab\xed\xa0\x80"},
+	{"split by invalid bytes", "pass\xffword:Hunter2Secret9x\n"},
+	{"invalid bytes and controls", "a\xff\x00b\xc0\x1b"},
 }
 
 // controlsWorkSizes are the sizes measured: from 4 KiB to the largest object (about 1.5 MiB).
@@ -51,7 +58,9 @@ func TestControlsViewWorkIsLinear(t *testing.T) {
 		per := map[int]float64{}
 		var line strings.Builder
 		for _, n := range controlsWorkSizes {
-			s := repeatTo(sh.unit, n)
+			// Whole units only: a cut inside U+0085 leaves an invalid byte at the end, which adds the reading of
+			// the shown view at one size and not at another.
+			s := strings.Repeat(sh.unit, n/len(sh.unit))
 			added := Work(func() { r.addControlsView(nil, s, r.newMatchList()) })
 			var ok bool
 			total := Work(func() { _, ok = r.StringChecked(s) })

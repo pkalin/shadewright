@@ -23,6 +23,12 @@ import (
 	"unicode/utf8"
 )
 
+// loneSurrogate is the encoding of U+D800, three invalid bytes; shownAPIKey a secret key.
+const (
+	loneSurrogate = "\xed\xa0\x80"
+	shownAPIKey   = "api_key"
+)
+
 // The shown view writes each run of invalid bytes as one "?" and leaves the controls out, as the text is shown, and
 // a match that starts at a "?" starts at its run, one that ends with it ends after its run.
 func TestShownViewWritesARunAsOneQuestionMark(t *testing.T) {
@@ -47,8 +53,8 @@ func TestShownViewWritesARunAsOneQuestionMark(t *testing.T) {
 // carried back to a range of the text that starts and ends at a character or an invalid byte, never inside a
 // multi-byte sequence, holds the bytes the view's range was read from and stays inside the text.
 func TestShownViewRangesLandOnCharacters(t *testing.T) {
-	units := []string{"a", "=", "\xff", "\x80", "\xc0", "\xe2\x82", "\xed\xa0\x80", "\x00", "\x1b", "\u0085", "é", "€", "\U0001f600", "\n"}
-	rng := rand.New(rand.NewPCG(1100, 23))
+	units := []string{"a", "=", "\xff", "\x80", "\xc0", "\xe2\x82", loneSurrogate, "\x00", "\x1b", "\u0085", "é", "€", "\U0001f600", "\n"}
+	rng := rand.New(rand.NewPCG(1100, 23)) // #nosec G404 -- reproducible generated texts
 	boundary := func(s string, i int) bool {
 		return i == 0 || i == len(s) || utf8.RuneStart(s[i]) || invalidAt(s, i)
 	}
@@ -63,7 +69,7 @@ func TestShownViewRangesLandOnCharacters(t *testing.T) {
 		if !ok {
 			t.Fatalf("%q has no shown view", s)
 		}
-		for i := 0; i < len(v.text); i++ {
+		for i := range len(v.text) {
 			for j := i + 1; j <= len(v.text); j++ {
 				if !utf8.RuneStart(v.text[i]) || j < len(v.text) && !utf8.RuneStart(v.text[j]) {
 					continue
@@ -83,8 +89,8 @@ func TestShownViewRangesLandOnCharacters(t *testing.T) {
 // The shown view only adds: on generated text with invalid bytes around secrets, every byte the readings of the
 // text as it is hide is hidden with the views added, and no match of theirs is shortened.
 func TestShownViewOnlyAdds(t *testing.T) {
-	units := []string{"password", "=", ": ", "token", "api_key", "\n", " ", "Hunter2Secret9x", "\xff", "\x80\xee", "\xed\xa0\x80", "\x00", "ghp_"}
-	rng := rand.New(rand.NewPCG(1100, 24))
+	units := []string{passwordKey, "=", ": ", KindToken, shownAPIKey, "\n", " ", "Hunter2Secret9x", "\xff", "\x80\xee", loneSurrogate, "\x00", "ghp_"}
+	rng := rand.New(rand.NewPCG(1100, 24)) // #nosec G404 -- reproducible generated texts
 	r := defaultRedactor
 	for range 400 {
 		var b strings.Builder

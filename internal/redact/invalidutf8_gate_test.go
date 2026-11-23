@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -81,18 +82,23 @@ func invalidSameInputs() []invalidSameInput {
 }
 
 // invalidSameCollector are the collector's short entry points, which never read the shown view.
-var invalidSameCollector = []string{"fingerprint.Normalize", "fingerprint.Symptom", "fingerprint.Value",
-	"modules.BoundValue", "incidentcontext.Value of the symptom", "redact.StringShort", "redact.ReplaceCheckedShort"}
+var invalidSameCollector = func() []string {
+	out := []string{"redact.StringShort", "redact.ReplaceCheckedShort"}
+	for name := range entryPoints {
+		if strings.HasPrefix(name, "fingerprint.") || strings.HasPrefix(name, "modules.") || strings.HasSuffix(name, " of the symptom") {
+			out = append(out, name)
+		}
+	}
+	slices.Sort(out)
+	return out
+}()
 
 // invalidSameEntries are the entry points of the table, by name: every entry point of the corpus (the pieces
 // ones each on every answer of pieces, none left out), the decisions of package redact on one text, and the
 // collector's.
 func invalidSameEntries() map[string]func(s string) []string {
 	r := defaultRedactor()
-	m := map[string]func(s string) []string{}
-	for name, f := range entryPoints {
-		m[name] = f
-	}
+	m := maps.Clone(entryPoints)
 	cut := func(s string, k int) int {
 		at := len(s) * k / 3
 		for at > 0 && at < len(s) && !utf8.RuneStart(s[at]) {
@@ -101,8 +107,9 @@ func invalidSameEntries() map[string]func(s string) []string {
 		return at
 	}
 	layouts := func(s string) [][]redact.Piece {
-		var out [][]redact.Piece
-		for _, form := range []redact.Form{redact.AsIs, redact.Line, redact.JSON} {
+		forms := []redact.Form{redact.AsIs, redact.Line, redact.JSON}
+		out := make([][]redact.Piece, 0, 3*len(forms))
+		for _, form := range forms {
 			out = append(out,
 				[]redact.Piece{{Text: s, Data: true, Form: form}},
 				[]redact.Piece{{Text: s[:cut(s, 1)], Data: true, Form: form}, {Text: s[cut(s, 1):], Data: true, Form: form}},
@@ -112,7 +119,7 @@ func invalidSameEntries() map[string]func(s string) []string {
 		return out
 	}
 	m["redact.Pieces"] = func(s string) []string {
-		var out []string
+		out := make([]string, 0, 18)
 		for _, ps := range layouts(s) {
 			out = append(out, r.Pieces(ps)...)
 		}
@@ -134,7 +141,7 @@ func invalidSameEntries() map[string]func(s string) []string {
 		}
 		return out
 	}
-	for _, name := range []string{"incidentcontext.RenderLog", "model text"} {
+	for _, name := range []string{entryRenderLog, entryModelText} {
 		f := invalidEntries()[name]
 		m[name] = func(s string) []string { return f(invalidCase{text: s}) }
 	}

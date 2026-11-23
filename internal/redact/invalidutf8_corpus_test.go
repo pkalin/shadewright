@@ -51,6 +51,12 @@ var invalidForms = []struct{ name, bytes string }{
 	{"lone surrogate", "\xed\xa0\x80"},
 }
 
+// Names of entry points of the corpus and of the unchanged table.
+const (
+	entryRenderLog = "incidentcontext.RenderLog"
+	entryModelText = "model text"
+)
+
 // invalidCase is one input of the corpus: a sample's text with an invalid form at one place.
 type invalidCase struct {
 	name string
@@ -96,7 +102,7 @@ func newInvalidCase(name, text string, at int, f string, vs, ve int) invalidCase
 // and a value, after a prefix. The invalid form goes at each boundary of the parts and inside each.
 var invalidKeyForms = struct{ prefixes, keys, seps, values []string }{
 	prefixes: []string{"", "\x80\xee \t"},
-	keys:     []string{"api_key", "password", "token", "Authorization"},
+	keys:     []string{signalAPIKey, fieldsKey, redact.KindToken, "Authorization"},
 	seps:     []string{"=", ": ", ":\t", "\n:", " :", " \t:"},
 	values:   []string{"sigQz22589xK9wAbc", "Bearer Zq7Kp2Vx9Lm4Wt8R"},
 }
@@ -174,7 +180,7 @@ func invalidCases() []invalidCase {
 // as they are and as values of lines.
 func invalidPieces(c invalidCase) [][]redact.Piece {
 	cuts := [][]int{{}, {c.at}, {c.at, c.at + c.n}}
-	var out [][]redact.Piece
+	out := make([][]redact.Piece, 0, 2*len(cuts))
 	for _, form := range []redact.Form{redact.AsIs, redact.Line} {
 		for _, cut := range cuts {
 			var ps []redact.Piece
@@ -230,7 +236,7 @@ func invalidEntries() map[string]func(c invalidCase) []string {
 		}
 	}
 	m := map[string]func(c invalidCase) []string{
-		"incidentcontext.RenderLog": func(c invalidCase) []string {
+		entryRenderLog: func(c invalidCase) []string {
 			ex := providers.LogExcerpt{Text: c.text, CollectedAt: time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)}
 			return []string{incidentcontext.RenderLog(r, false, "log", ex, nil, 4096, 8192).Text}
 		},
@@ -245,7 +251,7 @@ func invalidEntries() map[string]func(c invalidCase) []string {
 		}),
 		// The model text as the analysis loop stores it (shownModelText): redacted as read, then without its
 		// controls, then written by encoding/json, which writes each invalid byte as U+FFFD.
-		"model text": func(c invalidCase) []string {
+		entryModelText: func(c invalidCase) []string {
 			return []string{providers.StripControls(redact.WithoutControls(r.StringKeeping(c.text, "hunter")))}
 		},
 	}

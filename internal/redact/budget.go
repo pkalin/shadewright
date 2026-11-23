@@ -49,6 +49,12 @@ const (
 	// request body (3 MiB), so no object that can exist is withheld by it; an object stored is smaller still
 	// (about 1.5 MiB with etcd's default request limit).
 	MaxEntry = 4 << 20
+	// LargestEntry is the largest entry the heap of one redaction was measured for (TestHeapPerByteOfEveryShape,
+	// heapbound_test.go): the largest object, about 1.5 MiB with etcd's default request limit. MaxEntry stays the
+	// last check for every caller; a read tool never passes an entry larger than LargestEntry (package tools, #1106,
+	// decision of 2026-11-22): list_events leaves notes out unread until its answer fits, and any other answer over
+	// it is withheld whole (OverLargestEntry).
+	LargestEntry = 3 << 19
 	// HeapPerByte and HeapFixed bound the heap one redaction may hold (#873, decision of 2026-11-21 on the heap): at
 	// most HeapPerByte bytes for each byte of the entry plus HeapFixed, 46 MiB for the largest entry a caller passes
 	// (an object of about 1.5 MiB), inside the 48 MiB the decision allows. It is the bound of the shapes the heap
@@ -79,7 +85,8 @@ const Withheld = "[REDACTED:withheld]"
 const (
 	// ReasonWork: the redaction used up its budget.
 	ReasonWork = "work"
-	// ReasonSize: the entry is longer than MaxEntry, withheld before any work.
+	// ReasonSize: the entry is longer than MaxEntry, or a read tool's answer is longer than LargestEntry
+	// (OverLargestEntry), withheld before any work.
 	ReasonSize = "size"
 	// ReasonHeap: the entry is made of more pieces or strings than its bytes allow (FreePieces), withheld before
 	// any work, so that its redaction holds no more heap than the bound (HeapPerByte).
@@ -102,6 +109,27 @@ func init() {
 	withheldTotal.WithLabelValues(ReasonSize)
 	withheldTotal.WithLabelValues(ReasonHeap)
 	withheldTotal.WithLabelValues(ReasonWait)
+}
+
+// PiecesSize is the size of the entry the pieces make, as the budget counts it: the bytes of each piece's text
+// and of its key, as the caller passes them, before anything is written in its Form or made valid UTF-8.
+func PiecesSize(ps []Piece) int {
+	size := 0
+	for _, p := range ps {
+		size += len(p.Text) + len(p.Key)
+	}
+	return size
+}
+
+// OverLargestEntry reports whether an entry of size bytes is larger than LargestEntry, and if so counts it as
+// withheld with ReasonSize: a caller that bounds its entries to LargestEntry withholds such an entry whole before
+// any work, as an entry over MaxEntry is withheld here (#1106).
+func OverLargestEntry(size int) bool {
+	if size <= LargestEntry {
+		return false
+	}
+	withheldTotal.WithLabelValues(ReasonSize).Inc()
+	return true
 }
 
 // tooManyParts reports whether an entry of size bytes made of parts pieces (or strings), each standing for

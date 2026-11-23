@@ -632,17 +632,23 @@ spec:
               gitWaits:
                 description: |-
                   gitWaits are the waits on reads of the Git host that failed and are retried (#771), one entry per kind of
-                  bound: Paced (no end of its own), RequestDeadline, HandoffGrace, MergeCheck and MergeContent. Starting or ending
-                  one kind never touches another, and an entry holds everything needed to end it. At the start of every
-                  reconcile the executor ends each RequestDeadline and HandoffGrace entry whose bound has passed, before any
-                  read: RequestDeadline expires the request, HandoffGrace ends it NeedsIntervention with HandoffRecoveryFailed.
+                  bound: Paced (no end of its own), RequestDeadline, HandoffGrace, HandoffRecovery, MergeCheck and MergeContent.
+                  Starting or ending one kind never touches another, and an entry holds everything needed to end it. At the start
+                  of every reconcile the executor ends each RequestDeadline, HandoffGrace and HandoffRecovery entry whose own end
+                  has passed, before any read; no end is computed from another entry: RequestDeadline expires the request,
+                  HandoffGrace ends it NeedsIntervention with HandoffRecoveryFailed, HandoffRecovery with RecoveryWaitExpired.
                   A MergeCheck or MergeContent entry whose bound has passed ends only after one more read in that reconcile:
                   an answer goes on as after any read, and a failure ends it, MergeCheck by recording the merge with the plan
                   not shown fresh, MergeContent (five minutes from its start) by ending the request NeedsIntervention with
                   MergeContentUnreadable, recording the pull request the entry names when the status holds none. While writes
                   are paused nothing is read and no entry ends. An entry whose kind no longer applies to the request is
                   removed. A successful read of what a merge brought removes the MergeContent entry, and a reconcile with no
-                  failed Git read removes the others but MergeCheck. Condition GitReadRetry summarizes the entries for people.
+                  failed Git read removes the others but MergeCheck and HandoffRecovery. Condition GitReadRetry summarizes the
+                  entries for people. At most five entries stand at once though there are six kinds: RequestDeadline applies only
+                  to a request that recovers no handoff, and HandoffGrace and HandoffRecovery only to one that does, so the first
+                  never stands with either of the others, and HandoffGrace no longer applies once HandoffRecovery stands (a kind
+                  that no longer applies is removed in every write that adds an entry). A status stored before that holds both
+                  HandoffGrace and HandoffRecovery stays valid; the next reconcile removes the grace.
                 items:
                   description: |-
                     GitWait is one wait on a read of the Git host that failed (status.gitWaits). It holds everything needed to end it,
@@ -651,8 +657,9 @@ spec:
                     ends:
                       description: |-
                         ends is when the wait ends, on the executor's clock, recorded with the entry for every kind but Paced: the
-                        request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after
-                        the start (MergeCheck, MergeContent). It does not move while the entry stands.
+                        request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), 24 hours after the
+                        start (HandoffRecovery), five minutes after the start (MergeCheck, MergeContent). It does not move while the
+                        entry stands.
                       format: date-time
                       type: string
                     kind:
@@ -661,6 +668,7 @@ spec:
                       - Paced
                       - RequestDeadline
                       - HandoffGrace
+                      - HandoffRecovery
                       - MergeCheck
                       - MergeContent
                       type: string
@@ -909,7 +917,7 @@ spec:
                   replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all,
                   and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the
                   executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed,
-                  so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.
+                  so a Declined hint stays as the record of what was asked. A replacement carries over those of its chain.
                 items:
                   description: |-
                     Hint is one reviewer hint the executor accepted from a comment on the request's pull request (ADR-0028
@@ -1394,8 +1402,10 @@ spec:
                       condition Approved False with reason ReviewListTooLong; final on that head but for Stale), Refused when the
                       Git host refused for good to write it (condition Approved then says so and what the host shows; asked again
                       after a backoff), Stale when the freshness check found the plan stale and the executor completed it with
-                      failure, whether or not the close of the pull request went through (#713); the request then never writes
-                      the check again, and does not end Superseded before it is recorded. It always names headSHA: a new head
+                      failure, whether or not the close of the pull request went through (#713), when the request was cancelled
+                      with spec.cancel (#289), or when it stopped while its own pull request is open, on the target branch or on
+                      another base (#925; condition ReviewCheckNotFailed says while that write fails); the request then never
+                      writes the check again, and does not end Superseded before it is recorded. It always names headSHA: a new head
                       starts without it, so a state never outlives its head. Once a merge receipt exists it never changes.
                     properties:
                       head:
@@ -1823,13 +1833,17 @@ spec:
                           desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the
                           KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter
                           stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision
-                          or container) or PartialRollout (the report does not cover every desired replica, or a revert is checked
-                          before RolledOut is True). Every one is a reset of the no-evidence class.
+                          or container), PartialRollout (the report does not cover every desired replica, or a revert is checked
+                          before RolledOut is True) or ExecutorRestarted (a new executor process, after a restart or a leader change,
+                          found the window open and opened by no check of its own; its time is the second before it began
+                          reconciling, or windowStart when that is later).
+                          Every one is a reset of the no-evidence class.
                         enum:
                         - NotAvailable
                         - StaleReport
                         - ReportMismatch
                         - PartialRollout
+                        - ExecutorRestarted
                         type: string
                       time:
                         description: |-

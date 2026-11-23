@@ -24,8 +24,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// Default bounds, decided on 2026-11-05 (#70). They are the values of [DefaultLimits]; making them settings
-// is #372.
+// Default bounds, decided on 2026-11-05 (#70). They are the values of [DefaultLimits]. The analysis gives each
+// build the total from maxContextBytes of RemediationSettings ([Builder.BuildWithin], #981); making the
+// section bounds settings is #372.
 const (
 	// DefaultTotalBytes bounds the whole context, the sum of the text of every block.
 	DefaultTotalBytes = 48 << 10
@@ -43,8 +44,10 @@ const (
 	DefaultPolicyBytes = 2 << 10
 )
 
-// Range of each bound accepted by [Limits.Validate]. The upper end equals the largest maxContextBytes the
-// settings accept, so a later setting cannot ask for an unbounded context.
+// Range of each bound accepted by [Limits.Validate] and [Builder.BuildWithin]. The upper end is the builder's
+// own limit, above the largest maxContextBytes the settings accept (49152, [DefaultTotalBytes]), so a section
+// bound or a builder configured outside the settings (the evaluation's contextBytes) cannot ask for an
+// unbounded context. The analyzer holds maxContextBytes to [MinTotalBytes] to [DefaultTotalBytes].
 const (
 	MinSectionBytes = 1 << 10
 	MinTotalBytes   = 4 << 10
@@ -64,8 +67,8 @@ type Limits struct {
 }
 
 // DefaultLimits returns the default bounds. The sections, Git and policy bounds included, add up to the total, so with these
-// bounds the total cut is a backstop; it marks the context truncated when bounds that add up to more are
-// configured (#372).
+// bounds the total cut is a backstop; it marks the context truncated when a smaller total (maxContextBytes) or
+// sections that add up to more are configured.
 func DefaultLimits() Limits {
 	return Limits{
 		Total: DefaultTotalBytes, Summary: DefaultSummaryBytes, Status: DefaultStatusBytes,
@@ -156,12 +159,18 @@ const (
 	// LabelLeadingLinesDropped means the builder dropped lines at the start of a log excerpt that may continue
 	// an entry whose first line the source left out (indented lines, YAML sequence entries, blank lines).
 	LabelLeadingLinesDropped Label = "leading continuation lines dropped"
+	// LabelWithheld means redaction withheld what the block would hold, whole (its work ran out of its budget, or
+	// the text was longer than redact.LargestEntry, the largest entry the build passes; package redact): the block's
+	// source counts as failed.
+	LabelWithheld Label = "withheld by redaction"
 	// LabelLogTruncated means the log source cut older lines from the excerpt.
 	LabelLogTruncated Label = "log excerpt truncated by the source"
 	// LabelLogEndMissing means the log source could not read the newest lines.
 	LabelLogEndMissing Label = "log excerpt end missing"
-	// LabelLogInstanceUncertain means the log source cannot tie the excerpt to one container instance.
-	LabelLogInstanceUncertain Label = "log excerpt uncertain about its instance"
+	// LabelLogInstanceUncertain means the log source cannot tie the excerpt to one instance of the container:
+	// a restart, a pod re-created under the same name, a pod gone at the second check, or no instance in its status.
+	// The text names both causes and claims neither the pod nor the container is certain (#951).
+	LabelLogInstanceUncertain Label = "log excerpt from an uncertain instance of this container (a restart or a re-created pod)"
 	// LabelMetricsPartial means the metrics source warned that an answer may be incomplete: a missing series
 	// may exist and a total may be short.
 	LabelMetricsPartial Label = "partial metrics answer"

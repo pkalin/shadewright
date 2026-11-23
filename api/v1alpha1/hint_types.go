@@ -69,8 +69,9 @@ const ReasonAnotherRequestMerged = "AnotherRequestMerged"
 // ReasonAnotherRequestClosed is the PlanFresh reason of a request that ended Superseded because it waited behind
 // the target lock of another request for the same target and field (of any Incident, recorded in
 // status.queuedBehind) whose pull request was then closed without a merge, before this one took the lock or
-// opened a pull request (#643). A reviewer who closed that pull request said no to the change; the Incident's
-// next analysis is the way to a new proposal.
+// opened a pull request (#643). A reviewer who closed that pull request said no to the change. An Incident that
+// was analyzed is not analyzed again: unless a newer request names it, it moves to Escalated, and a person
+// applies a new request if the change is still wanted; one not yet analyzed (Open) gets its first analysis (#930).
 const ReasonAnotherRequestClosed = "AnotherRequestClosed"
 
 // ReasonAnotherRequestSucceeded is the PlanFresh reason of a request that ended Superseded because it waited
@@ -224,11 +225,12 @@ type Hint struct {
 // request (ADR-0028 section 7). The reply is built from a fixed template and typed fields, plus the quoted
 // first line of the stored hint, its one free text. It is posted only when the redactor would change nothing
 // in it, so it fails closed. Posted: the reply is in the pull request (posted, or found there by its marker
-// in a comment of the executor's own). NotRedactable: the redactor would still change the reply, so nothing
-// was posted. TooManyComments: the pull request has more comments than the executor reads to find an
-// earlier reply, so nothing was posted rather than risk a second reply. Refused: the Git host refused the
-// comment for good (a permission the App lacks, a rule, an invalid request). GaveUp: posting failed on every
-// try within the executor's bound. Only Posted means the author was told.
+// in a comment of the executor's own). NotRedactable: the redactor would still change the reply, or its
+// check of the reply ran out of the redactor's work budget and was withheld, so nothing was posted.
+// TooManyComments: the pull request has more comments than the executor reads to find an earlier reply, so
+// nothing was posted rather than risk a second reply. Refused: the Git host refused the comment for good (a
+// permission the App lacks, a rule, an invalid request). GaveUp: posting failed on every try within the
+// executor's bound. Only Posted means the author was told.
 // +kubebuilder:validation:Enum=Posted;NotRedactable;TooManyComments;Refused;GaveUp
 type HintReply string
 
@@ -309,7 +311,14 @@ const (
 // pull request goes through, until it is recorded, and never changes it, so the request never sets the check green
 // again. A Failed check may still become Stale on its head, so the run says why the plan must not be merged. The
 // executor writes the same failed state, with a run that says so, for a request cancelled with spec.cancel (#289),
-// before it closes the pull request.
+// before it closes the pull request, and for any request that stops while its own pull request is open, on the
+// target branch or on a base a person moved it to (#925): in the step that stops it for a pull request open on
+// another base, and at each later look of the stopped request until it is recorded (condition ReviewCheckNotFailed
+// says while it cannot be written); once recorded, a look of the stopped request that finds another state last on
+// the head writes it again. Before the merge gate writes the check (InProgress, Passed, or Failed on too many reviews),
+// the executor reads the request live, so a reconcile that worked from an older copy writes nothing over a stop, a
+// release or a deletion; the failed check of a stale plan, a cancel or a stop is written without that read, as
+// nothing it can go over passes a merge.
 // +kubebuilder:validation:Enum=InProgress;Passed;Failed;Refused;Stale
 type ReviewCheckState string
 
@@ -327,8 +336,8 @@ const (
 // or adopts starts without one, and the executor creates the check in progress on it. On one head a Failed check
 // changes only to Stale; every other state may follow any other, as the reviews and the Git host's answers change
 // (#748), or become Stale (#713). A Stale check never changes, neither its state nor its head: the request records
-// it only while the plan's cleanup runs, nothing pushes to the pull request then, and the request never writes the
-// check again on any head (#713).
+// it only when nothing pushes to the pull request any more (the plan's cleanup, a cancel, or a stop while the pull
+// request is open, #925), and the request never writes the check again on any head (#713).
 // +kubebuilder:validation:XValidation:rule="self.head != oldSelf.head || self.state == oldSelf.state || oldSelf.state != 'Failed' || self.state == 'Stale'",message="on one head a Failed check run changes only to Stale"
 // +kubebuilder:validation:XValidation:rule="oldSelf.state != 'Stale' || (self.state == 'Stale' && self.head == oldSelf.head)",message="a Stale check run never changes"
 // +kubebuilder:validation:XValidation:rule="self.state == 'Refused' || (!has(self.refusals) && !has(self.refusedAt))",message="refusals and refusedAt are recorded only on a Refused check run"
@@ -449,9 +458,10 @@ const MaxRefusedHints = 10
 // section 2); a command of an author without write access is never recorded, so it cannot push a record out.
 // CapReached: MaxHints hints of the request are Consumed or Reserved already, which count for its whole
 // supersede chain. TooLong: the hint is over MaxHintTextBytes after redaction, or the body was cut before the
-// end of its first line. NotRedactable: the redacted text still holds something the redactor would change.
-// Empty: the command has no text. EditedAfterSeen: a comment the executor had read already was edited to carry
-// the command. An edit of a stored hint's comment is recorded on the hint (editedAfterAccept), not here.
+// end of its first line. NotRedactable: the redacted text still holds something the redactor would change,
+// or redaction withheld the text whole because it ran out of its work budget; it is decided before TooLong,
+// so a long hint whose redaction runs out of its budget is NotRedactable. Empty: the command has no text. EditedAfterSeen: a comment the executor had read already was edited to carry the command. An edit of a
+// stored hint's comment is recorded on the hint (editedAfterAccept), not here.
 // +kubebuilder:validation:Enum=CapReached;TooLong;NotRedactable;Empty;EditedAfterSeen
 type HintRefusal string
 

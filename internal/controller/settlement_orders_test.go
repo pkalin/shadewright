@@ -522,6 +522,20 @@ func TestPassedWaitEndsBeforeAnyRead(t *testing.T) {
 				t.Fatalf("phase %s, Approved %+v; want HandoffRecoveryFailed", rr.Status.Phase, c)
 			}
 		}},
+		"handoff recovery": {kind: waitHandoffRecovery, setup: func(rr *api.RemediationRequest, now time.Time) {
+			rr.Status.Phase = api.PhasePolicyChecked
+			rr.Status.Deadline = &metav1.Time{Time: now.Add(-handoffRecoveryGrace)}
+			rr.Spec.Replaces = &api.RequestReplacement{}
+			rr.Status.Handoff = &api.Handoff{From: &api.IncomingHandoff{Phase: api.HandoffReserved}}
+			meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionPullRequestUnreadable,
+				Status: metav1.ConditionTrue, Reason: ReasonGitForbidden, Message: "The Git host refused the read",
+				LastTransitionTime: metav1.NewTime(now.Add(-recoveryWaitBound))})
+		}, check: func(t *testing.T, rr *api.RemediationRequest) {
+			if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPROpened); rr.Status.Phase !=
+				api.PhaseNeedsIntervention || c == nil || c.Reason != ReasonRecoveryWaitExpired {
+				t.Fatalf("phase %s, PullRequestOpened %+v; want RecoveryWaitExpired", rr.Status.Phase, c)
+			}
+		}},
 		"deadline": {kind: waitRequestDeadline, setup: func(rr *api.RemediationRequest, now time.Time) {
 			rr.Status.Phase = api.PhasePolicyChecked
 			rr.Status.Deadline = &metav1.Time{Time: now}

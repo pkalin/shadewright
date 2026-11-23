@@ -99,6 +99,7 @@ const (
 	errTooLarge        fixedError = "azureblob: the record is larger than 1 MiB"
 	errNotJSON         fixedError = "azureblob: the record is not valid JSON"
 	errRedactable      fixedError = "azureblob: the record still holds data the redactor removes; nothing was sent"
+	errCheckWaited     fixedError = "azureblob: the redaction check of the record did not run: it waited too long for others to finish; nothing was sent"
 	errExists          fixedError = "azureblob: the analysis record already exists; it was not overwritten"
 	errNoAnswer        fixedError = "azureblob: no answer from Blob Storage"
 	errTLS             fixedError = "azureblob: the certificate of Blob Storage was refused"
@@ -203,7 +204,8 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // check refuses a record before anything is sent: a bad ID or fingerprint, a verified value that is not an
-// object name, no data, data too large or not JSON, or data the redactor would still change (see clean).
+// object name, no data, data too large or not JSON. The redaction check of the data (checkClean) runs in each try
+// of Put instead, because it can wait.
 func (s *Store) check(rec providers.AnalysisRecord) error {
 	for _, v := range rec.Verified {
 		if !v.Valid() {
@@ -222,11 +224,24 @@ func (s *Store) check(rec providers.AnalysisRecord) error {
 	case !json.Valid(rec.Data):
 		return fmt.Errorf("%w: %w", errNotJSON, providers.ErrRejected)
 	}
-	keep := []string{rec.ID, rec.Fingerprint}
+	return nil
+}
+
+// checkClean refuses a record whose data the redactor would still change (see clean). A redaction check that did
+// not run, because its wait for the heap limit of the redactions running at once ended with ctx or at the
+// redactor's longest wait, is a retryable failure marked [providers.ErrNotChecked], not a refusal: Put tries it
+// again, and the same record may pass then.
+func (s *Store) checkClean(ctx context.Context, rec providers.AnalysisRecord) error {
+	keep := make([]string, 0, 2+len(rec.Verified))
+	keep = append(keep, rec.ID, rec.Fingerprint)
 	for _, v := range rec.Verified {
 		keep = append(keep, string(v))
 	}
-	if !s.clean(rec.Data, keep) {
+	clean, err := s.clean(s.redactor.WithContext(ctx), rec.Data, keep)
+	switch {
+	case errors.Is(err, redact.ErrWait):
+		return &providers.RetryableError{Err: fmt.Errorf("%w: %w", errCheckWaited, providers.ErrNotChecked)}
+	case !clean:
 		return fmt.Errorf("%w: %w", errRedactable, providers.ErrRejected)
 	}
 	return nil
@@ -237,50 +252,55 @@ func (s *Store) check(rec providers.AnalysisRecord) error {
 // more as "key: value" when the value is a string, a number, a boolean or null, so that a key that names a
 // credential is seen with its value, and each key alone. It does not check the JSON text as a whole: there
 // the redactor takes an unquoted value to run on over the quote and the members after it, and refuses clean
-// records.
-func (s *Store) clean(data []byte, keep []string) bool {
+// records. It stops at the first check that is not clean, and returns redact.ErrWait when a check did not run.
+func (s *Store) clean(red *redact.Redactor, data []byte, keep []string) (bool, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return false
+		return false, nil
 	}
-	return s.cleanValue(v, keep)
+	return cleanValue(red, v, keep)
 }
 
-func (s *Store) cleanValue(v any, keep []string) bool {
+func cleanValue(red *redact.Redactor, v any, keep []string) (bool, error) {
 	switch x := v.(type) {
 	case string:
-		return s.redactor.Clean(x, keep...)
+		return red.CleanChecked(x, keep...)
 	case []any:
 		for _, e := range x {
-			if !s.cleanValue(e, keep) {
-				return false
+			if ok, err := cleanValue(red, e, keep); !ok || err != nil {
+				return false, err
 			}
 		}
 	case map[string]any:
 		for k, e := range x {
-			if !s.redactor.Clean(k, keep...) {
-				return false
+			if ok, err := red.CleanChecked(k, keep...); !ok || err != nil {
+				return false, err
 			}
 			switch e.(type) {
 			case string, json.Number, bool, nil:
-				if !s.redactor.Clean(k+": "+fmt.Sprint(e), keep...) {
-					return false
+				if ok, err := red.CleanChecked(k+": "+fmt.Sprint(e), keep...); !ok || err != nil {
+					return false, err
 				}
 			}
-			if !s.cleanValue(e, keep) {
-				return false
+			if ok, err := cleanValue(red, e, keep); !ok || err != nil {
+				return false, err
 			}
 		}
 	}
-	return true
+	return true, nil
 }
 
 // Put writes rec as "<ID>.json" with If-None-Match: *, and returns the blob's URL. A blob that exists is
 // never replaced: Put returns an error matching [providers.ErrConflict] (409 BlobAlreadyExists or 412), also
 // when an earlier try of the same Put may have written it, because the identity cannot read the blob to
 // compare. A caller whose IDs are unique per write takes that conflict as its own record.
+//
+// The redaction check of the data runs inside the tries, each check bounded by the try's timeout, until one has
+// run: a try whose check waited for the heap limit sends nothing and counts as a try, and the next one checks
+// again after the backoff. When every try waited, or no time is left for another, Put returns the retryable
+// error marked [providers.ErrNotChecked] and nothing was sent.
 func (s *Store) Put(ctx context.Context, rec providers.AnalysisRecord) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", ctxError(err)
@@ -291,12 +311,21 @@ func (s *Store) Put(ctx context.Context, rec providers.AnalysisRecord) (string, 
 	blob := s.container.JoinPath(rec.ID + ".json")
 	ctx, cancel := context.WithTimeout(ctx, putTimeout)
 	defer cancel()
-	var last error
+	var (
+		last    error
+		checked bool
+	)
 	for try := 1; ; try++ {
 		var retryAfter time.Duration
-		retryAfter, last = s.try(ctx, blob, rec.Data)
-		if last == nil {
-			return blob.String(), nil
+		if !checked {
+			last = s.checkTry(ctx, rec)
+			checked = last == nil
+		}
+		if checked {
+			retryAfter, last = s.try(ctx, blob, rec.Data)
+			if last == nil {
+				return blob.String(), nil
+			}
 		}
 		if !providers.IsRetryable(last) || try == maxTries {
 			return "", last
@@ -313,6 +342,14 @@ func (s *Store) Put(ctx context.Context, rec providers.AnalysisRecord) (string, 
 			return "", ctxError(err)
 		}
 	}
+}
+
+// checkTry is the redaction check of one try, bounded by the try's timeout so that a wait for the heap limit
+// leaves time for the next try.
+func (s *Store) checkTry(ctx context.Context, rec providers.AnalysisRecord) error {
+	cctx, cancel := context.WithTimeout(ctx, s.tryTimeout)
+	defer cancel()
+	return s.checkClean(cctx, rec)
 }
 
 // backoff is the wait after the given try: exponential from firstBackoff, capped, with full jitter.
@@ -351,6 +388,17 @@ func (s *Store) try(ctx context.Context, blob *url.URL, data []byte) (time.Durat
 		// server sends when its handler gives up on a client going away (#767). The context ended first: the
 		// write reports that, whatever the answer was.
 		return 0, ctxError(err)
+	}
+	if err := tctx.Err(); err != nil {
+		// The try was given up before this answer was read: its own timeout ended while the write still has time.
+		// Only the success classify accepts (201 Created) still counts: the server says the record is stored.
+		// Any other late answer decides nothing (a server can send the empty 200 of a handler that gave up); the
+		// try counts as one that timed out with no answer, retried and paced like it, its Retry-After ignored. A
+		// blob it did store answers the retry with 409 BlobAlreadyExists, as after any try that timed out.
+		if _, cerr := classify(resp, s.now()); cerr == nil {
+			return 0, nil
+		}
+		return 0, s.transportError(ctx, err)
 	}
 	return classify(resp, s.now())
 }
@@ -428,7 +476,8 @@ func (s *Store) transportError(ctx context.Context, err error) error {
 	if errors.As(err, &certErr) || errors.As(err, &unknownAuth) || errors.As(err, &hostErr) || errors.As(err, &invalid) {
 		return fmt.Errorf("%w: %w", errTLS, providers.ErrForbidden)
 	}
-	// The try's own timeout, a reset or a DNS failure: worth another try.
+	// The try's own timeout (also an answer other than 201 read only after it), a reset or a DNS failure: worth
+	// another try.
 	return &providers.RetryableError{Err: errNoAnswer}
 }
 

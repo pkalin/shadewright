@@ -70,9 +70,9 @@ limitations under the License.
 // stream that makes no progress for 100 reads in a row fails as cut short.
 //
 // The log is untrusted input (invariant 4). The text is redacted with internal/redact ([Config.Redactor], or
-// the built-in rules) as it was read, before the cut and before invalid UTF-8 is replaced, and the excerpt is
-// redacted again before it leaves the adapter ([Excerpt], #840): a block scalar or a PEM key whose first line
-// the cut drops is still redacted in the lines kept. Redaction never makes the text longer, so the excerpt
+// the built-in rules) as it was read, before the cut and before invalid UTF-8 is replaced ([Excerpt], #840): a
+// block scalar or a PEM key whose first line the cut drops is still redacted in the lines kept. The excerpt is
+// not redacted again after the cut (#845). Redaction never makes the text longer, so the excerpt
 // stays within its byte bound. Redaction is best effort (see package redact). The volume of logs is controlled by
 // whoever can write logs in a watched namespace, so Truncated and EndMissing say nothing about the incident.
 // The adapter logs nothing.
@@ -87,4 +87,11 @@ limitations under the License.
 // which request failed ("pod read" or "logs request"). A failed second pod read is not an error: it marks the
 // excerpt uncertain. When the caller's context is done, its error is returned, so that errors.Is matches
 // [context.Canceled] or [context.DeadlineExceeded].
+//
+// A log the node no longer holds: the kubelet answers a logs request for a container it has removed with HTTP
+// 200 and the body "unable to retrieve container logs for <runtime>://<id>". When the whole body of the first
+// read is that sentence, with at most one newline after it, and names the container ID the status gave for the
+// instance asked for (or, when the status named none, an ID of that form), the adapter returns
+// [providers.ErrLogGone], which wraps [providers.ErrNotFound], instead of an excerpt. Any other body is a log,
+// one that holds the sentence among other lines or with other text on its line included.
 package kube

@@ -24,6 +24,10 @@ import (
 
 // Sentinel errors. Adapters wrap them (fmt.Errorf("...: %w", ErrNotFound)) so callers can use errors.Is.
 var (
+	// ErrWithheld means redaction withheld the answer whole: its work ran out of its budget, or the answer was
+	// longer than redaction reads (package redact, budget.go). Nothing of the answer is returned; a caller shows it
+	// as a source that failed.
+	ErrWithheld = errors.New("withheld by redaction")
 	// ErrNotFound means the object asked for does not exist.
 	ErrNotFound = errors.New("not found")
 	// ErrPathNotInTree means the adapter read the tree at the commit asked for and the path is not a regular
@@ -46,6 +50,11 @@ var (
 	// or a rule of the repository (branch protection, a ruleset). It is permanent until a person changes the
 	// permission or the rule; a rate limit is never ErrForbidden but a [RetryableError].
 	ErrForbidden = errors.New("forbidden")
+	// ErrUnauthorized means the host rejected the identity's credentials (HTTP 401): a GitHub App whose private key
+	// is wrong or rotated without the cluster's copy, or an App that was deleted, so the JWT or the installation
+	// token it signed is refused. It is not ErrForbidden and not retryable: it holds until a person fixes the App
+	// or its key, and callers that class refusals keep treating it as a plain failure.
+	ErrUnauthorized = errors.New("unauthorized")
 	// ErrRejected means the host refused the request itself as invalid (validation failed, for example a
 	// branch name or pull request it does not accept) and the adapter could not resolve the refusal by reading
 	// the state. It is permanent: the same request fails the same way.
@@ -80,6 +89,10 @@ var (
 	// from the status of the HTTP response the adapter received, never from a body or model output: only an
 	// adapter whose host documents the refusal as free marks an error with it ([NotProcessed]).
 	ErrNotProcessed = errors.New("the host refused the request before processing it")
+	// ErrNotChecked marks the error of a write whose last check before sending, the redaction check of the data,
+	// did not run on any attempt: its wait for the limit on the heap of the redactions running at once ended each
+	// time. Nothing was sent, and the data was not found unsafe either: it is not a refusal.
+	ErrNotChecked = errors.New("the redaction check did not run")
 )
 
 // notProcessedError keeps the text and the chain of err and adds ErrNotProcessed to it.
@@ -143,6 +156,9 @@ func (e *RetryableError) Unwrap() error { return e.Err }
 // Is reports whether target is ErrRetryable.
 func (e *RetryableError) Is(target error) bool { return target == ErrRetryable }
 
+// IsNotChecked reports whether err is a write whose redaction check never ran ([ErrNotChecked]).
+func IsNotChecked(err error) bool { return errors.Is(err, ErrNotChecked) }
+
 // IsNotFound reports whether err means the object does not exist.
 func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) }
 
@@ -164,6 +180,9 @@ func IsInvalidConfig(err error) bool { return errors.Is(err, ErrInvalidConfig) }
 
 // IsForbidden reports whether err means the host refused the identity (a missing permission or a rule).
 func IsForbidden(err error) bool { return errors.Is(err, ErrForbidden) }
+
+// IsUnauthorized reports whether err is, or wraps, ErrUnauthorized.
+func IsUnauthorized(err error) bool { return errors.Is(err, ErrUnauthorized) }
 
 // IsRejected reports whether err means the host refused the request as invalid.
 func IsRejected(err error) bool { return errors.Is(err, ErrRejected) }

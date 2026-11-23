@@ -302,6 +302,8 @@ func TestBackfillNeverClearsAHeldLock(t *testing.T) {
 		for _, recorded := range []bool{false, true} {
 			for _, closed := range []string{"", ReasonChangeRequestClosed, ReasonChangeRequestMerged} {
 				t.Run(fmt.Sprintf("%s/recorded=%t/closed=%q", phase, recorded, closed), func(t *testing.T) {
+					// Each case builds its own world (#961).
+					t.Parallel()
 					r, _, rr := settlementWorld(t, phase)
 					ctx := context.Background()
 					rr.Status.HoldsTarget = nil
@@ -333,6 +335,10 @@ var unboundedReads = map[string]noBoundReason{
 	"checkFailed":     noBoundPolicyCheck,
 	"heldUnsettled":   noBoundHeldLock,
 	"followHeldMerge": noBoundHeldLock,
+	// A replacement whose recovery ended at the bound of its wait (#786) keeps the lock until a read settles it.
+	"heldRecovery": noBoundHeldLock,
+	// A claim held after the end of the watch is retried within its own entry, which ends it (settleClaim, #1058).
+	"claimAfterWatch": noBoundHeldLock,
 	"requestBound":    "", // noBoundStaleCleanup and noBoundAfterStop, by the request's state.
 	"refuseOrWait":    noBoundRefusedWatch,
 	// A request cancelled for its Incident keeps the lock until a read settles its pull request.

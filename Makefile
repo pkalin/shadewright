@@ -103,7 +103,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test-scripts
-test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection, fuzz target, docs link check, condition reasons page check and plugin dependency check scripts (hack/*_test.sh).
+test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection, fuzz target, docs link check, condition reasons page check, plugin dependency check and side-by-side run scripts (hack/*_test.sh).
 	hack/release-notes-by-scope_test.sh
 	hack/check-chart-docs_test.sh
 	hack/chart-crds_test.sh
@@ -119,18 +119,81 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	hack/docs-reasons-check_test.sh
 	python3 -I hack/docs-reasons-check.py
 	hack/check-plugin-deps_test.sh
+	hack/side-by-side_test.sh
+
+# The shards of the run of internal/redact with the tag redactwork in make test (top-level test names, joined
+# with |): the tests that took longest in that run, one or a few to a binary.
+REDACT_SHARD_1 := TestRepeatedPatternsStayLinear
+REDACT_SHARD_2 := TestTokenShapesWorkIsLinear
+REDACT_SHARD_3 := TestCanonEntryPointsLeakNothingMainHid|TestCanonStairWorkIsLinear|TestEveryStepIsMetered|TestCanonCorpusWorkIsLinear|TestNestedBlocksStayLinear|TestMonotonicStaysLinear
+REDACT_SHARD_4 := TestReadingsKeepTheSignalOfAHiddenText|TestConnStringsThroughEveryEntryPointAgainstMain|TestSpansOnRuneBoundariesCanonCorpus|TestSpansOnRuneBoundariesMultiByteCorpus|TestReplacementsEndOnCharacterBoundaries|TestFieldsOfEveryToolHideWhatMainHid|TestWindowedChunksFindWhatTheExpressionFinds|TestStringsDecidesAsTheJoinedText
+REDACT_SHARD_5 := TestCorpusWorkGrowsLinearly|TestBlockCorporaThroughEveryEntryPoint
+# The heap per byte of every shape at every entry point (#1087): three to five minutes each on the test runner.
+REDACT_SHARD_6 := TestHeapPerByteOfEveryShapeStrings
+REDACT_SHARD_7 := TestHeapPerByteOfEveryShapeTwice
+REDACT_SHARD_8 := TestHeapPerByteOfEveryShapeSequences
+REDACT_SHARD_9 := TestHeapPerByteOfEveryShapePieces
+
+# make test runs each test line through gotestsum. Every line writes <name>.xml (junit) and <name>.json
+# (go test -json) under TEST_REPORT_DIR, which CI uploads and reads for the slowest tests. TEST_FORMAT keeps the
+# "--- FAIL", "FAIL" and "ok" lines that scripts grep for.
+TEST_REPORT_DIR ?= test-reports
+TEST_FORMAT ?= standard-verbose
+gotestsum = "$(GOTESTSUM)" --format "$(TEST_FORMAT)" --junitfile "$(TEST_REPORT_DIR)/$(1).xml" --jsonfile "$(TEST_REPORT_DIR)/$(1).json" --
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest test-scripts ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -timeout 20m -coverprofile cover.out
+test: manifests generate fmt vet setup-envtest gotestsum test-scripts ## Run tests (junit and JSON files in TEST_REPORT_DIR).
+	@mkdir -p "$(TEST_REPORT_DIR)"
+	@# -timeout applies to each package's test binary. internal/controller (the plain tests, then the envtest suite
+	@# TestControllers) took 14 to 15 minutes under -race on a hosted runner before #838 and ran past 20 after it (#961),
+	@# so the limit is 30 minutes; the packages still run side by side.
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" $(call gotestsum,unit-race) $$(go list ./... | grep -v -e /e2e -e /test/chart) -race -timeout 30m -coverprofile cover.out
 	@# The redact timing tests and the 100,000 seeded keys skip under -race, and the generated corpora check a seeded
-	@# sample there (internal/redact/race_test.go, racesample_test.go): run the whole package again without it, so
+	@# sample there (internal/redact/race_test.go, racesample_test.go), and so do the log source's tests on logs of
+	@# about 1 MiB (internal/providers/logs/kube/racesample_test.go) and the context builder's two largest generated
+	@# corpora (internal/incidentcontext/racesample_test.go): run those packages again without it, so
 	@# that no test is selected by name and a renamed one cannot drop out. The
-	@# linearity tests count redaction work only in a build with the tag redactwork (internal/redact/work_counted.go,
-	@# no counter in the product build), so this run and the log excerpt's package get it.
-	go test -timeout 20m -tags redactwork ./internal/redact ./internal/providers/logs/kube
+	@# linearity tests count redaction work only in a build with the tag redactwork (internal/redact/work_counted.go;
+	@# the product build spends each step on the budget of its call and keeps no shared counter), so this run, the log
+	@# excerpt's package and the context builder's get it.
+	@# The differential tests of the release's reading against its code before #873 check a share of their inputs
+	@# under -race (internal/redact/released/race_test.go) and all of them here.
+	@# internal/redact with the tag took about 555 s in one binary on a laptop, so on a hosted runner (2.4 times
+	@# slower on main) it would pass -timeout 20m: it runs in ten binaries (test-redactwork-*). The first nine select
+	@# the heaviest tests by name (REDACT_SHARD_*; 6 to 9 the heap per byte of every shape, #1087), the last runs every other test with -skip, so a test renamed out
+	@# of a shard runs in the last binary and none drops out. The tools and the meter run without -race only in
+	@# test-redactwork-other (some of their checks sample under -race, and the meter's allocation test needs a build
+	@# without it). They and the run of the other packages go side by
+	@# side (hack/side-by-side.sh: one process each, each output printed whole when all are done, any failure fails
+	@# make test); one after the other they took about 1,800 s of the test job on a hosted runner, and side by side on
+	@# its four cores about 1,300 s, two of them past their 20 minutes (2026-11-21). CI therefore runs make test with
+	@# REDACTWORK_IN_TEST=no and each of REDACTWORK_TARGETS in a job of its own (.github/workflows/test.yml, the list
+	@# from make redactwork-list), so every input is still checked on every pull request.
+	$(if $(filter yes,$(REDACTWORK_IN_TEST)),MAKE="$(MAKE)" hack/side-by-side.sh $(REDACTWORK_TARGETS),@echo "make test: the runs with the tag redactwork are left out (REDACTWORK_IN_TEST=$(REDACTWORK_IN_TEST)): run make $(REDACTWORK_TARGETS)")
 	@# The time bound of the wide mapping refusal is checked only without -race (internal/gitops/patch/race_test.go).
-	go test -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
+	$(call gotestsum,wide-mapping) -run 'TestWideMappingRefusedInTime$$' ./internal/gitops/patch
+
+# The runs with the tag redactwork of make test, which hack/side-by-side.sh starts side by side. CI sets
+# REDACTWORK_IN_TEST=no and runs each in a job of its own (make redactwork-list).
+REDACTWORK_TARGETS := test-redactwork-1 test-redactwork-2 test-redactwork-3 test-redactwork-4 test-redactwork-5 \
+	test-redactwork-6 test-redactwork-7 test-redactwork-8 test-redactwork-9 \
+	test-redactwork-rest test-redactwork-other
+REDACTWORK_IN_TEST ?= yes
+REDACTWORK_TEST := go test -timeout 20m -tags redactwork
+
+.PHONY: $(REDACTWORK_TARGETS)
+test-redactwork-1 test-redactwork-2 test-redactwork-3 test-redactwork-4 test-redactwork-5 test-redactwork-6 test-redactwork-7 test-redactwork-8 test-redactwork-9:
+	$(REDACTWORK_TEST) -run '^($(REDACT_SHARD_$(subst test-redactwork-,,$@)))$$' ./internal/redact
+test-redactwork-rest:
+	$(REDACTWORK_TEST) -skip '^($(REDACT_SHARD_1)|$(REDACT_SHARD_2)|$(REDACT_SHARD_3)|$(REDACT_SHARD_4)|$(REDACT_SHARD_5)|$(REDACT_SHARD_6)|$(REDACT_SHARD_7)|$(REDACT_SHARD_8)|$(REDACT_SHARD_9))$$' ./internal/redact
+test-redactwork-other:
+	$(REDACTWORK_TEST) ./internal/redact/released ./internal/redact/meter ./internal/providers/logs/kube ./internal/incidentcontext ./internal/tools
+
+# One line of JSON for the matrix of the redactwork jobs of .github/workflows/test.yml: every entry of
+# REDACTWORK_TARGETS, so that a run added to make test is a job in CI as well.
+.PHONY: redactwork-list
+redactwork-list: ## Print REDACTWORK_TARGETS as a JSON array (the matrix of the redactwork jobs in CI).
+	@printf '[%s]\n' "$$(printf '"%s",' $(REDACTWORK_TARGETS) | sed 's/,$$//')"
 
 # The evaluation harness (test/eval, docs/evaluation.md). make test runs it too; these targets write the report.
 EVAL_REPORT_DIR ?= $(LOCALBIN)/eval
@@ -150,7 +213,7 @@ eval-model: ## Evaluate a real model through EVAL_MODEL (foundry, anthropic or o
 
 # Fuzz targets as <package dir>:<FuzzName>. hack/fuzz-targets.sh checks this list against the tree both ways, so a
 # new target cannot be left out of the weekly Fuzz workflow and a stale entry cannot fuzz nothing and pass.
-FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/gitops/gityaml:FuzzNodes internal/gitops/gityaml:FuzzMappingKeys internal/redact:FuzzString internal/redact:FuzzMonotonicAgainstMain internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/gitops/semdiff:FuzzDocuments internal/gitops/sourcemap:FuzzFieldEquals internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/openaicompatible:FuzzCredentialEcho internal/providers/model/anthropic:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponses internal/tools:FuzzArguments
+FUZZ_TARGETS := cmd/kubectl-shadewright:FuzzClean internal/gitops/gityaml:FuzzNodes internal/gitops/gityaml:FuzzMappingKeys internal/redact:FuzzString internal/redact:FuzzMonotonicAgainstMain internal/redact:FuzzReplacementBoundaries internal/incidentcontext:FuzzLogExcerpt internal/gitops/patch:FuzzPatch internal/gitops/semdiff:FuzzDocuments internal/gitops/sourcemap:FuzzFieldEquals internal/incidents/fingerprint:FuzzNormalize internal/policy/pathmatch:FuzzMatch internal/analyzer/refcheck:FuzzCheck internal/providers/model/openaicompatible:FuzzCredentialEcho internal/providers/model/anthropic:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponse internal/providers/model/foundry:FuzzParseResponses internal/tools:FuzzArguments internal/redact:FuzzDiffString internal/redact:FuzzDiffStringTwice internal/redact:FuzzDiffStrings internal/redact:FuzzDiffReplaceFrom internal/redact:FuzzHeapWithinWeight internal/tools:FuzzDiffGetResource internal/tools:FuzzDiffGetPodLogs internal/tools:FuzzDiffListEvents internal/tools:FuzzDiffQueryMetrics internal/tools:FuzzDiffDeliveryStatus internal/tools:FuzzDiffCheckMissingReference internal/tools:FuzzDiffGitTools internal/incidentcontext:FuzzDiffBuild internal/redact/released:FuzzReleasedMatchesKeptCopy internal/providers:FuzzStripControlsJSON
 FUZZ ?= $(FUZZ_TARGETS)
 FUZZTIME ?= 30s
 
@@ -158,10 +221,24 @@ FUZZTIME ?= 30s
 fuzz: ## Run each fuzz target (FUZZ, default all) for FUZZTIME (default 30s); a failing input is saved under the package's testdata/fuzz.
 	@hack/fuzz-targets.sh "$(CURDIR)" $(FUZZ_TARGETS)
 	@$(if $(filter-out $(FUZZ_TARGETS),$(FUZZ)),echo "Not in FUZZ_TARGETS: $(filter-out $(FUZZ_TARGETS),$(FUZZ))" >&2; exit 1)
+	@# A target in a package with a file built only with the tag redactwork runs with it, so that the targets that
+	@# check the work bound of redaction (internal/redact FuzzDiff*, P3) count the work (hack/fuzz-targets.sh --tags).
 	@for t in $(FUZZ); do \
-		echo "fuzz ./$${t%%:*} $${t##*:} for $(FUZZTIME)"; \
-		go test -run '^$$' -fuzz "^$${t##*:}\$$" -fuzztime "$(FUZZTIME)" "./$${t%%:*}" || exit 1; \
+		tags="$$(hack/fuzz-targets.sh --tags "$(CURDIR)" "$${t%%:*}")" || exit 1; \
+		echo "fuzz ./$${t%%:*} $${t##*:} for $(FUZZTIME)$${tags:+ with -tags $$tags}"; \
+		go test -tags "$$tags" -run '^$$' -fuzz "^$${t##*:}\$$" -fuzztime "$(FUZZTIME)" "./$${t%%:*}" || exit 1; \
 	done
+
+# One line of JSON for the matrix of .github/workflows/fuzz.yml: every entry of FUZZ_TARGETS as <package dir>:<FuzzName>.
+.PHONY: fuzz-list
+fuzz-list: ## Print FUZZ_TARGETS as a JSON array (the Fuzz workflow matrix).
+	@hack/fuzz-targets.sh "$(CURDIR)" $(FUZZ_TARGETS)
+	@printf '[%s]\n' "$$(printf '"%s",' $(FUZZ_TARGETS) | sed 's/,$$//')"
+
+.PHONY: fuzz-one
+fuzz-one: ## Run one fuzz target, TARGET=<package dir>:<FuzzName> from FUZZ_TARGETS, for FUZZTIME (a Fuzz workflow job).
+	@$(if $(filter $(TARGET),$(FUZZ_TARGETS)),,echo "TARGET must be one of FUZZ_TARGETS, got '$(TARGET)'" >&2; exit 1)
+	@$(MAKE) --no-print-directory fuzz FUZZ="$(TARGET)" FUZZTIME="$(FUZZTIME)"
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The kind target installs the pinned Kind (KIND_VERSION) into bin/. The setup builds/loads the Manager Docker image locally.
@@ -236,10 +313,11 @@ verify-generated: ## Regenerate all generated files from scratch and fail if the
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build the executor (bin/manager), analyzer and verifier binaries.
+build: manifests generate fmt vet ## Build the executor (bin/manager), analyzer, verifier and scoring intake (bin/intake) binaries.
 	go build -o bin/manager cmd/main.go
 	go build -o bin/analyzer ./cmd/analyzer
 	go build -o bin/verifier ./cmd/verifier
+	go build -o bin/intake ./cmd/intake
 
 # PLUGIN_VERSION is stamped into the plugin (kubectl shadewright version); status compares it with the CRDs' version label.
 PLUGIN_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -345,6 +423,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GOTESTSUM ?= $(LOCALBIN)/gotestsum
 GOVULNCHECK ?= $(LOCALBIN)/govulncheck
 HELM_DOCS ?= $(LOCALBIN)/helm-docs
 
@@ -364,6 +443,8 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
 GOLANGCI_LINT_VERSION ?= v2.15.0
+# Runs the test lines of make test and writes their junit and JSON files (checked through the Go checksum database).
+GOTESTSUM_VERSION ?= v1.13.0
 GOVULNCHECK_VERSION ?= v1.9.0
 # Generates dist/chart/README.md from values.yaml (checked through the Go checksum database).
 HELM_DOCS_VERSION ?= v1.14.2
@@ -411,6 +492,11 @@ $(GOVULNCHECK): $(LOCALBIN)
 helm-docs: $(HELM_DOCS) ## Download helm-docs locally if necessary.
 $(HELM_DOCS): $(LOCALBIN)
 	$(call go-install-tool,$(HELM_DOCS),github.com/norwoodj/helm-docs/cmd/helm-docs,$(HELM_DOCS_VERSION))
+
+.PHONY: gotestsum
+gotestsum: $(GOTESTSUM) ## Download gotestsum locally if necessary.
+$(GOTESTSUM): $(LOCALBIN)
+	$(call go-install-tool,$(GOTESTSUM),gotest.tools/gotestsum,$(GOTESTSUM_VERSION))
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
@@ -544,6 +630,22 @@ test-chart-defaults: chart-ct-cluster ## Install the chart with the default valu
 .PHONY: test-chart-anthropic
 test-chart-anthropic: chart-ct-cluster ## Install the chart with Anthropic-only values (test/chart/testdata/anthropic-only-values.yaml, a dummy key Secret) on the chart-testing Kind cluster and check the Deployments, the analyzer's restarts and log, and what the API server does with RemediationSettings.
 	hack/chart-anthropic-install-test.sh "$(KUBECTL)" "$(HELM)"
+
+.PHONY: chart-ct-cluster-analyzer
+chart-ct-cluster-analyzer: kind ## Create the Kind cluster of the chart-testing job (if it is not there) and load only the analyzer image built from this checkout under the chart's repository:appVersion.
+	@if printf '%s\n' "$(CHART_CT_ANALYZER)" | grep -Evxq '[a-z0-9./_-]+:[0-9A-Za-z.+-]+'; then \
+		echo "no image repository or appVersion in $(CHART_DIR): '$(CHART_CT_ANALYZER)'" >&2; exit 1; \
+	fi
+	@$(KIND) get clusters | grep -qx '$(CHART_CT_KIND_CLUSTER)' \
+		&& echo "Kind cluster '$(CHART_CT_KIND_CLUSTER)' already exists." \
+		|| $(KIND) create cluster --name $(CHART_CT_KIND_CLUSTER)
+	$(CONTAINER_TOOL) build $(DOCKER_BUILD_ARGS) --target analyzer -t $(CHART_CT_ANALYZER) .
+	$(KIND) load docker-image --name $(CHART_CT_KIND_CLUSTER) $(CHART_CT_ANALYZER)
+	$(KUBECTL) config use-context kind-$(CHART_CT_KIND_CLUSTER)
+
+.PHONY: test-chart-analyzer-only
+test-chart-analyzer-only: chart-ct-cluster-analyzer ## Install the chart with executor.enabled=false, no verifier namespace, one watched namespace and no action policy (only the analyzer image is built) and check that no executor or verifier object exists, a broken workload gets an Incident and no RemediationRequest is created.
+	hack/chart-analyzer-only-install-test.sh "$(KUBECTL)" "$(HELM)"
 
 .PHONY: test-chart-metrics-tls
 test-chart-metrics-tls: chart-ct-cluster ## Install the chart with the metrics TLS trust profile on the chart-testing Kind cluster and scrape the metrics Services of all three components with the right CA (200), a wrong CA and a wrong server name (TLS failure).

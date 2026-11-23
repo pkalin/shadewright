@@ -273,7 +273,7 @@ func analyzerMetrics() map[string]metricguard.Labels {
 	return map[string]metricguard.Labels{
 		"shadewright_incident_observations_refused_total": {},
 		"shadewright_incident_batches_dropped_total": {
-			"reason": {dropInvalid, dropFingerprintConflict, dropStopped, dropDeleted},
+			"reason": {dropInvalid, dropFingerprintConflict, dropStopped, dropDeleted, dropStaleOnStart},
 		},
 		"shadewright_incident_occurrences_overflow_total": {},
 		"shadewright_incident_first_sightings_held":       {},
@@ -288,8 +288,9 @@ func analyzerMetrics() map[string]metricguard.Labels {
 		"shadewright_incident_cap":                        {},
 		"shadewright_incident_cap_near":                   {},
 		// Registered by package collector, which this package imports; checked there too.
-		"shadewright_analyzer_probe_decisions_pending": {},
-		"shadewright_analyzer_consequences_held":       {},
+		"shadewright_analyzer_probe_decisions_pending":     {},
+		"shadewright_analyzer_consequences_held":           {},
+		"shadewright_analyzer_stale_on_start_folded_total": {},
 	}
 }
 
@@ -303,6 +304,6 @@ func TestAnalyzerMetricsAreBoundedAndDocumented(t *testing.T) {
 	analysesUsedToday.set(1)
 	analysesPerDayLimit.set(2)
 
-	metricguard.Check(t, metrics.Registry, analyzerMetrics())
+	metricguard.Check(t, metrics.Registry, metricguard.WithRedaction(analyzerMetrics()))
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), analyzerMetrics())
 }

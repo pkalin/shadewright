@@ -169,6 +169,44 @@ subject), and a merged request can end only Inconclusive.
 {{- end }}
 
 {{/*
+"true" when the executor is deployed (executor.enabled, default true), else empty. Without it the chart renders no
+executor object at all (Deployment, ServiceAccount, Roles, bindings, PDB, metrics Service, NetworkPolicy, Lease,
+ServiceMonitor, the metrics-auth subject): the analyzer's identity and grants are the same either way. The values
+that only configure an executor are refused by shadewright.validate while it is off.
+*/}}
+{{- define "shadewright.executorEnabled" -}}
+{{- if .Values.executor.enabled -}}true{{- end -}}
+{{- end }}
+
+{{/*
+Refuses the values that only make sense with an executor while executor.enabled is false, so a value that does
+nothing is never accepted without a word. Left alone: image, resources, podLabels, podAnnotations, nodeSelector,
+tolerations, affinity, topologySpreadConstraints, priorityClassName and imagePullSecrets (inert placement or
+packaging: the published chart pins the executor's digest, so an image value cannot be told from a choice).
+Takes the root context. Renders nothing.
+*/}}
+{{- define "shadewright.executorOffValues" -}}
+{{- $e := .Values.executor -}}
+{{- if not $e.enabled -}}
+{{- $set := list -}}
+{{- if ne (int ($e.replicas | default 1)) 1 -}}{{- $set = append $set "executor.replicas" -}}{{- end -}}
+{{- if dig "identity" "azure" "clientId" "" $e -}}{{- $set = append $set "executor.identity.azure.clientId" -}}{{- end -}}
+{{- if dig "identity" "azure" "projectToken" false $e -}}{{- $set = append $set "executor.identity.azure.projectToken" -}}{{- end -}}
+{{- if dig "identity" "azure" "tenantId" "" $e -}}{{- $set = append $set "executor.identity.azure.tenantId" -}}{{- end -}}
+{{- if dig "serviceAccount" "annotations" dict $e -}}{{- $set = append $set "executor.serviceAccount.annotations" -}}{{- end -}}
+{{- if $e.goMemLimit -}}{{- $set = append $set "executor.goMemLimit" -}}{{- end -}}
+{{- if dig "reviewerHints" "enabled" false $e -}}{{- $set = append $set "executor.reviewerHints.enabled" -}}{{- end -}}
+{{- if dig "verification" "enabled" false $e -}}{{- $set = append $set "executor.verification.enabled" -}}{{- end -}}
+{{- if ne (dig "verification" "nodeGrace" "1m" $e) "1m" -}}{{- $set = append $set "executor.verification.nodeGrace" -}}{{- end -}}
+{{- if $e.extraArgs -}}{{- $set = append $set "executor.extraArgs" -}}{{- end -}}
+{{- if dig "metricsTLS" "secretName" "" $e -}}{{- $set = append $set "executor.metricsTLS.secretName" -}}{{- end -}}
+{{- if $set -}}
+{{- fail (printf "executor.enabled is false, so no executor is deployed, but these values only configure one and are set: %s. Remove them, or set executor.enabled to true" (join ", " $set)) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Flags the chart renders itself in the Deployments. extraArgs may not name them, so a free list cannot turn off
 leader election, the metrics authentication or the watched namespaces. Keep in step with the args in
 templates/workloads. "namespace" is not an arg of the chart but the Pods get it from POD_NAMESPACE.
@@ -178,18 +216,71 @@ leader-elect health-probe-bind-address metrics-bind-address metrics-secure metri
 {{- end }}
 
 {{/*
+Renders "true" when the component projects its own Azure workload identity token (identity.azure.projectToken),
+for a cluster without the workload identity webhook, and nothing otherwise. Takes the component's values.
+*/}}
+{{- define "shadewright.azureProjectToken" -}}
+{{- if dig "identity" "azure" "projectToken" false . -}}true{{- end -}}
+{{- end }}
+
+{{/*
+The volume, mount and environment the workload identity webhook would inject, rendered by the chart with
+identity.azure.projectToken. The token file name and path are what AZURE_FEDERATED_TOKEN_FILE names: the
+binaries read that variable and nothing else for the path. The audience is the one Entra ID federated
+credentials use by default.
+*/}}
+{{- define "shadewright.azureTokenVolume" -}}
+name: azure-identity-token
+projected:
+  defaultMode: 0444
+  sources:
+  - serviceAccountToken:
+      audience: api://AzureADTokenExchange
+      expirationSeconds: 3600
+      path: azure-identity-token
+{{- end }}
+
+{{- define "shadewright.azureTokenMount" -}}
+name: azure-identity-token
+mountPath: /var/run/secrets/azure/tokens
+readOnly: true
+{{- end }}
+
+{{- define "shadewright.azureTokenEnv" -}}
+- name: AZURE_CLIENT_ID
+  value: {{ .identity.azure.clientId | quote }}
+- name: AZURE_TENANT_ID
+  value: {{ .identity.azure.tenantId | quote }}
+- name: AZURE_FEDERATED_TOKEN_FILE
+  value: /var/run/secrets/azure/tokens/azure-identity-token
+- name: AZURE_AUTHORITY_HOST
+  value: https://login.microsoftonline.com/
+{{- end }}
+
+{{/*
 Refuses values that would weaken the separate identities (invariant 6) or the flags and labels the chart sets.
 Takes a dict with .component ("executor", "analyzer" or "verifier") and .context. Renders nothing.
 */}}
 {{- define "shadewright.validate" -}}
 {{- $v := .context.Values -}}
 {{- $c := index $v .component -}}
+{{- $_ := include "shadewright.executorOffValues" .context -}}
 {{- $ex := $v.executor.identity.azure.clientId | default "" | lower -}}
 {{- $an := $v.analyzer.identity.azure.clientId | default "" | lower -}}
 {{- if and $ex $an (eq $ex $an) -}}
 {{- fail "executor.identity.azure.clientId and analyzer.identity.azure.clientId are equal: the executor and the analyzer must have separate identities, never one for both" -}}
 {{- end -}}
 {{- if ne .component "verifier" -}}
+{{- if include "shadewright.azureProjectToken" $c -}}
+{{- if not (dig "identity" "azure" "clientId" "" $c) -}}
+{{- fail (printf "%s.identity.azure.projectToken needs %s.identity.azure.clientId: the token is projected for that identity" $.component $.component) -}}
+{{- end -}}
+{{- if not (dig "identity" "azure" "tenantId" "" $c) -}}
+{{- fail (printf "%s.identity.azure.projectToken needs %s.identity.azure.tenantId: the chart sets AZURE_TENANT_ID, which the webhook would take from its own configuration" $.component $.component) -}}
+{{- end -}}
+{{- else if dig "identity" "azure" "tenantId" "" $c -}}
+{{- fail (printf "%s.identity.azure.tenantId is used only with %s.identity.azure.projectToken: set projectToken or leave tenantId empty" $.component $.component) -}}
+{{- end -}}
 {{- range $k, $_ := $c.serviceAccount.annotations -}}
 {{- if hasPrefix "azure.workload.identity/" $k -}}
 {{- fail (printf "%s.serviceAccount.annotations may not set %q: use %s.identity.azure.clientId" $.component $k $.component) -}}
@@ -751,4 +842,18 @@ overlaps a form embedding IPv4 addresses (::ffff:0:0/96, ::/96, 64:ff9b::/96, 20
   {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Egress selector labels: the keys of .set with a value (a null key is ignored, so a user can drop a key another
+values file set), or .default when none is left. Never an empty selector (#985).
+*/}}
+{{- define "shadewright.egressPodLabels" -}}
+{{- $out := dict -}}
+{{- range $k, $v := (.set | default dict) -}}
+{{- if not (kindIs "invalid" $v) -}}
+{{- $_ := set $out $k $v -}}
+{{- end -}}
+{{- end -}}
+{{- toYaml (ternary .default $out (empty $out)) -}}
 {{- end -}}

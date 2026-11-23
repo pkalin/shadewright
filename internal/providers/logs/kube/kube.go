@@ -177,6 +177,9 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 	if err != nil {
 		return providers.LogExcerpt{}, err
 	}
+	if !over && goneAnswer(data, before.ContainerID) {
+		return providers.LogExcerpt{}, fmt.Errorf("logs request: %w", providers.ErrLogGone)
+	}
 	if over {
 		// The server cut the window at LimitBytes, from its start: the newest lines are missing. Ask again for
 		// fewer lines, so that they fit.
@@ -193,7 +196,12 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 		// instance checked before.
 		after = instance{}
 	}
-	text, truncated := Excerpt(s.redactor, data, over, keep)
+	text, truncated, err := Excerpt(s.redactor.WithContext(ctx), data, over, keep)
+	if err != nil {
+		// Redaction withheld the excerpt whole (its work budget ran out): nothing of the log is returned, and the
+		// caller shows the read as failed.
+		return providers.LogExcerpt{}, err
+	}
 	return providers.LogExcerpt{
 		Text:              text,
 		Truncated:         truncated,
@@ -266,6 +274,32 @@ func boundedID(s string) (string, bool) {
 		}
 	}
 	return s, true
+}
+
+// goneSentence starts the kubelet's answer for a container whose log it no longer holds: it answers the logs
+// request with HTTP 200 and a body of this sentence and the container ID, "<runtime>://<id>", the form the pod
+// status gives (pkg/kubelet/kuberuntime, GetContainerLogs).
+const goneSentence = "unable to retrieve container logs for "
+
+// goneAnswer reports whether data, the whole body a logs request answered, is the kubelet's answer for a
+// container whose log it no longer holds rather than a log: the body is goneSentence followed by a container
+// ID, and nothing else but one newline at the end. When the pod status named the instance asked for (id is not
+// empty), the sentence must name that instance; otherwise the ID must have the form of one: a runtime, "://"
+// and an ID, at most providers.MaxLogInstanceIDLength bytes of letters, digits and ._:/+-. So a log that holds
+// the sentence among other lines, after a timestamp, with any other text on its line, or for another
+// container, is a log; a log made of nothing but the sentence for its own container is taken for the
+// kubelet's answer, which is what it would say.
+func goneAnswer(data []byte, id string) bool {
+	named, ok := strings.CutPrefix(strings.TrimSuffix(string(data), "\n"), goneSentence)
+	if !ok {
+		return false
+	}
+	if id != "" {
+		return named == id
+	}
+	scheme, local, ok := strings.Cut(named, "://")
+	valid, _ := boundedID(named)
+	return ok && scheme != "" && local != "" && valid != ""
 }
 
 // read sends one request and reads at most MaxReadBytes+1 of the stream. over reports that the stream held
@@ -353,14 +387,22 @@ func fewerLines(data []byte) int64 {
 // older lines were dropped: the newest whole lines that fit in keep bytes of data ([cut]), valid UTF-8.
 // Redaction runs first, on data as it was read (#840): a match that starts in a line the cut drops, such as a
 // block scalar under a key whose line is dropped, is still redacted in the lines kept, by the marker of the
-// part kept, which is never longer than that part. Invalid bytes are replaced after that, and the excerpt is
-// redacted again. The cut is counted in bytes of data, as before redaction, so the excerpt never holds more
-// lines than when it was redacted after the cut. Redacting all of data costs work linear in its size, which
-// the reads bound by MaxReadBytes (1 MiB): at most about 710 steps of redaction work per byte on the most
-// costly input known, so at most about 750 million steps, a few seconds (TestExcerptWorkIsBoundedOnTheLargestInput).
+// part kept, which is never longer than that part. Invalid bytes are replaced after that; the excerpt is not
+// redacted again, since what to redact is decided once, on the text as it was read (#845). The decision also
+// holds what the release before #845 hid here, which redacted all of data, cut it and redacted the excerpt again
+// with its own markers in place (redact.Redactor.ReplaceFrom, thirteenth decision of 2026-11-18). The cut is
+// counted in bytes of data, as before redaction, so the excerpt never holds more lines than when it was redacted
+// after the cut. The reads bound data by MaxReadBytes (1 MiB). The rules of this package add work linear in its
+// size, at most about 720 steps per byte on the most costly input known; the reading of the release before cost
+// about 710 more on that input before #873 and 28 since, and is linear since #873 (on lines each indented one
+// more than the last under a secret key it cost about 1,950 steps per byte at 1 MiB before, 36 now), so a read
+// costs at most a few seconds (TestExcerptWorkIsBoundedOnTheLargestInput, TestCanonStairWorkIsLinear in package redact).
+// Whatever the input, the decision stops at the work budget of package redact (#873): the excerpt is then
+// withheld: Excerpt returns no text and an error that wraps providers.ErrWithheld, told by the flag of
+// redact.Redactor.ReplaceFrom and never by the text, so a log that spells the marker is a log like any other.
 // It is the step [Source.Logs] takes after its reads, exported so that tests outside the package run the same
 // code.
-func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string, bool) {
+func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (text string, truncated bool, err error) {
 	if endMissing {
 		data = data[:bytes.LastIndexByte(data, '\n')+1]
 	}
@@ -376,7 +418,7 @@ func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string
 		}
 		return f(max(from-start, 0))
 	}
-	text := r.Replace(string(data),
+	text, ok := r.ReplaceFrom(string(data), from, providers.LeadingContinuation,
 		func(kind, m string) string {
 			return part(len(m), func(skip int) string {
 				if skip == 0 {
@@ -386,7 +428,10 @@ func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (string
 			})
 		},
 		func(seg string) string { return part(len(seg), func(skip int) string { return seg[skip:] }) })
-	return r.String(strings.ToValidUTF8(text, "?")), truncated
+	if !ok {
+		return "", false, fmt.Errorf("the log excerpt: %w", providers.ErrWithheld)
+	}
+	return strings.ToValidUTF8(text, "?"), truncated, nil
 }
 
 // cut returns the newest whole lines of data that fit in keep bytes. When endMissing, the last line, which

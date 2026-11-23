@@ -59,3 +59,12 @@ func EntryCorpus() []EntryCase {
 var RaceKeeps = raceKeeps
 
 const RaceSampleEvery = raceSampleEvery
+
+// RaceDetector is raceDetector (race_test.go, norace_test.go), for the tests of package redact_test.
+const RaceDetector = raceDetector
+
+// ParallelUnderRace is parallelUnderRace (racesample_test.go), for the tests of package redact_test.
+var ParallelUnderRace = parallelUnderRace
+
+// MaxShownBytes is maxShownBytes, for TestReleasedShownMatchesValue.
+const MaxShownBytes = maxShownBytes

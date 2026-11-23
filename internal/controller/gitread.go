@@ -87,8 +87,9 @@ const (
 )
 
 // boundPassedWait is the wait of a retry whose end passed while the reconcile's reads ran: the check at the start
-// of the next reconcile (endPassedWait) ends the wait at once.
-const boundPassedWait = time.Nanosecond
+// of the next reconcile (endPassedWait) ends the wait first. It is the floor of every time to run again
+// (requeueFloor), so a passed end never brings a request back hot.
+const boundPassedWait = requeueFloor
 
 // boundBy is the bound of kind k, whose end the request's recorded state holds (waitKind.end).
 func boundBy(k waitKind) waitBound { return waitBound{kind: k} }
@@ -194,7 +195,7 @@ func waitPullRequest(cr providers.ChangeRequest) *api.GitWaitPullRequest {
 // otherwise (a Kubernetes read, a write), and the caller's cancellation, get boundErr's answer as it is.
 func keepGitRead(parent, phase context.Context, name string, err error) error {
 	bounded := boundErr(parent, phase, name, err)
-	if bounded == err || parent.Err() != nil || !gitReadFailure(err) {
+	if bounded == err || parent.Err() != nil || !gitReadFailure(err) { //nolint:errorlint // identity: boundErr returned err itself, not a wrapper of it
 		return bounded
 	}
 	read := readFailure(readOp(err), bounded)
@@ -462,7 +463,9 @@ func (r *RemediationRequestReconciler) gitRetries() *gitRetryMarks {
 // clearGitReadRetry runs after a reconcile that ended without an error and saw or recorded a Git wait. With clear
 // (the reconcile scheduled no Git read retry) it removes every wait but the merge waits: the content wait, which only
 // a successful read of what the merge brought removes (clearContentWait), and the merge wait, which ends at its end
-// or with the merge it waits for recorded: a reconcile that did not make those reads says nothing about them. left is how long until the earliest end of the waits that stand, zero when none has an end: the
+// or with the merge it waits for recorded: a reconcile that did not make those reads says nothing about them; nor the
+// HandoffRecovery entry, which bounds the watch of a replacement whose handoff was aborted at a refusal (#786). Under a
+// pause of Git writes it removes nothing. left is how long until the earliest end of the waits that stand, zero when none has an end: the
 // reconcile is looked at again by then, whatever pace it chose, so a wait that stands always reaches its end.
 func (r *RemediationRequestReconciler) clearGitReadRetry(ctx context.Context, key types.NamespacedName, clear bool) (
 	time.Duration, error) {
@@ -475,27 +478,30 @@ func (r *RemediationRequestReconciler) clearGitReadRetry(ctx context.Context, ke
 	if !rr.DeletionTimestamp.IsZero() {
 		return 0, nil
 	}
-	shown := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) != nil
-	mergeWait := func(w api.GitWait) bool {
-		return w.Kind == api.GitWaitMergeContent || w.Kind == api.GitWaitMergeCheck
+	if meta.IsStatusConditionTrue(rr.Status.Conditions, api.ConditionWritesPaused) {
+		// The kill switch holds the request (waitWhilePaused): no wait ends while it lasts (endPassedWait), and a
+		// reconcile under it reads nothing, so it removes nothing either: a standing entry survives the pause, and an
+		// end that passed is not looked at sooner than the pause's own recheck.
+		return 0, nil
 	}
-	onlyMerge := len(rr.Status.GitWaits) > 0 && !slices.ContainsFunc(rr.Status.GitWaits, func(w api.GitWait) bool {
-		return !mergeWait(w)
+	shown := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionGitReadRetry) != nil
+	// Kept whatever this reconcile read: the merge waits end at their end or with the merge recorded, and the
+	// HandoffRecovery entry of a replacement whose handoff was aborted at a refusal bounds its watch, not a read (#786).
+	kept := func(w api.GitWait) bool {
+		return w.Kind == api.GitWaitMergeContent || w.Kind == api.GitWaitMergeCheck || w.Kind == api.GitWaitHandoffRecovery
+	}
+	onlyKept := len(rr.Status.GitWaits) > 0 && !slices.ContainsFunc(rr.Status.GitWaits, func(w api.GitWait) bool {
+		return !kept(w)
 	})
-	if clear && (len(rr.Status.GitWaits) > 0 || shown) && (!onlyMerge || !shown) {
+	if clear && (len(rr.Status.GitWaits) > 0 || shown) && (!onlyKept || !shown) {
 		// A request gone from the API server (its finalizer removed after the read) has nothing left to clear.
-		err := r.dropGitWaits(ctx, rr, func(w api.GitWait) bool { return !mergeWait(w) })
+		err := r.dropGitWaits(ctx, rr, func(w api.GitWait) bool { return !kept(w) })
 		if apierrors.IsNotFound(err) {
 			return 0, nil
 		}
 		if err != nil {
 			return 0, err
 		}
-	}
-	if meta.IsStatusConditionTrue(rr.Status.Conditions, api.ConditionWritesPaused) {
-		// The kill switch holds the request (waitWhilePaused): no wait ends while it lasts (endPassedWait), so an end
-		// that passed is not looked at sooner than the pause's own recheck.
-		return 0, nil
 	}
 	const none = time.Duration(1<<63 - 1)
 	left, err := r.withinWaits(ctx, rr, none)

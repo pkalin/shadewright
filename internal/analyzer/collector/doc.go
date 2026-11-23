@@ -61,7 +61,10 @@ limitations under the License.
 // to stay within the capacity), it asks a HandledFunc from the Incident controller how much of that
 // occurrence the Incident already counted; without one it emits the observation with Count 0, the
 // cluster's Total and MayRepeat, and the consumer decides. Restarts are thus absorbed by state the Incident
-// controller persists per occurrence, not by memory alone.
+// controller persists per occurrence, not by memory alone. An event of the informer's initial list that has not
+// changed since (listed.go), last occurred more than StaleOnStart before the start and whose regarding Pod is
+// gone is marked FoldOnly: its consumer counts it only on an Incident that exists, so a restart opens no
+// Incident the running collector would not have opened (#996).
 //
 // Owner correlation follows controller owner references from Pod to ReplicaSet to Deployment and from Pod
 // to StatefulSet. Owner references are untrusted: each hop is a get through the API reader, with a
@@ -78,6 +81,8 @@ limitations under the License.
 // its deletion) becomes no observation either (probe.go, #726), is recorded as handled and is counted in
 // shadewright_analyzer_settled_probe_failures_skipped_total. A starting pod not Ready yet is looked at again
 // ProbeSettleGrace after the failure; anything else counts as before, and a pod that cannot be read is retried.
+// A container termination other than OOMKilled of a pod being deleted (deletionTimestamp set) is no evidence at
+// all: the stop came from the deletion, not from a fault (pods.go, #966).
 //
 // Untrusted input: notes go through package fingerprint, which redacts before it normalizes, and only the
 // fingerprint and the normalized symptom leave the collector; termination messages are never read.

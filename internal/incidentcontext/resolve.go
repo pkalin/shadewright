@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -409,15 +410,63 @@ func completed(cs containerStatus) bool {
 	return cs.State.Terminated != nil && cs.State.Terminated.ExitCode == 0
 }
 
+// reasonOOMKilled is the termination reason of a container the kernel killed for memory. It stays evidence
+// even when the pod is being deleted ([shutdown]).
+const reasonOOMKilled = "OOMKilled"
+
+// shutdown reports a container whose current instance exited after its pod's deletion began: the pod is being
+// deleted (deletionTimestamp set), and the instance terminated other than by an OOM kill, with a non-zero exit
+// code ([completed] covers a zero one), at or after the start of the last grace period ([deletionStart]). A
+// rollout, a scale down or a node drain stops containers this way (for example with exit code 137 after the
+// grace period, or 143 for a runtime that exits on SIGTERM). Such an exit does not rank the pod as troubled.
+// An exit that finished before that start, or with no finish time recorded, is a failure like any other
+// (#969). Only the current instance is meant: the kubelet restarts no container of a pod being deleted, so
+// the last termination, when there is one, ended an earlier instance and stays trouble.
+//
+// Two limits are known and accepted. A real crash during the grace period (a segfault while flushing) reads
+// the same and is not ranked. A pod kept by a finalizer after a later delete whose shorter grace period had
+// already ended (the kubelet's final delete, with a period of 0) has its deletionTimestamp set to the time of
+// that delete, past the exits it already had, so they are not marked and rank as trouble.
+//
+// The finish time comes from the kubelet's clock and the deletionTimestamp from the API server's: a kubelet
+// clock that runs behind can show a shutdown as a failure, one that runs ahead can hide a failure of the
+// last seconds before the deletion by the same skew.
+func shutdown(p *corev1.Pod, cs containerStatus) bool {
+	term := cs.State.Terminated
+	if p.DeletionTimestamp == nil || term == nil || term.Reason == reasonOOMKilled || completed(cs) ||
+		term.FinishedAt.IsZero() {
+		return false
+	}
+	return !term.FinishedAt.Time.Before(deletionStart(p))
+}
+
+// deletionStart is the start of p's last grace period: its deletionTimestamp, the end of that period, minus
+// deletionGracePeriodSeconds. It is the request time unless a later delete asked for a shorter period that
+// had already ended: the API server then sets the deletionTimestamp to the time of that delete. A pod with no
+// grace period recorded (or a negative one) counts as deleted with none.
+func deletionStart(p *corev1.Pod) time.Time {
+	var grace int64
+	if p.DeletionGracePeriodSeconds != nil {
+		grace = max(*p.DeletionGracePeriodSeconds, 0)
+	}
+	return p.DeletionTimestamp.Add(-time.Duration(grace) * time.Second)
+}
+
+// settled reports a container whose current instance is no trouble although it is not ready: it ran to
+// completion ([completed]) or exited after its pod's deletion began ([shutdown]).
+func settled(p *corev1.Pod, cs containerStatus) bool {
+	return completed(cs) || shutdown(p, cs)
+}
+
 func troubleOf(p *corev1.Pod) trouble {
 	var t trouble
 	for _, cs := range allStatuses(p) {
 		if (cs.State.Waiting != nil && cs.State.Waiting.Reason != "") ||
-			(cs.State.Terminated != nil && !completed(cs)) || cs.LastTerminationState.Terminated != nil {
+			(cs.State.Terminated != nil && !settled(p, cs)) || cs.LastTerminationState.Terminated != nil {
 			t.broken++
 		}
 		t.restarts += max(cs.RestartCount, 0)
-		if !cs.Ready && !completed(cs) {
+		if !cs.Ready && !settled(p, cs) {
 			t.unready++
 		}
 	}

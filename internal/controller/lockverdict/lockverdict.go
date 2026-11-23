@@ -70,13 +70,20 @@ const (
 	// undeliveredGone: a merge that did not deliver the plan as shown, whose repository is gone from the settings: no
 	// read of its branch can start any more.
 	undeliveredGone
+	// replacementMerge: the read found the request's pull request merged with the handoff commit of its replacement,
+	// which records that merge (#786): the pull request can deliver nothing more, and the merge is not this request's.
+	replacementMerge
+	// otherRequestMerge: the read found the pull request a replacement took over merged with its predecessor's
+	// recorded head, which the predecessor records (second round of #786).
+	otherRequestMerge
 )
 
 var proofNames = map[proof]string{
 	none: "none", mergeRecorded: "merge recorded", closedOrGone: "closed or gone", noPullRequest: "no pull request",
 	neverHeld: "never held", handedOver: "handed over", handoffAborted: "handoff aborted",
 	releasedBeforeField: "released before the field", recordedMerge: "recorded merge",
-	undeliveredGone: "undelivered merge, repository gone",
+	undeliveredGone: "undelivered merge, repository gone", replacementMerge: "merged with the replacement's commit",
+	otherRequestMerge: "merged with the other request's commit",
 }
 
 // String names what v proves, for logs.
@@ -123,6 +130,15 @@ func ByRead(found Found, recorded, pullRequest, otherOpen bool) (*Verdict, bool)
 		return &Verdict{proof: closedOrGone}, true
 	}
 	return nil, false
+}
+
+// ReplacementMerge is the verdict of a predecessor whose recorded pull request a read found merged (found) with a head
+// that is its replacement's handoff commit (byReplacement), which the replacement records.
+func ReplacementMerge(found Found, byReplacement bool) (*Verdict, bool) {
+	if found != FoundMerged || !byReplacement {
+		return nil, false
+	}
+	return &Verdict{proof: replacementMerge}, true
 }
 
 // NeverHeld is the verdict of a request that never took the lock: status.holdsTarget not set, or false.
@@ -210,8 +226,20 @@ func UndeliveredRepositoryGone(undelivered, repositoryGone bool) (*Verdict, bool
 	return &Verdict{proof: undeliveredGone}, true
 }
 
+// OtherRequestMerge is the verdict of a replacement whose taken-over pull request was found merged (found) with the head
+// its predecessor recorded, which the predecessor records with its receipt (byPredecessor): the pull request can
+// deliver nothing more, and the merge is not this request's.
+func OtherRequestMerge(found Found, byPredecessor bool) (*Verdict, bool) {
+	if found != FoundMerged || !byPredecessor {
+		return nil, false
+	}
+	return &Verdict{proof: otherRequestMerge}, true
+}
+
 // Release clears the lock in status, about to be written, for the verdict v, with the condition TargetHeld that
-// said why it was kept. A nil or zero v releases nothing and returns ErrNoVerdict.
+// said why it was kept, and condition ReviewCheckNotFailed: the failed review check of a stopped request is tried
+// again only at the looks of a holder, which end with the lock (#925). A nil or zero v releases nothing and returns
+// ErrNoVerdict.
 func Release(status *api.RemediationRequestStatus, v *Verdict) error {
 	if v == nil || v.proof == none {
 		return ErrNoVerdict
@@ -219,5 +247,6 @@ func Release(status *api.RemediationRequestStatus, v *Verdict) error {
 	held := false
 	status.HoldsTarget = &held
 	meta.RemoveStatusCondition(&status.Conditions, api.ConditionTargetHeld)
+	meta.RemoveStatusCondition(&status.Conditions, api.ConditionReviewCheckNotFailed)
 	return nil
 }

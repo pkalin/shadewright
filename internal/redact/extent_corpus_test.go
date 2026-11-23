@@ -86,7 +86,7 @@ func TestWriteExtentMainTable(t *testing.T) {
 	enc := json.NewEncoder(w)
 	for _, in := range extentCorpus(4000) {
 		c := mainRedaction{In: in, Out: String(in)}
-		for _, sp := range defaultRedactor.spans(in) {
+		for _, sp := range defaultRedactor.spans(nil, in) {
 			c.Spans = append(c.Spans, [2]int{sp.start, sp.end})
 		}
 		if err := enc.Encode(c); err != nil {
@@ -105,6 +105,8 @@ func TestWriteExtentMainTable(t *testing.T) {
 // of every grammar piece, each byte main redacted is still redacted. The rule takes the union of main's value
 // and its own extent, so this holds by construction; a change that narrows a value fails here.
 func TestExtentStillRedactsWhatMainRedacted(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	f, err := os.Open(extentMainTable)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +126,10 @@ func TestExtentStillRedactsWhatMainRedacted(t *testing.T) {
 		if len(c.Spans) > 0 {
 			redacted++
 		}
-		now := defaultRedactor.spans(c.In)
+		if !raceKeeps(t.Name(), cases-1) {
+			continue // a seeded sample under -race; all of them without it
+		}
+		now := defaultRedactor.spans(nil, c.In)
 		for _, want := range c.Spans {
 			for i := want[0]; i < want[1]; i++ {
 				if !coveredBy([2]int{i, i + 1}, now) {
@@ -383,10 +388,15 @@ func knownExtentCorpus(n int) []knownValue {
 // as literal text, quoted arguments, and YAML flow sequences with apostrophes in plain scalars. No byte of a
 // word of the value survives, and the token after the value stays.
 func TestExtentTakesTheKnownValue(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	failed := 0
-	for _, k := range knownExtentCorpus(4000) {
+	for i, k := range knownExtentCorpus(4000) {
+		if !raceKeeps(t.Name(), i) {
+			continue // a seeded sample under -race; all of them without it
+		}
 		in := k.b.String()
-		now := defaultRedactor.spans(in)
+		now := defaultRedactor.spans(nil, in)
 		bad := ""
 		for _, w := range k.secret {
 			for i := w[0]; i < w[1]; i++ {
@@ -418,9 +428,11 @@ func TestExtentTakesTheKnownValue(t *testing.T) {
 // The lists are JSON, YAML single-quoted, and JSON escaped inside a JSON string. "--password=" is left out: the
 // connection string rule (older than #708) takes "Password=" to the line end.
 func TestExtentKeepsTheArgumentsAfterAQuotedSecret(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	rng := rand.New(rand.NewPCG(708, 4)) //nolint:gosec // a fixed seed keeps the corpus the same on every run
 	openers := []string{"$(", "`", "${", "[", "{", "(", " ", ")", "]", "}", "$("}
-	tails := []string{"EVIDENCE)", "EV`", "EV}", "EV]", "--region", "west", "a b)", "$(x)", "x'y"}
+	tails := []string{"EVIDENCE)", "EV`", "EV}", "EV]", regionFlag, "west", "a b)", "$(x)", "x'y"}
 	failed := 0
 	for i := range 3000 {
 		k := &knownValue{rng: rng}
@@ -453,6 +465,9 @@ func TestExtentKeepsTheArgumentsAfterAQuotedSecret(t *testing.T) {
 		k.b.WriteString(q + "]")
 		if q == `\"` {
 			k.b.WriteString(`"`)
+		}
+		if !raceKeeps(t.Name(), i) {
+			continue // a seeded sample under -race; all of them without it
 		}
 		in := k.b.String()
 		out := String(in)

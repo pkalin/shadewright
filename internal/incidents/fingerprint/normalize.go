@@ -19,6 +19,7 @@ package fingerprint
 import (
 	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -31,9 +32,10 @@ const (
 	// byte bound also bounds the character count the API server checks.
 	MaxSymptomLength = 1024
 
-	// maxInputLength bounds the work done on a single note. Kubernetes caps event notes at 1 KiB, so this
-	// only matters for status messages or hostile input. A longer note is withheld whole, never cut before
-	// redaction: a cut could drop the closing quote of a secret and leak its tail.
+	// maxInputLength bounds the work done on a single note. The exported functions take the long-note marker
+	// for any note over redact.MaxShortEntry, so this only holds for a direct caller of normalizeWith. A longer
+	// note is withheld whole, never cut before redaction: a cut could drop the closing quote of a secret and
+	// leak its tail.
 	maxInputLength = 1 << 20
 )
 
@@ -49,6 +51,9 @@ const (
 	placeholderDigest   = "<digest>"
 	placeholderPod      = "<pod>"
 	placeholderHash     = "<hash>"
+	// placeholderLongNote is the normalized symptom of every note longer than redact.MaxShortEntry bytes: its
+	// text is not part of the fingerprint (#1087, decision of 2026-11-22).
+	placeholderLongNote = "<long note>"
 )
 
 // rule replaces a part of the text which changes between occurrences of the same problem.
@@ -145,7 +150,16 @@ var durationRules = []rule{
 //
 // A Kubernetes milli quantity ("averageValue=6500m") reads as minutes here and becomes a placeholder: a value
 // that changes while the problem lasts must not split its Incident. The text that is shown uses [Symptom].
+//
+// A note longer than redact.MaxShortEntry bytes is not read: the symptom is the fixed "<long note>", whatever the
+// note says and whatever the analyzer is doing. Its redaction would need the full redactor, which can wait for the
+// limit on the heap of the redactions running at once, and a fingerprint must not depend on that wait. The note is
+// not cut to the short bound instead, because a cut can end inside a secret and leave a part the full reading would
+// hide. So two long notes of one subject and reason are one Incident (#1087, decision of 2026-11-22).
 func Normalize(o Observation) string {
+	if len(o.Note) > redact.MaxShortEntry {
+		return placeholderLongNote
+	}
 	return normalize(o, keepNone)
 }
 
@@ -154,14 +168,31 @@ func Normalize(o Observation) string {
 // and the fingerprint does not depend on it. Other durations become placeholders as in [Normalize], and the
 // binary and decimal quantity suffixes (Mi, Gi, k, M) are never read as durations. A bare minute count after
 // a key ("timeout=5m") is kept too: it cannot be told from a quantity.
+//
+// A note longer than redact.MaxShortEntry bytes is not read here either: the symptom is "<long note: N bytes>",
+// on a busy and an idle analyzer alike, so the collector never waits for the heap limit (#1087, decision of
+// 2026-11-22). The note itself is read through the events tool, with the full redactor and the caller's deadline.
 func Symptom(o Observation) string {
+	if len(o.Note) > redact.MaxShortEntry {
+		return longMarker("note", len(o.Note))
+	}
 	return normalize(o, keepAfterKey)
 }
 
 // Value returns an evidence value as it is shown: [Symptom] of the value alone, where the value as a whole
-// counts as the value of its field, so "212500m" is kept.
+// counts as the value of its field, so "212500m" is kept. A value longer than redact.MaxShortEntry bytes is not
+// read: it is "<long value: N bytes>", as [Symptom] does for a long note.
 func Value(s string) string {
+	if len(s) > redact.MaxShortEntry {
+		return longMarker("value", len(s))
+	}
 	return normalize(Observation{Note: s}, keepAfterKeyOrWhole)
+}
+
+// longMarker is the shown text of a note or value of n bytes, longer than redact.MaxShortEntry, that is not read.
+// Its angle brackets cannot come from the input, which sanitize rewrites.
+func longMarker(what string, n int) string {
+	return "<long " + what + ": " + strconv.Itoa(n) + " bytes>"
 }
 
 // quantityMode says which milli quantities the duration rule leaves alone.
@@ -177,17 +208,30 @@ const (
 )
 
 func normalize(o Observation, mode quantityMode) string {
+	return normalizeWith(redact.ReplaceCheckedShort, o, mode)
+}
+
+// replaceChecked is the signature of redact.ReplaceCheckedShort.
+type replaceChecked func(s string, repl func(kind, text string) string, between func(string) string) (string, bool)
+
+// normalizeWith is normalize with the redaction given: redact.ReplaceCheckedShort, which takes no share of the
+// limit on the heap of the redactions running at once and never waits for an analysis, or in a test the same
+// method of a redactor on a lowered work budget (#962). Every caller gives it a note of at most
+// redact.MaxShortEntry bytes; a longer one is withheld by the short entry point and stands as "<redacted>".
+func normalizeWith(replace replaceChecked, o Observation, mode quantityMode) string {
 	if len(o.Note) > maxInputLength {
 		return placeholderRedacted
 	}
 	// Redact the note as it was read, before any character is replaced: sanitize turns ">" into ")", which
 	// would hide a folded block scalar indicator from the rules (#840). Each match becomes its placeholder
 	// at once, and only the text between matches is sanitized.
-	s := redact.Replace(o.Note, rawPlaceholder, sanitize)
+	s, ok := replace(o.Note, rawPlaceholder, sanitize)
+	if !ok {
+		// Redaction withheld the note whole (its work budget ran out): it stands as a note too long to read. The
+		// flag says so, never the text: a note that spells the marker is a note like any other (#873).
+		return placeholderRedacted
+	}
 	s = expandShortIPv6(s)
-	// Redact again while line breaks and indentation are still there: YAML block scalars and continuation
-	// lines are recognized by their layout.
-	s = redactText(s)
 	s = flatten(s)
 	s = apply(s, identifierRules)
 	s = apply(s, timeRules)
@@ -290,9 +334,10 @@ func rawPlaceholder(kind, text string) string {
 	return placeholderRedacted
 }
 
-// redactText redacts s and turns the markers into placeholders.
+// redactText redacts s and turns the markers into placeholders. [finish] cuts the symptom to MaxSymptomLength
+// first, so it is a short entry, which never waits for an analysis.
 func redactText(s string) string {
-	return apply(redact.String(s), markerRules)
+	return apply(redact.StringShort(s), markerRules)
 }
 
 // stripRegarding replaces the generated suffix of the regarding object's name wherever the whole name
@@ -362,6 +407,13 @@ func flatten(s string) string {
 
 // finish cuts s to MaxSymptomLength and redacts again until nothing changes, because a substitution or a
 // cut can create a new match. If that does not settle, the whole symptom is withheld.
+//
+// The note was redacted as it was read before anything here (#845); this pass works on the flattened symptom,
+// not on that note, and it stays because two of the 709 recorded fingerprints (fingerprint-main.jsonl) come
+// from it: the notes "credentials:\n  user: s3cr3tValue99" and "password: |\n  s3cr3tValue99" flatten to
+// "credentials: user: <redacted>" and "password: | <redacted>", which this pass makes "credentials: <redacted>"
+// and "password: <redacted>". Without it both fingerprints change, and so do three symptoms of
+// TestNormalizeRedacts and the placeholder test (checked 2026-11-17).
 func finish(s string) string {
 	for range 4 {
 		s = truncate(s, MaxSymptomLength)

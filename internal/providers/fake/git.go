@@ -474,6 +474,23 @@ func (g *Git) ForcePush(branch, sha string) error {
 	return nil
 }
 
+// DeleteBranch deletes branch as a person on the host would, and closes its open change requests, as the host
+// does when the head branch of an open pull request is deleted. Its commits stay readable.
+func (g *Git) DeleteBranch(branch string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.branches[branch]; !ok {
+		return fmt.Errorf("branch %q: %w", branch, providers.ErrNotFound)
+	}
+	delete(g.branches, branch)
+	for _, cr := range g.crs {
+		if cr.HeadBranch == branch && cr.State == providers.ChangeRequestOpen {
+			cr.State = providers.ChangeRequestClosed
+		}
+	}
+	return nil
+}
+
 // CheckBranch reports what a commit carries over the target branch (providers.GitProvider.CheckBranch).
 func (g *Git) CheckBranch(ctx context.Context, sha, path string) (providers.BranchState, error) {
 	if err := g.before("CheckBranch"); err != nil {
@@ -615,15 +632,18 @@ func (g *Git) ListChangeRequestsAnyBase(_ context.Context, headBranch string, op
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for i := range out {
-		if g.unnamed[out[i].BaseBranch] {
+		// The target branch's name always passes the rule for target branches, so it is never left out (the
+		// contract of GitProvider.ListChangeRequestsAnyBase), as in the read by number (getFor).
+		if out[i].BaseBranch != g.target && g.unnamed[out[i].BaseBranch] {
 			out[i].BaseBranch = ""
 		}
 	}
 	return out, err
 }
 
-// HideBaseName makes ListChangeRequestsAnyBase answer change requests to base with no base name, as a provider
-// does for a name outside its rule for target branches.
+// HideBaseName makes ListChangeRequestsAnyBase and GetChangeRequest answer change requests to base with no base
+// name, as a provider does for a name outside its rule for target branches. The target branch's name is never hidden:
+// it passes that rule.
 func (g *Git) HideBaseName(base string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -679,6 +699,10 @@ func (g *Git) Reopen(n int64) error {
 	}
 	if cr.State == providers.ChangeRequestMerged {
 		return fmt.Errorf("change request %d is merged: %w", n, providers.ErrConflict)
+	}
+	if _, ok := g.branches[cr.HeadBranch]; !ok {
+		// The host refuses to reopen a pull request whose head branch is deleted.
+		return fmt.Errorf("branch %q of change request %d: %w", cr.HeadBranch, n, providers.ErrConflict)
 	}
 	for _, o := range g.crs {
 		if o != cr && o.HeadBranch == cr.HeadBranch && o.State == providers.ChangeRequestOpen {

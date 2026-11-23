@@ -29,7 +29,8 @@ import (
 func held() *api.RemediationRequestStatus {
 	t := true
 	return &api.RemediationRequestStatus{HoldsTarget: &t, Conditions: []metav1.Condition{{
-		Type: api.ConditionTargetHeld, Status: metav1.ConditionTrue, Reason: "OpenOnBranch"}}}
+		Type: api.ConditionTargetHeld, Status: metav1.ConditionTrue, Reason: "OpenOnBranch"}, {
+		Type: api.ConditionReviewCheckNotFailed, Status: metav1.ConditionTrue, Reason: "GitFailed"}}}
 }
 
 // A nil or zero verdict releases nothing and is an error, never a silent no-op.
@@ -39,13 +40,15 @@ func TestReleaseRefusesNoVerdict(t *testing.T) {
 		if err := Release(s, v); !errors.Is(err, ErrNoVerdict) {
 			t.Errorf("%s: Release = %v, want ErrNoVerdict", name, err)
 		}
-		if !*s.HoldsTarget || meta.FindStatusCondition(s.Conditions, api.ConditionTargetHeld) == nil {
+		if !*s.HoldsTarget || meta.FindStatusCondition(s.Conditions, api.ConditionTargetHeld) == nil ||
+			meta.FindStatusCondition(s.Conditions, api.ConditionReviewCheckNotFailed) == nil {
 			t.Errorf("%s: the lock or its condition changed without a verdict", name)
 		}
 	}
 }
 
-// Each constructor gives a verdict only for the facts that prove it, and Release clears the lock and TargetHeld.
+// Each constructor gives a verdict only for the facts that prove it, and Release clears the lock, TargetHeld and
+// ReviewCheckNotFailed, whose retry runs only at the looks of a holder (#925).
 func TestEachVerdictOnlyFromItsProof(t *testing.T) {
 	receipt := func(phase api.RemediationPhase) *api.RemediationRequestStatus {
 		s := held()
@@ -95,6 +98,12 @@ func TestEachVerdictOnlyFromItsProof(t *testing.T) {
 		"undelivered, repository gone":     {of(UndeliveredRepositoryGone(true, true)), true},
 		"undelivered, repository there":    {of(UndeliveredRepositoryGone(true, false)), false},
 		"delivered, repository gone":       {of(UndeliveredRepositoryGone(false, true)), false},
+		"merged by the replacement":        {of(ReplacementMerge(FoundMerged, true)), true},
+		"merged by the predecessor":        {of(OtherRequestMerge(FoundMerged, true)), true},
+		"merged, not by the predecessor":   {of(OtherRequestMerge(FoundMerged, false)), false},
+		"open, predecessor's head":         {of(OtherRequestMerge(FoundOther, true)), false},
+		"merged, not by the replacement":   {of(ReplacementMerge(FoundMerged, false)), false},
+		"open, replacement's commit":       {of(ReplacementMerge(FoundOther, true)), false},
 	} {
 		if tc.got.ok != tc.want || (tc.got.v != nil) != tc.want {
 			t.Errorf("%s: verdict %v, ok %t; want ok %t", name, tc.got.v, tc.got.ok, tc.want)
@@ -105,8 +114,9 @@ func TestEachVerdictOnlyFromItsProof(t *testing.T) {
 		}
 		s := held()
 		if err := Release(s, tc.got.v); err != nil || *s.HoldsTarget ||
-			meta.FindStatusCondition(s.Conditions, api.ConditionTargetHeld) != nil {
-			t.Errorf("%s: Release = %v, holds %t", name, err, *s.HoldsTarget)
+			meta.FindStatusCondition(s.Conditions, api.ConditionTargetHeld) != nil ||
+			meta.FindStatusCondition(s.Conditions, api.ConditionReviewCheckNotFailed) != nil {
+			t.Errorf("%s: Release = %v, holds %t, conditions %v", name, err, *s.HoldsTarget, s.Conditions)
 		}
 	}
 }

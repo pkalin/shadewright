@@ -1,0 +1,4 @@
+# The work (steps, -tags redactwork) of get_resource on a pod of n containers (#845), at main c84029ce.
+# containers	steps	bytes of the pod as JSON
+64	2656666	46067
+256	10622386	184235

@@ -42,11 +42,11 @@ var entryPoints = map[string]func(in string) []string{
 	"fingerprint.Value":  func(in string) []string { return []string{fingerprint.Value(in)} },
 	"modules.BoundValue": func(in string) []string { return []string{modules.BoundValue(in)} },
 	"incidentcontext.Value": func(in string) []string {
-		return []string{incidentcontext.Value(redact.String, in)}
+		return []string{incidentcontext.Value(stringTwice, in)}
 	},
 	// The context builder's summary shows the symptom an Incident stores through Value, then cuts it.
 	"incidentcontext.Value of the symptom": func(in string) []string {
-		return []string{incidentcontext.Value(redact.String, fingerprint.Symptom(fingerprint.Observation{Note: in}))}
+		return []string{incidentcontext.Value(stringTwice, fingerprint.Symptom(fingerprint.Observation{Note: in}))}
 	},
 	// The read tools of the model: the answer of get_resource is JSON, whose escapes must not hide an
 	// indicator (an HTML-escaped ">" did, #840).
@@ -55,16 +55,24 @@ var entryPoints = map[string]func(in string) []string{
 	tools.NameListEvents: toolText(tools.NameListEvents,
 		map[string]any{argNamespace: toolNS, argKind: toolKind, argName: toolPod, "limit": 5}),
 	tools.NameGetPodLogs: toolText(tools.NameGetPodLogs,
-		map[string]any{argNamespace: toolNS, "pod": toolPod, "container": toolContainer}),
+		map[string]any{argNamespace: toolNS, argPod: toolPod, argContainer: toolContainer}),
+	// The text as the value of a metric label, as a delivery object's message, and as the missing key the
+	// reference check shows (#845: every tool that shows text from a source, TestEveryToolIsAnEntryPoint).
+	tools.NameQueryMetrics: toolText(tools.NameQueryMetrics,
+		map[string]any{argNamespace: toolNS, argPod: toolPod, argTemplate: toolTemplate}),
+	tools.NameGetDeliveryStatus: toolText(tools.NameGetDeliveryStatus,
+		map[string]any{argKind: "Kustomization", argNamespace: toolNS, argName: toolDelivery}),
+	// check_missing_reference shows the text as the key the kubelet reports missing (missingKeyText).
+	tools.NameCheckMissingReference: missingKeyText(),
 	// The log excerpt, whole and cut after each of its lines: a cut that drops the key's line must not
 	// leave its block bare.
 	"kube.Excerpt": func(in string) []string {
 		out := []string{}
-		text, _ := kube.Excerpt(defaultRedactor(), []byte(in), false, len(in))
+		text, _, _ := kube.Excerpt(defaultRedactor(), []byte(in), false, len(in))
 		out = append(out, text)
 		for i := range len(in) {
 			if in[i] == '\n' && i+1 < len(in) {
-				text, _ := kube.Excerpt(defaultRedactor(), []byte(in), false, len(in)-i-1)
+				text, _, _ := kube.Excerpt(defaultRedactor(), []byte(in), false, len(in)-i-1)
 				out = append(out, text)
 			}
 		}
@@ -130,3 +138,7 @@ var defaultRedactor = sync.OnceValue(func() *redact.Redactor {
 	}
 	return r
 })
+
+// stringTwice is what incidentcontext.Value redacts a value with in the product (incidentcontext.Twice of a
+// redact.Redactor): String, and the reading of the release before as it redacted a value twice.
+func stringTwice(s string) string { return redact.StringTwice(s, nil) }

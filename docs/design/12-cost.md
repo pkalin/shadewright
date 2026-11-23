@@ -36,7 +36,7 @@ Real prices come from the model card, the deployment configurator and the [Azure
 
 The app enforces maximum context, steps, output tokens, concurrency, analyses per day and a daily spend limit, with the gaps listed below. All are set in `RemediationSettings` (5.4): the count of analyses in `spec.analysis.maxAnalysesPerDay`, the others beside it in `spec.analysis`.
 
-<span class="sw-status sw-built">built</span> The analysis loop (`internal/analysis`, 3.3) enforces steps, output tokens, concurrency and the count of analyses, a token bound per analysis, and `maxTokensPerDay` of each deployment within one analysis. The analyzer starts it only with `--triage-model` ([#76](https://github.com/pkalin/shadewright/issues/76)); without it only the trigger reads the count (3.2). **Planned.** The context bound comes from constants of the context builder, not from `maxContextBytes` yet ([#372](https://github.com/pkalin/shadewright/issues/372)), and the daily spend per deployment across analyses needs its counter ([#208](https://github.com/pkalin/shadewright/issues/208)).
+<span class="sw-status sw-built">built</span> The analysis loop (`internal/analysis`, 3.3) enforces steps, output tokens, concurrency and the count of analyses, a token bound per analysis, and `maxTokensPerDay` of each deployment within one analysis. The analyzer starts it only with `--triage-model` ([#76](https://github.com/pkalin/shadewright/issues/76)); without it only the trigger reads the count (3.2). The context's total bound is `maxContextBytes` ([#981](https://github.com/pkalin/shadewright/issues/981)), counted on the context text before escaping and wrapping, so the context sent can be several times that size ([#1054](https://github.com/pkalin/shadewright/issues/1054)); its section bounds are constants of the context builder ([#372](https://github.com/pkalin/shadewright/issues/372)). **Planned.** The daily spend per deployment across analyses needs its counter ([#208](https://github.com/pkalin/shadewright/issues/208)).
 
 ### Why an Azure budget is not enough
 
@@ -57,7 +57,7 @@ The count lives in the ConfigMap `shadewright-analysis-budget` in the operator n
 
 ### The spend limit
 
-The spend limit is a count of tokens per model deployment and UTC day (`maxTokensPerDay`), not an amount of money.
+The spend limit is a count of tokens per model deployment and UTC day (`maxTokensPerDay`), not an amount of money. Until the daily counter exists it is a ceiling for one analysis, and the daily bound on spend is `maxAnalysesPerDay` times this ceiling. An analysis counts for the UTC day on which it starts, so one still running after midnight (at most 9 minutes) spends in the new day without a unit there: a day can pass that product by one ceiling for each analysis in flight at midnight.
 
 - **Why tokens.** Tokens are what the provider reports and bills, and they are whole numbers with no rounding. A money limit would need a price list in the settings that goes stale.
 - **Why per deployment.** The triage and escalation models differ in price.

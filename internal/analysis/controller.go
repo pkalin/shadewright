@@ -305,8 +305,9 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("reading the reviewer hint of Incident %s after its analysis: %w", inc.Name, err)
 	}
 	logger.Info("Analyzed Incident", append([]any{"incident", inc.Name, "run", runID, "reason", out.Reason,
-		"escalated", out.Escalated, "calls", out.Calls, "toolCalls", out.ToolCalls, "tokens", out.Tokens,
-		"models", out.Models, "promptVersion", out.PromptVersion, "request", created}, resultFields(out)...)...)
+		"escalated", out.Escalated, "calls", out.Calls, "toolCalls", out.ToolCalls,
+		"toolCallsWithControls", out.ToolCallsWithControls, "tokens", out.Tokens, "models", out.Models,
+		"promptVersion", out.PromptVersion, "request", created}, resultFields(out)...)...)
 	// The record is written after a live read confirms the claim, so a run whose claim was lost before it leaves
 	// no record, and before the outcome, which carries its ID: a record ID in the status always names a record
 	// that was stored. A claim lost between the two leaves a record whose ID is not in the status.

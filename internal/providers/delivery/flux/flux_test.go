@@ -35,6 +35,7 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/delivery/flux"
 	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 const (
@@ -288,6 +289,41 @@ func TestStatusReaderRedactsTheMessageBeforeItIsCut(t *testing.T) {
 	st, err := sr.Status(t.Context(), unitOf(u))
 	if err != nil || len(st.Message) > flux.MaxMessageBytes || strings.Contains(st.Message, secret[:20]) {
 		t.Errorf("%v: message of %d bytes ends %q", err, len(st.Message), st.Message[max(len(st.Message)-40, 0):])
+	}
+}
+
+// A message redaction withholds whole is empty, with MessageWithheld set; a message that spells the withheld
+// marker is text, with MessageWithheld unset: the flag of the redactor decides, never the text (#873). The
+// redactor has the lowered work budget of redacttest, which withholds OverLowBudget for its work.
+func TestStatusReaderFlagsAWithheldMessage(t *testing.T) {
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	red = redacttest.LowBudget(red)
+	for _, tc := range []struct {
+		message  string
+		withheld bool
+	}{
+		{redacttest.OverLowBudget, true},
+		{redact.Withheld, false},
+	} {
+		u := recorded(t, readyFile)
+		u.Object["status"].(map[string]any)["conditions"].([]any)[0].(map[string]any)["message"] = tc.message
+		applied := fluxstatus.AppliedRevision(fluxstatus.Status(u.Object))
+		sr, err := flux.NewStatusReader(&reader{obj: u, others: []*unstructured.Unstructured{source(t, applied)}}, red)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := sr.Status(t.Context(), unitOf(u))
+		want := tc.message
+		if tc.withheld {
+			want = ""
+		}
+		if err != nil || st.MessageWithheld != tc.withheld || st.Message != want {
+			t.Errorf("message of %d bytes: %v, withheld %v, message %q", len(tc.message), err, st.MessageWithheld,
+				st.Message[:min(len(st.Message), 80)])
+		}
 	}
 }
 

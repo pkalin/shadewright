@@ -1,0 +1,144 @@
+{"in":"- args:\n  - -p\n- name: keepname\n","out":"- args:\n  - -p\n- name: keepname\n","spans":null}
+{"in":"- args:\n  - -p\n  image: busybox\n","out":"- args:\n  - -p\n  image: busybox\n","spans":null}
+{"in":"containers:\n- name: app\n  args:\n  - --verbose\n  - -p\n  image: busybox\n","out":"containers:\n- name: app\n  args:\n  - --verbose\n  - -p\n  image: busybox\n","spans":null}
+{"in":"args:\n- -p\nimage: busybox\n","out":"args:\n- -p\nimage: busybox\n","spans":null}
+{"in":"- args:\n  - -p\n  # keep note\n  image: busybox\n","out":"- args:\n  - -p\n  # keep note\n  image: busybox\n","spans":null}
+{"in":"- image: mongo\n  args:\n  - -p\n- name: keepname\n","out":"- image: mongo\n  args:\n  - -p\n- name: keepname\n","spans":null}
+{"in":"- image: mongo\n  args:\n  - -p\n  name: keepname\n","out":"- image: mongo\n  args:\n  - -p\n  name: keepname\n","spans":null}
+{"in":"spec:\n  containers:\n  - args:\n    - -p\n  - name: keepname\n","out":"spec:\n  containers:\n  - args:\n    - -p\n  - name: keepname\n","spans":null}
+{"in":"- args: [-p]\n  name: keepname\n","out":"- args: [-p]\n  name: keepname\n","spans":null}
+{"in":"{\"args\":[\"-p\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-p\"],\"name\":\"keepname\"}","spans":null}
+{"in":"- args:\r\n  - -p\r\n- name: keepname\r\n","out":"- args:\r\n  - -p\r\n- name: keepname\r\n","spans":null}
+{"in":"- args:\r\n  - -p\r\n  image: busybox\r\n","out":"- args:\r\n  - -p\r\n  image: busybox\r\n","spans":null}
+{"in":"containers:\r\n- name: app\r\n  args:\r\n  - --verbose\r\n  - -p\r\n  image: busybox\r\n","out":"containers:\r\n- name: app\r\n  args:\r\n  - --verbose\r\n  - -p\r\n  image: busybox\r\n","spans":null}
+{"in":"args:\r\n- -p\r\nimage: busybox\r\n","out":"args:\r\n- -p\r\nimage: busybox\r\n","spans":null}
+{"in":"- args:\r\n  - -p\r\n  # keep note\r\n  image: busybox\r\n","out":"- args:\r\n  - -p\r\n  # keep note\r\n  image: busybox\r\n","spans":null}
+{"in":"- image: mongo\r\n  args:\r\n  - -p\r\n- name: keepname\r\n","out":"- image: mongo\r\n  args:\r\n  - -p\r\n- name: keepname\r\n","spans":null}
+{"in":"- image: mongo\r\n  args:\r\n  - -p\r\n  name: keepname\r\n","out":"- image: mongo\r\n  args:\r\n  - -p\r\n  name: keepname\r\n","spans":null}
+{"in":"spec:\r\n  containers:\r\n  - args:\r\n    - -p\r\n  - name: keepname\r\n","out":"spec:\r\n  containers:\r\n  - args:\r\n    - -p\r\n  - name: keepname\r\n","spans":null}
+{"in":"- args: [-p]\r\n  name: keepname\r\n","out":"- args: [-p]\r\n  name: keepname\r\n","spans":null}
+{"in":"{\"args\":[\"-p\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-p\"],\"name\":\"keepname\"}","spans":null}
+{"in":"- args:\n  - -p\n  - Sw000ExyuaH9br.T\n- name: keepname\n","out":"- args:\n  - -p\n  - Sw000ExyuaH9br.T\n- name: keepname\n","spans":null}
+{"in":"- image: mongo\n  args:\n  - -p\n  - Sw001YMeZVYRyJ+m\n  name: keepname\n","out":"- image: mongo\n  args:\n  - -p\n  - Sw001YMeZVYRyJ+m\n  name: keepname\n","spans":null}
+{"in":"args: [-pSw002uggv9vj5]\nimage: busybox\n","out":"args: [-pSw002uggv9vj5]\nimage: busybox\n","spans":null}
+{"in":"args: [-pSw003uxzp3nvqW.G, --verbose]\nimage: busybox\n","out":"args: [-pSw003uxzp3nvqW.G, --verbose]\nimage: busybox\n","spans":null}
+{"in":"args: [--verbose, -pSw004hWSzBMX^6]\nname: keepname\n","out":"args: [--verbose, -pSw004hWSzBMX^6]\nname: keepname\n","spans":null}
+{"in":"args: [-p=Sw0053bpPN9Cx~z]\nname: keepname\n","out":"args: [-p=Sw0053bpPN9Cx~z]\nname: keepname\n","spans":null}
+{"in":"args: [-p, Sw006YaxZec6%w]\nname: keepname\n","out":"args: [-p, Sw006YaxZec6%w]\nname: keepname\n","spans":null}
+{"in":"args: [-p,Sw007bTSTXRr]\nname: keepname\n","out":"args: [-p,Sw007bTSTXRr]\nname: keepname\n","spans":null}
+{"in":"args: [-p, Sw008g2hew8x3~g, --verbose]\n","out":"args: [-p, Sw008g2hew8x3~g, --verbose]\n","spans":null}
+{"in":"image: mongo\nargs: [-pSw009Rf8Rv42D%3]\n","out":"image: mongo\nargs: [-pSw009Rf8Rv42D%3]\n","spans":null}
+{"in":"- args: [-pSw010Tmxf7gMF+Z]\n  name: keepname\n","out":"- args: [-pSw010Tmxf7gMF+Z]\n  name: keepname\n","spans":null}
+{"in":"{args: [-pSw011dceJdz5*S], name: keepname}\n","out":"{args: [-pSw011dceJdz5*S], name: keepname}\n","spans":null}
+{"in":"args: [[-pSw012sLoNVU5^o]]\n","out":"args: [[-pSw012sLoNVU5^o]]\n","spans":null}
+{"in":"{\"args\":[\"-pSw013PEtLJD7X\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-pSw013PEtLJD7X\"],\"name\":\"keepname\"}","spans":null}
+{"in":"{\"args\":[\"-p\",\"Sw014RDc32vgw.V\"],\"image\":\"busybox\"}","out":"{\"args\":[\"-p\",\"Sw014RDc32vgw.V\"],\"image\":\"busybox\"}","spans":null}
+{"in":"{\"args\":[\"--verbose\",\"-pSw015Si92nBCR%C\"]}","out":"{\"args\":[\"--verbose\",\"-pSw015Si92nBCR%C\"]}","spans":null}
+{"in":"- args:\n  - -P\n- name: keepname\n","out":"- args:\n  - -P\n- name: keepname\n","spans":null}
+{"in":"- args:\n  - -P\n  image: busybox\n","out":"- args:\n  - -P\n  image: busybox\n","spans":null}
+{"in":"containers:\n- name: app\n  args:\n  - --verbose\n  - -P\n  image: busybox\n","out":"containers:\n- name: app\n  args:\n  - --verbose\n  - -P\n  image: busybox\n","spans":null}
+{"in":"args:\n- -P\nimage: busybox\n","out":"args:\n- -P\nimage: busybox\n","spans":null}
+{"in":"- args:\n  - -P\n  # keep note\n  image: busybox\n","out":"- args:\n  - -P\n  # keep note\n  image: busybox\n","spans":null}
+{"in":"- image: sqlcmd\n  args:\n  - -P\n- name: keepname\n","out":"- image: sqlcmd\n  args:\n  - -P\n- name: keepname\n","spans":null}
+{"in":"- image: sqlcmd\n  args:\n  - -P\n  name: keepname\n","out":"- image: sqlcmd\n  args:\n  - -P\n  name: keepname\n","spans":null}
+{"in":"spec:\n  containers:\n  - args:\n    - -P\n  - name: keepname\n","out":"spec:\n  containers:\n  - args:\n    - -P\n  - name: keepname\n","spans":null}
+{"in":"- args: [-P]\n  name: keepname\n","out":"- args: [-P]\n  name: keepname\n","spans":null}
+{"in":"{\"args\":[\"-P\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-P\"],\"name\":\"keepname\"}","spans":null}
+{"in":"- args:\r\n  - -P\r\n- name: keepname\r\n","out":"- args:\r\n  - -P\r\n- name: keepname\r\n","spans":null}
+{"in":"- args:\r\n  - -P\r\n  image: busybox\r\n","out":"- args:\r\n  - -P\r\n  image: busybox\r\n","spans":null}
+{"in":"containers:\r\n- name: app\r\n  args:\r\n  - --verbose\r\n  - -P\r\n  image: busybox\r\n","out":"containers:\r\n- name: app\r\n  args:\r\n  - --verbose\r\n  - -P\r\n  image: busybox\r\n","spans":null}
+{"in":"args:\r\n- -P\r\nimage: busybox\r\n","out":"args:\r\n- -P\r\nimage: busybox\r\n","spans":null}
+{"in":"- args:\r\n  - -P\r\n  # keep note\r\n  image: busybox\r\n","out":"- args:\r\n  - -P\r\n  # keep note\r\n  image: busybox\r\n","spans":null}
+{"in":"- image: sqlcmd\r\n  args:\r\n  - -P\r\n- name: keepname\r\n","out":"- image: sqlcmd\r\n  args:\r\n  - -P\r\n- name: keepname\r\n","spans":null}
+{"in":"- image: sqlcmd\r\n  args:\r\n  - -P\r\n  name: keepname\r\n","out":"- image: sqlcmd\r\n  args:\r\n  - -P\r\n  name: keepname\r\n","spans":null}
+{"in":"spec:\r\n  containers:\r\n  - args:\r\n    - -P\r\n  - name: keepname\r\n","out":"spec:\r\n  containers:\r\n  - args:\r\n    - -P\r\n  - name: keepname\r\n","spans":null}
+{"in":"- args: [-P]\r\n  name: keepname\r\n","out":"- args: [-P]\r\n  name: keepname\r\n","spans":null}
+{"in":"{\"args\":[\"-P\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-P\"],\"name\":\"keepname\"}","spans":null}
+{"in":"- args:\n  - -P\n  - Sw016FTrmuph^q\n- name: keepname\n","out":"- args:\n  - -P\n  - Sw016FTrmuph^q\n- name: keepname\n","spans":null}
+{"in":"- image: sqlcmd\n  args:\n  - -P\n  - Sw0174k79dZ98L_Q\n  name: keepname\n","out":"- image: sqlcmd\n  args:\n  - -P\n  - Sw0174k79dZ98L_Q\n  name: keepname\n","spans":null}
+{"in":"args: [-PSw018SVgsVsoS~A]\nimage: busybox\n","out":"args: [-PSw018SVgsVsoS~A]\nimage: busybox\n","spans":null}
+{"in":"args: [-PSw019rFMGAVY~P, --verbose]\nimage: busybox\n","out":"args: [-PSw019rFMGAVY~P, --verbose]\nimage: busybox\n","spans":null}
+{"in":"args: [--verbose, -PSw020vFwqxmf]\nname: keepname\n","out":"args: [--verbose, -PSw020vFwqxmf]\nname: keepname\n","spans":null}
+{"in":"args: [-P=Sw0213mQ34EQD~L]\nname: keepname\n","out":"args: [-P=Sw0213mQ34EQD~L]\nname: keepname\n","spans":null}
+{"in":"args: [-P, Sw0224j7YRDqFX~n]\nname: keepname\n","out":"args: [-P, Sw0224j7YRDqFX~n]\nname: keepname\n","spans":null}
+{"in":"args: [-P,Sw023ngP7MQek*H]\nname: keepname\n","out":"args: [-P,Sw023ngP7MQek*H]\nname: keepname\n","spans":null}
+{"in":"args: [-P, Sw024Uye8CZqaV^f, --verbose]\n","out":"args: [-P, Sw024Uye8CZqaV^f, --verbose]\n","spans":null}
+{"in":"image: sqlcmd\nargs: [-PSw025ePKjQ7PR]\n","out":"image: sqlcmd\nargs: [-PSw025ePKjQ7PR]\n","spans":null}
+{"in":"- args: [-PSw026qUx3ydHTX+7]\n  name: keepname\n","out":"- args: [-PSw026qUx3ydHTX+7]\n  name: keepname\n","spans":null}
+{"in":"{args: [-PSw027n22zfymRL^t], name: keepname}\n","out":"{args: [-PSw027n22zfymRL^t], name: keepname}\n","spans":null}
+{"in":"args: [[-PSw028Ny7JSvD8%G]]\n","out":"args: [[-PSw028Ny7JSvD8%G]]\n","spans":null}
+{"in":"{\"args\":[\"-PSw029aBUDR8iZZ+L\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-PSw029aBUDR8iZZ+L\"],\"name\":\"keepname\"}","spans":null}
+{"in":"{\"args\":[\"-P\",\"Sw030ABfCwdM\"],\"image\":\"busybox\"}","out":"{\"args\":[\"-P\",\"Sw030ABfCwdM\"],\"image\":\"busybox\"}","spans":null}
+{"in":"{\"args\":[\"--verbose\",\"-PSw031YMN4wj7J~L\"]}","out":"{\"args\":[\"--verbose\",\"-PSw031YMN4wj7J~L\"]}","spans":null}
+{"in":"- args:\n  - -a\n- name: keepname\n","out":"- args:\n  - -a\n- name: keepname\n","spans":null}
+{"in":"- args:\n  - -a\n  image: busybox\n","out":"- args:\n  - -a\n  image: busybox\n","spans":null}
+{"in":"containers:\n- name: app\n  args:\n  - --verbose\n  - -a\n  image: busybox\n","out":"containers:\n- name: app\n  args:\n  - --verbose\n  - -a\n  image: busybox\n","spans":null}
+{"in":"args:\n- -a\nimage: busybox\n","out":"args:\n- -a\nimage: busybox\n","spans":null}
+{"in":"- args:\n  - -a\n  # keep note\n  image: busybox\n","out":"- args:\n  - -a\n  # keep note\n  image: busybox\n","spans":null}
+{"in":"- image: redis\n  args:\n  - -a\n- name: keepname\n","out":"- image: redis\n  args:\n  - -a\n- name: keepname\n","spans":null}
+{"in":"- image: redis\n  args:\n  - -a\n  name: keepname\n","out":"- image: redis\n  args:\n  - -a\n  name: keepname\n","spans":null}
+{"in":"spec:\n  containers:\n  - args:\n    - -a\n  - name: keepname\n","out":"spec:\n  containers:\n  - args:\n    - -a\n  - name: keepname\n","spans":null}
+{"in":"- args: [-a]\n  name: keepname\n","out":"- args: [-a]\n  name: keepname\n","spans":null}
+{"in":"{\"args\":[\"-a\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-a\"],\"name\":\"keepname\"}","spans":null}
+{"in":"- args:\r\n  - -a\r\n- name: keepname\r\n","out":"- args:\r\n  - -a\r\n- name: keepname\r\n","spans":null}
+{"in":"- args:\r\n  - -a\r\n  image: busybox\r\n","out":"- args:\r\n  - -a\r\n  image: busybox\r\n","spans":null}
+{"in":"containers:\r\n- name: app\r\n  args:\r\n  - --verbose\r\n  - -a\r\n  image: busybox\r\n","out":"containers:\r\n- name: app\r\n  args:\r\n  - --verbose\r\n  - -a\r\n  image: busybox\r\n","spans":null}
+{"in":"args:\r\n- -a\r\nimage: busybox\r\n","out":"args:\r\n- -a\r\nimage: busybox\r\n","spans":null}
+{"in":"- args:\r\n  - -a\r\n  # keep note\r\n  image: busybox\r\n","out":"- args:\r\n  - -a\r\n  # keep note\r\n  image: busybox\r\n","spans":null}
+{"in":"- image: redis\r\n  args:\r\n  - -a\r\n- name: keepname\r\n","out":"- image: redis\r\n  args:\r\n  - -a\r\n- name: keepname\r\n","spans":null}
+{"in":"- image: redis\r\n  args:\r\n  - -a\r\n  name: keepname\r\n","out":"- image: redis\r\n  args:\r\n  - -a\r\n  name: keepname\r\n","spans":null}
+{"in":"spec:\r\n  containers:\r\n  - args:\r\n    - -a\r\n  - name: keepname\r\n","out":"spec:\r\n  containers:\r\n  - args:\r\n    - -a\r\n  - name: keepname\r\n","spans":null}
+{"in":"- args: [-a]\r\n  name: keepname\r\n","out":"- args: [-a]\r\n  name: keepname\r\n","spans":null}
+{"in":"{\"args\":[\"-a\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-a\"],\"name\":\"keepname\"}","spans":null}
+{"in":"- args:\n  - -a\n  - Sw032kAWYptKx\n- name: keepname\n","out":"- args:\n  - -a\n  - Sw032kAWYptKx\n- name: keepname\n","spans":null}
+{"in":"- image: redis\n  args:\n  - -a\n  - Sw033a3G6YQTz_F\n  name: keepname\n","out":"- image: redis\n  args:\n  - -a\n  - Sw033a3G6YQTz_F\n  name: keepname\n","spans":null}
+{"in":"args: [-aSw0343bigPpPoZ.t]\nimage: busybox\n","out":"args: [-aSw0343bigPpPoZ.t]\nimage: busybox\n","spans":null}
+{"in":"args: [-aSw0356HLKWbU, --verbose]\nimage: busybox\n","out":"args: [-aSw0356HLKWbU, --verbose]\nimage: busybox\n","spans":null}
+{"in":"args: [--verbose, -aSw0367xsQMRgqz.X]\nname: keepname\n","out":"args: [--verbose, -aSw0367xsQMRgqz.X]\nname: keepname\n","spans":null}
+{"in":"args: [-a=Sw037AX6WZ3j*x]\nname: keepname\n","out":"args: [-a=Sw037AX6WZ3j*x]\nname: keepname\n","spans":null}
+{"in":"args: [-a, Sw038HYhFQa5rd*f]\nname: keepname\n","out":"args: [-a, Sw038HYhFQa5rd*f]\nname: keepname\n","spans":null}
+{"in":"args: [-a,Sw039agjzebw]\nname: keepname\n","out":"args: [-a,Sw039agjzebw]\nname: keepname\n","spans":null}
+{"in":"args: [-a, Sw040XwxTYXVWG*L, --verbose]\n","out":"args: [-a, Sw040XwxTYXVWG*L, --verbose]\n","spans":null}
+{"in":"image: redis\nargs: [-aSw041pjzbmWy]\n","out":"image: redis\nargs: [-aSw041pjzbmWy]\n","spans":null}
+{"in":"- args: [-aSw042wvm33M6vf_a]\n  name: keepname\n","out":"- args: [-aSw042wvm33M6vf_a]\n  name: keepname\n","spans":null}
+{"in":"{args: [-aSw043EtWdoEGdP+Z], name: keepname}\n","out":"{args: [-aSw043EtWdoEGdP+Z], name: keepname}\n","spans":null}
+{"in":"args: [[-aSw044XpZ4U2Zue_Y]]\n","out":"args: [[-aSw044XpZ4U2Zue_Y]]\n","spans":null}
+{"in":"{\"args\":[\"-aSw045irjWGqHL^2\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-aSw045irjWGqHL^2\"],\"name\":\"keepname\"}","spans":null}
+{"in":"{\"args\":[\"-a\",\"Sw0464PWGscia\"],\"image\":\"busybox\"}","out":"{\"args\":[\"-a\",\"Sw0464PWGscia\"],\"image\":\"busybox\"}","spans":null}
+{"in":"{\"args\":[\"--verbose\",\"-aSw047TaHbrxPKy*q\"]}","out":"{\"args\":[\"--verbose\",\"-aSw047TaHbrxPKy*q\"]}","spans":null}
+{"in":"- args:\n  - -u\n- name: keepname\n","out":"- args:\n  - -u\n- name: keepname\n","spans":null}
+{"in":"- args:\n  - -u\n  image: busybox\n","out":"- args:\n  - -u\n  image: busybox\n","spans":null}
+{"in":"containers:\n- name: app\n  args:\n  - --verbose\n  - -u\n  image: busybox\n","out":"containers:\n- name: app\n  args:\n  - --verbose\n  - -u\n  image: busybox\n","spans":null}
+{"in":"args:\n- -u\nimage: busybox\n","out":"args:\n- -u\nimage: busybox\n","spans":null}
+{"in":"- args:\n  - -u\n  # keep note\n  image: busybox\n","out":"- args:\n  - -u\n  # keep note\n  image: busybox\n","spans":null}
+{"in":"- image: curl\n  args:\n  - -u\n- name: keepname\n","out":"- image: curl\n  args:\n  - -u\n- name: keepname\n","spans":null}
+{"in":"- image: curl\n  args:\n  - -u\n  name: keepname\n","out":"- image: curl\n  args:\n  - -u\n  name: keepname\n","spans":null}
+{"in":"spec:\n  containers:\n  - args:\n    - -u\n  - name: keepname\n","out":"spec:\n  containers:\n  - args:\n    - -u\n  - name: keepname\n","spans":null}
+{"in":"- args: [-u]\n  name: keepname\n","out":"- args: [-u]\n  name: keepname\n","spans":null}
+{"in":"{\"args\":[\"-u\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-u\"],\"name\":\"keepname\"}","spans":null}
+{"in":"- args:\r\n  - -u\r\n- name: keepname\r\n","out":"- args:\r\n  - -u\r\n- name: keepname\r\n","spans":null}
+{"in":"- args:\r\n  - -u\r\n  image: busybox\r\n","out":"- args:\r\n  - -u\r\n  image: busybox\r\n","spans":null}
+{"in":"containers:\r\n- name: app\r\n  args:\r\n  - --verbose\r\n  - -u\r\n  image: busybox\r\n","out":"containers:\r\n- name: app\r\n  args:\r\n  - --verbose\r\n  - -u\r\n  image: busybox\r\n","spans":null}
+{"in":"args:\r\n- -u\r\nimage: busybox\r\n","out":"args:\r\n- -u\r\nimage: busybox\r\n","spans":null}
+{"in":"- args:\r\n  - -u\r\n  # keep note\r\n  image: busybox\r\n","out":"- args:\r\n  - -u\r\n  # keep note\r\n  image: busybox\r\n","spans":null}
+{"in":"- image: curl\r\n  args:\r\n  - -u\r\n- name: keepname\r\n","out":"- image: curl\r\n  args:\r\n  - -u\r\n- name: keepname\r\n","spans":null}
+{"in":"- image: curl\r\n  args:\r\n  - -u\r\n  name: keepname\r\n","out":"- image: curl\r\n  args:\r\n  - -u\r\n  name: keepname\r\n","spans":null}
+{"in":"spec:\r\n  containers:\r\n  - args:\r\n    - -u\r\n  - name: keepname\r\n","out":"spec:\r\n  containers:\r\n  - args:\r\n    - -u\r\n  - name: keepname\r\n","spans":null}
+{"in":"- args: [-u]\r\n  name: keepname\r\n","out":"- args: [-u]\r\n  name: keepname\r\n","spans":null}
+{"in":"{\"args\":[\"-u\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-u\"],\"name\":\"keepname\"}","spans":null}
+{"in":"- args:\n  - -u\n  - admin:Sw048PGimsMX.N\n- name: keepname\n","out":"- args:\n  - -u\n  - admin:Sw048PGimsMX.N\n- name: keepname\n","spans":null}
+{"in":"- image: curl\n  args:\n  - -u\n  - admin:Sw049LbWrzFCB\n  name: keepname\n","out":"- image: curl\n  args:\n  - -u\n  - admin:Sw049LbWrzFCB\n  name: keepname\n","spans":null}
+{"in":"args: [-uadmin:Sw050W32XiTU_d]\nimage: busybox\n","out":"args: [-uadmin:Sw050W32XiTU_d]\nimage: busybox\n","spans":null}
+{"in":"args: [-uadmin:Sw051wo8kvkYB%L, --verbose]\nimage: busybox\n","out":"args: [-uadmin:Sw051wo8kvkYB%L, --verbose]\nimage: busybox\n","spans":null}
+{"in":"args: [--verbose, -uadmin:Sw0527stPt9C+X]\nname: keepname\n","out":"args: [--verbose, -uadmin:Sw0527stPt9C+X]\nname: keepname\n","spans":null}
+{"in":"args: [-u=admin:Sw053ndA4Hovk.C]\nname: keepname\n","out":"args: [-u=admin:Sw053ndA4Hovk.C]\nname: keepname\n","spans":null}
+{"in":"args: [-u, admin:Sw054Mi32YtH.7]\nname: keepname\n","out":"args: [-u, admin:Sw054Mi32YtH.7]\nname: keepname\n","spans":null}
+{"in":"args: [-u,admin:Sw055Com2Ajzg]\nname: keepname\n","out":"args: [-u,admin:Sw055Com2Ajzg]\nname: keepname\n","spans":null}
+{"in":"args: [-u, admin:Sw056kmAzLUo.B, --verbose]\n","out":"args: [-u, admin:Sw056kmAzLUo.B, --verbose]\n","spans":null}
+{"in":"image: curl\nargs: [-uadmin:Sw057qs9CCZ5+u]\n","out":"image: curl\nargs: [-uadmin:Sw057qs9CCZ5+u]\n","spans":null}
+{"in":"- args: [-uadmin:Sw0588JHXLY43L~r]\n  name: keepname\n","out":"- args: [-uadmin:Sw0588JHXLY43L~r]\n  name: keepname\n","spans":null}
+{"in":"{args: [-uadmin:Sw059icRDP3qWY%b], name: keepname}\n","out":"{args: [-uadmin:Sw059icRDP3qWY%b], name: keepname}\n","spans":null}
+{"in":"args: [[-uadmin:Sw0608QrsbH4MT+6]]\n","out":"args: [[-uadmin:Sw0608QrsbH4MT+6]]\n","spans":null}
+{"in":"{\"args\":[\"-uadmin:Sw061Qa4vNPpu\"],\"name\":\"keepname\"}","out":"{\"args\":[\"-uadmin:Sw061Qa4vNPpu\"],\"name\":\"keepname\"}","spans":null}
+{"in":"{\"args\":[\"-u\",\"admin:Sw062kKnKfVwT+F\"],\"image\":\"busybox\"}","out":"{\"args\":[\"-u\",\"admin:Sw062kKnKfVwT+F\"],\"image\":\"busybox\"}","spans":null}
+{"in":"{\"args\":[\"--verbose\",\"-uadmin:Sw063naxeJjCo^e\"]}","out":"{\"args\":[\"--verbose\",\"-uadmin:Sw063naxeJjCo^e\"]}","spans":null}

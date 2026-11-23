@@ -126,6 +126,13 @@ type Observation struct {
 	// occurrences at least as old to stay within its bounds, and no HandledFunc settled it. The consumer must
 	// then count Increase(what it already counted for this Occurrence).
 	MayRepeat bool
+	// FoldOnly is set on the observation of an event from before the collector's start about a pod that is
+	// gone (#996, decided 2026-11-21): the start listed the event and it has not changed since, its last
+	// occurrence is more than StaleOnStart before the start, and its pod was not found. Such an observation
+	// opens no Incident. The consumer counts it only on an Incident that exists: the one that counted its
+	// occurrence, or the one of its fingerprint; with neither it is dropped.
+	// A restart thus opens no Incident that the running collector would not have opened.
+	FoldOnly bool
 	// Immediate is set when the symptom opens an Incident at its first sighting instead of waiting to be
 	// seen again (design 3.2, #267). Only the collector sets it, from what it read itself: a container
 	// termination in pod status whose reason is OOMKilled, or a symptom state of a module's symptom source
@@ -263,6 +270,8 @@ type Collector struct {
 	start time.Time
 
 	series *seriesTracker
+	// listed remembers the events of the start's list until they change (listed.go).
+	listed *listedEvents
 	pods   *terminationTracker
 	owners *ownerResolver
 	// conditions remembers the handled symptom states of objects read by module symptom sources, keyed by
@@ -315,6 +324,7 @@ func New(cfg Config) (*Collector, error) {
 		out:    make(chan Observation, cfg.Buffer),
 		now:    cfg.Now,
 		series: newSeriesTracker(cfg.MaxEvents),
+		listed: newListedEvents(cfg.MaxEvents),
 		pods:   newTerminationTracker(cfg.MaxPods),
 		// A tracker of its own, keyed by kind and name, so a pod and a watched object of the same name, or two
 		// watched kinds, keep apart.
@@ -347,7 +357,7 @@ func (c *Collector) SetupWithManager(mgr ctrl.Manager) error {
 	er := &eventReconciler{c: c, reader: mgr.GetClient()}
 	err := ctrl.NewControllerManagedBy(mgr).
 		Named("collector-events").
-		For(&eventsv1.Event{}, builder.WithPredicates(predicate.NewPredicateFuncs(isWarning))).
+		For(&eventsv1.Event{}, builder.WithPredicates(c.eventPredicate())).
 		// An update of the pod of a held consequence is a sample of its hold (hold.go).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(c.heldEventsOf)).
 		// The events of the holds that ReleaseCause releases (hold.go).
@@ -431,7 +441,13 @@ func (c *Collector) deliver(ctx context.Context, o Observation) (bool, error) {
 			return true, nil
 		}
 	}
-	return c.emit(ctx, o), nil
+	sent := c.emit(ctx, o)
+	if sent && o.FoldOnly {
+		// Counted once handed over: not at the mark, a retry, a hold that ends without it, or a Handled answer
+		// that leaves nothing to send.
+		staleOnStartFolded.Inc()
+	}
+	return sent, nil
 }
 
 // emit hands o to the consumer. It returns false when the channel stayed full for the send timeout or the

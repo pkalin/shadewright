@@ -30,7 +30,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/controller/lockverdict"
 	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
 )
 
@@ -64,8 +63,10 @@ import (
 // status.queuedBehind, in the status write that queues it (waitForLimits). It ends Superseded with reason AnotherRequestClosed when a
 // recorded holder for the same target and field ended with its pull request closed without a merge: a reviewer
 // who closed that proposal said no to the change, and the waiting one was planned without knowing it. It does
-// not go back to the analyzer; if the symptom continues, the Incident's next analysis proposes again, with the
-// closed request in its history. Before #643 it took the lock and opened a second pull request for the same
+// not go back to the analyzer, and an analyzed Incident is not analyzed again: unless a newer request names it,
+// the closure rules move it to Escalated (#930), and a person applies a new request if the change is still wanted;
+// one not yet analyzed (Open) gets its first analysis.
+// Before #643 it took the lock and opened a second pull request for the same
 // field (lab run of 2026-11-10).
 //
 // The decision reads only recorded state, never a clock (invariant 5): the record, and each recorded holder read
@@ -360,38 +361,50 @@ func (r *RemediationRequestReconciler) endingRequestOf(ctx context.Context, rr *
 	return r.recordedHolderOf(ctx, rr)
 }
 
-// supersedeDuplicate ends rr Superseded because of w: PlanFresh False with reason (AnotherRequestMerged,
-// AnotherRequestClosed or AnotherRequestSucceeded) and a message naming w and its pull request, Queued removed, no
-// lock. Any other reason gets a message that names w only. The status write uses rr's resourceVersion, so a
-// conflict (another write meanwhile) is returned and the request is looked at again.
-func (r *RemediationRequestReconciler) supersedeDuplicate(ctx context.Context, rr, w *remediationv1alpha1.RemediationRequest,
-	reason string) error {
+// supersedeMessage is the PlanFresh message of a request superseded because of w with reason: it names w and its
+// pull request for AnotherRequestMerged, AnotherRequestClosed and AnotherRequestSucceeded, and w only for any
+// other reason. The AnotherRequestClosed message states the closure rule of a Superseded request
+// (incidents.Closure): an analyzed Incident (Proposed, Escalated, Resolved) is not analyzed again and, unless a
+// newer request names it, moves to Escalated; one still Open stays Open and gets its first analysis
+// (incidents.Due). The message holds for both without reading the Incident, and points to a person and a new
+// request, never to a repeat analysis (#930).
+func supersedeMessage(reason string, w *remediationv1alpha1.RemediationRequest) string {
 	pr := "its pull request"
 	if w.Status.PullRequest != nil {
 		pr = fmt.Sprintf("pull request #%d", w.Status.PullRequest.Number)
 	}
-	var message string
 	switch reason {
 	case remediationv1alpha1.ReasonAnotherRequestMerged:
-		message = fmt.Sprintf("RemediationRequest %s of the same Incident and target was merged (%s) "+
+		return fmt.Sprintf("RemediationRequest %s of the same Incident and target was merged (%s) "+
 			"after this one was created; this one is not needed", w.Name, pr)
 	case remediationv1alpha1.ReasonAnotherRequestClosed:
-		message = fmt.Sprintf("This one waited behind RemediationRequest %s for the same target and field, whose %s "+
-			"was closed without a merge; this one opens no pull request for that field. A new analysis of the "+
-			"Incident proposes again if the symptom continues", w.Name, pr)
+		return fmt.Sprintf("This one waited behind RemediationRequest %s for the same target and field, whose %s "+
+			"was closed without a merge; this one opens no pull request for that field. An Incident that was "+
+			"analyzed is not analyzed again: unless a newer request names it, it moves to Escalated for a person, "+
+			"who applies a new request if the symptom continues and the change is still wanted; one not yet "+
+			"analyzed gets its first analysis as usual", w.Name, pr)
 	case remediationv1alpha1.ReasonAnotherRequestSucceeded:
-		message = fmt.Sprintf("This one waited behind RemediationRequest %s, which changed the same field from the "+
+		return fmt.Sprintf("This one waited behind RemediationRequest %s, which changed the same field from the "+
 			"same previous value in the same direction; its %s was merged and the request ended Succeeded, so this "+
 			"one's previous value is gone and its change is not needed. Its Incident follows that request's outcome",
 			w.Name, pr)
 	default:
-		message = fmt.Sprintf("RemediationRequest %s for the same target ended this one", w.Name)
+		return fmt.Sprintf("RemediationRequest %s for the same target ended this one", w.Name)
 	}
+}
+
+// supersedeDuplicate ends rr Superseded because of w: PlanFresh False with reason (AnotherRequestMerged,
+// AnotherRequestClosed or AnotherRequestSucceeded) and the message of supersedeMessage, Queued removed, no lock.
+// The status write uses rr's resourceVersion, so a conflict (another write meanwhile) is returned and the request
+// is looked at again.
+func (r *RemediationRequestReconciler) supersedeDuplicate(ctx context.Context, rr, w *remediationv1alpha1.RemediationRequest,
+	reason string) error {
+	message := supersedeMessage(reason, w)
 	r.setPhase(rr, remediationv1alpha1.PhaseSuperseded)
 	rr.Status.ObservedGeneration = rr.Generation
 	// It waited in the queue and never took the lock: false keeps it out of the limits' lock list.
 	if s, ok := settleNeverHeld(rr); ok {
-		if err := lockverdict.Release(&rr.Status, s); err != nil {
+		if err := releaseLock(ctx, rr, s); err != nil {
 			return err
 		}
 	}

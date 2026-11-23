@@ -58,6 +58,8 @@ type Record struct {
 	Escalated  bool      `json:"escalated"`
 	Calls      int       `json:"calls"`
 	ToolCalls  int       `json:"toolCalls"`
+	// ToolCallsWithControls counts the tool calls refused because they held control characters (#852).
+	ToolCallsWithControls int `json:"toolCallsWithControls,omitempty"`
 	// Tokens is what the analysis was charged ([Outcome].Tokens). The key is "usage": a key named like
 	// "tokens" with a value is what the redactor takes for a credential.
 	Tokens int64 `json:"usage"`
@@ -142,7 +144,7 @@ func (c *Controller) buildRecord(claimed *remediationv1alpha1.Incident, id remed
 		FinishedAt: c.now().UTC().Truncate(time.Second),
 		Reason:     out.Reason, Escalated: out.Escalated, Calls: out.Calls, ToolCalls: out.ToolCalls,
 		Tokens: out.Tokens, Models: make([]string, 0, len(out.Models)), PromptVersion: out.PromptVersion,
-		Summary: r(out.Summary), Request: string(request),
+		Summary: r(out.Summary), Request: string(request), ToolCallsWithControls: out.ToolCallsWithControls,
 	}
 	if d := limits.Triage; d != nil {
 		rec.Deployments.Triage = r(d.Deployment)
@@ -178,6 +180,11 @@ var recordMessages = map[string]string{
 	recordSkipped: "The analysis record was not written: no time was left on the claim, or the claim was lost",
 	recordRefused: "The analysis record was not written: the store refused it, or it could not be built; see the analyzer log",
 }
+
+// recordNotCheckedMessage is the message of EventRecordNotWritten for a write whose redaction check waited for the
+// limit on the heap of the redactions running at once on every try ([providers.ErrNotChecked]), counted as failed.
+const recordNotCheckedMessage = "The analysis record was not written: its redaction check waited for other redactions " +
+	"to finish on every try, so nothing was sent; it was not refused"
 
 // storeRecord writes the run's record when a store is configured, and returns its ID for
 // status.analysisRecords, or "" when there is no store or no record was stored. It first reads the Incident
@@ -234,6 +241,10 @@ func (c *Controller) storeRecord(ctx context.Context, claimed *remediationv1alph
 		logger.Error(err, "The analysis store refused the analysis record")
 		c.recordResult(claimed, recordRefused)
 		return "", nil
+	case providers.IsNotChecked(err):
+		logger.Error(err, "Failed to write the analysis record: its redaction check waited for other redactions on every try")
+		c.recordResultWith(claimed, recordFailed, recordNotCheckedMessage)
+		return "", nil
 	default:
 		logger.Error(err, "Failed to write the analysis record", "retryable", providers.IsRetryable(err),
 			"canceled", ctx.Err() != nil)
@@ -245,8 +256,13 @@ func (c *Controller) storeRecord(ctx context.Context, claimed *remediationv1alph
 
 // recordResult counts a record write and, when no record was stored, writes the Warning event on the Incident.
 func (c *Controller) recordResult(claimed *remediationv1alpha1.Incident, result string) {
+	c.recordResultWith(claimed, result, recordMessages[result])
+}
+
+// recordResultWith is recordResult with the event's message given; an empty message writes no event.
+func (c *Controller) recordResultWith(claimed *remediationv1alpha1.Incident, result, msg string) {
 	analysisRecords.WithLabelValues(result).Inc()
-	if msg, ok := recordMessages[result]; ok && c.Recorder != nil {
+	if msg != "" && c.Recorder != nil {
 		c.Recorder.Event(claimed, corev1.EventTypeWarning, EventRecordNotWritten, msg)
 	}
 }

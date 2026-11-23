@@ -107,7 +107,8 @@ func tool(t *testing.T, envVar, name string) string {
 
 func run(t *testing.T, dir string, name string, args ...string) []byte {
 	t.Helper()
-	cmd := exec.Command(name, args...) // #nosec G702 -- test caller selects the local Helm or Kustomize tool
+	cmd := exec.CommandContext(t.Context(), // #nosec G702 -- test caller selects the local Helm or Kustomize tool
+		name, args...)
 	cmd.Dir = dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -303,7 +304,7 @@ func isTestHook(u *unstructured.Unstructured) bool {
 // render succeeds.
 func helmFails(t *testing.T, extraSet ...string) string {
 	t.Helper()
-	cmd := exec.Command(tool(t, "HELM", "helm"), helmArgs(t, false, extraSet...)...)
+	cmd := exec.CommandContext(t.Context(), tool(t, "HELM", "helm"), helmArgs(t, false, extraSet...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err == nil {
@@ -474,7 +475,8 @@ func TestNetworkPoliciesServicesAndCRDsEqualKustomize(t *testing.T) {
 // policy (the manifests use a placeholder, the chart a digest), the cluster ID (a value), the module grants (the
 // chart knows which module roles it rendered; a kustomize install may add any of config/modules, so the
 // manifests leave --module-grants out and the analyzer checks every module kind), the metrics port (the chart
-// makes it optional), GOMEMLIMIT (chart only), the order of the args, and the defaulted automountServiceAccountToken.
+// makes it optional), GOMEMLIMIT (TestManifestsSetTheChartsGoMemLimit checks it), the order of the args, and the
+// defaulted automountServiceAccountToken.
 func normalizedPod(d *appsv1.Deployment) corev1.PodSpec {
 	spec := *d.Spec.Template.Spec.DeepCopy()
 	if spec.AutomountServiceAccountToken == nil {
@@ -493,8 +495,9 @@ func normalizedPod(d *appsv1.Deployment) corev1.PodSpec {
 			}
 		}
 		c.Args = slices.DeleteFunc(c.Args, func(a string) bool { return strings.HasPrefix(a, "--module-grants=") })
-		// The chart sets GOMEMLIMIT from the memory limit (#601); the manifests do not.
-		c.Env = slices.DeleteFunc(c.Env, func(e corev1.EnvVar) bool { return e.Name == "GOMEMLIMIT" })
+		// The chart sets GOMEMLIMIT from the memory limit (#601); the manifests set a fixed value for the executor and the
+		// analyzer (TestManifestsSetTheChartsGoMemLimit).
+		c.Env = slices.DeleteFunc(c.Env, func(e corev1.EnvVar) bool { return e.Name == goMemLimitEnv })
 		slices.Sort(c.Args)
 		c.Ports = slices.DeleteFunc(c.Ports, func(p corev1.ContainerPort) bool { return p.Name == "metrics" })
 		if len(c.VolumeMounts) == 0 {

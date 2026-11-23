@@ -92,6 +92,13 @@
             "clientId": {
               "type": "string",
               "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?$"
+            },
+            "tenantId": {
+              "type": "string",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[A-Za-z0-9-]{1,63}(\\.[A-Za-z0-9-]{1,63})+)?$"
+            },
+            "projectToken": {
+              "type": "boolean"
             }
           }
         }
@@ -113,6 +120,9 @@
         "image"
       ],
       "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
         "replicas": {
           "type": "integer",
           "minimum": 1
@@ -994,10 +1004,9 @@
                 },
                 "podLabels": {
                   "type": "object",
-                  "minProperties": 1,
                   "maxProperties": 8,
                   "additionalProperties": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "maxLength": 63,
                     "pattern": "^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$"
                   }
@@ -1023,10 +1032,9 @@
                 },
                 "podLabels": {
                   "type": "object",
-                  "minProperties": 1,
                   "maxProperties": 8,
                   "additionalProperties": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "maxLength": 63,
                     "pattern": "^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$"
                   }

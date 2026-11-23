@@ -1,0 +1,41 @@
+# The work (steps, -tags redactwork) of String on the inputs of the cost tests (#845), on main.
+# commit 7e5cedb1
+corpus	24007956	880262
+form indentation of other characters once	3630694	123845
+form indentation of other characters eight times	29045391	990760
+form keys on one line once	4470527	140367
+form keys on one line eight times	35764055	1122936
+form bracket inside the secret once	2075732	73460
+form bracket inside the secret eight times	16605695	587680
+form key and value in two strings once	2416429	98053
+form key and value in two strings eight times	19331271	784424
+form env name and value in two fields once	398153	16456
+form env name and value in two fields eight times	3162394	131101
+form block cut from its key once	448147	16467
+form block cut from its key eight times	3565671	131085
+form forms combined once	3955253	130898
+form forms combined eight times	31641863	1047184
+form key with format characters or a colon look-alike once	3274019	141015
+form key with format characters or a colon look-alike eight times	26191991	1128120
+form explicit key once	376970	16389
+form explicit key eight times	3015760	131119
+form comment inside the block once	459347	16388
+form comment inside the block eight times	3674350	131100
+form metric labels once	433300	16403
+form metric labels eight times	3464258	131104
+form separator of other characters once	914730	39477
+form separator of other characters eight times	7317679	315816
+form user info in angle brackets once	378937	16426
+form user info in angle brackets eight times	3023853	131082
+form separator between blanks once	1873325	79401
+form separator between blanks eight times	14986439	635208
+form secret key as a value once	449155	17905
+form secret key as a value eight times	3593079	143240
+form equals or arrow look-alike once	381145	16416
+form equals or arrow look-alike eight times	3043611	131092
+stair "pass: |" 65536	33176525	65675
+stair "pass: |" 262144	259120454	262422
+stair "pass: |" 1048576	2048312332	1049048
+repeated quoted keys 512	354341	9728
+repeated quoted keys 1024	708645	19456
+repeated quoted keys 2048	1417253	38912

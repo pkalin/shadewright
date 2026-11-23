@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -104,25 +105,63 @@ func (c *countingReader) List(ctx context.Context, list client.ObjectList, opts 
 	return c.Reader.List(ctx, list, opts...)
 }
 
-// blockingReader blocks every read until its context is done.
-type blockingReader struct{ client.Reader }
+// blockingReader blocks every read until its context is done. With seen set, it records each read's deadline.
+type blockingReader struct {
+	client.Reader
+	seen *deadlines
+}
 
-func (blockingReader) Get(ctx context.Context, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+func (b blockingReader) Get(ctx context.Context, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+	b.seen.add(ctx)
 	<-ctx.Done()
 	return ctx.Err()
 }
 
-func (blockingReader) List(ctx context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+func (b blockingReader) List(ctx context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+	b.seen.add(ctx)
 	<-ctx.Done()
 	return ctx.Err()
 }
 
-// blockingLogs blocks until its context is done.
-type blockingLogs struct{}
+// blockingLogs blocks until its context is done. With seen set, it records each read's deadline.
+type blockingLogs struct{ seen *deadlines }
 
-func (blockingLogs) Logs(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
+func (b blockingLogs) Logs(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
+	b.seen.add(ctx)
 	<-ctx.Done()
 	return providers.LogExcerpt{}, ctx.Err()
+}
+
+// deadline is what a blocking read saw of its context when it started: its deadline, and how much of it was left.
+type deadline struct {
+	at      time.Time
+	bounded bool
+	left    time.Duration
+}
+
+// deadlines records the deadline of each read that blocks. A nil *deadlines records nothing.
+type deadlines struct {
+	mu   sync.Mutex
+	seen []deadline
+}
+
+func (d *deadlines) add(ctx context.Context) {
+	if d == nil {
+		return
+	}
+	at, ok := ctx.Deadline()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.seen = append(d.seen, deadline{at: at, bounded: ok, left: time.Until(at)})
+}
+
+// take returns the deadlines recorded since the last take and forgets them.
+func (d *deadlines) take() []deadline {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := d.seen
+	d.seen = nil
+	return out
 }
 
 // env is a tool set over fakes that count every call.

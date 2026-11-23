@@ -29,8 +29,14 @@ limitations under the License.
 //     each labelled as the template's or the pod's (during a rollout they differ); for a KEDA ScaledObject
 //     subject, the allow-listed fields of that one object, read with one get (ADR-0036), and the object itself
 //     as [Context.ScaledObject] for the analysis loop to decide from;
-//   - log excerpt: at most two excerpts from a [providers.LogSource], of the containers that look most
-//     relevant (a terminated previous instance first, then a waiting or unready container);
+//   - log excerpt: excerpts from a [providers.LogSource] of at most two containers, those that look most
+//     relevant (a terminated instance first, then a waiting or unready container), at most two excerpts
+//     (one per instance) within each container's equal share of the bound; every container's first read comes
+//     before any second read, each with one call timeout, and only a first read that failed makes the section
+//     a failed source; the second reads run in what is left of a time budget of two call timeouts for the
+//     section, and none starts once it is up. That budget is the worst case; an exited container whose
+//     current instance hangs, and a fallback read that hangs, take longer than one read of the previous
+//     instance (design 3.3, "Known limits of the log section");
 //   - metrics: the approved metric templates for the target's pods from a [providers.MetricsSource];
 //   - Git: always "not available" for now: the analyzer has no Git identity (invariant 6, #373);
 //   - policy bounds (#493): for each catalog action that can change the subject, the bounds of the
@@ -58,15 +64,20 @@ limitations under the License.
 // the window, or a StatefulSet whose current and update revisions differ). Historical membership (for example
 // kube_pod_owner) is not read.
 //
-// Redaction and cuts: every piece of text goes through the [Redactor] before anything is cut. Each value from
-// the cluster is redacted on its own and the summary, status and metrics sections are redacted again as a
-// whole once assembled; a log block's header and its excerpt are redacted whole, the excerpt again whatever the
-// source did. So no cut can split a secret before the redactor sees it or drop the key line that marks the next
-// lines as a secret. After that, the builder only removes whole lines of redacted text, which cannot reveal
-// anything that was not already there; the fixed labels and availability values are code, never cluster data,
-// and the error text of a failed source never enters a block. A value longer than 1 KiB once redacted is left
-// out whole, never cut. Redaction never makes text longer (package redact), so a bound checked before a cut
-// holds after it.
+// Redaction and cuts: every piece of text goes through the [Redactor] before anything is cut. The summary,
+// status, metrics and policy sections are written as pieces, the text the builder writes and each value from the
+// cluster as it was read, and decided once on those pieces (redact.Redactor.PiecesWithin, #845); a redactor
+// that cannot decide on pieces redacts each value on its own and the section again once assembled. A log
+// block's header and its excerpt are redacted whole, the excerpt again whatever the source did. So no cut can
+// split a secret before the redactor sees it or drop the key line that marks the next lines as a secret. When
+// redaction withholds a section, a log header or a log excerpt whole (its work budget ran out, #873), the
+// block says "could not fetch: withheld by redaction" (a log block under its title), with [LabelWithheld] and
+// no values, and its section counts as a failed source, which escalates. [FitLog], which bounds a rendered log
+// text again, does not redact: the text was redacted when it was rendered. After that, the builder only
+// removes whole lines of redacted text, which cannot reveal anything that was not already there; the fixed
+// labels and availability values are code, never cluster data, and the error text of a failed source never
+// enters a block. A value longer than 1 KiB once redacted is left out whole, never cut. Redaction never makes
+// text longer (package redact), so a bound checked before a cut holds after it.
 //
 // What a cut keeps: the summary, status and metrics sections are written most relevant first (the target,
 // then the pods with the most trouble, then the metric templates that explain a crash) and keep their head;

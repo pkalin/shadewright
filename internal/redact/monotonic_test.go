@@ -30,7 +30,7 @@ import (
 
 // lostMainBytes returns the first byte of in that main's redactor removes and this one keeps, or -1.
 func lostMainBytes(in string) int {
-	now := defaultRedactor.spans(in)
+	now := defaultRedactor.spans(nil, in)
 	for _, want := range mainredact.Spans(in) {
 		for i := want[0]; i < want[1]; i++ {
 			if !coveredBy([2]int{i, i + 1}, now) {
@@ -150,8 +150,12 @@ const monotonicCorpusSize = 12000
 
 // On every input of the generated corpus, each byte main's redactor removes is removed too.
 func TestMonotonicAgainstMain(t *testing.T) {
+	parallelUnderRace(t)
 	n := monotonicCorpusSize
-	if testing.Short() || raceDetector {
+	switch {
+	case raceDetector:
+		n /= 32 // the full corpus runs without -race (decision of 2026-11-21 on #873)
+	case testing.Short():
 		n /= 8
 	}
 	failed, redacted := 0, 0

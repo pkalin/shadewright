@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,7 @@ import (
 
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/pkalin/shadewright/internal/redact/redacttest"
 )
 
 const testToken = "test-access-token-value"
@@ -347,16 +349,23 @@ func TestPutAnswerAfterContextEnd(t *testing.T) {
 }
 
 // A try that times out on its own is retried while the write has time left.
+// The first handler gives up when the server sees the client go away and returns, which sends an empty 200 the
+// client may or may not read before its try ends: either way the try is retried (#1064).
 func TestPutRetriesATryThatTimedOut(t *testing.T) {
 	var n int
 	var mu sync.Mutex
+	release := make(chan struct{})
+	defer close(release)
 	s := newServer(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		n++
 		first := n == 1
 		mu.Unlock()
 		if first {
-			<-r.Context().Done()
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
@@ -369,6 +378,92 @@ func TestPutRetriesATryThatTimedOut(t *testing.T) {
 	}
 	if got := len(s.requests()); got != 2 {
 		t.Errorf("%d requests, want 2", got)
+	}
+}
+
+// tryLateAnswer is a transport whose first late tries answer only once the try's own context ended, while the
+// write's context stays live; later tries answer 201. The late answer carries a Retry-After and body text that
+// must not reach the write's pacing or its error.
+type tryLateAnswer struct {
+	code int
+	late int
+	n    *int
+}
+
+func (a tryLateAnswer) RoundTrip(r *http.Request) (*http.Response, error) {
+	*a.n++
+	if *a.n > a.late {
+		return &http.Response{StatusCode: http.StatusCreated, Header: http.Header{}, Body: http.NoBody, Request: r}, nil
+	}
+	<-r.Context().Done()
+	h := http.Header{}
+	h.Set("Retry-After", "7")
+	h.Set("x-ms-error-code", "BlobAlreadyExists")
+	return &http.Response{StatusCode: a.code, Header: h, Request: r,
+		Body: io.NopCloser(strings.NewReader("<Error><Message>body text " + testToken + "</Message></Error>"))}, nil
+}
+
+// An answer read after its try timed out, the write's context still live: a 201 is a success, on any try; any
+// other answer decides nothing, and the try is retried like one that timed out with no answer, with the same
+// pacing and the same final error (#1064).
+func TestPutAnswerAfterTryTimeout(t *testing.T) {
+	for _, code := range []int{http.StatusOK, http.StatusCreated, http.StatusConflict, http.StatusInternalServerError} {
+		for _, late := range []int{1, maxTries} {
+			t.Run(fmt.Sprintf("%d/late%d", code, late), func(t *testing.T) {
+				u, err := url.Parse("https://account.blob.core.windows.net")
+				if err != nil {
+					t.Fatal(err)
+				}
+				red, err := redact.New()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var n int
+				st := newStore(u.JoinPath(testContainer), &staticCredential{}, red, tryLateAnswer{code: code, late: late, n: &n})
+				var waits []time.Duration
+				st.sleep = func(ctx context.Context, d time.Duration) error {
+					waits = append(waits, d)
+					return ctx.Err()
+				}
+				st.tryTimeout = 5 * time.Millisecond
+				_, err = st.Put(t.Context(), testRecord())
+				switch {
+				case code == http.StatusCreated:
+					// The one late answer that counts: the server says the record is stored.
+					if err != nil {
+						t.Fatalf("Put = %v, want a late 201 to be a success", err)
+					}
+					if n != 1 {
+						t.Errorf("%d round trips, want 1", n)
+					}
+				case late < maxTries:
+					if err != nil {
+						t.Fatalf("Put = %v after %d round trips, want the retry to create", err, n)
+					}
+					if n != late+1 {
+						t.Errorf("%d round trips, want %d", n, late+1)
+					}
+				default:
+					if !errors.Is(err, errNoAnswer) || !providers.IsRetryable(err) {
+						t.Fatalf("Put = %v, want no answer, retryable", err)
+					}
+					if n != maxTries {
+						t.Errorf("%d round trips, want %d", n, maxTries)
+					}
+					if strings.Contains(err.Error(), "body text") || strings.Contains(err.Error(), testToken) {
+						t.Errorf("error %q carries response body text", err)
+					}
+				}
+				if len(waits) != n-1 {
+					t.Errorf("%d waits for %d round trips", len(waits), n)
+				}
+				for _, w := range waits {
+					if w > maxBackoff {
+						t.Errorf("wait %s: a late answer's Retry-After paced the write", w)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -653,5 +748,104 @@ func TestNewWithoutWorkloadIdentity(t *testing.T) {
 	t.Setenv("AZURE_FEDERATED_TOKEN_FILE", "")
 	if _, err := New(Config{Account: testAccount, Container: testContainer}, Options{}); !providers.IsInvalidConfig(err) {
 		t.Fatalf("New = %v, want invalid configuration", err)
+	}
+}
+
+// A record whose redaction check did not run, because its wait for the limit on the heap of the redactions running
+// at once ended, is a retryable failure and nothing is sent; it is not refused (#1087, decision of 2026-11-22).
+// Once the limit is free the same record is written, and a record whose check ran and found a secret is still
+// refused.
+func TestPutRetryableWhenTheRedactionCheckWaited(t *testing.T) {
+	srv := newServer(t, status(http.StatusCreated))
+	st, _ := testStore(t, srv)
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	free := redacttest.HoldHeapLimit(t, func(block func()) {
+		red.PiecesFitting([]redact.Piece{{Text: "pwd=abcdef", Data: true}}, func([]string) bool { block(); return true })
+	}, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, ok := red.WithContext(ctx).StringChecked("x")
+		return !ok
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err = st.Put(ctx, testRecord())
+	if !providers.IsRetryable(err) || providers.IsRejected(err) {
+		t.Fatalf("a check that waited past the write's context: %v (retryable %v, rejected %v)", err,
+			providers.IsRetryable(err), providers.IsRejected(err))
+	}
+	if n := len(srv.requests()); n != 0 {
+		t.Fatalf("%d requests sent for a record whose check did not run", n)
+	}
+	free()
+	if _, err := st.Put(context.Background(), testRecord()); err != nil {
+		t.Fatalf("the same record once the limit is free: %v", err)
+	}
+	secret := testRecord()
+	secret.Data = []byte(`{"summary":"password: hunter2xyz9"}`)
+	if _, err := st.Put(context.Background(), secret); !providers.IsRejected(err) || providers.IsRetryable(err) {
+		t.Fatalf("a record whose check found a secret: %v", err)
+	}
+}
+
+// holdHeapLimit holds the whole limit on the heap of the redactions running at once until free is called.
+func holdHeapLimit(t *testing.T) (free func()) {
+	t.Helper()
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return redacttest.HoldHeapLimit(t, func(block func()) {
+		red.PiecesFitting([]redact.Piece{{Text: "pwd=abcdef", Data: true}}, func([]string) bool { block(); return true })
+	}, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, ok := red.WithContext(ctx).StringChecked("x")
+		return !ok
+	})
+}
+
+// The redaction check of a record runs inside Put's tries (#1087, decision of 2026-11-22): a try whose check waited
+// for the heap limit sends nothing, and when the limit is free by the next try the record is checked and written by
+// the same Put.
+func TestPutChecksTheRecordAgainOnTheNextTry(t *testing.T) {
+	srv := newServer(t, status(http.StatusCreated))
+	st, waits := testStore(t, srv)
+	st.tryTimeout = 50 * time.Millisecond
+	free := holdHeapLimit(t)
+	st.sleep = func(ctx context.Context, d time.Duration) error {
+		*waits = append(*waits, d)
+		free()
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := st.Put(ctx, testRecord()); err != nil {
+		t.Fatalf("Put with the limit held for its first try and free for its second: %v", err)
+	}
+	if len(*waits) != 1 || len(srv.requests()) != 1 {
+		t.Fatalf("%d waits and %d requests, want one of each: the first try waited and sent nothing", len(*waits), len(srv.requests()))
+	}
+}
+
+// When the check waits on every try, Put sends nothing and returns a retryable error marked
+// providers.ErrNotChecked, never a refusal, after maxTries tries.
+func TestPutNotCheckedWhenEveryTryWaited(t *testing.T) {
+	srv := newServer(t, status(http.StatusCreated))
+	st, waits := testStore(t, srv)
+	st.tryTimeout = 50 * time.Millisecond
+	holdHeapLimit(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := st.Put(ctx, testRecord())
+	if !providers.IsNotChecked(err) || !providers.IsRetryable(err) || providers.IsRejected(err) {
+		t.Fatalf("every check waited: %v (not checked %v, retryable %v, rejected %v)", err,
+			providers.IsNotChecked(err), providers.IsRetryable(err), providers.IsRejected(err))
+	}
+	if len(*waits) != maxTries-1 || len(srv.requests()) != 0 {
+		t.Fatalf("%d waits and %d requests, want %d waits and none", len(*waits), len(srv.requests()), maxTries-1)
 	}
 }

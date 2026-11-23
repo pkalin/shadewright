@@ -36,6 +36,6 @@ func TestWatchedNamespacesGauge(t *testing.T) {
 		}
 	}
 	want := map[string]metricguard.Labels{"shadewright_analyzer_watched_namespaces": {}}
-	metricguard.Check(t, metrics.Registry, want)
+	metricguard.Check(t, metrics.Registry, metricguard.WithRedaction(want))
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), want)
 }

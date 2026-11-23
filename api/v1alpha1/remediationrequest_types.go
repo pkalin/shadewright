@@ -379,7 +379,16 @@ const (
 	// with its marker (the message names both numbers and what ends it), and, on a stale plan whose repository the
 	// settings reach only through a new installation of the GitHub App, with reason GitNotFound (a 404) or GitFailed
 	// (any other failure that is not an answer, the token and the cleanup's deadline included) while the read of its
-	// branch that settles the lock on its target fails through that installation (#797). The message names the read;
+	// branch that settles the lock on its target fails through that installation (#797), and, on a replacement whose
+	// recovery of its handoff met a refusal, with the refusal's reason (GitForbidden, GitRejected) or one of the three
+	// reasons about the repository (#786): that first refusal aborts the handoff (the predecessor's intent is aborted
+	// before it writes again), and the replacement, which writes nothing to Git from then on, keeps the target lock and
+	// reads the pull request it was to take over, recording a merge of its commit, until the end of its HandoffRecovery
+	// wait (24 hours from the first refusal, lastTransitionTime); reason RecoveryReadFailed names another read of that
+	// watch that fails once that cause is gone. At the end the replacement ends NeedsIntervention with reason
+	// RecoveryWaitExpired, keeps this condition, its handoff Reserved and the lock, and the look at stopped holders
+	// records a merge of its commit whenever it comes; the lock goes on merged, closed or the branch gone; a
+	// repository that left the settings keeps it until it is back. The message names the read;
 	// lastTransitionTime is when it started. Nothing is decided on such a read: it is retried, and a request that holds the lock on its
 	// target keeps it. The condition is removed by the next read that works (for a reason about the repository,
 	// once the repository can be opened again). One Warning Event,
@@ -457,20 +466,35 @@ const (
 	ConditionCancelPending = "CancelPending"
 	// ConditionGitReadRetry is True while status.gitWaits holds an entry: the executor retries a read of the Git host
 	// that failed (#771). It summarizes the entries: the reason is that of the entry that ends first
-	// (GitReadFailedBeforeDeadline, GitReadFailedBeforeHandoffGrace, GitReadFailedBeforeMergeWait,
-	// GitReadFailedBeforeContentWait), or GitReadFailed when only a Paced entry stands; the message names the
+	// (GitReadFailedBeforeDeadline, GitReadFailedBeforeHandoffGrace, GitReadFailedBeforeHandoffRecovery,
+	// GitReadFailedBeforeMergeWait, GitReadFailedBeforeContentWait), or GitReadFailed when only a Paced entry stands; the message names the
 	// reads, never the host's answer; lastTransitionTime is the start of that entry. The read is made again after
 	// the pull request poll interval, or the longer delay the host asked for, and never later than the end of an
 	// entry; an entry past its end is ended at the start of the next reconcile. A failure of the Kubernetes API
 	// never sets it. It is removed with the last entry.
 	ConditionGitReadRetry = "GitReadRetry"
+	// ConditionReviewCheckNotFailed is True, with reviewer hints on, while a stopped request that holds the target lock
+	// could not fail the check run shadewright/review on its recorded head (#925), so a check written before the stop
+	// may still show on a pull request from its branch. The look writes it whatever the request's own pull request is
+	// (open on any base, closed, merged elsewhere or gone) while the lock is held, by that pull request or by another
+	// open one from the branch. The reason says why: TargetBranchChanged, RepositoryUnavailable, RepositoryUnusable or
+	// SettingsNotFound while the settings do not let the executor write to the repository of the plan, WritesPaused
+	// while RemediationSettings spec.paused holds Git writes, GitForbidden or GitRejected when the Git host refused the
+	// write for good, GitUnauthorized when it rejected the App's credentials (a 401), GitNotFound when it answered 404,
+	// and GitFailed for any other failure of the Git host. The message names the pull request, never the Git host's
+	// answer. The write is tried again at each look of the stopped request, every 10 minutes while it holds the lock;
+	// the condition is removed when the failed check is written and recorded as Stale, by a look that reads the failed
+	// check as the latest on the head, by the release of the lock (which logs that an earlier check may stay), a
+	// recorded merge, or the first write of a deletion. One Warning Event, ReviewCheckNotFailed, is recorded when it is
+	// set or its reason changes.
+	ConditionReviewCheckNotFailed = "ReviewCheckNotFailed"
 )
 
 // ReasonGitReadFailed is the reason of condition GitReadRetry True: a read of the Git host failed and is retried.
 const ReasonGitReadFailed = "GitReadFailed"
 
 // GitWaitKind is the kind of bound of a Git wait (status.gitWaits).
-// +kubebuilder:validation:Enum=Paced;RequestDeadline;HandoffGrace;MergeCheck;MergeContent
+// +kubebuilder:validation:Enum=Paced;RequestDeadline;HandoffGrace;HandoffRecovery;MergeCheck;MergeContent
 type GitWaitKind string
 
 // Kinds of Git wait.
@@ -482,9 +506,17 @@ const (
 	// GitWaitRequestDeadline ends at status.deadline of a request in PolicyChecked, as it stood when the entry was
 	// recorded: the request expires, also when the cleanup of its pull requests cannot read the Git host.
 	GitWaitRequestDeadline GitWaitKind = "RequestDeadline"
-	// GitWaitHandoffGrace ends a grace after status.deadline of a replacement recovering a handoff: the request ends
-	// NeedsIntervention with HandoffRecoveryFailed.
+	// GitWaitHandoffGrace ends a grace after status.deadline of a replacement recovering a handoff whose intent
+	// stands: the request ends NeedsIntervention with HandoffRecoveryFailed. A refusal aborts the intent, and the write
+	// that records its HandoffRecovery entry removes this one.
 	GitWaitHandoffGrace GitWaitKind = "HandoffGrace"
+	// GitWaitHandoffRecovery ends 24 hours after the first refusal (or settings that cannot reach the repository) met
+	// by a replacement recovering a handoff, the start of condition PullRequestUnreadable (#786). That refusal aborts
+	// the handoff, and the entry is the record of it: while it stands the replacement only watches the pull request it
+	// was to take over for a merge of its commit, never takes it over and writes nothing to Git; a reconcile that reads
+	// without a failure and a pause of Git writes keep it. The watch ends at its end, with RecoveryWaitExpired, the
+	// handoff still Reserved and the target lock kept: a later merge of its commit is still recorded.
+	GitWaitHandoffRecovery GitWaitKind = "HandoffRecovery"
 	// GitWaitMergeCheck ends five minutes after its start, a wait for the merge commit of a pull request seen merged
 	// without one or for an answer of the check at the merge: the merge it names is recorded, with the plan not
 	// shown fresh, and without a receipt when no merge commit was seen. It ends only after one more read made once
@@ -511,8 +543,9 @@ type GitWait struct {
 	Since metav1.Time `json:"since"`
 
 	// ends is when the wait ends, on the executor's clock, recorded with the entry for every kind but Paced: the
-	// request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), five minutes after
-	// the start (MergeCheck, MergeContent). It does not move while the entry stands.
+	// request deadline (RequestDeadline), the deadline plus the handoff grace (HandoffGrace), 24 hours after the
+	// start (HandoffRecovery), five minutes after the start (MergeCheck, MergeContent). It does not move while the
+	// entry stands.
 	// +optional
 	Ends *metav1.Time `json:"ends,omitempty"`
 
@@ -626,8 +659,10 @@ type PullRequestStatus struct {
 	// condition Approved False with reason ReviewListTooLong; final on that head but for Stale), Refused when the
 	// Git host refused for good to write it (condition Approved then says so and what the host shows; asked again
 	// after a backoff), Stale when the freshness check found the plan stale and the executor completed it with
-	// failure, whether or not the close of the pull request went through (#713); the request then never writes
-	// the check again, and does not end Superseded before it is recorded. It always names headSHA: a new head
+	// failure, whether or not the close of the pull request went through (#713), when the request was cancelled
+	// with spec.cancel (#289), or when it stopped while its own pull request is open, on the target branch or on
+	// another base (#925; condition ReviewCheckNotFailed says while that write fails); the request then never
+	// writes the check again, and does not end Superseded before it is recorded. It always names headSHA: a new head
 	// starts without it, so a state never outlives its head. Once a merge receipt exists it never changes.
 	// +optional
 	ReviewCheck *ReviewCheck `json:"reviewCheck,omitempty"`
@@ -745,9 +780,12 @@ type VerificationReset struct {
 	// desired, fewer or more, a revert's target desires no replica, or a ScaledObject is not ready by the
 	// KedaReady rule), StaleReport (the verifier's report is missing, was never sampled, or its sample counter
 	// stopped rising), ReportMismatch (the report names another request, merge commit, target, template revision
-	// or container) or PartialRollout (the report does not cover every desired replica, or a revert is checked
-	// before RolledOut is True). Every one is a reset of the no-evidence class.
-	// +kubebuilder:validation:Enum=NotAvailable;StaleReport;ReportMismatch;PartialRollout
+	// or container), PartialRollout (the report does not cover every desired replica, or a revert is checked
+	// before RolledOut is True) or ExecutorRestarted (a new executor process, after a restart or a leader change,
+	// found the window open and opened by no check of its own; its time is the second before it began
+	// reconciling, or windowStart when that is later).
+	// Every one is a reset of the no-evidence class.
+	// +kubebuilder:validation:Enum=NotAvailable;StaleReport;ReportMismatch;PartialRollout;ExecutorRestarted
 	// +required
 	Reason ResetReason `json:"reason"`
 
@@ -759,8 +797,10 @@ type VerificationReset struct {
 
 // VerificationWindow is the executor's own stable window of a Verifying request (ADR-0030 section 4), kept next
 // to the verifier's window in the VerificationReport. Every time in it is on the executor's clock, and it is
-// never compared with a time of the report. No window counts time from before the executor process began reconciling, so after a restart or a leader change every open window needs a full stableFor again. A lastReset is
-// counted: resets is at least 1 when it is set.
+// never compared with a time of the report. No window counts time from before the executor process began
+// reconciling: after a restart or a leader change the first check resets every open window no check of the new
+// process opened, with ExecutorRestarted, so it needs a full stableFor again and the window stored is the one
+// that decides. A lastReset is counted: resets is at least 1 when it is set.
 // +kubebuilder:validation:XValidation:rule="!has(self.lastReset) || (has(self.resets) && self.resets >= 1)",message="lastReset requires resets of at least 1"
 type VerificationWindow struct {
 	// windowStart is when the current window opened: the first good check after the last reset. It only moves
@@ -1054,17 +1094,23 @@ type RemediationRequestStatus struct {
 	MergeCommitAwaitedSince *metav1.Time `json:"mergeCommitAwaitedSince,omitempty"`
 
 	// gitWaits are the waits on reads of the Git host that failed and are retried (#771), one entry per kind of
-	// bound: Paced (no end of its own), RequestDeadline, HandoffGrace, MergeCheck and MergeContent. Starting or ending
-	// one kind never touches another, and an entry holds everything needed to end it. At the start of every
-	// reconcile the executor ends each RequestDeadline and HandoffGrace entry whose bound has passed, before any
-	// read: RequestDeadline expires the request, HandoffGrace ends it NeedsIntervention with HandoffRecoveryFailed.
+	// bound: Paced (no end of its own), RequestDeadline, HandoffGrace, HandoffRecovery, MergeCheck and MergeContent.
+	// Starting or ending one kind never touches another, and an entry holds everything needed to end it. At the start
+	// of every reconcile the executor ends each RequestDeadline, HandoffGrace and HandoffRecovery entry whose own end
+	// has passed, before any read; no end is computed from another entry: RequestDeadline expires the request,
+	// HandoffGrace ends it NeedsIntervention with HandoffRecoveryFailed, HandoffRecovery with RecoveryWaitExpired.
 	// A MergeCheck or MergeContent entry whose bound has passed ends only after one more read in that reconcile:
 	// an answer goes on as after any read, and a failure ends it, MergeCheck by recording the merge with the plan
 	// not shown fresh, MergeContent (five minutes from its start) by ending the request NeedsIntervention with
 	// MergeContentUnreadable, recording the pull request the entry names when the status holds none. While writes
 	// are paused nothing is read and no entry ends. An entry whose kind no longer applies to the request is
 	// removed. A successful read of what a merge brought removes the MergeContent entry, and a reconcile with no
-	// failed Git read removes the others but MergeCheck. Condition GitReadRetry summarizes the entries for people.
+	// failed Git read removes the others but MergeCheck and HandoffRecovery. Condition GitReadRetry summarizes the
+	// entries for people. At most five entries stand at once though there are six kinds: RequestDeadline applies only
+	// to a request that recovers no handoff, and HandoffGrace and HandoffRecovery only to one that does, so the first
+	// never stands with either of the others, and HandoffGrace no longer applies once HandoffRecovery stands (a kind
+	// that no longer applies is removed in every write that adds an entry). A status stored before that holds both
+	// HandoffGrace and HandoffRecovery stays valid; the next reconcile removes the grace.
 	// +listType=map
 	// +listMapKey=kind
 	// +kubebuilder:validation:MaxItems=5
@@ -1095,7 +1141,7 @@ type RemediationRequestStatus struct {
 	// replacement carried over from its chain (ADR-0028). Two bounds: at most MaxStoredHints entries in all,
 	// and at most MaxHints of them Consumed or Reserved, the hints a supersede chain may consume. Only the
 	// executor writes them; a stored hint keeps its pin, moves only forward in its state and is never removed,
-	// so a Declined hint stays as the record of what was asked. Planned: carrying them over to a replacement.
+	// so a Declined hint stays as the record of what was asked. A replacement carries over those of its chain.
 	// +listType=map
 	// +listMapKey=source
 	// +listMapKey=commentID

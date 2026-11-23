@@ -58,7 +58,7 @@ spec:
                   analysis bounds every model-backed analysis and names the model deployments it may call. Left out, its
                   limits take their defaults and no model is configured. maxAnalysesPerDay is read by the analysis
                   trigger; the analysis loop, which the analyzer starts only with its --triage-model flag, reads and
-                  enforces the rest, maxTokensPerDay within one analysis only until the spend counter of #208. The
+                  enforces the rest, maxTokensPerDay as a ceiling for one analysis only until the spend counter of #208. The
                   endpoints decide where the analyzer sends its Entra ID token and the redacted context, so write access
                   to this object is security-relevant (threat model).
                 properties:
@@ -83,14 +83,18 @@ spec:
                     minimum: 1
                     type: integer
                   maxContextBytes:
-                    default: 32768
+                    default: 49152
                     description: |-
                       maxContextBytes is the most bytes of redacted cluster context (events, pod status, log excerpts,
-                      metrics) the context builder puts into one analysis, before the fixed system part of the prompt.
-                      4096 to 262144; the default of 32768 is roughly 8,000 tokens. A context cut at this bound is marked
-                      truncated, which is an escalation trigger (ADR-0023).
+                      metrics) the context builder puts into one analysis. It bounds the text of the context blocks before the
+                      prompt escapes it and wraps each block in its tags, not the context message sent: escaping can make that
+                      several times larger. 4096 to 49152; the default and maximum of 49152 (48 KiB) of context text is roughly
+                      12,000 tokens before escaping and wrapping. The bounds of the sections (summary, status, logs, metrics,
+                      Git, policy) stay fixed and add up to 48 KiB, so a larger value would add no context; a value below it
+                      cuts the context to it. A context cut at this bound is marked truncated, which is an escalation trigger
+                      (ADR-0023).
                     format: int32
-                    maximum: 262144
+                    maximum: 49152
                     minimum: 4096
                     type: integer
                   maxOutputTokens:
@@ -179,7 +183,11 @@ spec:
                             type: string
                           maxTokensPerDay:
                             description: |-
-                              maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not)
+                              maxTokensPerDay is meant as the daily spend cap of this deployment, in tokens per UTC day, but it is not
+                              yet counted across analyses: today it is a ceiling for one analysis, so the daily bound on spend is
+                              maxAnalysesPerDay times this ceiling. An analysis counts for the UTC day on which it starts, so one still running
+                              after midnight (its deadline is at most 9 minutes) spends in the new day without a unit there: a day can pass
+                              the product by one ceiling for each analysis in flight at midnight. It counts input (cached or not)
                               plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input
                               estimate plus maxOutputTokens), except a call the adapter marks as refused by its host before processing
                               (a 429 on every attempt from a Microsoft-operated Azure OpenAI or Foundry host), counted as 0. Required, with no default, so the admin chooses the cap of each
@@ -316,7 +324,11 @@ spec:
                             type: string
                           maxTokensPerDay:
                             description: |-
-                              maxTokensPerDay is the daily spend cap of this deployment, in tokens per UTC day: input (cached or not)
+                              maxTokensPerDay is meant as the daily spend cap of this deployment, in tokens per UTC day, but it is not
+                              yet counted across analyses: today it is a ceiling for one analysis, so the daily bound on spend is
+                              maxAnalysesPerDay times this ceiling. An analysis counts for the UTC day on which it starts, so one still running
+                              after midnight (its deadline is at most 9 minutes) spends in the new day without a unit there: a day can pass
+                              the product by one ceiling for each analysis in flight at midnight. It counts input (cached or not)
                               plus output tokens of every call, a failed or timed-out call counted at its upper bound (the input
                               estimate plus maxOutputTokens), except a call the adapter marks as refused by its host before processing
                               (a 429 on every attempt from a Microsoft-operated Azure OpenAI or Foundry host), counted as 0. Required, with no default, so the admin chooses the cap of each

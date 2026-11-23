@@ -31,7 +31,7 @@ networkPolicy:
     traceCollector:
       enabled: true
       namespace: observability
-      # podLabels and port default to the opentelemetry-collector chart and 4317
+      # port defaults to 4317; podLabels, when set, replaces the default (the opentelemetry-collector chart's name label)
 ```
 
 `analyzer.tracing.endpoint` sets `OTEL_TRACES_EXPORTER=otlp`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `service.version` (the chart's `appVersion`) on the analyzer only. `networkPolicy.analyzer.traceCollector` adds one rule to `allow-analyzer-egress` (never to the executor's policy), to the collector Pods you name in one namespace on one port. With the NetworkPolicies on, the chart refuses an endpoint without that rule, since the default-deny policy would drop every export. If the collector's namespace has its own ingress policy, allow the analyzer there too.
@@ -67,6 +67,6 @@ An analysis that ends early (a runbook matched, no model configured, the budget 
 | `shadewright.analysis.context` | `shadewright.result` (`ok`, `failed`, `canceled`), `shadewright.context.blocks`, `shadewright.context.bytes`, `shadewright.context.truncated`, `shadewright.context.failed_sources`, `shadewright.context.pods` |
 | `shadewright.analysis.reserve` | `shadewright.result` (`ok`, `spent`, `unavailable`, `canceled`) |
 | `shadewright.model.call` | `gen_ai.operation.name` (`chat`), `shadewright.model.role` (`triage`, `escalation`), `gen_ai.request.model` (the deployment name), `gen_ai.response.model` (the model the reply named), `gen_ai.request.max_tokens`, `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens` (when reported), `shadewright.model.charged_tokens`, `shadewright.model.usage_unknown` (the reply reported no usage), `shadewright.model.attempt`, `shadewright.model.tool_calls` (how many the reply asked for), `shadewright.result` (`ok`, `retry`, `canceled` or the hand-off reason, such as `ModelUnavailable` or `InvalidOutput`) |
-| `shadewright.tool.call` | `gen_ai.tool.name` (or `unknown`), `shadewright.result` (`ok`, `refused`, `failed`, `canceled`), `shadewright.tool.status` (`ok`, `refused`, `not found`, `not available`, `could not fetch`), `shadewright.tool.quotable` (the answer may be cited as evidence), `shadewright.tool.outside_attribution` |
+| `shadewright.tool.call` | `gen_ai.tool.name` (or `unknown`), `shadewright.result` (`ok`, `refused`, `failed`, `canceled`), `shadewright.tool.status` (`ok`, `refused`, `not found`, `not available`, `could not fetch`), `shadewright.tool.quotable` (the answer may be cited as evidence), `shadewright.tool.outside_attribution`, `shadewright.tool.held_controls` (the call held a control character and was refused unrun, #852) |
 
 The `gen_ai.*` names follow the OpenTelemetry semantic conventions for generative AI. The Incident name and UID are the same values the analyzer's log lines and the analysis record carry; use them to go from a trace to the Incident (`kubectl shadewright status`) or to the record.

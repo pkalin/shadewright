@@ -33,7 +33,7 @@ spec:
   # access to this object. maxTokensPerDay is required on each model.
   analysis:
     maxAnalysesPerDay: 100
-    maxContextBytes: 32768
+    maxContextBytes: 49152
     maxToolSteps: 4
     maxOutputTokens: 2048
     maxConcurrentAnalyses: 1

@@ -59,7 +59,7 @@ var statusClocks = map[string]statusClock{
 		why: "a paused rollout, which moves the delivery window by the pause"},
 	"status.pullRequest.appliedObservedAt": {test: "TestEveryGitReadRetrySiteKeepsItsBound",
 		why: "the start of the delivery window (paceAt(windowEnd) of deliveryStep and waitForDelivery)"},
-	"status.verification.windowStart": {test: "TestCountedStartsNoWindowBeforeReconciling",
+	"status.verification.windowStart": {test: "TestRestartedResetsWindowsNotOfThisProcess",
 		why: "the stable window of the verification, ended by its verdict"},
 
 	"status.pullRequest.incidentStopped.readAt": {why: "the read that set the IncidentStopped mark; the wait before " +
@@ -75,7 +75,9 @@ var statusClocks = map[string]statusClock{
 	"status.commentCursor.sweepStart":                    {why: "the start of a sweep of the comment listing"},
 	"status.commentCursor.seen.updatedAt":                {why: "a comment's time on the code host"},
 	"status.commentCursor.evictedAt":                     {why: "when the cursor dropped old comments"},
-	"status.conditions.lastTransitionTime":               {why: "a condition's transition"},
+	"status.conditions.lastTransitionTime": {entry: api.GitWaitHandoffRecovery, why: "a condition's transition; " +
+		"PullRequestUnreadable's is the first refusal of a handoff's recovery, recorded as the start of its " +
+		"HandoffRecovery entry, which records its end"},
 }
 
 // statusTimePaths lists the JSON paths of every metav1.Time field of RemediationRequestStatus.

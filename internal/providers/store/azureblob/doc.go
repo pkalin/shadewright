@@ -31,14 +31,19 @@ limitations under the License.
 // Before any network call, a record is refused ([providers.ErrRejected]) unless its ID is a lower-case name
 // safe as a blob name, its data is valid JSON of at most [MaxRecordBytes], and its data passes the redactor
 // unchanged: a record in which a secret pattern is still found is never sent. The caller redacts; this is the
-// last check before the data leaves the pod.
+// last check before the data leaves the pod. The redaction check runs inside the write's tries, each under one
+// try's timeout: a try whose check waited for the limit on the heap of the redactions running at once sends
+// nothing, and the next try checks again. When every try waited, the error is retryable and marked
+// [providers.ErrNotChecked], and nothing was sent.
 //
 // A write has a deadline of 30 seconds (or the caller's, if shorter), 10 seconds per try, and at most three
 // tries with exponential backoff and jitter. Only throttling (429), a timeout (408), transient server errors
 // (500, 502, 503, 504), a network failure and a token request that got no answer are retried, within the
 // deadline and honouring Retry-After; a refused certificate, a refused identity (401, 403), a missing
-// container (404), an existing blob and any other answer are final. A canceled context ends the write at
-// once. Redirects are never followed. Errors are fixed text with the kind from package providers, the status
+// container (404), an existing blob and any other answer are final. A 201 read after its try's own timeout
+// ended is still a success; any other answer read that late decides nothing: that try is retried like one that
+// timed out with no answer. A canceled context ends the write at once, whatever answer arrived. Redirects are
+// never followed. Errors are fixed text with the kind from package providers, the status
 // code and Blob Storage's short error code; they never carry the token, the URL, the record or a response body.
 //
 // This package and package azurekv are the only ones allowed to import the Azure SDK.

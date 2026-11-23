@@ -1,0 +1,39 @@
+# CodeRabbit, schema V3: https://docs.coderabbit.ai/reference/configuration-v3
+# A review is asked for once per pull request, with a comment "@coderabbitai review", at the commit that is
+# to merge. What to look for is in .coderabbit/instructions/, the checks in .coderabbit/pre-merge-checks/.
+# It never approves: nothing merges on an automated approval (AGENTS.md).
+version: 3
+language: en-GB
+reviews:
+  behavior:
+    profile: assertive
+    path_filters:
+      - "!config/crd/bases/**"
+      - "!config/rbac/**/role.yaml"
+      - "!dist/chart/templates/crd/**"
+      - "!docs/reference/api.md"
+      - "!**/zz_generated.*.go"
+      - "!**/testdata/**"
+      - "!go.sum"
+    auto_approvals:
+      enabled: false
+    merge_risk_instructions: >-
+      Higher risk: internal/redact, internal/policy, internal/gitops, the record store and the signer under
+      internal/providers, reconcile code under internal/controller, the types under api/, RBAC under
+      config/rbac, .github/ and AGENTS.md. Lower risk: docs outside docs/adr, tests only, chart values.
+  auto_review:
+    enabled: false
+    incremental_review: false
+  output:
+    summary:
+      placement: "off"
+    metadata:
+      labels:
+        mode: "off"
+      reviewers:
+        mode: "off"
+  tools:
+    golangci-lint:
+      enabled: false # CI runs it with the repository's own plugin build (make lint)
+fun:
+  tone_instructions: "Plain and short: the failing case and the line. No praise, no summary of the change."

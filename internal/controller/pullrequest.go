@@ -157,6 +157,10 @@ const (
 	// to a step of a stale plan's cleanup through a new installation of the GitHub App (#290), such as an
 	// installation ID with a typing mistake or one not granted the repository. It is tried again.
 	ReasonGitNotFound = "GitNotFound"
+	// ReasonGitUnauthorized (condition ReviewCheckNotFailed, #925): the Git host rejected the GitHub App's credentials
+	// (401): its private key is wrong or was replaced without the cluster's copy, or the App was deleted. Each look
+	// tries again and fails the same way until a person fixes the App or its key.
+	ReasonGitUnauthorized = "GitUnauthorized"
 	// ReasonGitFailed (conditions PullRequestNotClosed and PullRequestUnreadable, #797): a step of a stale plan's
 	// cleanup through a new installation of the GitHub App (#290) failed without a refusal or a 404: a server error,
 	// a timeout, a rate limit, an answer that settles nothing or an unclassified failure. It is tried again.
@@ -193,28 +197,31 @@ func (e *openElsewhereError) Is(target error) bool { return target == errOpenEls
 // openElsewhereText says that pull request cr of the request is open on another base, where a person moved it: its
 // number, and its base through hostBranchText when the provider answered a name (#892).
 func openElsewhereText(cr providers.ChangeRequest) string {
-	where := "another base branch"
-	if cr.BaseBranch != "" {
-		where += " (" + hostBranchText(cr.BaseBranch) + ")"
+	return fmt.Sprintf("pull request #%d of the request is open on %s, where it was moved", cr.Number, otherBaseText(cr))
+}
+
+// otherBaseText names the base of cr, a pull request on another base than the target branch: "another base branch",
+// with its name through hostBranchText when the provider answered one.
+func otherBaseText(cr providers.ChangeRequest) string {
+	if cr.BaseBranch == "" {
+		return "another base branch"
 	}
-	return fmt.Sprintf("pull request #%d of the request is open on %s, where it was moved", cr.Number, where)
+	return "another base branch (" + hostBranchText(cr.BaseBranch) + ")"
 }
 
 // mergedElsewhereText says that pull request cr of the request was merged into another base than the target branch,
 // where a person moved it: its number, and its base through hostBranchText when the provider answered a name (#892).
 func mergedElsewhereText(cr providers.ChangeRequest) string {
-	where := "another base branch"
-	if cr.BaseBranch != "" {
-		where += " (" + hostBranchText(cr.BaseBranch) + ")"
-	}
 	return fmt.Sprintf("pull request #%d of the request was merged into %s, where it was moved, not into the "+
-		"target branch", cr.Number, where)
+		"target branch", cr.Number, otherBaseText(cr))
 }
 
 // messageOpenElsewhere is the tail of every message that ends a stop on the request's own pull request open on
-// another base (#892): nothing is written to it there, and the lock stays while it is open.
-const messageOpenElsewhere = "; Shadewright writes nothing more to it there, and the target stays locked until it " +
-	"is closed or merged (condition TargetHeld)"
+// another base (#892): nothing is written to it there but a failed review check on its head (with reviewer hints on,
+// #925), and the lock stays while it is open.
+const messageOpenElsewhere = "; Shadewright writes nothing more to it there but a failed review check " +
+	"shadewright/review on its head (with reviewer hints on), and the target stays locked until it is closed or " +
+	"merged (condition TargetHeld)"
 
 // openElsewhereOf returns the pull request of err when err is or wraps an *openElsewhereError, the zero one otherwise.
 func openElsewhereOf(err error) providers.ChangeRequest {
@@ -317,7 +324,13 @@ func (r *RemediationRequestReconciler) planEntry(ctx context.Context,
 // installation makes the plan stale (the digest covers it), and the same URL is the same repository, so its pull
 // request can still be closed there; but every caller reads the pull request through that entry with this request's
 // marker (request UID and plan digest, invariant 5) before it fails the review check or closes it, and the provider
-// opened for it writes nothing else (openPlanEntry). Another URL is never accepted: closing a number elsewhere could
+// opened for it writes nothing else (openPlanEntry). One write is the exception: the failed check of a stopped
+// holder after any look that leaves the lock held, and of its stop for a pull request read gone (failStoppedCheck,
+// ADR-0046), follows no read that confirmed a pull request as the request's, and names the recorded head (from status,
+// or from a listing of the request's own branch when the same look adopts its lost pull request). The entry applies
+// only while stale holds (the stale mark, which needs a phase before the merge, or staleCleanupStopped, as planEntry
+// passes it): a stopped holder in any other phase or stop gets errRepositoryGone after an installation change, writes
+// nothing, and leaves the pass written before its stop in place (ADR-0046 limit (e)). Another URL is never accepted: closing a number elsewhere could
 // close someone else's pull request.
 func cleanupRepository(settings *remediationv1alpha1.RemediationSettings, rr *remediationv1alpha1.RemediationRequest,
 	stale bool) (repo remediationv1alpha1.GitRepository, reinstalled, ok bool) {
@@ -339,6 +352,10 @@ func (r *RemediationRequestReconciler) openPlanEntry(ctx context.Context, rr *re
 	// check run (#713): the one guard every step that writes to the plan's pull request passes (#199).
 	git, err := r.openGated(ctx, repo, func() bool { return reinstalled || staleMark(rr) != nil })
 	if providers.IsInvalidConfig(err) {
+		// Evidence that no read of the Git host can start for the request, as planEntry notes a repository that left
+		// the settings: a wait for a read past its end ends on it (endAfterLastRead).
+		r.gitRetries().noteUnstartable(client.ObjectKeyFromObject(rr),
+			unstartableReads[string(sourcemap.ReasonRepositoryUnusable)])
 		return nil, "", freshness.ErrRepositoryUnusable
 	}
 	if err != nil {
@@ -775,7 +792,7 @@ func (r *RemediationRequestReconciler) pullRequestStep(ctx context.Context, rr *
 // when it decided (adopted, stopped or a failed read to retry, err), false when the branch steps go on.
 func (r *RemediationRequestReconciler) adoptFound(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, v changeVerdict, freshFile []byte) (bool, error) {
-	switch adoptRule[v.state] {
+	switch v.rule().adopt {
 	case adoptRetry:
 		return true, v.err
 	case adoptIt:
@@ -819,12 +836,9 @@ const (
 	adoptMergedElsewhere
 )
 
-// adoptRule is pullRequestStep's rule per verdict: open, merged and closed adopt the pull request (record it, end
-// Merged, or stop as closed; closed on another base as well), gone goes on to the branch steps, unknown is retried.
-var adoptRule = map[changeState]adoptOutcome{
-	changeOpen: adoptIt, changeMerged: adoptIt, changeClosed: adoptIt, changeGone: adoptNone,
-	changeElsewhere: adoptElsewhere, changeMergedElsewhere: adoptMergedElsewhere, changeUnknown: adoptRetry,
-}
+// pullRequestStep's rule per verdict is the column adopt of verdictTable: open, merged and closed adopt the pull
+// request (record it, end Merged, or stop as closed; closed on another base as well), gone goes on to the branch
+// steps, unknown is retried.
 
 // checkPlanned checks a branch head whose file holds the planned value before its pull request is opened or
 // recorded (#524): data, the file at head, must be byte for byte the planned change of the target file the
@@ -905,19 +919,19 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 	// pull request succeeds and would hide who closed it. A look-up that fails, or finds another pull request,
 	// decides nothing; the close by number below still runs.
 	read := changeQuery{number: cr.Number}
-	switch v := r.changeOf(cleanCtx, git, rr, read); v.state {
-	case changeMerged, changeClosed:
+	switch v := r.changeOf(cleanCtx, git, rr, read); v.rule().refuseOpened {
+	case refuseEnded:
 		if ok, err := ended(v.pr); ok {
 			return err
 		}
-	case changeElsewhere:
+	case refuseMoved:
 		// A person moved it to another base since the open (#892): nothing is closed there.
 		return r.stopOpenElsewhere(ctx, rr, v.pr)
-	case changeMergedElsewhere:
+	case refuseMergedElsewhere:
 		// Moved to another base and merged there: nothing to close (the close to the target branch would be refused),
 		// and the request stops with the pull request named, as the watch stops it.
 		return r.stopMergedElsewhere(ctx, rr, v.pr)
-	case changeOpen, changeGone, changeUnknown:
+	case refuseClose:
 	}
 	err := git.CloseChangeRequest(cleanCtx, cr.Number)
 	err = boundErr(ctx, cleanCtx, "close the pull request", err)
@@ -929,7 +943,7 @@ func (r *RemediationRequestReconciler) refuseOpened(ctx context.Context, git pro
 		// A merge between the look-up and the close is a conflict, but so is any other 409 of the host: only a
 		// look-up that shows the pull request merged (or closed) decides; anything else is retried.
 		v := r.changeOf(cleanCtx, git, rr, read)
-		if v.state == changeMerged || v.state == changeClosed {
+		if v.rule().refuseOpened == refuseEnded {
 			if ok, err := ended(v.pr); ok {
 				return err
 			}
@@ -1149,7 +1163,21 @@ func checkMergedHead(ctx context.Context, git providers.GitProvider, rr *remedia
 		return &renderRefusal{reason: ReasonBranchDiverged, message: "The Git host reported no full merge commit " +
 			"ID for the merged pull request, so what the merge brought cannot be checked"}, nil
 	}
-	state, parent, err := git.CheckMerged(ctx, cr.HeadSHA, cr.MergeCommit, path)
+	// A replacement's branch carries the chain of the requests it took over, one commit each (chainDepth): each commit
+	// above the lowest must change only the target file over its own parent, and the lowest is judged against the
+	// target branch as it was before the merge (#786).
+	lowest := cr.HeadSHA
+	for range chainDepth(rr) - 1 {
+		state, parent, err := git.CheckCommit(ctx, lowest, path)
+		switch {
+		case err != nil:
+			return nil, freshness.WrapProvider("check a commit of the merged chain", err)
+		case state != providers.BranchOneChange || parent == "":
+			return diverged, nil
+		}
+		lowest = parent
+	}
+	state, parent, err := git.CheckMerged(ctx, lowest, cr.MergeCommit, path)
 	switch {
 	case err != nil:
 		return nil, freshness.WrapProvider("check what the merged pull request held", err)
@@ -1186,12 +1214,12 @@ func (r *RemediationRequestReconciler) mergedUnrecorded(ctx context.Context, rr 
 		return errors.Join(closeErr, err)
 	}
 	// openPlanRepository returned, so the source is recorded and its target branch is the repository's.
-	switch v := r.changeOf(ctx, git, rr, changeQuery{number: tried.number, marker: true}); v.state {
-	case changeMerged:
+	switch v := r.changeOf(ctx, git, rr, changeQuery{number: tried.number, marker: true}); v.rule().mergedUnrecorded {
+	case mergedUnrecordedMerged:
 		return r.endMerged(ctx, git, rr, v.pr)
-	case changeUnknown:
+	case mergedUnrecordedRetry:
 		return errors.Join(closeErr, v.err)
-	case changeOpen, changeClosed, changeGone, changeElsewhere, changeMergedElsewhere:
+	case mergedUnrecordedNothing:
 	}
 	return closeErr
 }
@@ -1368,6 +1396,10 @@ const (
 	// could not be opened (watchBranchChanged). Nothing else is done: the error is retried, since the full
 	// freshness check would end the request without knowing whether it was merged.
 	prBranchUnread
+	// prMergeRecordPending: merged with the commit of the other request of a handoff, which records the merge
+	// (awaitOtherRecord). Nothing else is done on the merged pull request: it is looked at again at the poll
+	// interval until that request records the merge or releases its lock.
+	prMergeRecordPending
 	// prOpenElsewhere: spec.cancel is set, and the request's own pull request, read by its number, is open on a base
 	// other than the target branch (and, after a change of the target branch, other than the one the settings name
 	// now), where a person moved it (changeElsewhere, watchStep, watchBranchChanged, #892). Only the cancel acts on it
@@ -1389,6 +1421,7 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) (prOutcome, error) {
 	stepCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
 	look, err := r.watchStep(stepCtx, rr)
+	err = awaitedMergeUnread(rr, err)
 	mergeSeen, timedOut := errors.Is(err, errMergeCheck), stepCtx.Err() != nil
 	branchUnread := errors.Is(err, errBranchChangedUnread)
 	// A read of a wait of its own (the content of a retargeted merge, the check at the merge) that ran out of the
@@ -1417,6 +1450,8 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 		return prConflicted, nil
 	case errors.Is(err, errMergeCommitPending):
 		return prMergeCommitPending, nil
+	case errors.Is(err, errMergeRecordPending):
+		return prMergeRecordPending, nil
 	}
 	comments := commentsNone
 	if ctx.Err() == nil {
@@ -1447,10 +1482,57 @@ func (r *RemediationRequestReconciler) watchPullRequest(ctx context.Context,
 	return prOpen, nil
 }
 
+// awaitedMergeUnread returns err, the error of watchStep, wrapped in errMergeCheck when rr's status records that the
+// merge of its pull request was seen and is not recorded, and the look failed before it could read that pull request
+// again (opening the repository, the read of the pull request): rr records a MergeCheck wait about its recorded pull
+// request (recordedMergeWait; a failed Git read is then one read of that wait, readOfMergeCheck), or it waits for the
+// other request of its handoff to record the merge (condition Approved False with ReasonMergeRecordPending, with
+// errOwnerCheckUnread). The merge was seen, so nothing after the look runs on the merged pull request (no full
+// freshness check, no check run, no close) until a look works (#879, #880, #786). Decided from the recorded state, as
+// the failed look read nothing. A pause of writes is left to the recheck, which waits while it lasts and writes
+// nothing (waitWhilePaused). The outcomes watchStep returns as sentinels, a look that saw the
+// merge, and settings that do not reach the repository (repositoryRead: nothing can be written there, and the path
+// after the look shows that in PullRequestUnreadable) are left as they are.
+func awaitedMergeUnread(rr *remediationv1alpha1.RemediationRequest, err error) error {
+	if err == nil || errors.Is(err, errMergeCheck) || errors.Is(err, errBranchChangedUnread) ||
+		errors.Is(err, errStopped) || errors.Is(err, errClosed) || errors.Is(err, errConflicted) ||
+		errors.Is(err, errMergeCommitPending) || errors.Is(err, errMergeRecordPending) || repositoryRead(rr, err) != nil {
+		return err
+	}
+	if w := recordedMergeWait(rr); w != nil && !errors.Is(err, freshness.ErrPaused) {
+		// The merge of the recorded pull request was seen and its wait recorded (awaitMergeCommit, a takeover of a
+		// merged pull request, checkAtMerge): the failed look is one read of that wait, which bounds it and records
+		// the merge from its entry at its end (endMergeWait), as a failed check at the merge (mergeCheckFailed).
+		p := w.PullRequest
+		cr := providers.ChangeRequest{Number: p.Number, URL: p.URL, HeadSHA: p.HeadSHA,
+			State: providers.ChangeRequestMerged, BaseBranch: string(p.BaseBranch), MergeCommit: p.MergeCommitSHA}
+		if _, kinded := errors.AsType[*kindedReadError](err); !kinded && gitReadFailure(err) {
+			err = readOfMergeCheck(cr, err)
+		}
+		return fmt.Errorf("%w: %w", errMergeCheck, err)
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonMergeRecordPending {
+		return err
+	}
+	return fmt.Errorf("%w: %w: %w", errMergeCheck, errOwnerCheckUnread, err)
+}
+
+// recordedMergeWait is rr's MergeCheck entry of status.gitWaits when it is about rr's recorded pull request (same
+// number): the merge of that pull request was seen and is not recorded yet. Nil otherwise. It reads the status only.
+func recordedMergeWait(rr *remediationv1alpha1.RemediationRequest) *remediationv1alpha1.GitWait {
+	w, pr := gitWait(rr, waitMergeCheck), rr.Status.PullRequest
+	if w == nil || w.PullRequest == nil || pr == nil || w.PullRequest.Number != pr.Number {
+		return nil
+	}
+	return w
+}
+
 // mergeSeenErr returns err, the error of a look that saw the pull request merged and did not record the merge,
 // so that it matches errMergeCheck. When the step's own deadline ended the look (timedOut) and the reconcile goes
 // on, it records the start of the wait for the merge first (startMergeWait, within a deadline of its own), so a
-// check that always runs out of time is bounded by the wait like any other failure (checkAtMerge). A failed write
+// check that always runs out of time is bounded by the wait like any other failure (checkAtMerge). A failed owner
+// check of a moved head (errOwnerCheckUnread) starts none: the merged head is not the recorded one. A failed write
 // is joined to the error; the next look tries again.
 func (r *RemediationRequestReconciler) mergeSeenErr(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	err error, timedOut bool) error {
@@ -1458,7 +1540,8 @@ func (r *RemediationRequestReconciler) mergeSeenErr(ctx context.Context, rr *rem
 		err = fmt.Errorf("%w: %w", errMergeCheck, err)
 	}
 	pr := rr.Status.PullRequest
-	if !timedOut || gitWait(rr, waitMergeCheck) != nil || ctx.Err() != nil || pr == nil || rr.Status.Source == nil {
+	if !timedOut || errors.Is(err, errOwnerCheckUnread) || gitWait(rr, waitMergeCheck) != nil || ctx.Err() != nil ||
+		pr == nil || rr.Status.Source == nil {
 		return err
 	}
 	waitCtx, cancel := bound(ctx, r.WriteTimeout, DefaultWriteTimeout)
@@ -1591,32 +1674,19 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	// Unknown is returned for a retry and ends nothing; gone is confirmed (changeOf). Through a new installation
 	// (#290) only a pull request with this request's marker is taken for the recorded one.
 	v := r.changeOf(ctx, git, rr, changeQuery{marker: reinstalled})
-	switch v.state {
-	case changeUnknown:
+	switch v.rule().watch {
+	case watchRetry:
 		return hintLook{}, v.err
-	case changeGone:
-		return hintLook{}, r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
-			"The recorded pull request cannot be found any more ("+v.gone+"); automation stopped")
-	case changeElsewhere:
-		return hintLook{}, r.stopOpenElsewhere(ctx, rr, v.pr)
-	case changeMergedElsewhere:
-		return hintLook{}, r.stopMergedElsewhere(ctx, rr, v.pr)
-	case changeOpen, changeMerged, changeClosed:
+	case watchGone:
+		return hintLook{}, r.stopGone(ctx, rr, v)
+	case watchMoved, watchMergedElsewhere:
+		return hintLook{}, r.watchOtherBase(ctx, rr, v)
+	case watchGoOn:
 	}
 	// changeOf read the recorded number and answers about it only, so cr is that pull request.
 	cr := v.pr
 	if cr.HeadSHA != rr.Status.PullRequest.HeadSHA {
-		if intent(rr) != nil {
-			// The replacement's commit is expected while the intent stands (handoff.go): the replacement records
-			// what happens to the pull request from here, and this request waits for it.
-			switch ok, err := r.expectedHandoffHead(ctx, git, rr, cr.HeadSHA); {
-			case err != nil:
-				return hintLook{}, err
-			case ok:
-				return hintLook{}, nil
-			}
-		}
-		return hintLook{}, r.headMoved(ctx, git, rr, cr)
+		return hintLook{}, r.lookMovedHead(ctx, git, rr, v)
 	}
 	switch cr.State {
 	case providers.ChangeRequestMerged:
@@ -1652,18 +1722,153 @@ func (r *RemediationRequestReconciler) watchStep(ctx context.Context, rr *remedi
 	return hintLook{}, nil
 }
 
+// lookMovedHead is watchStep's look at rr's recorded pull request, v.pr, found with a head that is not the one rr
+// recorded: the replacement's expected commit while the intent stands, a takeover the replacement recorded, the merge
+// of a head another request of the handoff records (mergedHeadOwner), or a head that moved (headMoved). A failed read
+// or write is returned for a retry; on a merged pull request it is a merge seen and not recorded (ownerCheckFailed),
+// so nothing after the look runs on it.
+func (r *RemediationRequestReconciler) lookMovedHead(ctx context.Context, git providers.GitProvider,
+	rr *remediationv1alpha1.RemediationRequest, v changeVerdict) error {
+	cr := v.pr
+	failed := func(err error) error { return ownerCheckFailed(cr, err) }
+	if intent(rr) != nil {
+		// The replacement's commit is expected while the intent stands (handoff.go): the replacement records
+		// what happens to the pull request from here, and this request waits for it.
+		switch ok, err := r.expectedHandoffHead(ctx, git, rr, cr.HeadSHA); {
+		case err != nil:
+			return failed(err)
+		case ok && cr.State == providers.ChangeRequestMerged:
+			// Merged with the replacement's expected commit: while the replacement may still record the merge, this
+			// request waits for that record without acting on the merged pull request as on an open one.
+			switch owner, err := r.predecessorMergeOwner(ctx, git, rr, cr.HeadSHA); {
+			case err != nil:
+				return failed(err)
+			case owner == ownerReplacementPending:
+				return r.awaitOtherRecord(ctx, rr, v, string(intent(rr).Name))
+			}
+			return nil
+		case ok:
+			return nil
+		}
+		// A takeover the replacement recorded (its from Done) is never aborted, also when its write here was
+		// lost: the pull request is the replacement's, which handles the head from here and ends this request
+		// HandedOff (step 5, supersedePredecessor). The replacement is read first (second round of #786).
+		switch took, err := r.replacementTookOver(ctx, rr); {
+		case err != nil:
+			return failed(err)
+		case took:
+			return nil
+		}
+		// Any other head ends the handoff: the abort is stored before this request writes anything to the pull
+		// request (its comment, headMoved), as nothing is written to Git while the intent stands (#786).
+		if err := r.abortStandingIntent(ctx, rr, "its pull request moved to a head that is not its replacement's commit"); err != nil {
+			return failed(err)
+		}
+	}
+	if cr.State == providers.ChangeRequestMerged && rr.Status.Handoff != nil && rr.Status.Handoff.To != nil {
+		switch owner, err := r.predecessorMergeOwner(ctx, git, rr, cr.HeadSHA); {
+		case err != nil:
+			return failed(err)
+		case owner == ownerReplacement:
+			return r.leaveReplacementMerge(ctx, rr, v, owner)
+		case owner == ownerReplacementPending:
+			// The replacement records the merge of its commit; this request ends once it holds its record of it, and
+			// writes nothing to the merged pull request meanwhile.
+			return r.awaitOtherRecord(ctx, rr, v, string(rr.Status.Handoff.To.Name))
+		}
+	}
+	if cr.State == providers.ChangeRequestMerged && tookOver(rr) {
+		// A person put the predecessor's recorded head back and merged it: the predecessor records that merge.
+		switch owner, err := r.replacementMergeOwner(ctx, rr, cr.HeadSHA); {
+		case err != nil:
+			return failed(err)
+		case owner == ownerPredecessorRecords:
+			return r.leavePredecessorMerge(ctx, rr, v)
+		case owner == ownerPredecessorPending:
+			return r.awaitOtherRecord(ctx, rr, v, string(rr.Status.Handoff.From.Name))
+		}
+	}
+	return r.headMoved(ctx, git, rr, cr)
+}
+
+// errOwnerCheckUnread marks a failed read or write of lookMovedHead's owner checks on a merged pull request: a merge
+// seen and not recorded, but of a head that is not the one the request recorded, so mergeSeenErr starts no wait for
+// the merge commit of the recorded head on it.
+var errOwnerCheckUnread = errors.New("the owner of the merge could not be read")
+
+// ownerCheckFailed returns err, a failed read or write of lookMovedHead's owner checks (the handoff's expected head,
+// the takeover, the abort of the intent, the owner of the merge) about cr: unchanged while cr is open, and on a merged
+// cr wrapped in errMergeCheck (with errOwnerCheckUnread), so that the caller runs nothing after the look on the merged
+// pull request (no full freshness check, no check run, no close) until a read works (#879). The error keeps what it
+// wraps: a failed Git read gets the visible poll, a Kubernetes error the error backoff (waitOrFail).
+func ownerCheckFailed(cr providers.ChangeRequest, err error) error {
+	if err == nil || cr.State != providers.ChangeRequestMerged || errors.Is(err, errMergeCheck) {
+		return err
+	}
+	return fmt.Errorf("%w: %w: %w", errMergeCheck, errOwnerCheckUnread, err)
+}
+
+// watchOtherBase is watchStep's answer to rr's recorded pull request read by its number on another base than the
+// target branch (v: changeElsewhere or changeMergedElsewhere, ADR-0043). A predecessor whose intent stands and whose
+// pull request carries another head than the one it recorded first reads its replacement from the API server, as
+// lookMovedHead does: once the replacement recorded the takeover the pull request is the replacement's, which stops on
+// it and ends this request HandedOff, so nothing is done here and the intent is not aborted (decision of 2026-11-19 on
+// #786, the live copies). Otherwise the request stops as ADR-0043 says (stopOpenElsewhere, stopMergedElsewhere). A
+// failed read is returned for a retry, with nothing written.
+func (r *RemediationRequestReconciler) watchOtherBase(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	v changeVerdict) error {
+	if intent(rr) != nil && v.pr.HeadSHA != rr.Status.PullRequest.HeadSHA {
+		switch took, err := r.replacementTookOver(ctx, rr); {
+		case err != nil:
+			return err
+		case took:
+			return nil
+		}
+	}
+	if v.rule().watch == watchMergedElsewhere {
+		return r.stopMergedElsewhere(ctx, rr, v.pr)
+	}
+	return r.stopOpenElsewhere(ctx, rr, v.pr)
+}
+
 // stopOpenElsewhere is the watch's answer to the request's own pull request, cr, read by its number open on another
 // base than the target branch, where a person moved it (#892). A cancelled request ends Cancelled saying so
 // (errOpenElsewhere, prOpenElsewhere, cancelOpen), whether or not its target branch changed. Any other request stops
-// in NeedsIntervention with ChangeRequestOnOtherBase. Nothing is written to the pull request, and the lock stays
-// while it is open (lookHeld, TargetHeld).
+// in NeedsIntervention with ChangeRequestOnOtherBase. Nothing but the failed review check is written to the pull request, and the lock stays
+// while it is open (lookHeld, TargetHeld). In the same step the review check of its head is failed (failStoppedCheck,
+// #925): moved back to the target branch, the pull request cannot merge on a check written before the stop. A failed
+// write of the check does not hold the stop: the stop's status write carries condition ReviewCheckNotFailed, which
+// says why (failStoppedCheck), and the stopped holder's next look tries it again. A cancelled reconcile and a failure
+// of the Kubernetes API are returned, for the error backoff, before anything is written.
 func (r *RemediationRequestReconciler) stopOpenElsewhere(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest) error {
 	if cancelRequested(rr) {
 		return errOpenElsewhere
 	}
+	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestOnOtherBase); ctx.Err() != nil ||
+		isClusterError(err) {
+		return err
+	}
 	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestOnOtherBase,
 		"The recorded "+openElsewhereText(cr)+"; automation stopped"+messageOpenElsewhere)
+}
+
+// stopGone is the watch's answer to the request's own pull request read gone, v: the request stops in
+// NeedsIntervention with ChangeRequestGone, cancelled or not. In the same step the review check of the recorded head
+// is failed (failStoppedCheck, decision of 2026-11-20 on #925 extending the replacement of point 2 to the stop,
+// ADR-0045): the head is the request's own commit, and another pull request from its branch could merge it on a pass
+// written before the stop. Through a new installation of the plan's repository (only while the stale mark holds) the same check is written on
+// the same recorded head (decision of 2026-11-21 on #925, ADR-0046). A failed write does not hold the stop: its status write carries condition
+// ReviewCheckNotFailed, and a look of the stopped holder that keeps the lock tries it again. A cancelled reconcile and
+// a failure of the Kubernetes API are returned, for the error backoff, before anything is written.
+func (r *RemediationRequestReconciler) stopGone(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	v changeVerdict) error {
+	if err := r.failStoppedCheck(ctx, rr, ReasonChangeRequestGone); ctx.Err() != nil ||
+		isClusterError(err) {
+		return err
+	}
+	return r.stop(ctx, rr, remediationv1alpha1.PhaseNeedsIntervention, ReasonChangeRequestGone,
+		"The recorded pull request cannot be found any more ("+v.gone+"); automation stopped")
 }
 
 // stopMergedElsewhere is the watch's and the adoption's answer to the request's own pull request, cr, merged into a
@@ -1863,7 +2068,7 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 		Message:            message,
 		ObservedGeneration: rr.Generation,
 	})
-	r.settleRecorded(rr)
+	r.settleRecorded(ctx, rr)
 	// A wait the stop ends (the deadline's, a merge wait once the merge is recorded) goes in the same write.
 	dropEnded(rr, r.now())
 	if err := r.Status().Update(ctx, rr); err != nil {
@@ -1977,7 +2182,7 @@ func (r *RemediationRequestReconciler) cleanUpExpired(ctx context.Context, rr *r
 	case gitReadFailure(err) && !expiredCleanupOver(rr, r.now()):
 		// A failed read of the cleanup: a visible retry at the pace of a stopped holder's looks. Past the cutoff it is
 		// the one more close that failed, which ends the cleanup (expiredCloseFailed).
-		return r.heldUnsettled(ctx, rr, changeVerdict{state: changeUnknown}, err, false)
+		return r.heldUnsettled(ctx, rr, unknownChange(err), err, false)
 	default:
 		// A close the Git host failed to answer (a 5xx, a rate limit, a conflict, a token it does not give): retried
 		// visibly and within a bound (expiredCloseFailed).
@@ -2270,9 +2475,78 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 	return err
 }
 
+// beginFinalize is the first step of finalize: it marks the deletion and ends the Git waits of a handoff's recovery
+// (#786: nothing recovers the handoff any more) in one status write, before the close, since the limits read this
+// request, and count it against the cap, until the finalizer is gone (breakercounts.go). Then a replacement that
+// recorded the takeover and the merge of its pull request ends its predecessor HandedOff (step 5 of a handoff), so the
+// predecessor never records that merge a second time once this request is gone (#786). One that recorded no merge
+// leaves its predecessor as it is: a merge of its commit it did not record is the predecessor's to record as a
+// foreign change once this request is gone (decision 2 of the model result of 2026-11-18, second round). The other way
+// round, a predecessor that recorded the merge of its own head after its replacement took the pull request over ends
+// that replacement MergedForPredecessor first (supersedeReplacementAfterMerge), so the replacement never records that
+// merge a second time once this request is gone. done is true
+// when finalize returns res and err as they are: a failed write, a pause, or a failure of that step.
+func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	reconcile.Result, bool, error) {
+	marked := markDeleting(rr)
+	if removeInapplicable(rr) {
+		gitWaitSummary(rr, r.now())
+		marked = true
+	}
+	// The deletion ends the looks of a stopped request, so nothing tries its failed review check again: the close
+	// below takes over, and says so with its own conditions when it fails (#925). A check written before the stop may
+	// stay the latest on the head, also for an open pull request from the branch the close does not take (#984, ADR-0046
+	// limit (a)): whenever condition ReviewCheckNotFailed was set or the recorded head is not known to show the failed
+	// check (checkMayStay), that is said in the log at Info once the first write of the deletion went through, and
+	// once per deletion (deletionNoted of the reconciler), not on every pass of the finalizer.
+	var ended *metav1.Condition
+	if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed); c != nil {
+		note := *c
+		ended = &note
+	} else if r.checkMayStay(rr) {
+		ended = &metav1.Condition{Reason: "NotRecordedStale"}
+	}
+	if endCheckNote(rr) {
+		marked = true
+	}
+	if marked {
+		if err := r.Status().Update(ctx, rr); err != nil {
+			return reconcile.Result{}, true, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace,
+				rr.Name, err)
+		}
+	}
+	if ended != nil {
+		if uid, seen := r.deletionNoted.LoadOrStore(client.ObjectKeyFromObject(rr), rr.UID); !seen || uid != rr.UID {
+			r.deletionNoted.Store(client.ObjectKeyFromObject(rr), rr.UID)
+			logCheckNoteEnd(ctx, rr, ended, "the request is being deleted")
+		}
+	}
+	if err := r.supersedeReplacementAfterMerge(ctx, rr); err != nil {
+		if errors.Is(err, freshness.ErrPaused) {
+			res, err := r.waitWhilePaused(ctx, rr)
+			return res, true, err
+		}
+		return reconcile.Result{}, true, err
+	}
+	if !tookOver(rr) || !r.ReviewerHints || !mergeRecorded(rr) {
+		return reconcile.Result{}, false, nil
+	}
+	switch err := r.supersedePredecessor(ctx, rr); {
+	case errors.Is(err, freshness.ErrPaused):
+		res, err := r.waitWhilePaused(ctx, rr)
+		return res, true, err
+	case err != nil:
+		return reconcile.Result{}, true, err
+	}
+	return reconcile.Result{}, false, nil
+}
+
 // finalize closes the request's pull request when the request is deleted, then removes the finalizer. It
-// never touches the cluster. Settings that cannot reach the plan's repository any more do not block the
-// deletion: there is nothing this executor can close there. A request that stopped (NeedsIntervention,
+// never touches the cluster. A repository that left the settings does not block the deletion: there is nothing this
+// executor can close there. One whose entry names another target branch now is closed on the branch the plan recorded
+// (closeOwn). An entry that cannot be used (a bad key, client ID or installation) is a failure of the cleanup within
+// the bound of CleanupFailing, since the pull request may be open and the entry may be fixed (#786, third round). A
+// request that stopped (NeedsIntervention,
 // Expired) may still have an open pull request of its own, so it is closed too, and so is the one of any
 // request that holds the lock on its target (status.holdsTarget), whatever its phase, except a merged request
 // that holds it only while its outcome is verified (heldForVerification, #719); a merged one refuses the
@@ -2291,16 +2565,8 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		return reconcile.Result{}, nil
 	}
-	waits := len(rr.Status.GitWaits)
-	// The waits for a read do not apply to a request being deleted (waitKind.applies, #878): removed in the same write,
-	// so the status does not say it waits for a merge while the cleanup is retried.
-	dropEnded(rr, r.now())
-	if marked := markDeleting(rr); marked || len(rr.Status.GitWaits) != waits {
-		// Before the close below: the limits read this request, and count it against the cap, until the
-		// finalizer is gone (breakercounts.go).
-		if err := r.Status().Update(ctx, rr); err != nil {
-			return reconcile.Result{}, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
-		}
+	if res, done, err := r.beginFinalize(ctx, rr); done {
+		return res, err
 	}
 	closes := r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
 		(closeOnDelete(rr.Status.Phase) ||
@@ -2328,6 +2594,7 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		defer freeSlot()
 	}
 	var left *cleanupRelease
+	var unreachable error
 	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err := r.closeOnDeleteOf(cleanCtx, rr)
@@ -2343,11 +2610,15 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 				return res, err
 			}
 			left = release
-		case err == nil, errors.Is(err, errRepositoryGone), errors.Is(err, errTargetBranchChanged),
-			errors.Is(err, freshness.ErrRepositoryUnusable), isMergedUnrecorded(err),
-			errors.Is(err, errChangeRequestNotOurs):
-			// Closed, nothing reachable to close, the open ones closed and a merged one read as merged, or not
-			// ours to close. A close refused as a conflict is not a merge until a read says so: it is retried.
+		case cleanupDone(err):
+			// Closed, nothing reachable to close (a repository that left the settings, said by leftUnreachable below,
+			// #925), the open ones closed and a merged one read as merged, or not ours to close. A close refused as a
+			// conflict is not a merge until a read says so: it is retried. An entry that cannot be used
+			// (freshness.ErrRepositoryUnusable) and a missing RemediationSettings object (errNoSettings) are not among
+			// them: the repository may still be reached once the entry is fixed or the object is back, and its pull
+			// request may be open, so each is a failure of the cleanup, retried within the bound of CleanupFailing like
+			// any other (#786, third round; #925).
+			unreachable = unreachableCleanup(err)
 			if err := r.clearCleanupConditions(ctx, rr); err != nil {
 				return reconcile.Result{}, err
 			}
@@ -2372,11 +2643,9 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		}
 		return reconcile.Result{}, err
 	}
-	if left != nil {
-		// Before the patch, so a patch that finds the request gone, or a restart right after it, loses neither the
-		// Event nor the log line. A failed patch is retried and reports it again: at least once, maybe twice.
-		r.reportRelease(ctx, rr, *left)
-	}
+	// Before the patch, so a patch that finds the request gone, or a restart right after it, loses neither the Event
+	// nor the log line. A failed patch is retried and reports it again: at least once, maybe twice.
+	r.reportLetGo(ctx, rr, left, unreachable)
 	base := rr.DeepCopy()
 	controllerutil.RemoveFinalizer(rr, FinalizerName)
 	if err := r.Patch(ctx, rr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -2384,6 +2653,38 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	return reconcile.Result{}, nil
+}
+
+// reportLetGo reports a deleted request the finalizer lets go without a finished cleanup: left, when a bound of the
+// cleanup released it (reportRelease), or unreachable, the answer of the close when the settings object is missing or
+// its repository has no usable entry in it (leftUnreachable). It does nothing for a cleanup that finished.
+func (r *RemediationRequestReconciler) reportLetGo(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	left *cleanupRelease, unreachable error) {
+	switch {
+	case left != nil:
+		r.reportRelease(ctx, rr, *left)
+	case unreachable != nil:
+		r.leftUnreachable(ctx, rr, unreachable)
+	}
+}
+
+// unreachableCleanup returns err, from the finalizer's close (closeOnDeleteOf), when it says the repository of the
+// plan left the settings (errRepositoryGone), nil otherwise. A missing settings object is not such an answer: it is a
+// failure of the cleanup (cleanupDone).
+func unreachableCleanup(err error) error {
+	if errors.Is(err, errRepositoryGone) && !errors.Is(err, errNoSettings) {
+		return err
+	}
+	return nil
+}
+
+// cleanupDone reports whether err, from the finalizer's close (closeOnDeleteOf), lets the finalizer go: nil, or an
+// answer that leaves nothing to close or nothing reachable (the plan's repository gone from the settings, a merge read
+// as merged, a pull request not the request's). An entry that cannot be used and a missing settings object are
+// failures of the cleanup, retried within its bound (cleanupFailedOnDelete).
+func cleanupDone(err error) bool {
+	return err == nil || unreachableCleanup(err) != nil || isMergedUnrecorded(err) ||
+		errors.Is(err, errChangeRequestNotOurs)
 }
 
 // closeOnDelete reports whether deleting a request in phase p closes its pull request: before merge, and
@@ -2539,7 +2840,8 @@ func (r *RemediationRequestReconciler) ownsMarker(ctx context.Context, body stri
 		}
 		from := cur.Status.Handoff.From
 		pred := &remediationv1alpha1.RemediationRequest{}
-		err := r.Get(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred)
+		// Read from the API server: the answer decides whether a close may be written (decision of 2026-11-19 on #786).
+		err := r.getLive(ctx, types.NamespacedName{Namespace: rr.Namespace, Name: string(from.Name)}, pred)
 		if apierrors.IsNotFound(err) {
 			logf.FromContext(ctx).V(1).Info("Stopped at a missing request of the supersede chain",
 				"remediationRequest", client.ObjectKeyFromObject(rr), "missing", from.Name)
@@ -2566,10 +2868,17 @@ func (r *RemediationRequestReconciler) ownsMarker(ctx context.Context, body stri
 
 // change describes the action in words: the field, the previous and the planned value.
 func change(rr *remediationv1alpha1.RemediationRequest) (what, previous, desired string) {
+	return changeWith(rr, func(s string) string { return s })
+}
+
+// changeWith is change with value applied to the untrusted part of the description (the container name) before
+// it is joined to the fixed words, so a value withheld by the body's redaction leaves "the memory limit of
+// container" in place.
+func changeWith(rr *remediationv1alpha1.RemediationRequest, value func(string) string) (what, previous, desired string) {
 	a := rr.Spec.Action
 	switch {
 	case a.SetContainerMemoryLimit != nil:
-		return "the memory limit of container " + a.SetContainerMemoryLimit.Container,
+		return "the memory limit of container " + value(a.SetContainerMemoryLimit.Container),
 			a.SetContainerMemoryLimit.Previous.String(), a.SetContainerMemoryLimit.Desired.String()
 	case a.AdjustKedaMaxReplicas != nil:
 		return "the maximum replica count", fmt.Sprint(a.AdjustKedaMaxReplicas.PreviousValue),
@@ -2653,74 +2962,122 @@ func (r *RemediationRequestReconciler) revertedRequest(ctx context.Context,
 }
 
 // pullRequestBody is the evidence, scope, expected effect, risk and rollback plan, and the marker. Every value
-// comes from validated fields of the request and its status; the whole body is redacted once more, so nothing
-// that looks like a secret reaches the Git host. The exceptions are incident, the Incident name as
+// comes from validated fields of the request and its status, and each is redacted on its own before the body is
+// composed (bodyText, #963), so nothing that looks like a secret reaches the Git host, and a value redaction
+// withholds whole stands as withheldValue in its own place while the operator's fixed text (the headings, Risk,
+// Rollback, Approval required and the rest) stays. The exceptions are incident, the Incident name as
 // verifiedIncidentName returned it, and the "namespace/name" of the request and of the request it reverts as
-// keptRequestName returns them: when not empty, their whole occurrences are kept (redact.StringKeeping), because
-// the names the collector and the analyzer derive are long hex runs the redactor takes for a token.
+// keptRequestName returns them: when not empty, their whole occurrences are kept (redact.StringKeeping, per
+// value), because the names the collector and the analyzer derive are long hex runs the redactor takes for a
+// token.
 //
 // For a revert, failed is the request spec.reverts names as revertedRequest read it (nil when it is gone or has
 // another UID). The body then says what it reverts: that request, its pull request and the reason it failed, all
 // from that request's status as the executor wrote it, and no model text.
 func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string,
 	failed *remediationv1alpha1.RemediationRequest) string {
-	what, previous, desired := change(rr)
+	return composeBody(rr, incident, failed, redactBodyValue)
+}
+
+// redactBodyValue redacts one value of a pull request body with the built-in rules, keeping whole occurrences of
+// keep. ok false means the redactor withheld the value whole (its work budget ran out, #873): it says so with its
+// flag (redact.StringKeepingChecked), never by a comparison of the text with a marker.
+func redactBodyValue(s string, keep ...string) (out string, ok bool) {
+	return redact.StringKeepingChecked(s, keep...)
+}
+
+// withheldValue is the text a withheld value of the body stands as, the redactor's fixed marker for a withheld
+// entry.
+const withheldValue = redact.Withheld
+
+// bodyWithheld is the paragraph a body with a withheld value carries before its marker. It is fixed text: it
+// names no value.
+const bodyWithheld = "**Withheld:** redaction withheld at least one value of this request whole, shown as `" +
+	withheldValue + "`. The rest of this text is complete. Each value comes from the spec or status of the " +
+	"RemediationRequest (for a revert, also of the request it reverts) in the cluster.\n\n"
+
+// bodyText redacts the values of one pull request body, each on its own, and records whether any was withheld.
+type bodyText struct {
+	redact   func(s string, keep ...string) (string, bool)
+	keep     []string
+	withheld bool
+}
+
+// v returns s redacted on its own, or the redactor's marker when the redactor withheld it. A "namespace/name"
+// is one value: both are names the schema allows (no key, separator or quote can join them into a key and its
+// value), and the kept "namespace/name" of keptRequestName is a whole occurrence only as the pair.
+func (t *bodyText) v(s string) string {
+	out, ok := t.redact(s, t.keep...)
+	if !ok {
+		t.withheld = true
+		return withheldValue
+	}
+	return out
+}
+
+// composeBody is pullRequestBody with the redaction of one value given: every value from the request, the
+// request it reverts or the cluster goes through t.v, and only the operator's own text is written as it is.
+func composeBody(rr *remediationv1alpha1.RemediationRequest, incident string,
+	failed *remediationv1alpha1.RemediationRequest, redactValue func(s string, keep ...string) (string, bool)) string {
 	t, src := rr.Spec.TargetRef, rr.Status.Source
 	revert := remediationv1alpha1.IsRevert(rr)
 	approval := "yes"
 	if rr.Status.EffectiveApprovalRequired != nil && !*rr.Status.EffectiveApprovalRequired {
 		approval = "no (policy allows automation; auto-merge is not available yet, so a person merges)"
 	}
+	keep := []string{incident, keptRequestName(rr), keptName(failed)}
+	x := &bodyText{redact: redactValue, keep: keep}
+	what, previous, desired := changeWith(rr, x.v)
 	var b strings.Builder
 	if revert {
-		fmt.Fprintf(&b, "Shadewright proposes to revert a failed change for incident `%s`.\n\n", rr.Spec.IncidentRef.Name)
-		writeReverts(&b, rr, failed)
+		fmt.Fprintf(&b, "Shadewright proposes to revert a failed change for incident `%s`.\n\n",
+			x.v(rr.Spec.IncidentRef.Name))
+		writeReverts(&b, x, rr, failed)
 	} else {
-		fmt.Fprintf(&b, "Shadewright proposes one typed change for incident `%s`.\n\n", rr.Spec.IncidentRef.Name)
+		fmt.Fprintf(&b, "Shadewright proposes one typed change for incident `%s`.\n\n", x.v(rr.Spec.IncidentRef.Name))
 	}
-	fmt.Fprintf(&b, "**Change:** %s (`%s`) of %s `%s/%s`, from `%s` to `%s`.\n\n", what, rr.Spec.Action.Type,
-		t.Kind, t.Namespace, t.Name, previous, desired)
+	fmt.Fprintf(&b, "**Change:** %s (`%s`) of %s `%s`, from `%s` to `%s`.\n\n", what, x.v(string(rr.Spec.Action.Type)),
+		x.v(t.Kind), x.v(t.Namespace+"/"+t.Name), x.v(previous), x.v(desired))
 	fmt.Fprintf(&b, "**Scope:** one value in `%s` on `%s`. Nothing else in this pull request is part of the plan.\n\n",
-		src.Path, src.TargetBranch)
-	fmt.Fprintf(&b, "**Evidence:** RemediationRequest `%s/%s` (UID `%s`), incident `%s`, policy `%s` "+
+		x.v(string(src.Path)), x.v(string(src.TargetBranch)))
+	fmt.Fprintf(&b, "**Evidence:** RemediationRequest `%s` (UID `%s`), incident `%s`, policy `%s` "+
 		"(decision `WithinApprovedBounds`), plan digest `%s`.\n\n",
-		rr.Namespace, rr.Name, rr.UID, rr.Spec.IncidentRef.Name, rr.Status.PolicyRevision, rr.Status.PlanDigest)
+		x.v(rr.Namespace+"/"+rr.Name), x.v(string(rr.UID)), x.v(rr.Spec.IncidentRef.Name), x.v(rr.Status.PolicyRevision),
+		x.v(rr.Status.PlanDigest))
 	switch size := stepSize(rr); {
 	case size == "":
 	case revert:
 		fmt.Fprintf(&b, "**Size:** %s, within policy `%s`: the step of the failed request, undone. No model chose "+
-			"it.\n\n", size, rr.Spec.PolicyRef)
+			"it.\n\n", x.v(size), x.v(string(rr.Spec.PolicyRef)))
 	default:
 		fmt.Fprintf(&b, "**Size:** %s, within policy `%s`. The policy bounds the step; it does not say the step is "+
 			"the right size. The diagnosis, with the model's unverified reason for the size, is in the analysis record "+
 			"and the analyzer's log for this request's name, not in this pull request (ADR-0026): check it before "+
-			"approving.\n\n", size, rr.Spec.PolicyRef)
+			"approving.\n\n", x.v(size), x.v(string(rr.Spec.PolicyRef)))
 	}
-	fmt.Fprintf(&b, "**Expected effect:** once merged and delivered, %s is `%s`.\n\n", what, desired)
+	fmt.Fprintf(&b, "**Expected effect:** once merged and delivered, %s is `%s`.\n\n", what, x.v(desired))
 	b.WriteString("**Risk:** the change is bounded by the policy's limits and touches one field. " +
 		"Any other push to this branch stops the automation.\n\n")
 	if revert {
 		fmt.Fprintf(&b, "**Rollback:** do not revert this pull request: that applies `%s` again, the value of the "+
-			"failed request. To keep the current value, close this pull request without merging it.\n\n", previous)
+			"failed request. To keep the current value, close this pull request without merging it.\n\n", x.v(previous))
 	} else {
 		b.WriteString("**Rollback:** revert this pull request; the GitOps controller applies the previous value.\n\n")
 	}
 	fmt.Fprintf(&b, "**Approval required:** %s.\n\n", approval)
-	keep := []string{incident, keptRequestName(rr)}
-	if failed != nil {
-		keep = append(keep, keptRequestName(failed))
+	if x.withheld {
+		b.WriteString(bodyWithheld)
 	}
-	out := redact.StringKeeping(b.String(), keep...)
-	// The marker is added after redaction: it holds only the UID and the digest, and must stay exact.
-	return out + marker(rr) + "\n"
+	// The marker is written as it is: it holds only the UID and the digest, and must stay exact.
+	return b.String() + marker(rr) + "\n"
 }
 
 // writeReverts writes the paragraph of a revert's body that names the request it reverts: from failed, the
 // request as read back with the UID in spec.reverts, its pull request and the reason of its Verified condition;
 // without it, only the name and UID in spec.reverts and that the rest is not shown.
-func writeReverts(b *strings.Builder, rr, failed *remediationv1alpha1.RemediationRequest) {
+func writeReverts(b *strings.Builder, x *bodyText, rr, failed *remediationv1alpha1.RemediationRequest) {
 	ref := rr.Spec.Reverts
-	fmt.Fprintf(b, "**Reverts:** RemediationRequest `%s/%s` (UID `%s`)", rr.Namespace, ref.Name, ref.UID)
+	fmt.Fprintf(b, "**Reverts:** RemediationRequest `%s` (UID `%s`)", x.v(rr.Namespace+"/"+ref.Name), x.v(string(ref.UID)))
 	if failed == nil {
 		b.WriteString(". It is no longer there with that UID, so its pull request and the reason it failed are not " +
 			"shown.\n\n")
@@ -2729,18 +3086,26 @@ func writeReverts(b *strings.Builder, rr, failed *remediationv1alpha1.Remediatio
 	if pr := failed.Status.PullRequest; pr != nil && pr.Number > 0 {
 		// The number only: the code host links it. status.pullRequest.url is status text that is checked against
 		// nothing here, so it does not go into a body a reviewer reads.
-		fmt.Fprintf(b, ", pull request #%d", pr.Number)
+		fmt.Fprintf(b, ", pull request #%s", x.v(fmt.Sprint(pr.Number)))
 	} else {
 		b.WriteString(", no pull request recorded")
 	}
 	verified := meta.FindStatusCondition(failed.Status.Conditions, remediationv1alpha1.ConditionVerified)
 	if failed.Status.Phase == remediationv1alpha1.PhaseFailed && verified != nil &&
 		verified.Status == metav1.ConditionFalse && verified.Reason != "" {
-		fmt.Fprintf(b, ". It ended `Failed` with the reason `%s`", verified.Reason)
+		fmt.Fprintf(b, ". It ended `Failed` with the reason `%s`", x.v(verified.Reason))
 	} else {
 		b.WriteString(". Its status no longer shows why it failed")
 	}
 	b.WriteString(". This pull request sets the value it changed back.\n\n")
+}
+
+// keptName is keptRequestName of failed, or "" when there is none.
+func keptName(failed *remediationv1alpha1.RemediationRequest) string {
+	if failed == nil {
+		return ""
+	}
+	return keptRequestName(failed)
 }
 
 // keptRequestName returns the request's "namespace/name", as the body shows it, when the body may show it

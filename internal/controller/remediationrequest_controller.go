@@ -203,6 +203,15 @@ type RemediationRequestReconciler struct {
 	// dropped with checked.
 	reviewCommentsBehind sync.Map
 	reviewCheckConflicts sync.Map
+	// stoppedCheckLooks holds, per request name, the looks in a row of a stopped holder on one head that could not
+	// tell whether its failed review check is still the latest (stoppedCheckUnread, #925), so they raise one Warning
+	// Event. Memory only, dropped with checked.
+	stoppedCheckLooks sync.Map
+	// deletionNoted holds, per request name, the UID of a request being deleted whose first write of the deletion
+	// said in the log that its failed review check may not be the latest on its head (beginFinalize, #925), so the
+	// line comes once per deletion, not on every pass of the finalizer. Memory only and not dropped by forget, which
+	// runs on every pass of a deletion; dropped when the request is gone. After a restart the line comes once more.
+	deletionNoted sync.Map
 	// rewritten holds, per request name, the answer of the Git host to the rewrite after a handoff whose status
 	// write has not gone through (followHandoff), so a retry records it without sending the rewrite again.
 	// Memory only, dropped with checked: after a restart the rewrite is sent again, which is idempotent.
@@ -221,6 +230,10 @@ type RemediationRequestReconciler struct {
 	process string
 	// renderCheck is the render check of checkRender; nil is semdiff.Check. Tests replace it.
 	renderCheck func(context.Context, semdiff.Input) (semdiff.Result, error)
+	// stopExceptionTaken is called when a stop exception of ADR-0046 limit (c) takes a stopped holder's look over
+	// (tookStopException); nil outside the Git waits model, which waits for the next look before it asks for the
+	// failed review check (property "stopped holder").
+	stopExceptionTaken func()
 	// reportCounters holds, per request in Verifying, the executor's memory of its VerificationReport's sample
 	// counter (clearing.go). Memory only: after a restart success waits one more check. Dropped when the request
 	// ends, is being deleted or is gone, not with forget, which runs on every reconcile of a request after the
@@ -229,6 +242,10 @@ type RemediationRequestReconciler struct {
 	// unwrittenResets holds, per request in Verifying, a reset of the executor's window whose status write was lost
 	// (clearing.go), applied again by the next check. Memory only; dropped like reportCounters.
 	unwrittenResets unwrittenResets
+	// ownWindows holds, per request in Verifying, the starts of the executor's windows this process's checks opened
+	// (at most 16) and what it read of the report when it recorded its restart (clearing.go). Memory only; dropped
+	// like reportCounters.
+	ownWindows ownWindows
 	// mergeReadings holds, per request after the merge, the reading of its Incident's count at the merge that
 	// this process took (incidentcount.go), the only one to which it adds a reading at the applied time. Memory
 	// only: after a restart or a change of leader no reading at the applied time is taken. Dropped like
@@ -255,8 +272,8 @@ type RemediationRequestReconciler struct {
 	// field the executor sent (crdoutdated.go, #866): later status writes of the request in that reconcile are
 	// refused with it, and Reconcile returns it. Dropped at the start and the end of each reconcile.
 	outdatedCRD sync.Map
-	// since is when this process began reconciling, on its clock (clearing.go): no window counts time before
-	// it. Memory only, set once.
+	// since is when this process began reconciling, on its clock (clearing.go): the time of the reset that records
+	// the restart (restarted). Memory only, set once.
 	since reconcilingSince
 }
 
@@ -270,6 +287,7 @@ func (r *RemediationRequestReconciler) forget(key types.NamespacedName) {
 	r.reviewCheckFailures.Delete(key)
 	r.reviewCommentsBehind.Delete(key)
 	r.reviewCheckConflicts.Delete(key)
+	r.stoppedCheckLooks.Delete(key)
 	r.rewritten.Delete(key)
 	r.replyAttempts.Delete(key)
 	r.renderEnds.forget(key)
@@ -430,7 +448,9 @@ func (r *RemediationRequestReconciler) reader() client.Reader {
 	return r.Client
 }
 
-// getLive reads a cluster-scoped authorizing object (the policy or the settings) straight from the API server.
+// getLive reads an object straight from the API server: a cluster-scoped authorizing object (the policy or the
+// settings), the request a reconcile works on, and the other request of its handoff wherever a Git write or a wait
+// is decided on it.
 // The cache is not used: a cached copy can still hold a deleted policy, an older approval mode or a repository
 // removed from the settings, and the request's resourceVersion does not change when either of them does, so a
 // stale copy would authorize a request the live configuration refuses. A policy created together with the
@@ -500,8 +520,17 @@ func (r *RemediationRequestReconciler) Reconcile(ctx context.Context, req ctrl.R
 			"remediationRequest", req.NamespacedName, "error", err.Error())
 		return ctrl.Result{}, nil
 	}
+	if res.RequeueAfter > 0 && res.RequeueAfter < requeueFloor {
+		// No path asks to run again hot: an end that passed while the reads ran (boundPassedWait), or what is left
+		// of a bound, is looked at no sooner than the floor.
+		res.RequeueAfter = requeueFloor
+	}
 	return res, err
 }
+
+// requeueFloor is the shortest time to run again a reconcile of a request returns (Reconcile): a time computed from
+// an end that has passed, or that lies a moment ahead, is raised to it, so no request is reconciled in a hot loop.
+const requeueFloor = time.Second
 
 // checkFailed handles err, a policy check that did not decide: a failed read of the source mapping or the build tree
 // is a visible retry (the check has no deadline yet); a remote system that asked for a delay (Retry-After) gets it,
@@ -583,17 +612,27 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 
 	rr := &remediationv1alpha1.RemediationRequest{}
 	defer func() { res = r.lookAgainWhileHeld(rr, res, err) }()
-	if err := r.Get(ctx, req.NamespacedName, rr); err != nil {
+	// Runs before the one above: a predecessor that holds the record of its own merge ends its replacement in the
+	// same pass (endReplacementAfterRecord, decision of 2026-11-20 on #870).
+	defer r.endReplacementAfterRecord(ctx, rr, &res, &err)
+	// The request is read from the API server, not the cache (decision of 2026-11-19 on #786): every step decides on
+	// the request as stored, so no reconcile starts from a copy older than a write the executor already made. The
+	// cache still triggers the reconcile and serves the lists.
+	if err := r.getLive(ctx, req.NamespacedName, rr); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.forget(req.NamespacedName)
 			r.reportCounters.forget(req.NamespacedName)
+			r.ownWindows.forget(req.NamespacedName)
 			r.unwrittenResets.forget(req.NamespacedName)
 			r.mergeReadings.forget(req.NamespacedName)
 			r.incidentWatch.forget(req.NamespacedName)
 			r.looks().forget(req.NamespacedName)
+			r.deletionNoted.Delete(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// Every Git write of this reconcile passes the record hold of the handoff (recordHeld), in gatedGit.gate.
+	ctx = r.withRecordHold(ctx, rr)
 	if showsGitWait(rr) {
 		// Reconcile removes it after this reconcile if no read is retried; a request without it costs no read.
 		r.gitRetries().shown(req.NamespacedName)
@@ -601,6 +640,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 	if !rr.DeletionTimestamp.IsZero() {
 		r.forget(req.NamespacedName)
 		r.reportCounters.forget(req.NamespacedName)
+		r.ownWindows.forget(req.NamespacedName)
 		r.unwrittenResets.forget(req.NamespacedName)
 		r.mergeReadings.forget(req.NamespacedName)
 		r.incidentWatch.forget(req.NamespacedName)
@@ -633,6 +673,7 @@ func (r *RemediationRequestReconciler) reconcile(ctx context.Context, req ctrl.R
 				// Windows exist only in Verifying. A request seen in another phase after the merge was ended,
 				// by this executor or by another writer, and a reset kept for a lost write has no window left.
 				r.unwrittenResets.forget(req.NamespacedName)
+				r.ownWindows.forget(req.NamespacedName)
 			}
 			if !awaitsCountAtApplied(rr) {
 				r.mergeReadings.forget(req.NamespacedName)
@@ -2007,7 +2048,7 @@ func (r *RemediationRequestReconciler) releaseReinstalled(ctx context.Context,
 			err = r.noteLockUnreadable(ctx, rr, err)
 		}
 		return r.lockPending(ctx, rr, err)
-	case v.state == changeUnknown:
+	case v.failed():
 		return r.lockPending(ctx, rr, v.err)
 	}
 	if !ptr.Deref(rr.Status.HoldsTarget, false) {
@@ -2122,7 +2163,7 @@ func (r *RemediationRequestReconciler) endFreshness(ctx context.Context, rr *rem
 		ObservedGeneration: rr.Generation,
 	})
 	clearNotClosed(rr)
-	r.settleRecorded(rr)
+	r.settleRecorded(ctx, rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}
@@ -2154,9 +2195,10 @@ func (r *RemediationRequestReconciler) stillOwns(ctx context.Context, rr *remedi
 	return nil
 }
 
-// clusterError is a failure of a cleanup on the Kubernetes side (stillOwns: a failed read of the request, a request
-// handed over or gone, an intent to hand it over that stands; ownsMarker: a failed read of a request of the supersede
-// chain, #812), not of a step of the Git host. It wraps the error and
+// clusterError is a failure on the Kubernetes side, not of a step of the Git host: of a cleanup (stillOwns: a failed
+// read of the request, a request handed over or gone, an intent to hand it over that stands; ownsMarker: a failed read
+// of a request of the supersede chain, #812), of a write of condition PullRequestUnreadable (setUnreadable), or of a
+// read or write of the recovery of a handoff (clusterSide, #786). It wraps the error and
 // adds no text. A cleanup through a new installation (#290) returns it as it is, outside a *reinstalledError, so it
 // is never said in PullRequestNotClosed as a failure of the Git host (#797).
 type clusterError struct{ err error }
@@ -2169,7 +2211,8 @@ func (e *clusterError) Unwrap() error { return e.err }
 // for and nowhere else. A change request that is already closed, or that was never opened, is not an error; a
 // merged one is, because the change landed. It returns [errRepositoryGone] when that repository is not in the
 // settings (for a stale plan's cleanup, also not under a new installation of the GitHub App: cleanupRepository,
-// #290, whose failures come wrapped in a *reinstalledError), [errTargetBranchChanged] when its entry now names another target branch, [errChangeRequestNotOurs]
+// #290, whose failures come wrapped in a *reinstalledError), [errTargetBranchChanged] when its entry now names another
+// target branch (the finalizer instead closes on the branch the plan recorded), [errChangeRequestNotOurs]
 // when a recorded pull request is gone (changeOf: not this request's, or without its marker), and
 // [freshness.ErrPaused] when the settings read now pause writes. A request with an outgoing handoff that stands or is done never closes anything: the pull
 // request is, or may become, its replacement's ([errChangeRequestNotOurs] when handed over,
@@ -2185,7 +2228,8 @@ func (r *RemediationRequestReconciler) closeOnDeleteOf(ctx context.Context, rr *
 	return r.closeOwn(ctx, rr, true)
 }
 
-// closeOwn is closeChangeRequest; deleting is true for the finalizer (closeOnDeleteOf).
+// closeOwn is closeChangeRequest; deleting is true for the finalizer (closeOnDeleteOf), which closes through the
+// recorded target branch when the repository's entry now names another one, instead of errTargetBranchChanged.
 func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	deleting bool) error {
 	if r.OpenRepository == nil {
@@ -2199,6 +2243,11 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 	}
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
+	case apierrors.IsNotFound(err) && deleting:
+		// A failure of the cleanup for the finalizer (cleanupDone), not a repository that left the settings: the object
+		// may come back, and the request's pull request may be open (#925). CleanupFailing says so with reason
+		// SettingsNotFound until the object is back or the bound of the cleanup ends.
+		return errNoSettings
 	case apierrors.IsNotFound(err):
 		return errRepositoryGone
 	case err != nil:
@@ -2218,7 +2267,15 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 		return errRepositoryGone
 	}
 	if src := rr.Status.Source; src != nil && repo.TargetBranch != src.TargetBranch {
-		return errTargetBranchChanged
+		if !deleting {
+			return errTargetBranchChanged
+		}
+		// The finalizer closes the request's own pull requests whatever target branch the settings name now: they are
+		// still in the plan's repository and may be open, and a deletion that let go of them would leave them open with
+		// no request holding their target (#786, third round; #925). It closes by the recorded number and by the marker,
+		// through a provider for the recorded target branch, and on every other base, the configured one included
+		// (closeOwnOnOtherBases). Every close reads the pull request with this request's marker first.
+		repo.TargetBranch = src.TargetBranch
 	}
 	if reinstalled {
 		// Writes nothing but the close and a failed check run; every close below reads the pull request with this
@@ -2307,26 +2364,24 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 		return r.closeUnrecorded(ctx, git, rr, deleting)
 	}
 	v := r.changeOf(ctx, git, rr, changeQuery{marker: true})
-	switch v.state {
-	case changeUnknown:
+	switch v.rule().closeRecorded {
+	case closeRecordedRetry:
 		// A 404 the branch does not confirm, an answer about another pull request and any other failure are
 		// retried (#688), so a stale plan's cleanup, the deadline's and a render refusal's never end the request
 		// with its pull request open on a single read.
 		return v.err
-	case changeGone, changeMergedElsewhere:
-		// Merged into another base (#892): nothing to close, and nothing is written to it there, as for gone.
+	case closeRecordedNotOurs:
+		// Gone, or merged into another base (#892): nothing to close, and nothing is written to it there.
 		return fmt.Errorf("%w: %s", errChangeRequestNotOurs, v.gone)
-	case changeElsewhere:
+	case closeRecordedMoved:
 		// Open on a base a person moved it to (#892): nothing is written to it there; each caller ends its stop
 		// saying so, and the lock stays while it is open.
 		return &openElsewhereError{pr: v.pr}
-	case changeClosed:
-		if v.pr.BaseBranch != string(rr.Status.Source.TargetBranch) {
-			// Closed on a base a person moved it to: nothing to close, and the close to the target branch would be
-			// refused there.
-			return nil
-		}
-	case changeOpen, changeMerged:
+	case closeRecordedNothing:
+		// Closed on a base a person moved it to: nothing to close, and the close to the target branch would be
+		// refused there.
+		return nil
+	case closeRecordedClose:
 	}
 	if err := r.stillOwns(ctx, rr); err != nil {
 		return err
@@ -2350,17 +2405,17 @@ func (r *RemediationRequestReconciler) closeFound(ctx context.Context, git provi
 func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, deleting bool) error {
 	v := r.changeOf(ctx, git, rr, changeQuery{})
-	switch v.state {
-	case changeUnknown:
+	switch v.rule().closeUnrecorded {
+	case closeUnrecordedRetry:
 		return v.err
-	case changeGone, changeClosed:
+	case closeUnrecordedLookElsewhere:
 		// The finalizer closed every one open on another base already (closeOwnOnOtherBases).
 		if !deleting {
 			if err := r.closeUnrecordedElsewhere(ctx, git, rr); err != nil {
 				return err
 			}
 		}
-	case changeOpen, changeMerged, changeElsewhere, changeMergedElsewhere:
+	case closeUnrecordedGoOn:
 	}
 	for _, cr := range v.own {
 		if cr.State != providers.ChangeRequestOpen {
@@ -2388,12 +2443,12 @@ func (r *RemediationRequestReconciler) closeUnrecorded(ctx context.Context, git 
 func (r *RemediationRequestReconciler) closeUnrecordedElsewhere(ctx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest) error {
 	v := r.changeOf(ctx, git, rr, changeQuery{otherBases: []remediationv1alpha1.GitBranch{rr.Status.Source.TargetBranch}})
-	switch v.state {
-	case changeUnknown:
+	switch v.rule().stopOnOtherBase {
+	case stopOnOtherRetry:
 		return v.err
-	case changeElsewhere:
+	case stopOnOtherMoved:
 		return &openElsewhereError{pr: v.pr}
-	case changeOpen, changeMerged, changeClosed, changeGone, changeMergedElsewhere:
+	case stopOnOtherNothing:
 	}
 	return nil
 }
@@ -2407,10 +2462,8 @@ func (r *RemediationRequestReconciler) closeOwnOnOtherBases(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest) error {
 	v := r.changeOf(ctx, git, rr, changeQuery{otherBases: []remediationv1alpha1.GitBranch{rr.Status.Source.TargetBranch},
 		withRecorded: true})
-	switch v.state {
-	case changeUnknown:
+	if v.failed() {
 		return v.err
-	case changeOpen, changeMerged, changeClosed, changeGone, changeElsewhere, changeMergedElsewhere:
 	}
 	for _, cr := range v.own {
 		if cr.State != providers.ChangeRequestOpen {
@@ -2453,14 +2506,14 @@ func (r *RemediationRequestReconciler) closeAllOwn(ctx context.Context, git prov
 		return closeFailed(cr, git.CloseChangeRequest(ctx, cr.Number))
 	}
 	v := r.changeOf(ctx, git, rr, changeQuery{marker: true, openOnBranch: true})
-	if v.state == changeUnknown && v.ownListed {
+	if v.failed() && v.ownListed {
 		// A person deleted the holder (ADR-0030): the recorded number is not this request's while the branch lists
 		// pull requests with its marker, so those are its change. Each open one is closed, and the finalizer goes,
 		// whatever the recorded number was read as. The verdict carries both listings of the branch (ownListed); one
 		// that a later failure made unknown again does not, and is retried.
 		return r.closeListedOwn(ctx, rr, v, closeIt)
 	}
-	switch finalizeRule[v.state] {
+	switch v.rule().finalize {
 	case finalizeRetry:
 		return v.err
 	case finalizeClose:
@@ -2480,7 +2533,7 @@ func (r *RemediationRequestReconciler) closeAllOwn(ctx context.Context, git prov
 	case finalizeNothing:
 	}
 	for _, o := range v.open {
-		if o.Number == v.pr.Number && v.state == changeOpen {
+		if o.Number == v.pr.Number && v.rule().finalize == finalizeClose {
 			continue
 		}
 		switch ours, err := r.ownsMarker(ctx, o.Body, rr); {
@@ -2539,14 +2592,9 @@ const (
 	finalizeCloseAnyBase
 )
 
-// finalizeRule is closeAllOwn's rule per verdict: open is closed, on any base, merged, closed and gone close nothing on the
-// recorded one's account (the open pull requests of the branch are looked at either way), unknown is retried
-// and keeps the finalizer.
-var finalizeRule = map[changeState]finalizeOutcome{
-	changeOpen: finalizeClose, changeMerged: finalizeNothing, changeClosed: finalizeNothing,
-	changeGone: finalizeNothing, changeElsewhere: finalizeCloseAnyBase, changeMergedElsewhere: finalizeNothing,
-	changeUnknown: finalizeRetry,
-}
+// closeAllOwn's rule per verdict is the column finalize of verdictTable: open is closed, on any base, merged, closed
+// and gone close nothing on the recorded one's account (the open pull requests of the branch are looked at either
+// way), unknown is retried and keeps the finalizer.
 
 // closeConflictError is closeChangeRequest's answer when the close of a pull request it found by the branch of a
 // request with none recorded was a conflict: number is the pull request it tried to close.

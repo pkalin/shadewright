@@ -212,7 +212,8 @@ var skipOwnMarks = predicate.Funcs{UpdateFunc: func(e crevent.UpdateEvent) bool 
 }}
 
 // onlyOwnMarksChanged ignores executor bookkeeping and retry-only updates: render marks, merge-read clocks,
-// PullRequestNotClosed, PullRequestUnreadable and GitReadRetry. They must not shorten a scheduled retry.
+// PullRequestNotClosed, PullRequestUnreadable, GitReadRetry, ReviewCheckNotFailed, and Approved set to or back from
+// reason ReviewCheckLiveReadFailed (liveReadNote). They must not shorten a scheduled retry.
 // Phase, lock, plan and external changes still wake the request.
 func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	o, ok1 := oldObj.(*remediationv1alpha1.RemediationRequest)
@@ -241,6 +242,14 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionPullRequestNotClosed)
 	}
+	if liveReadNote(o, n) {
+		for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
+			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionApproved)
+		}
+	}
+	for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
+		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
+	}
 	if deliveryPending(o) && deliveryPending(n) {
 		for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionDelivered)
@@ -264,4 +273,20 @@ func closedRecorded(o, n *remediationv1alpha1.RemediationRequest) bool {
 func deliveryPending(rr *remediationv1alpha1.RemediationRequest) bool {
 	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionDelivered)
 	return c == nil || (c.Status == metav1.ConditionUnknown && c.Reason == ReasonDeliveryPending)
+}
+
+// liveReadNote reports whether condition Approved changes from o to n only by the note of a failed live read before a
+// review check write (noteLiveRead): one of them carries reason ReviewCheckLiveReadFailed (False) and the other the
+// same, WaitingForReview (False), or no Approved yet (a pull request just opened). The look that writes it keeps its
+// pace, so its write must not wake the request.
+func liveReadNote(o, n *remediationv1alpha1.RemediationRequest) bool {
+	a := meta.FindStatusCondition(o.Status.Conditions, remediationv1alpha1.ConditionApproved)
+	b := meta.FindStatusCondition(n.Status.Conditions, remediationv1alpha1.ConditionApproved)
+	note := func(c *metav1.Condition) bool {
+		return c != nil && c.Status == metav1.ConditionFalse && c.Reason == ReasonReviewCheckLiveReadFailed
+	}
+	waiting := func(c *metav1.Condition) bool {
+		return c == nil || c.Status == metav1.ConditionFalse && c.Reason == ReasonWaitingForReview
+	}
+	return note(a) && (note(b) || waiting(b)) || note(b) && waiting(a)
 }

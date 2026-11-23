@@ -23,6 +23,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -293,34 +294,64 @@ func (r *RemediationRequestReconciler) awaitMergeCommit(ctx context.Context, rr 
 // at the merge, op naming which), on the executor's own clock: its entry in status.gitWaits (wholeWait), with the
 // pull request and its end, and status.mergeCommitAwaitedSince when unset (kept as before the entry existed, as the
 // time the merge was first seen; the entry's end counts from the entry's own start, wholeWait). Both go in one patch
-// with the resourceVersion of rr, so a copy read earlier than the server's is refused as a conflict, and rr takes
-// only these fields and the new resourceVersion: a caller's unwritten changes to rr stay for its own write. A failed
-// write leaves rr as it was and is returned for a retry.
+// made on the request as the API server holds it (patchGitWaits), so a caller's unwritten changes to rr (a takeover's
+// conditions, #786) are never written with it; rr takes only these fields, and the new resourceVersion only when it
+// was the server's copy, so a later write of an older copy is refused as a conflict. A failed write leaves rr as it
+// was and is returned for a retry. The admission decides on live copies of both requests of a handoff (admits): when
+// the request as the API server holds it has its merge recorded, is settled on a merge the other request records, or
+// is being deleted, or the other request, read here, holds the record of that merge, rr was an older copy (the other
+// request changed it, or the store moved on, after the reconcile read it): nothing is added,
+// and a conflict is returned, so the reconcile runs again on a fresh read instead of starting a wait the request has
+// left (or replacing an entry of the same kind that still stands, which a validation rule refuses).
 func (r *RemediationRequestReconciler) startMergeWait(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	cr providers.ChangeRequest, op string) error {
 	now := r.now()
-	base := rr.DeepCopy()
-	upd := rr.DeepCopy()
-	if upd.Status.MergeCommitAwaitedSince == nil {
-		upd.Status.MergeCommitAwaitedSince = &metav1.Time{Time: now.Truncate(time.Second)}
+	var since *metav1.Time
+	left := false
+	if err := r.patchGitWaits(ctx, rr, func(live *remediationv1alpha1.RemediationRequest) error {
+		ok, err := r.admits(ctx, live, remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck,
+			PullRequest: waitPullRequest(cr)})
+		if err != nil {
+			return err
+		}
+		if left = !ok; left {
+			return nil
+		}
+		startMergeWaitIn(live, cr, op, now)
+		since = live.Status.MergeCommitAwaitedSince.DeepCopy()
+		return nil
+	}); err != nil {
+		return fmt.Errorf("record the wait for the merge of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	}
+	if left {
+		// The same error a write of the older copy got before (an optimistic lock), so callers treat it alike.
+		return fmt.Errorf("record the wait for the merge of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name,
+			apierrors.NewConflict(remediationv1alpha1.GroupVersion.WithResource("remediationrequests").GroupResource(),
+				rr.Name, errors.New("its merge is recorded, by it or by the other request of its handoff, or it is being "+
+					"deleted since it was read")))
+	}
+	rr.Status.MergeCommitAwaitedSince = since
+	return nil
+}
+
+// startMergeWaitIn adds the wait for a merge of cr seen but not recorded (startMergeWait) to rr's status about to be
+// written: status.mergeCommitAwaitedSince when unset, and the MergeCheck entry when there is none, after any entry
+// whose kind no longer applies is removed (removeInapplicable). Nothing is added to a request the MergeCheck kind no
+// longer applies to (its merge recorded, or being deleted).
+func startMergeWaitIn(rr *remediationv1alpha1.RemediationRequest, cr providers.ChangeRequest, op string, now time.Time) {
+	if !waitMergeCheck.applies(rr) {
+		return
 	}
 	w, ok := wholeWait(remediationv1alpha1.GitWait{Kind: remediationv1alpha1.GitWaitMergeCheck,
 		PullRequest: waitPullRequest(cr)}, op, now)
-	if ok && gitWait(upd, waitMergeCheck) == nil {
-		upd.Status.GitWaits = append(upd.Status.GitWaits, w)
-		gitWaitSummary(upd, now)
+	if rr.Status.MergeCommitAwaitedSince == nil {
+		rr.Status.MergeCommitAwaitedSince = &metav1.Time{Time: now.Truncate(time.Second)}
 	}
-	if err := r.Status().Patch(ctx, upd, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
-		return fmt.Errorf("record the wait for the merge of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
+	// As every write that adds an entry (removeInapplicable): one whose kind no longer applies goes first.
+	removeInapplicable(rr)
+	if ok && gitWait(rr, waitMergeCheck) == nil {
+		rr.Status.GitWaits = append(rr.Status.GitWaits, w)
 	}
-	rr.Status.MergeCommitAwaitedSince = upd.Status.MergeCommitAwaitedSince
-	rr.Status.GitWaits = upd.Status.GitWaits
-	meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry)
-	if c := meta.FindStatusCondition(upd.Status.Conditions, remediationv1alpha1.ConditionGitReadRetry); c != nil {
-		meta.SetStatusCondition(&rr.Status.Conditions, *c)
-	}
-	rr.ResourceVersion = upd.ResourceVersion
-	return nil
 }
 
 // mergeCommitClockSlack is how far the recorded start of the wait may lie after the executor's clock before the
@@ -352,13 +383,16 @@ func (r *RemediationRequestReconciler) mergeCommitWaitLeft(rr *remediationv1alph
 
 // mergeNotRecorded is recheck's answer to a look that found the pull request merged without recording the merge:
 // merged is true, and nothing else runs, for prMergeCommitPending (looked at again until the host reports the
-// merge commit or the wait ends) and prMergeUnchecked (the plan could not be checked at the merge: Git reads use the common visible poll, while Kubernetes errors are returned). The full freshness check never runs on a merged change, which makes the plan
+// merge commit or the wait ends), prMergeRecordPending (looked at again at the poll interval until the other request
+// of the handoff records the merge or releases its lock) and prMergeUnchecked (the plan could not be checked at the merge: Git reads use the common visible poll, while Kubernetes errors are returned). The full freshness check never runs on a merged change, which makes the plan
 // look stale.
 func (r *RemediationRequestReconciler) mergeNotRecorded(ctx context.Context, rr *remediationv1alpha1.RemediationRequest, outcome prOutcome,
 	lookErr error, bound waitBound) (res ctrl.Result, merged bool, err error) {
 	switch outcome {
 	case prMergeCommitPending:
 		return ctrl.Result{RequeueAfter: min(r.mergeCommitWaitLeft(rr), r.pullRequestPollInterval())}, true, nil
+	case prMergeRecordPending:
+		return ctrl.Result{RequeueAfter: r.pullRequestPollInterval()}, true, nil
 	case prMergeUnchecked:
 		res, err := r.waitOrFail(ctx, rr, lookErr, bound)
 		return res, true, err
@@ -417,7 +451,7 @@ func (r *RemediationRequestReconciler) settleReceipt(ctx context.Context, rr *re
 			"merge can be checked", verified.Reason))
 	}
 	r.setPhase(rr, remediationv1alpha1.PhaseInconclusive)
-	r.settleRecorded(rr)
+	r.settleRecorded(ctx, rr)
 	if err := r.Status().Update(ctx, rr); err != nil {
 		return false, fmt.Errorf("update status of RemediationRequest %s/%s: %w", rr.Namespace, rr.Name, err)
 	}

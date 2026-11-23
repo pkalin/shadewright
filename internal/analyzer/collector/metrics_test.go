@@ -84,10 +84,11 @@ func TestSymptomSourceWatchedIsBounded(t *testing.T) {
 		"shadewright_analyzer_probe_decisions_pending":              {},
 		"shadewright_analyzer_held_consequences_total":              {"outcome": holdOutcomes},
 		"shadewright_analyzer_consequences_held":                    {},
+		"shadewright_analyzer_stale_on_start_folded_total":          {},
 	}
 	// Registered by package analyzer, which the envtest harness imports; checked there.
 	all := map[string]metricguard.Labels{"shadewright_analyzer_watched_namespaces": {}}
 	maps.Copy(all, want)
-	metricguard.Check(t, metrics.Registry, all)
+	metricguard.Check(t, metrics.Registry, metricguard.WithRedaction(all))
 	metricguard.Documented(t, filepath.Join("..", "..", "..", "docs", "reference", "metrics.md"), want)
 }

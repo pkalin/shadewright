@@ -34,6 +34,7 @@ import (
 	"github.com/pkalin/shadewright/internal/providers"
 	"github.com/pkalin/shadewright/internal/providers/fake"
 	"github.com/pkalin/shadewright/internal/providers/metrics/prometheus"
+	"github.com/pkalin/shadewright/internal/redact"
 )
 
 // validArgs are arguments each tool accepts, in the watched namespace.
@@ -604,21 +605,46 @@ func TestLogExcerptKeepsItsTail(t *testing.T) {
 }
 
 // Acceptance: timeout. A read that does not answer ends in "could not fetch, timed out" within the tool's
-// timeout; the caller's cancellation is an error, not a result.
+// timeout; the caller's cancellation is an error, not a result. The timeout is checked on the deadline each
+// blocked read was given, not on the time the call took: under load the work around the reads takes longer,
+// and a check of the call's wall time failed once on a loaded machine (#1095). The call must still return
+// within a second of that deadline. Every read of one call carries
+// the same deadline, at most timeout ahead when the read starts: one bound for the whole call, not one per read
+// and not a default.
 func TestTimeout(t *testing.T) {
-	const timeout = 50 * time.Millisecond
+	const timeout, afterDeadline = 50 * time.Millisecond, time.Second
+	seen := &deadlines{}
 	e := newEnv(t, nil, func(c *Config) {
-		b := blockingReader{}
-		c.Pods, c.Events, c.Objects, c.Logs, c.Timeout = b, b, b, blockingLogs{}, timeout
+		b := blockingReader{seen: seen}
+		c.Pods, c.Events, c.Objects, c.Logs, c.Timeout = b, b, b, blockingLogs{seen: seen}, timeout
 	})
 	for _, name := range []string{NameGetResource, NameListEvents, NameGetPodLogs, NameQueryMetrics, NameCheckMissingReference} {
-		start := time.Now()
 		r := e.call(t, name, with(name, nil))
+		returned := time.Now()
 		if r.Status != StatusCouldNotFetch || !slices.Contains(r.Labels, LabelTimedOut) {
 			t.Errorf("%s: %q %v", name, r.Status, r.Labels)
 		}
-		if d := time.Since(start); d > 20*timeout {
-			t.Errorf("%s took %s", name, d)
+		reads := seen.take()
+		if len(reads) == 0 {
+			t.Errorf("%s: no read waited for the timeout", name)
+		}
+		// The call ends soon after its deadline: measured from the deadline, not from the start of the call, so
+		// slow work before the reads does not count, and loose enough for a loaded machine.
+		if len(reads) > 0 && reads[0].bounded {
+			if late := returned.Sub(reads[0].at); late > afterDeadline {
+				t.Errorf("%s: returned %s after its deadline, want within %s", name, late, afterDeadline)
+			}
+		}
+		for i, d := range reads {
+			switch {
+			case !d.bounded:
+				t.Errorf("%s: read %d has no deadline", name, i)
+			case d.left > timeout:
+				t.Errorf("%s: read %d had %s left, want at most the tool's timeout %s", name, i, d.left, timeout)
+			case !d.at.Equal(reads[0].at):
+				t.Errorf("%s: read %d has deadline %s, read 0 %s: one deadline for the call", name, i,
+					d.at.Format(time.StampMicro), reads[0].at.Format(time.StampMicro))
+			}
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -639,6 +665,38 @@ const canaryMark = "CANARY-7f3a"
 
 func (canary) String(s string) string { return strings.ReplaceAll(s, canaryMark, "[x]") }
 
+// StringChecked never withholds.
+func (c canary) StringChecked(s string) (string, bool) { return c.String(s), true }
+
+func (c canary) PiecesWithin(ps []redact.Piece, _ int) ([]string, bool) {
+	return eachPiece(c, ps), true
+}
+
+func (c canary) PiecesFitting(ps []redact.Piece, _ func([]string) bool) ([]string, bool) {
+	return eachPiece(c, ps), true
+}
+
+// eachPiece decides the pieces with r one value at a time, for a test redactor: each value redacted alone and
+// written in its form, a value marked Whole hidden.
+func eachPiece(r Redactor, ps []redact.Piece) []string {
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = p.Text
+		switch {
+		case p.Whole:
+			out[i] = redact.Marker(redact.KindCredential, len(redact.Written(p.Form, p.Text)))
+		case p.Data:
+			out[i] = redact.Written(p.Form, r.String(p.Text))
+		}
+	}
+	return out
+}
+
+// stringOnly is a redactor with String alone, which cannot decide on an answer as pieces.
+type stringOnly struct{}
+
+func (stringOnly) String(s string) string { return s }
+
 // Acceptance: redaction of a planted secret, in every tool that returns cluster or source text; a redactor
 // that removes only a canary shows that each goes through the configured redactor.
 func TestRedactsPlantedSecrets(t *testing.T) {
@@ -647,8 +705,8 @@ func TestRedactsPlantedSecrets(t *testing.T) {
 	p.Labels["leak"] = canaryMark
 	objs := []client.Object{p, deployment(), event("e1", podName, "pull failed "+leakDSN+" "+canaryMark, testNow)}
 	for name, secrets := range map[string][]string{
-		"built-in rules": {leakJWT, leakPassword},
-		"canary":         {canaryMark},
+		builtInRules: {leakJWT, leakPassword},
+		"canary":     {canaryMark},
 	} {
 		e := newEnv(t, objs, func(c *Config) {
 			if name == "canary" {
@@ -777,6 +835,8 @@ func TestNewRefusesBadConfig(t *testing.T) {
 		"timeout too long":  {Pods: r, Events: r, Objects: r, Redactor: red, Timeout: MaxTimeout + 1},
 		"negative timeout":  {Pods: r, Events: r, Objects: r, Redactor: red, Timeout: -1},
 		"invalid namespace": {Pods: r, Events: r, Objects: r, Redactor: red, Namespaces: []string{"Shop"}},
+		// A redactor that can only redact one value at a time would miss what the whole answer shows.
+		"redactor without pieces": {Pods: r, Events: r, Objects: r, Redactor: stringOnly{}},
 	} {
 		if _, err := New(cfg); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -822,4 +882,271 @@ func TestGetResourceRedactsFoldedBlocks(t *testing.T) {
 			t.Errorf("%q: %q\n%s", arg, r.Status, r.Text)
 		}
 	}
+}
+
+// A metric label is redacted as its name and value together (#845): a secret name takes its value, also next to
+// a second secret label, and a label that names nothing secret stays. Redacted apart, the name and the value were
+// two plain words and both values showed.
+func TestQueryMetricsRedactsALabelWithItsName(t *testing.T) {
+	e := newEnv(t, []client.Object{pod()})
+	e.metrics.Set(restartsTemplate, []providers.Series{{
+		Labels: map[string]string{
+			"password": leakPassword + "A", "api_token": leakPassword + "B", argContainer: container,
+		},
+		Samples: []providers.Sample{{Value: 4}},
+	}})
+	r := e.call(t, NameQueryMetrics, fmt.Sprintf(`{"%s":%q,"%s":%q,"%s":%q}`,
+		argTemplate, restartsTemplate, argNamespace, testNS, argPod, podName))
+	if r.Status != StatusOK {
+		t.Fatalf("status %s: %s", r.Status, r.Text)
+	}
+	if strings.Contains(r.Text, leakPassword) {
+		t.Errorf("a label value under a secret name shows:\n%s", r.Text)
+	}
+	for _, kept := range []string{"api_token=", "password=", argContainer + "=" + container} {
+		if !strings.Contains(r.Text, kept) {
+			t.Errorf("%q is missing:\n%s", kept, r.Text)
+		}
+	}
+}
+
+// get_resource lays the object out as one text and decides it once (#845, third decision of 2026-11-18): a key
+// in one field and its value in a sibling or the next field are seen together. An HTTP header's name and value
+// and a flag followed by a string that looks like a flag were hidden by main's second pass over the whole
+// answer and shown by a decision per field; a flag at the end of the command with its value in the arguments,
+// and a selector's key with its values, showed on main too.
+func TestGetResourceDecidesTheObjectAsOneText(t *testing.T) {
+	const passwordFlag, key = "--password", "password"
+	secret := "S3cr3t" + "Value9"
+	header := func(name string) func(p *corev1.Pod) {
+		return func(p *corev1.Pod) {
+			p.Spec.Containers[0].LivenessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+				Path: "/healthz", HTTPHeaders: []corev1.HTTPHeader{{Name: name, Value: secret}},
+			}}}
+		}
+	}
+	args := func(cmd, a []string) func(p *corev1.Pod) {
+		return func(p *corev1.Pod) { p.Spec.Containers[0].Command, p.Spec.Containers[0].Args = cmd, a }
+	}
+	for name, set := range map[string]func(p *corev1.Pod){
+		"header X-Api-Key":           header("X-Api-Key"),
+		"header X-Auth-Token":        header("X-Auth-Token"),
+		"header password":            header(key),
+		"flag, dashed value":         args(nil, []string{passwordFlag, "--" + secret}),
+		"token flag, short value":    args(nil, []string{"--token", "-" + secret}),
+		"flag, short flag":           args(nil, []string{passwordFlag, "-p=" + secret}),
+		"client-secret flag, flag":   args(nil, []string{"--client-secret", "--x=" + secret}),
+		"flag in command, arguments": args([]string{"serve", passwordFlag}, []string{secret}),
+		"selector key and values": func(p *corev1.Pod) {
+			p.Spec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+					MatchExpressions: []corev1.NodeSelectorRequirement{{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{secret}}},
+				}}},
+			}}
+		},
+	} {
+		p := pod()
+		set(p)
+		e := newEnv(t, []client.Object{p})
+		r := e.call(t, NameGetResource, with(NameGetResource, nil))
+		if r.Status != StatusOK || strings.Contains(r.Text, secret[:6]) || strings.Contains(r.Text, secret[6:]) {
+			t.Errorf("%s: %s\n%s", name, r.Status, r.Text)
+		}
+		if !strings.Contains(r.Text, `"name": "`+container+`"`) {
+			t.Errorf("%s: the container's name is missing:\n%s", name, r.Text)
+		}
+	}
+}
+
+// The values in a collection under a secret-named field (a Secret volume, imagePullSecrets, a projected
+// service account token) are hidden whole, as main hid that JSON collection (#845, fourth decision of
+// 2026-11-18; showing them is #860), with the built-in redactor and with one that decides each value alone
+// (canary). A reference field whose own name is a reference (envFrom's secretRef) keeps its name, as on main.
+func TestGetResourceHidesCollectionsUnderSecretNamedFields(t *testing.T) {
+	const (
+		volSecret = "vol-secret-name"
+		itemPath  = "item-path-name"
+		pullName  = "pull-secret-name"
+		tokenPath = "token-path-name"
+		refName   = "envfrom-ref-name"
+	)
+	p := pod()
+	p.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: pullName}}
+	p.Spec.Containers[0].EnvFrom = []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{
+		LocalObjectReference: corev1.LocalObjectReference{Name: refName},
+	}}}
+	p.Spec.Volumes = []corev1.Volume{
+		{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: volSecret, Items: []corev1.KeyToPath{{Key: "k", Path: itemPath}},
+		}}},
+		{Name: "token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Path: tokenPath}}},
+		}}},
+	}
+	for name, red := range map[string]Redactor{builtInRules: nil, "each value alone": canary{}} {
+		e := newEnv(t, []client.Object{p}, func(c *Config) {
+			if red != nil {
+				c.Redactor = red
+			}
+		})
+		r := e.call(t, NameGetResource, with(NameGetResource, nil))
+		if r.Status != StatusOK {
+			t.Fatalf("%s: %s", name, r.Status)
+		}
+		for _, hidden := range []string{volSecret, itemPath, pullName, tokenPath} {
+			if strings.Contains(r.Text, hidden) {
+				t.Errorf("%s: %q shows:\n%s", name, hidden, r.Text)
+			}
+		}
+		if !strings.Contains(r.Text, refName) || !strings.Contains(r.Text, `"name": "creds"`) {
+			t.Errorf("%s: a reference outside a secret-named collection is missing:\n%s", name, r.Text)
+		}
+	}
+}
+
+// A map key is decided like a value, as far as main hid it (#845, eighth decision of 2026-11-18, point 1): main
+// redacted no key alone, only its answer as JSON, where a line break in a key is "\n" and a connection string
+// runs on to the closing quote, so main answered the key below with "[REDACTED:connection-string]" alone. A key
+// decided alone first ended the connection string at the line break and showed the text after it.
+func TestGetResourceHidesAMapKeyAsMainDid(t *testing.T) {
+	tail := "Qz7secret" + "Value1"
+	key := "postgres" + "://u:" + "Pw9secret" + "Xyz@h/db" + "\n" + tail
+	p := pod()
+	p.Spec.Volumes = []corev1.Volume{{Name: "csi", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+		Driver: "d", VolumeAttributes: map[string]string{key: "v"},
+	}}}}
+	r := newEnv(t, []client.Object{p}).call(t, NameGetResource, with(NameGetResource, nil))
+	if r.Status != StatusOK {
+		t.Fatalf("%s: %s", r.Status, r.Text)
+	}
+	if strings.Contains(r.Text, tail) || strings.Contains(r.Text, "Pw9secret") {
+		t.Errorf("the key shows, main hid it:\n%s", r.Text)
+	}
+	if !strings.Contains(r.Text, `"driver": "d"`) || !strings.Contains(r.Text, `: "v"`) {
+		t.Errorf("text around the key is gone:\n%s", r.Text)
+	}
+}
+
+// A map key that is itself hidden keeps the signal it carries for its value (#845, ninth decision of 2026-11-18):
+// main redacted each value alone and then read the whole answer, where the word "authorization" at the end of the
+// key hides the value after it. Hiding the key first as a piece took the word away before the answer was read,
+// and the value showed.
+func TestGetResourceHidesTheValueOfAHiddenKeyWithASignal(t *testing.T) {
+	value := "Qz9Secret" + "Value"
+	key := "postgres" + "://u:p@h/db" + "\n-authorization"
+	p := pod()
+	p.Spec.Volumes = []corev1.Volume{{Name: "csi", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+		Driver: "d", VolumeAttributes: map[string]string{key: value},
+	}}}}
+	r := newEnv(t, []client.Object{p}).call(t, NameGetResource, with(NameGetResource, nil))
+	if r.Status != StatusOK {
+		t.Fatalf("%s: %s", r.Status, r.Text)
+	}
+	if strings.Contains(r.Text, value) {
+		t.Errorf("the value of the key shows, main hid it:\n%s", r.Text)
+	}
+	if !json.Valid([]byte(r.Text)) || !strings.Contains(r.Text, `"driver": "d"`) {
+		t.Errorf("the answer is no JSON or the text around the key is gone:\n%s", r.Text)
+	}
+}
+
+// Numbers, booleans and null are tokens of the walk too (#845, eighth decision of 2026-11-18, point 2): where main
+// hid a whole object or list, every token inside is hidden, and the answer stays valid JSON. main answered the
+// volume below with
+//
+//	"secret": [REDACTED:credential]
+//
+// (the whole object, no longer JSON), so "secretName", "defaultMode" and "optional" showed nothing of their
+// values there.
+func TestGetResourceHidesEveryTokenOfAHiddenCollection(t *testing.T) {
+	mode, optional := int32(256), true
+	p := pod()
+	p.Spec.Volumes = []corev1.Volume{{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+		SecretName: "credentials", DefaultMode: &mode, Optional: &optional,
+	}}}}
+	for name, red := range map[string]Redactor{builtInRules: nil, "each value alone": canary{}} {
+		e := newEnv(t, []client.Object{p}, func(c *Config) {
+			if red != nil {
+				c.Redactor = red
+			}
+		})
+		r := e.call(t, NameGetResource, with(NameGetResource, nil))
+		if r.Status != StatusOK {
+			t.Fatalf("%s: %s: %s", name, r.Status, r.Text)
+		}
+		for _, shown := range []string{`"credentials"`, "256", `"optional": true`} {
+			if strings.Contains(r.Text, shown) {
+				t.Errorf("%s: %s shows, main hid it:\n%s", name, shown, r.Text)
+			}
+		}
+		if !json.Valid([]byte(r.Text)) {
+			t.Errorf("%s: the answer is no JSON:\n%s", name, r.Text)
+		}
+		if !strings.Contains(r.Text, `"name": "creds"`) {
+			t.Errorf("%s: the volume's name is missing:\n%s", name, r.Text)
+		}
+	}
+}
+
+// builtInRules names the cases of a test run with the built-in redactor.
+const builtInRules = "built-in rules"
+
+// linesSecret is the secret on the first line of the values below.
+const linesSecret = "Qz7line" + "Secret"
+
+// linesNote is a multi-line value with a secret under a key and diagnosis text on the lines after it: a block
+// whose line is indented with figure spaces (U+2007), which the reading of the value alone does not take as the
+// block's indentation.
+const linesNote = "password: |-\n\u2007\u2007" + linesSecret + "\nhost: db.internal\nport: 5432"
+
+// checkLinesKept fails unless text hides linesSecret and shows the lines after it.
+func checkLinesKept(t *testing.T, what, text string) {
+	t.Helper()
+	if strings.Contains(text, linesSecret) {
+		t.Errorf("%s: the password shows:\n%s", what, text)
+	}
+	for _, shown := range []string{"db.internal", "5432"} {
+		if !strings.Contains(text, shown) {
+			t.Errorf("%s: %s is hidden, main showed it:\n%s", what, shown, text)
+		}
+	}
+}
+
+// The reading of the whole answer keeps the lines of the values (#845, tenth decision of 2026-11-18): a value
+// hidden to the end of its line stops at a line break inside the value, written "\n" in the JSON of get_resource,
+// as it stops in the reading of that value alone. A secret in a map value (get_resource leaves out annotations,
+// so a CSI volume's attribute) or in an argument does not take the host and port on the next lines, which main
+// showed; in the answer as written the value ran on to the end of the JSON string. (An argument that starts with
+// the key is read by main as a quoted key at the start of its JSON line, and main hid the rest of that line; the
+// argument here has text before the key.)
+func TestGetResourceKeepsTheLinesAfterASecretInAValue(t *testing.T) {
+	for name, set := range map[string]func(p *corev1.Pod){
+		"map value": func(p *corev1.Pod) {
+			p.Spec.Volumes = []corev1.Volume{{Name: "config", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+				Driver: "d", VolumeAttributes: map[string]string{"config": linesNote},
+			}}}}
+		},
+		"argument": func(p *corev1.Pod) { p.Spec.Containers[0].Args = []string{"serve", "connect with " + linesNote} },
+	} {
+		p := pod()
+		set(p)
+		r := newEnv(t, []client.Object{p}).call(t, NameGetResource, with(NameGetResource, nil))
+		if r.Status != StatusOK {
+			t.Fatalf("%s: %s: %s", name, r.Status, r.Text)
+		}
+		checkLinesKept(t, name, r.Text)
+	}
+}
+
+// An Event's note with real line breaks keeps the lines after the one with the secret (#845, tenth decision of
+// 2026-11-18): list_events writes the note on one line, and the line breaks it had still end the secret's value.
+// The secret is a block under the key, indented with a control character that list_events writes as a space:
+// on that one line the block reading took the host and port too, which main showed.
+func TestListEventsKeepsTheLinesAfterASecretInANote(t *testing.T) {
+	note := "password: | # note\n\x01\x01" + linesSecret + "\nhost: db.internal\nport: 5432"
+	r := newEnv(t, []client.Object{event("e1", podName, note, testNow)}).call(t, NameListEvents, with(NameListEvents, nil))
+	if r.Status != StatusOK {
+		t.Fatalf("%s: %s", r.Status, r.Text)
+	}
+	checkLinesKept(t, "event note", r.Text)
 }

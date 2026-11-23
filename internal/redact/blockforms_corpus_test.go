@@ -345,11 +345,16 @@ func formLeaks(c formCase, spans []span) (leaked, lost []string) {
 // Every secret of the forms corpus is redacted and the text around it survives. At b2d4d3eb (the first
 // build of #840) 1,900 of the 3,152 inputs leaked a secret or lost kept text; on main (0dcfec7a) 2,736.
 func TestBlockFormsCorpusRedactsEverySecret(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	cases := formCorpus()
 	failed := 0
 	byForm := map[string]int{}
-	for _, c := range cases {
-		leaked, lost := formLeaks(c, defaultRedactor.spans(c.in))
+	for i, c := range cases {
+		if !raceKeeps(t.Name(), i) {
+			continue // a seeded sample under -race; all of them without it
+		}
+		leaked, lost := formLeaks(c, defaultRedactor.spans(nil, c.in))
 		if len(leaked)+len(lost) == 0 {
 			continue
 		}
@@ -387,7 +392,7 @@ func TestWriteFormMainTable(t *testing.T) {
 	rows := make([]any, 0, len(corpus))
 	for _, c := range corpus {
 		row := formMainRow{Hash: formHash(c.in)}
-		for _, sp := range defaultRedactor.spans(c.in) {
+		for _, sp := range defaultRedactor.spans(nil, c.in) {
 			row.Spans = append(row.Spans, [2]int{sp.start, sp.end})
 		}
 		rows = append(rows, row)
@@ -457,6 +462,8 @@ func formRedacted(s string, spans []span) []bool {
 
 // Each byte main redacted in the forms corpus is still redacted.
 func TestBlockFormsStillRedactWhatMainRedacted(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	gen := formCorpus()
 	failed := 0
 	n := readJSONLines(t, formMainTable, func(i int, line []byte) {
@@ -467,8 +474,11 @@ func TestBlockFormsStillRedactWhatMainRedacted(t *testing.T) {
 		if i >= len(gen) || formHash(gen[i].in) != row.Hash {
 			t.Fatalf("%s line %d does not match its generator: regenerate it from the commit it names", formMainTable, i+1)
 		}
+		if !raceKeeps(t.Name(), i) {
+			return // a seeded sample under -race; all of them without it
+		}
 		in := gen[i].in
-		red := formRedacted(in, defaultRedactor.spans(in))
+		red := formRedacted(in, defaultRedactor.spans(nil, in))
 		for _, want := range row.Spans {
 			for j := want[0]; j < want[1]; j++ {
 				if !red[j] {

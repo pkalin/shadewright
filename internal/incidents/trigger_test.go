@@ -1348,7 +1348,9 @@ func TestQuietIncidentsTakeNoBudgetWhenSettingsArriveLate(t *testing.T) {
 	now.Store(triggerNow.UnixNano())
 	clock := func() time.Time { return time.Unix(0, now.Load()).UTC() }
 	rec := corerecord.NewFakeRecorder(20)
-	r := start(t, ns, Config{TriggerInterval: testTriggerInterval, Now: clock, Recorder: rec})
+	passes := &markCounter{Reader: env.admin}
+	r := startWith(t, ns, Config{TriggerInterval: testTriggerInterval, Now: clock, Recorder: rec},
+		func(c *Controller, _ *countingClient) { c.cache = passes })
 	for f := 1; f <= recent; f++ {
 		eventually(t, ns, f, dueIs(false, ReasonSettingsNotFound))
 	}
@@ -1359,17 +1361,17 @@ func TestQuietIncidentsTakeNoBudgetWhenSettingsArriveLate(t *testing.T) {
 	for f := 1; f <= 3; f++ {
 		eventually(t, ns, f, dueIs(false, ReasonNotRecent))
 	}
-	time.Sleep(4 * testTriggerInterval) // later passes report nothing more
 	for range 3 {
 		select {
 		case e := <-rec.Events:
 			if !strings.HasPrefix(e, "Normal AnalysisSkipped ") || !strings.Contains(e, "15m0s") {
 				t.Fatalf("event %q", e)
 			}
-		default:
+		case <-time.After(20 * time.Second):
 			t.Fatal("fewer than 3 AnalysisSkipped events")
 		}
 	}
+	passes.afterPasses(t, 4) // later passes report nothing more
 	select {
 	case e := <-rec.Events:
 		t.Fatalf("an event more than one per skipped Incident: %q", e)
@@ -1745,7 +1747,7 @@ func TestHeldObservationKeepsTheSettleLimitCounting(t *testing.T) {
 	c.watch([]remediationv1alpha1.Incident{inc}, triggerNow, s)
 	start := triggerNow
 	used := 0
-	for i := 0; i <= 31; i++ { // every 10 s for a little over the settle limit, observed every pass
+	for i := range 32 { // every 10 s for a little over the settle limit, observed every pass
 		now := start.Add(time.Duration(i) * 10 * time.Second)
 		c.failed[inc.Spec.Fingerprint] = &batch{first: start, last: now}
 		c.watch([]remediationv1alpha1.Incident{inc}, now, s)

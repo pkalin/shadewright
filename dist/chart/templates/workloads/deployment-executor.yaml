@@ -1,3 +1,4 @@
+{{- if include "shadewright.executorEnabled" . -}}
 {{- $_ := include "shadewright.validate" (dict "component" "executor" "context" $) }}
 {{- $_ := include "shadewright.executorMemoryBudget" $ }}
 {{- $c := .Values.executor }}
@@ -24,7 +25,7 @@ spec:
       labels:
         {{- include "shadewright.labels" (dict "component" "executor" "context" $) | nindent 8 }}
         control-plane: executor
-        {{- if $c.identity.azure.clientId }}
+        {{- if and $c.identity.azure.clientId (not (include "shadewright.azureProjectToken" $c)) }}
         # Asks the AKS workload identity webhook to inject the federated token (design section 9).
         azure.workload.identity/use: "true"
         {{- end }}
@@ -85,6 +86,9 @@ spec:
               fieldPath: metadata.namespace
         - name: GOMEMLIMIT
           value: {{ include "shadewright.goMemLimit" (dict "component" "executor" "context" $) | quote }}
+        {{- if include "shadewright.azureProjectToken" $c }}
+        {{- include "shadewright.azureTokenEnv" $c | nindent 8 }}
+        {{- end }}
         ports:
         - containerPort: 8081
           name: health
@@ -125,18 +129,29 @@ spec:
           failureThreshold: 3
         resources:
           {{- toYaml $c.resources | nindent 10 }}
-        {{- with $c.metricsTLS.secretName }}
+        {{- $azTok := include "shadewright.azureProjectToken" $c }}
+        {{- if or $c.metricsTLS.secretName $azTok }}
         volumeMounts:
+        {{- with $c.metricsTLS.secretName }}
         - name: metrics-tls
           mountPath: /etc/shadewright/metrics-tls
           readOnly: true
         {{- end }}
-      {{- with $c.metricsTLS.secretName }}
+        {{- if $azTok }}
+        - {{- include "shadewright.azureTokenMount" . | nindent 10 }}
+        {{- end }}
+        {{- end }}
+      {{- if or $c.metricsTLS.secretName $azTok }}
       volumes:
+      {{- with $c.metricsTLS.secretName }}
       - name: metrics-tls
         secret:
           secretName: {{ . | quote }}
           defaultMode: 0444
+      {{- end }}
+      {{- if $azTok }}
+      - {{- include "shadewright.azureTokenVolume" . | nindent 8 }}
+      {{- end }}
       {{- end }}
       {{- with $c.nodeSelector }}
       nodeSelector:
@@ -154,3 +169,4 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{ end -}}

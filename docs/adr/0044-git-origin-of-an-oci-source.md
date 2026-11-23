@@ -1,7 +1,7 @@
 # ADR-0044: The Git origin of an OCI source is declared, and the artifact is only a cross-check
 
-- Status: Proposed
-- Date: 2026-11-19
+- Status: Accepted
+- Date: 2026-11-23
 
 ## Context
 

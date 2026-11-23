@@ -64,3 +64,24 @@ func PeakLiveHeap(f func()) uint64 {
 	peak = max(peak, s[0].Value.Uint64())
 	return peak - min(base, peak)
 }
+
+// PeakRuns is the most runs SmallestPeak measures.
+const PeakRuns = 3
+
+// SmallestPeak returns PeakLiveHeap of f, measured again up to PeakRuns runs in all while the reading is over
+// (over reports it), and the smallest reading. A sample counts the heap objects not yet swept, and when the
+// collector gets little processor time (a loaded machine, a runner with few cores) it can still count garbage at
+// the peak: PiecesWithin on 1.5 MiB of "addresses and control" read 71.7 bytes per byte past HeapFixed in idle
+// runs and 74.9 to 80.8 in 5 of 80 runs on two or four busy cores, at most one dead buffer of about 13.6 MiB more
+// (#1112). The live heap of f is the same in every run, so its smallest reading is the closest to it, and a shape
+// that really holds more is over in every run. f must hold nothing from one run to the next.
+func SmallestPeak(f func(), over func(peak uint64) bool) uint64 {
+	peak := PeakLiveHeap(f)
+	for range PeakRuns - 1 {
+		if !over(peak) {
+			break
+		}
+		peak = min(peak, PeakLiveHeap(f))
+	}
+	return peak
+}

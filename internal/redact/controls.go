@@ -18,6 +18,7 @@ package redact
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/pkalin/shadewright/internal/redact/meter"
 )
@@ -48,6 +49,15 @@ import (
 // no match; the heap tests (heapbound_test.go) measure its shapes against HeapWeightPerByte. Its work is linear in
 // the length of the text, and the matches read on it are carried back with a binary search over the runs,
 // counted on the budget.
+//
+// The shown view (decision of 2026-11-23). Invalid UTF-8 bytes can keep a key and its value from reading as one
+// form, and the text is shown with each run of them made one "?" (strings.ToValidUTF8 in the log source, the
+// context and the read tools), which joins them for the reader. Text that is not valid UTF-8 is therefore read once
+// more as it is shown: without its controls and with each run of invalid bytes as one "?" (shownViewOf). Its
+// matches are added the same way as those of the controls view, by the same callers, after it; a match that
+// starts at a "?" starts at its run and one that ends with it ends after its run (controlsView.origEnd). Valid
+// UTF-8 is not read again, and the collector's short entry points read neither view. Its heap is the view's text
+// (at most the bytes of the text) and one gap for each run of controls or of invalid bytes.
 
 // Control reports whether r is a code point the controls view leaves out, and that model text is stored without:
 // Unicode category Cc (U+0000 to U+001F, U+007F to U+009F) except newline and tab.
@@ -94,9 +104,14 @@ func hasControl(wm *meter.Meter, s string) bool {
 	return false
 }
 
-// controlsGap is one run of controls removed from a text: the byte of the view right after it (at) and how many
-// bytes of the text were removed up to and including it (removed).
-type controlsGap struct{ at, removed int32 }
+// controlsGap is one run of controls removed from a text, or one run of invalid bytes written as one "?": the byte
+// of the view right after it (at) and how many bytes of the text more than of the view lie before at (removed).
+// repaired is set for a run of invalid bytes: the "?" right before at stands for the whole run, so a match that
+// ends with it ends at the run's end.
+type controlsGap struct {
+	at, removed int32
+	repaired    bool
+}
 
 // controlsView is the controls view of a text: the text without its controls, and the runs removed.
 type controlsView struct {
@@ -110,6 +125,32 @@ func controlsViewOf(wm *meter.Meter, s string) (controlsView, bool) {
 	if !hasControl(wm, s) {
 		return controlsView{}, false
 	}
+	return viewOf(wm, s, false), true
+}
+
+// shownViewOf returns the shown view of s, and false when s is valid UTF-8: s as it is shown, without its
+// controls and with each run of invalid bytes (bytes that start no valid UTF-8 sequence) written as one "?", as
+// the log excerpts, the context and the read tools show a text made valid UTF-8 (strings.ToValidUTF8). Each run
+// is a gap of its own (repaired): a match that starts at its "?" starts at the run, and one that ends with it ends
+// after the run. The work is linear in the length of s.
+func shownViewOf(wm *meter.Meter, s string) (controlsView, bool) {
+	for i := 0; ; {
+		if i == len(s) {
+			return controlsView{}, false
+		}
+		tick(wm, 1)
+		c, n := utf8.DecodeRuneInString(s[i:])
+		if c == utf8.RuneError && n == 1 {
+			break
+		}
+		i += n
+	}
+	return viewOf(wm, s, true), true
+}
+
+// viewOf returns s without its controls, and with each run of invalid bytes written as one "?" when repair is
+// set.
+func viewOf(wm *meter.Meter, s string, repair bool) controlsView {
 	var b strings.Builder
 	b.Grow(len(s))
 	var v controlsView
@@ -125,16 +166,41 @@ func controlsViewOf(wm *meter.Meter, s string) (controlsView, bool) {
 			v.gaps = append(v.gaps, controlsGap{at: int32(b.Len()), removed: int32(i - b.Len())}) // #nosec G115 -- an entry is at most MaxEntry bytes
 			continue
 		}
-		b.WriteByte(s[i])
-		i++
+		if !repair {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if !invalidAt(s, i) {
+			_, n := utf8.DecodeRuneInString(s[i:])
+			b.WriteString(s[i : i+n])
+			i += n
+			continue
+		}
+		for i++; i < len(s) && invalidAt(s, i); i++ {
+			tick(wm, 1)
+		}
+		b.WriteByte('?')
+		v.gaps = append(v.gaps, controlsGap{at: int32(b.Len()), removed: int32(i - b.Len()), repaired: true}) // #nosec G115 -- an entry is at most MaxEntry bytes
 	}
 	v.text = b.String()
-	return v, true
+	return v
 }
 
-// orig returns the byte of the text that byte i of the view is.
-func (v controlsView) orig(wm *meter.Meter, i int) int {
-	lo, hi := 0, len(v.gaps) // the first gap after i
+// eachAddedView calls f with each added view of s: its controls view when s holds a code point of [Control], then
+// its shown view when s is not valid UTF-8. Text that is valid UTF-8 without a control has neither.
+func eachAddedView(wm *meter.Meter, s string, f func(v controlsView)) {
+	if v, ok := controlsViewOf(wm, s); ok {
+		f(v)
+	}
+	if v, ok := shownViewOf(wm, s); ok {
+		f(v)
+	}
+}
+
+// after returns the index of the first gap of v after byte i of the view.
+func (v controlsView) after(wm *meter.Meter, i int) int {
+	lo, hi := 0, len(v.gaps)
 	for lo < hi {
 		tick(wm, 1)
 		m := int(uint(lo+hi) >> 1)
@@ -144,10 +210,31 @@ func (v controlsView) orig(wm *meter.Meter, i int) int {
 			hi = m
 		}
 	}
+	return lo
+}
+
+// orig returns the byte of the text that byte i of the view is (the first byte of a run of invalid bytes for its
+// "?").
+func (v controlsView) orig(wm *meter.Meter, i int) int {
+	lo := v.after(wm, i)
 	if lo == 0 {
 		return i
 	}
 	return i + int(v.gaps[lo-1].removed)
+}
+
+// origEnd returns the end in the text of a match that ends at byte end of the view (end > 0): right after the
+// byte of its last byte, or after the whole run of invalid bytes its last byte, a "?", stands for. The controls
+// right after a match are not in it.
+func (v controlsView) origEnd(wm *meter.Meter, end int) int {
+	lo := v.after(wm, end-1)
+	if lo < len(v.gaps) && int(v.gaps[lo].at) == end && v.gaps[lo].repaired {
+		return end + int(v.gaps[lo].removed)
+	}
+	if lo == 0 {
+		return end
+	}
+	return end + int(v.gaps[lo-1].removed)
 }
 
 // eachControlsMatch calls add with each match of the reading of the controls view v of a text (its rules, in its
@@ -156,25 +243,23 @@ func (v controlsView) orig(wm *meter.Meter, i int) int {
 func (r *Redactor) eachControlsMatch(wm *meter.Meter, v controlsView, add func(start, end, rule int)) {
 	r.eachRuleMatch(wm, v.text, &windowIDs{}, func(start, end, rule int) {
 		tick(wm, 1)
-		add(v.orig(wm, start), v.orig(wm, end-1)+1, rule)
+		add(v.orig(wm, start), v.origEnd(wm, end), rule)
 	})
 }
 
 // addControlsView adds to l, which holds the matches of the readings of s as it is, the matches of the controls
-// view of s that l does not already hold whole, when s holds a code point of [Control]; for text without one it
-// does nothing. A match l holds whole would add no byte to what is hidden, so it is not held a second time: the
+// view of s that l does not already hold whole, when s holds a code point of [Control], then those of its shown
+// view, when s is not valid UTF-8; for valid UTF-8 without a control it does nothing. A match l holds whole would add no byte to what is hidden, so it is not held a second time: the
 // heap of the view is its text, its gaps and the matches that add to what is hidden (#852, decision of
 // 2026-11-22 on the heap). The matches l holds are never changed or dropped.
 func (r *Redactor) addControlsView(wm *meter.Meter, s string, l *matchList) {
-	v, ok := controlsViewOf(wm, s)
-	if !ok {
-		return
-	}
-	l.merge(wm)
-	r.eachControlsMatch(wm, v, func(start, end, rule int) {
-		if !l.covers(wm, start, end) {
-			l.add(wm, start, end, rule)
-		}
+	eachAddedView(wm, s, func(v controlsView) {
+		l.merge(wm)
+		r.eachControlsMatch(wm, v, func(start, end, rule int) {
+			if !l.covers(wm, start, end) {
+				l.add(wm, start, end, rule)
+			}
+		})
 	})
 }
 

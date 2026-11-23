@@ -80,8 +80,15 @@ func (a *answer) value(key, v string) int {
 // With fits not nil, the markers take the first form at which fits holds of the pieces as decided and made valid
 // UTF-8, in place of the limit (redact.Redactor.PiecesFitting).
 //
-// ok is false when redaction withheld the answer whole: the redactor's flag, never the text of a piece.
+// ok is false when redaction withheld the answer whole: the redactor's flag, never the text of a piece. An answer
+// larger than the largest entry the heap of one redaction was measured for (redact.LargestEntry, its size counted
+// on the pieces as passed, before any escape or normalisation) is withheld whole before the redactor reads it, with
+// the reason size (#1106, decision of 2026-11-22); list_events leaves notes out unread first (notesWithin) so that
+// its answer fits.
 func (s *Set) decide(ps []redact.Piece, limit int, fits func(out []string) bool) (out []string, ok bool) {
+	if redact.OverLargestEntry(redact.PiecesSize(ps)) {
+		return nil, false
+	}
 	if fits != nil {
 		out, ok = s.redactor.PiecesFitting(ps, func(out []string) bool {
 			valid := make([]string, len(out))

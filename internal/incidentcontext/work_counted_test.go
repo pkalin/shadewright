@@ -171,8 +171,10 @@ func TestBuildWorkIsLinear(t *testing.T) {
 // answers in its one series (the shape of FuzzDiffBuild input 81e201e983440dcc, metricsKey): each expression of
 // the rules reads a long window of the label once, alone and in its answer (redact's windows.go), and the
 // release's reading reads the label at two passes, not at each of 16 (#873, second round). The test logs the
-// steps per byte it measures; only this bound is asserted.
-const repeatedLabelWorkPerByte = 900
+// steps per byte it measures; only this bound is asserted. Measured 897 before the controls reading and 907 with
+// it (a text without controls costs that reading one step per byte at each pass that looks for them); the figure
+// is the same at 40 KiB and 400 KiB (864, 860), so the bound has room and the growth stays linear.
+const repeatedLabelWorkPerByte = 950
 
 // The work of a whole Build on one label name repeated by every metric template stays within
 // repeatedLabelWorkPerByte per byte of the label at 4 KiB, 40 KiB and 400 KiB (#873, second round).

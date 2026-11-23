@@ -68,7 +68,7 @@ var boundedLoops = map[string]string{
 	// The size of an entry, read once before its decision to set its budget (budget.go, #873): no meter exists yet,
 	// and a step counted there would be one no budget holds.
 	"(*Redactor).StringsChecked#0": entrySize,
-	"(*Redactor).meteredPieces#0":  entrySize,
+	"PiecesSize#0":                 entrySize,
 	// The heap of one redaction (#873, decision of 2026-11-21 on the heap): lookups in the maps kept as checkpoints
 	// or segments, and passes that size a buffer or group what a counted loop found.
 	"(*lineKinds).next#0":          "kindBlock bytes, in a match counted by its caller",

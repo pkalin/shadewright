@@ -191,11 +191,16 @@ type decidedPiece struct {
 
 // decidedPieces takes the one decision on ps with r and returns each piece as decided, a value shown on its line
 // ([Shown] of the decided value made valid UTF-8), or withheld true when redaction withheld the pieces whole
-// (the flag of PiecesWithin, never the text): nothing of them is returned then.
+// (the flag of PiecesWithin, never the text): nothing of them is returned then. Pieces larger than the largest
+// entry the heap of one redaction was measured for (redact.LargestEntry) are withheld before the redactor reads
+// them, with the reason size ([overLargestEntry]).
 func decidedPieces(r pieceRedactor, ps frag) (pieces []decidedPiece, withheld bool) {
 	in := make([]redact.Piece, len(ps))
 	for i, p := range ps {
 		in[i] = p.Piece
+	}
+	if overLargestEntry(redact.PiecesSize(in)) {
+		return nil, true
 	}
 	decided, ok := r.PiecesWithin(in, -1)
 	if !ok {

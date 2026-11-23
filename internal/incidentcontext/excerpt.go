@@ -41,8 +41,12 @@ type twicer interface {
 // checkedTwice redacts s as [Twice] of r does (with cut, as StringTwice takes it, when r is a twicer) and reports
 // false when redaction withheld it whole. Withheld is told by the redactor's flag, never by the text, so a value
 // from the cluster that spells redact.Withheld is text like any other (#873, decision of 2026-11-20). Every
-// [Redactor] has the flag (StringChecked), so none is taken for one that never withholds.
+// [Redactor] has the flag (StringChecked), so none is taken for one that never withholds. A text larger than
+// redact.LargestEntry is withheld before the redactor reads it, with the reason size ([overLargestEntry]).
 func checkedTwice(r Redactor, s string, cut func(string) int) (string, bool) {
+	if overLargestEntry(len(s)) {
+		return "", false
+	}
 	if t, ok := r.(twicer); ok {
 		return t.StringTwiceChecked(s, cut)
 	}

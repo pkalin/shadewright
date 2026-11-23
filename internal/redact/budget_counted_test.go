@@ -44,6 +44,9 @@ func TestEveryStepIsMetered(t *testing.T) {
 	for _, in := range budgetShapes(4 << 10) {
 		inputs = append(inputs, in)
 	}
+	for _, in := range shortFlagShapes(4 << 10) {
+		inputs = append(inputs, in)
+	}
 	for _, e := range budgetEntries {
 		for i, in := range inputs {
 			if n := Unmetered(func() { e.public(in) }); n != 0 {

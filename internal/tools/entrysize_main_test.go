@@ -36,7 +36,10 @@ import (
 
 // ordinaryAnswersTable records the answers of list_events and get_resource for ordinary answers, under the largest
 // entry the heap bound was measured for, as origin/main at ab900832 gave them, before #1106 bounded the entry of a
-// read tool. ORDINARY_ANSWERS_WRITE=1 writes it again from the tools of the tree it runs in.
+// read tool. The rows "generated 0" to "generated 3" hold control characters and were written again with the
+// controls reading (#852), which hides more in such text: their notes differ from that commit's only by spans
+// hidden, the kind of a placeholder, and one long reason that now fits its bound once redacted and is shown
+// redacted. ORDINARY_ANSWERS_WRITE=1 writes the table again from the tools of the tree it runs in.
 const ordinaryAnswersTable = "testdata/ordinary-answers-main.tsv"
 
 // ordinaryRows is the number of generated scenes of list_events in the table.
@@ -109,7 +112,7 @@ func TestOrdinaryAnswersAsOnMain(t *testing.T) {
 	}
 	if os.Getenv("ORDINARY_ANSWERS_WRITE") == "1" {
 		var b strings.Builder
-		b.WriteString("# The answers of TestOrdinaryAnswersAsOnMain at main ab900832, before #1106.\n# case\tdigest\n")
+		b.WriteString("# The answers of TestOrdinaryAnswersAsOnMain at main ab900832, before #1106; generated 0 to 3 with the controls reading.\n# case\tdigest\n")
 		for _, c := range cs {
 			fmt.Fprintf(&b, "%s\t%s\n", c.name, answerDigest(src.run(set, c.scene, c.tool, c.args)))
 		}

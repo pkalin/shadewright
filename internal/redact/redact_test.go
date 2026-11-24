@@ -24,7 +24,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // The corpus builds every token-shaped value at run time from obviously synthetic parts, so no realistic

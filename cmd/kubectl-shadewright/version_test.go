@@ -25,7 +25,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
+	"github.com/shadewright-labs/shadewright/cmd/kubectl-shadewright/internal/readclient"
 )
 
 // testPluginVersion is the plugin version the CRD version tests compare against.

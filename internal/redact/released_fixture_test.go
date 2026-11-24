@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/released"
+	"github.com/shadewright-labs/shadewright/internal/redact/released"
 )
 
 // releasedTable holds, for every input of the corpora of this package (canonCorpus, blockCorpus, formCorpus,

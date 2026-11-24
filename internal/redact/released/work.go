@@ -19,7 +19,7 @@ package released
 import (
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // The work of redaction is counted, not timed, by the tests that show it stays linear in the size of the

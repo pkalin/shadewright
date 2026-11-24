@@ -17,7 +17,7 @@ limitations under the License.
 package redact
 
 import (
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // The matches of the rules on one text, held as they are found (#1087). Every caller merges them (mergeSpans)

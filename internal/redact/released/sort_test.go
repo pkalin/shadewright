@@ -20,7 +20,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // The reading of the release before sorts its spans with sortFunc (#873, decision of 2026-11-20): a sort with no

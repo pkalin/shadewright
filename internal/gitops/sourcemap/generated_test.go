@@ -24,8 +24,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // ordersDir is the Kustomization path of the fixture.

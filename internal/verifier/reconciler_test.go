@@ -40,10 +40,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/testfixtures"
-	"github.com/pkalin/shadewright/internal/verification/clearing"
-	"github.com/pkalin/shadewright/internal/verification/rollout"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/testfixtures"
+	"github.com/shadewright-labs/shadewright/internal/verification/clearing"
+	"github.com/shadewright-labs/shadewright/internal/verification/rollout"
 )
 
 const (

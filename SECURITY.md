@@ -5,7 +5,7 @@ no maintained older lines yet.
 
 ## Reporting a vulnerability
 
-Report privately through GitHub: [open a security advisory for this repository](https://github.com/pkalin/shadewright/security/advisories/new).
+Report privately through GitHub: [open a security advisory for this repository](https://github.com/shadewright-labs/shadewright/security/advisories/new).
 The form is private: only the maintainer sees it. Do not open a public issue or pull request for a
 vulnerability, and do not describe it in a pull request that fixes it.
 
@@ -20,8 +20,8 @@ unless they prefer not to be.
 ## Scope
 
 In scope: the operator in this repository, its container images and Helm chart, and the reference lab in
-[shadewright-azure](https://github.com/pkalin/shadewright-azure) (it has its own advisory form). The workloads
-in [shadewright-fleet](https://github.com/pkalin/shadewright-fleet) are broken on purpose; their problems are
+[shadewright-azure](https://github.com/shadewright-labs/shadewright-azure) (it has its own advisory form). The workloads
+in [shadewright-fleet](https://github.com/shadewright-labs/shadewright-fleet) are broken on purpose; their problems are
 not vulnerabilities.
 
 The invariants in [AGENTS.md](AGENTS.md) are what the project promises: a model's output is never

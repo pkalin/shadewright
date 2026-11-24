@@ -23,7 +23,7 @@ import (
 
 	yaml "go.yaml.in/yaml/v3"
 
-	"github.com/pkalin/shadewright/internal/gitops/gityaml"
+	"github.com/shadewright-labs/shadewright/internal/gitops/gityaml"
 )
 
 // documents returns an upper bound of the objects kustomize processes from one manifest or patch file, or from

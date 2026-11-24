@@ -21,8 +21,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
 )
 
 // The envtest API server has no KEDA CRDs, so the KEDA baseline is checked here on an unstructured object.

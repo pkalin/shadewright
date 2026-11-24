@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 var t0 = time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)

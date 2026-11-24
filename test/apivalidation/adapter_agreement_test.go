@@ -25,12 +25,12 @@ import (
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/github"
-	"github.com/pkalin/shadewright/internal/providers/github/auth"
-	"github.com/pkalin/shadewright/internal/providers/signer/azurekv"
-	fx "github.com/pkalin/shadewright/internal/testfixtures"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/github"
+	"github.com/shadewright-labs/shadewright/internal/providers/github/auth"
+	"github.com/shadewright-labs/shadewright/internal/providers/signer/azurekv"
+	fx "github.com/shadewright-labs/shadewright/internal/testfixtures"
 )
 
 // settingsField is a RemediationSettings repository field that the GitHub adapter or the signer checks again.

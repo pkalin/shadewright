@@ -31,8 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
-	fx "github.com/pkalin/shadewright/internal/testfixtures"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	fx "github.com/shadewright-labs/shadewright/internal/testfixtures"
 )
 
 // A real API server with the CustomResourceDefinition of RemediationRequest of v0.5.2 (testdata/crd-v0.5.2, copied

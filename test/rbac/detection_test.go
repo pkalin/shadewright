@@ -28,11 +28,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	analyzerpkg "github.com/pkalin/shadewright/internal/analyzer"
-	"github.com/pkalin/shadewright/internal/analyzer/detection"
-	"github.com/pkalin/shadewright/internal/modules"
-	"github.com/pkalin/shadewright/internal/modules/aks"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	analyzerpkg "github.com/shadewright-labs/shadewright/internal/analyzer"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/detection"
+	"github.com/shadewright-labs/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/modules/aks"
 )
 
 // TestDetectionRunsWithTheAnalyzerRBAC runs the detector as the analyzer's ServiceAccount, with the analyzer's

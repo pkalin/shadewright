@@ -32,9 +32,9 @@ import (
 	metadatafake "k8s.io/client-go/metadata/fake"
 	k8stesting "k8s.io/client-go/testing"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
-	"github.com/pkalin/shadewright/internal/fluxstatus"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/cmd/kubectl-shadewright/internal/readclient"
+	"github.com/shadewright-labs/shadewright/internal/fluxstatus"
 )
 
 // testKinds are the kinds the fake cluster serves: every kind the plugin reads.

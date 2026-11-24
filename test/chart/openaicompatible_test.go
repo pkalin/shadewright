@@ -28,7 +28,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/pkalin/shadewright/internal/providers/model/openaicompatible"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/openaicompatible"
 )
 
 const serviceModelName = "model"

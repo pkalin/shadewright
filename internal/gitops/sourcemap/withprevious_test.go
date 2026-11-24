@@ -21,8 +21,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
 )
 
 // WithPrevious reads a decoded value as the previous value of an action in the bounded forms only, and leaves the

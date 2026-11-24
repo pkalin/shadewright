@@ -24,10 +24,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/gitops/semdiff"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/fake"
+	"github.com/shadewright-labs/shadewright/internal/gitops/semdiff"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 // readme is a file outside every build.

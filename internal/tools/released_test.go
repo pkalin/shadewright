@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/pkalin/shadewright/internal/providers/fake"
+	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 // The release before #845 read a value, then read it again with its own markers in place, and read the whole

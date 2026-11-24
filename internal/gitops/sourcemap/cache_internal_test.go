@@ -26,7 +26,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // countingGit serves files of a fixed size at any commit, refuses one over the read's limit as a provider

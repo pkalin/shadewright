@@ -23,7 +23,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // The sixth round of #786 against the model: one directed sequence per defect, each failing without its fix.

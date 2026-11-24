@@ -17,9 +17,9 @@ limitations under the License.
 package keda
 
 import (
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/kedaready"
-	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/kedaready"
+	"github.com/shadewright-labs/shadewright/internal/modules"
 )
 
 // Name is the module's name in RemediationSettings and its status.

@@ -5,9 +5,9 @@
 
 ## Context
 
-Design 11.2 leaves open which concrete models do the triage and the escalation jobs ([#80](https://github.com/pkalin/shadewright/issues/80), open question 3 in [design 15](../design/15-decisions-made-and-open-questions.md)). The evaluation harness ([#78](https://github.com/pkalin/shadewright/issues/78)) now gives real-model numbers, but they are thin: three repeats, one day, and a build with a known regression. This ADR records what runs today and says plainly what the numbers do not support.
+Design 11.2 leaves open which concrete models do the triage and the escalation jobs ([#80](https://github.com/shadewright-labs/shadewright/issues/80), open question 3 in [design 15](../design/15-decisions-made-and-open-questions.md)). The evaluation harness ([#78](https://github.com/shadewright-labs/shadewright/issues/78)) now gives real-model numbers, but they are thin: three repeats, one day, and a build with a known regression. This ADR records what runs today and says plainly what the numbers do not support.
 
-Decided on 2026-11-05 ([#80](https://github.com/pkalin/shadewright/issues/80)), restated here:
+Decided on 2026-11-05 ([#80](https://github.com/shadewright-labs/shadewright/issues/80)), restated here:
 
 1. Microsoft Foundry is the only provider in v0.3.0. Other providers come later as adapters behind `ModelProvider`, each through the evaluation gate.
 2. Data Zone EU deployments are the documented default. Global Standard is an operator's documented choice.
@@ -18,7 +18,7 @@ Decided on 2026-11-05 ([#80](https://github.com/pkalin/shadewright/issues/80)), 
 ## Decision
 
 1. **False fix, defined.** A false fix is a proposal that reaches a pull request and would not resolve the incident, or would cause harm. A proposal that policy denies or that falls outside the action catalog is not a false fix, because policy stopped it, but the evaluation counts and reports it per model. No run so far had a false fix.
-2. **Triage default: `gpt-5.4-mini-2026-03-17`, provisional.** It is what the lab runs today and it was safe on every refusal scenario, but on the comparable set it scored below `gpt-5.4` alone (evidence below). Epic [#503](https://github.com/pkalin/shadewright/issues/503) settles it before v0.4.0.
+2. **Triage default: `gpt-5.4-mini-2026-03-17`, provisional.** It is what the lab runs today and it was safe on every refusal scenario, but on the comparable set it scored below `gpt-5.4` alone (evidence below). Epic [#503](https://github.com/shadewright-labs/shadewright/issues/503) settles it before v0.4.0.
 3. **Escalation: no default.** `escalationModel` stays empty, so an escalation signal hands the incident to a person. `gpt-5.4-2026-03-05` is the leading candidate, not a default: escalation with tools has not been measured for any model. Epic #503 decides it.
 4. The chart keeps `analyzer.analysis.triageModel` empty, so analysis stays off until an operator opts in. The evaluation gate of [ADR-0025](0025-analysis-claims-units-and-evaluation-manifest.md) is planned, not built: until it exists, analysis is for evaluation runs in the lab only, as the chart values say.
 
@@ -35,15 +35,15 @@ All runs on 2026-11-07, three repeats each. The 27-run set has 9 scenarios, the 
 | Forced escalation, `gpt-5.4` | 14 of 27, zero tool calls | | |
 | Forced escalation, both `gpt-6.1` models | 0 of 27 | | |
 
-- Safety: on an earlier run `gpt-5.4-mini` triage was correct and safe on all 15 refusal scenario runs (5 scenarios, 3 repeats). The proposals policy denied were `AdjustKedaMaxReplicas` to 4 where policy allows 2 to 3, made before [#493](https://github.com/pkalin/shadewright/issues/493) showed the model the policy bounds. None reached Git.
-- Accuracy: on the comparable set the proposed pair is the lowest row, and `gpt-5.4` alone costs only about 11% more. The pair is the configuration whose score dropped with regression [#499](https://github.com/pkalin/shadewright/issues/499) (14 of 24 to 10 of 24 on the older 8-scenario set). The effect of #499 on the single-model runs is not measured.
+- Safety: on an earlier run `gpt-5.4-mini` triage was correct and safe on all 15 refusal scenario runs (5 scenarios, 3 repeats). The proposals policy denied were `AdjustKedaMaxReplicas` to 4 where policy allows 2 to 3, made before [#493](https://github.com/shadewright-labs/shadewright/issues/493) showed the model the policy bounds. None reached Git.
+- Accuracy: on the comparable set the proposed pair is the lowest row, and `gpt-5.4` alone costs only about 11% more. The pair is the configuration whose score dropped with regression [#499](https://github.com/shadewright-labs/shadewright/issues/499) (14 of 24 to 10 of 24 on the older 8-scenario set). The effect of #499 on the single-model runs is not measured.
 - An older run on the 8-scenario set with a different prompt (`78b6640`) passed 17 of 24 at about USD 0.14. It is not comparable with the table.
-- The `gpt-6.1` models scored 0 in forced escalation because chat completions refuse function tools for them ([#501](https://github.com/pkalin/shadewright/issues/501)): an adapter limit, not a verdict on the models. `gpt-5.4` made no tool calls when forced, and escalation never starts in normal runs ([#473](https://github.com/pkalin/shadewright/issues/473)).
+- The `gpt-6.1` models scored 0 in forced escalation because chat completions refuse function tools for them ([#501](https://github.com/shadewright-labs/shadewright/issues/501)): an adapter limit, not a verdict on the models. `gpt-5.4` made no tool calls when forced, and escalation never starts in normal runs ([#473](https://github.com/shadewright-labs/shadewright/issues/473)).
 
 ### What these numbers are not
 
-- **Deployment type.** The benchmarked `gpt-5.4-mini`, `gpt-5.4` and `gpt-6.1-terra` deployments were Global Standard, because Data Zone quota was pending ([#411](https://github.com/pkalin/shadewright/issues/411)). Only `gpt-6.1-sol` ran as Data Zone Standard. Numbers on Data Zone are expected to match but are not measured.
-- **Injection corpus.** The false-fix gate on the prompt injection and outage corpus ([#79](https://github.com/pkalin/shadewright/issues/79)) is not yet measured for these models.
+- **Deployment type.** The benchmarked `gpt-5.4-mini`, `gpt-5.4` and `gpt-6.1-terra` deployments were Global Standard, because Data Zone quota was pending ([#411](https://github.com/shadewright-labs/shadewright/issues/411)). Only `gpt-6.1-sol` ran as Data Zone Standard. Numbers on Data Zone are expected to match but are not measured.
+- **Injection corpus.** The false-fix gate on the prompt injection and outage corpus ([#79](https://github.com/shadewright-labs/shadewright/issues/79)) is not yet measured for these models.
 - **Cost.** Per-run costs are estimates from the evaluation report, not a cost per resolved incident.
 
 ## Consequences
@@ -66,4 +66,4 @@ The lab Terraform (`shadewright-azure`) defaults a model deployment to Global St
 
 ## Amendments
 
-- 2026-11-16: the Foundry adapter can call a deployment through the Responses API (`inferenceAPI: Responses`, [#501](https://github.com/pkalin/shadewright/issues/501)). The 0 of 27 in the evidence table was measured on chat completions and has not been measured again on Responses, so the decision and the table stand as written.
+- 2026-11-16: the Foundry adapter can call a deployment through the Responses API (`inferenceAPI: Responses`, [#501](https://github.com/shadewright-labs/shadewright/issues/501)). The 0 of 27 in the evidence table was measured on chat completions and has not been measured again on Responses, so the decision and the table stand as written.

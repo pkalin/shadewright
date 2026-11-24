@@ -10,7 +10,7 @@ ADR-0037. Foundry already speaks Chat Completions and Responses, but binds them 
 an Entra identity. Operators also need the OpenAI API, gateways and models served
 inside a cluster. A protocol name is not a claim that every server enforces schemas.
 The decision of 2026-11-16 is one configurable provider, not one fixed vendor host.
-On 2026-11-17 the [decision on issue #834](https://github.com/pkalin/shadewright/issues/834#issuecomment-6946338496)
+On 2026-11-17 the [decision on issue #834](https://github.com/shadewright-labs/shadewright/issues/834#issuecomment-6946338496)
 bound the models at install time as well: each endpoint declaration names an exact
 base URL and the model names allowed at it, so settings choose neither the base nor
 the model alias a gateway routes on.
@@ -169,7 +169,7 @@ raw bytes.
 The check does not model terminal escape sequences. Model text is stored without
 control characters: every code point of Unicode category Cc (C0, DEL, C1) except
 newline and tab is removed where model output enters the analysis loop, for every
-provider ([#852](https://github.com/pkalin/shadewright/issues/852)). What is
+provider ([#852](https://github.com/shadewright-labs/shadewright/issues/852)). What is
 stored is then what any terminal shows, and the view drops a superset of what
 storage removes, so a key that is contiguous in stored text is contiguous in the
 view and is refused. A sequence with visible parameters inside the key, such as
@@ -309,4 +309,4 @@ Offline transport tests do not replace scenario qualification.
 
 ## Amendments
 
-- 2026-11-22 ([#852](https://github.com/pkalin/shadewright/issues/852)): #852, the condition this ADR set for shipping the provider, is built. Model text is stored without control characters and a tool call that holds one is refused, for every provider ([ADR-0023](0023-how-the-analyzer-calls-the-model.md), amendment of that date). Nothing else changes.
+- 2026-11-22 ([#852](https://github.com/shadewright-labs/shadewright/issues/852)): #852, the condition this ADR set for shipping the provider, is built. Model text is stored without control characters and a tool call that holds one is refused, for every provider ([ADR-0023](0023-how-the-analyzer-calls-the-model.md), amendment of that date). Nothing else changes.

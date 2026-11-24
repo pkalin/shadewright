@@ -19,8 +19,8 @@ package models
 import (
 	"testing"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/providers/model/foundry"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/foundry"
 )
 
 // TestInferenceAPIValuesMatchTheAdapter pins that the values of the settings field are the adapter's own: the

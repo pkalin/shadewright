@@ -16,7 +16,7 @@ limitations under the License.
 
 package openaiwire
 
-import "github.com/pkalin/shadewright/internal/providers"
+import "github.com/shadewright-labs/shadewright/internal/providers"
 
 // API identifies an OpenAI wire format.
 type API string

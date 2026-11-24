@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/policy/pathmatch"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/policy/pathmatch"
 )
 
 //nolint:goconst // literal paths keep each test case readable

@@ -20,7 +20,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/gitops/semdiff"
+	"github.com/shadewright-labs/shadewright/internal/gitops/semdiff"
 )
 
 // TestMain makes the render check of the pull request step render in this process

@@ -35,8 +35,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/model/keyfile"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/keyfile"
 )
 
 // The API this adapter calls. The URL is a constant: no setting can point the key at another host.

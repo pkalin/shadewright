@@ -20,9 +20,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"github.com/pkalin/shadewright/internal/fluxstatus"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap/fluxrules"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/fluxstatus"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap/fluxrules"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // The Flux rules of the mapping live in [fluxrules], which imports no Kubernetes client, so

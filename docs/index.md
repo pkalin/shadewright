@@ -15,7 +15,7 @@ hide:
 
 [Get started](getting-started.md){ .md-button .md-button--primary }
 [How it works](how-it-works/index.md){ .md-button }
-[GitHub](https://github.com/pkalin/shadewright){ .md-button }
+[GitHub](https://github.com/shadewright-labs/shadewright){ .md-button }
 
 </div>
 
@@ -100,6 +100,6 @@ The design, the decisions behind it and the contributor guide are in the sidebar
 
 ## Repositories
 
-- [shadewright](https://github.com/pkalin/shadewright): the operator and these docs.
-- [shadewright-azure](https://github.com/pkalin/shadewright-azure): Terraform for a disposable reference lab in Azure.
-- [shadewright-fleet](https://github.com/pkalin/shadewright-fleet): the lab's GitOps repository and incident scenarios.
+- [shadewright](https://github.com/shadewright-labs/shadewright): the operator and these docs.
+- [shadewright-azure](https://github.com/shadewright-labs/shadewright-azure): Terraform for a disposable reference lab in Azure.
+- [shadewright-fleet](https://github.com/shadewright-labs/shadewright-fleet): the lab's GitOps repository and incident scenarios.

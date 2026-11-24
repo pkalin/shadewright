@@ -19,7 +19,7 @@ package providers_test
 import (
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/testutil/importguard"
+	"github.com/shadewright-labs/shadewright/internal/testutil/importguard"
 )
 
 // TestNoVendorImports enforces ADR-0013: the interfaces and the fakes import only the standard library and

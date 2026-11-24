@@ -31,9 +31,9 @@ import (
 	yaml "go.yaml.in/yaml/v3"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/gitops/gityaml"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/gitops/gityaml"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
 )
 
 // MaxBytes is the largest input accepted, as for files read from Git.

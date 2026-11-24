@@ -30,9 +30,9 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/incidentcontext"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // A tool result is one text, decided once (#845, third decision of 2026-11-18), and the text decided on is the

@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // benchLog returns log lines of four common shapes, about n bytes.

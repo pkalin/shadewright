@@ -16,7 +16,7 @@ Dashed boxes are designed, not built. The teal box is GitHub, outside the cluste
 | Context builder | <span class="sw-status sw-built">built</span> | [3.3, the context builder](3-observation-and-deduplication.md#the-context-builder); `internal/incidentcontext`, `internal/redact` |
 | Pod logs, metrics, the Incident (made from Events) | <span class="sw-status sw-built">built</span> | [3.1](3-observation-and-deduplication.md#31-collecting), [4.1](4-tools.md#41-query_metrics), [4.2](4-tools.md#42-get_pod_logs) |
 | Read-only tools | <span class="sw-status sw-built">built</span> | [4. Tools](4-tools.md); `internal/tools` |
-| `read_git_file` | <span class="sw-status sw-planned">planned</span> | [4. Tools](4-tools.md), [#373](https://github.com/pkalin/shadewright/issues/373) |
+| `read_git_file` | <span class="sw-status sw-planned">planned</span> | [4. Tools](4-tools.md), [#373](https://github.com/shadewright-labs/shadewright/issues/373) |
 | Analyzer RBAC | <span class="sw-status sw-built">built</span> | [10.1](10-security.md#101-least-privilege-rbac), [10.11](10-security.md#1011-what-each-identity-can-read-and-write) |
 | Budget and time limit | <span class="sw-status sw-built">built</span> | [3.2, the analysis budget](3-observation-and-deduplication.md#the-analysis-budget), [the loop and its limits](3-observation-and-deduplication.md#the-loop-and-its-limits) |
 | Malformed output refused | <span class="sw-status sw-built">built</span> | [3.3, the prompt and the result](3-observation-and-deduplication.md#the-prompt-and-the-result); `internal/analysis/result.go` |

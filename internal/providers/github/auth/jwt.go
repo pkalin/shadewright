@@ -25,7 +25,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 const (

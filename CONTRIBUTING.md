@@ -5,11 +5,12 @@ the operator diagnoses or refuses wrongly, a scenario for the lab, and tasks fro
 
 ## Where things are
 
-- Issues for all three repositories ([shadewright](https://github.com/pkalin/shadewright),
-  [shadewright-azure](https://github.com/pkalin/shadewright-azure),
-  [shadewright-fleet](https://github.com/pkalin/shadewright-fleet)) live in this repository. Tasks labelled
+- Each issue lives in the repository whose files it changes: [shadewright](https://github.com/shadewright-labs/shadewright)
+  (the operator, chart, docs and every epic), [shadewright-azure](https://github.com/shadewright-labs/shadewright-azure)
+  (Terraform for the lab) or [shadewright-fleet](https://github.com/shadewright-labs/shadewright-fleet) (scenarios and
+  cluster config). Tasks labelled
   `agent-ready` are written so that anyone, a person or a coding agent, can take one without further context.
-- The roadmap is a public [GitHub project](https://github.com/users/pkalin/projects/2).
+- The roadmap is a public [GitHub project](https://github.com/orgs/shadewright-labs/projects/1).
 - The design is [docs/design.md](docs/design.md), one page per section in `docs/design/`; decisions are [ADRs](docs/adr/index.md). Both are published
   at [shadewright.io](https://shadewright.io).
 - [AGENTS.md](AGENTS.md) is the working guide: the invariants, the commit format, the checks to run, what docs

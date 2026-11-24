@@ -24,8 +24,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	verification "github.com/pkalin/shadewright/internal/verification/clearing"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	verification "github.com/shadewright-labs/shadewright/internal/verification/clearing"
 )
 
 // The first check of a new process resets every open window that no check of its own left open, with

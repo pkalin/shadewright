@@ -168,7 +168,7 @@ func unmetered(t *testing.T, name string, src []byte) string {
 	for _, d := range f.Decls {
 		if g, ok := d.(*ast.GenDecl); ok && g.Tok == token.IMPORT {
 			g.Specs = slices.DeleteFunc(g.Specs, func(s ast.Spec) bool {
-				return s.(*ast.ImportSpec).Path.Value == `"github.com/pkalin/shadewright/internal/redact/meter"`
+				return s.(*ast.ImportSpec).Path.Value == `"github.com/shadewright-labs/shadewright/internal/redact/meter"`
 			})
 			if len(g.Specs) == 1 {
 				g.Lparen, g.Rparen = token.NoPos, token.NoPos
@@ -176,7 +176,7 @@ func unmetered(t *testing.T, name string, src []byte) string {
 		}
 	}
 	f.Imports = slices.DeleteFunc(f.Imports, func(s *ast.ImportSpec) bool {
-		return s.Path.Value == `"github.com/pkalin/shadewright/internal/redact/meter"`
+		return s.Path.Value == `"github.com/shadewright-labs/shadewright/internal/redact/meter"`
 	})
 	var b bytes.Buffer
 	if err := format.Node(&b, fset, f); err != nil {

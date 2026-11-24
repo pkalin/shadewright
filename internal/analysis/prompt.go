@@ -27,9 +27,9 @@ import (
 	"sync"
 	"text/template"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/incidentcontext"
-	"github.com/pkalin/shadewright/internal/tools"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // systemTemplate is the static system part of the prompt (ADR-0023 decisions 1 and 3): code, reviewed and

@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"regexp"
 
-	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/openaiwire"
 )
 
 var (

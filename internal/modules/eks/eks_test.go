@@ -20,8 +20,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/modules"
-	"github.com/pkalin/shadewright/internal/testutil/importguard"
+	"github.com/shadewright-labs/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/testutil/importguard"
 )
 
 // TestNoVendorImports enforces ADR-0013: no AWS SDK in a platform module.

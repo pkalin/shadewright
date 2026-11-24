@@ -5,7 +5,7 @@
 
 ## Context
 
-Epic [#545](https://github.com/pkalin/shadewright/issues/545) lets someone install Shadewright on an existing AKS cluster with a published Terraform module and a reference architecture. Task [#546](https://github.com/pkalin/shadewright/issues/546) records the decisions the epic made on 2026-11-08, after an assessment, `/breakdown` and `/challenge premortem`. This ADR writes them down with the alternatives. Beyond the epic it decides the deployer permissions per layer and the landing-zone check (section 5), the grants and the admin principal (section 6), the tag precedence (section 7), and how the module treats the analyzer's blob grant, the identities' lifetime, the audit workspace endpoint and the single GitHub App key (see Alternatives).
+Epic [#545](https://github.com/shadewright-labs/shadewright/issues/545) lets someone install Shadewright on an existing AKS cluster with a published Terraform module and a reference architecture. Task [#546](https://github.com/shadewright-labs/shadewright/issues/546) records the decisions the epic made on 2026-11-08, after an assessment, `/breakdown` and `/challenge premortem`. This ADR writes them down with the alternatives. Beyond the epic it decides the deployer permissions per layer and the landing-zone check (section 5), the grants and the admin principal (section 6), the tag precedence (section 7), and how the module treats the analyzer's blob grant, the identities' lifetime, the audit workspace endpoint and the single GitHub App key (see Alternatives).
 
 What runs on Azure today is the lab in the `shadewright-azure` repository, written for one subscription of the maintainer:
 
@@ -41,7 +41,7 @@ The split is for adopters' environments: the records, the key and the audit trai
 
 ### 4. Restricted by default, private on request
 
-Decided on 2026-11-08 ([#546](https://github.com/pkalin/shadewright/issues/546#issuecomment-6726981902)): full privacy is the adopter's choice, not the default.
+Decided on 2026-11-08 ([#546](https://github.com/shadewright-labs/shadewright/issues/546#issuecomment-6726981902)): full privacy is the adopter's choice, not the default.
 
 **Default: restricted public endpoints.** The services keep public endpoints, and each one is locked down with its own features:
 
@@ -78,7 +78,7 @@ The role assignments are the sensitive part: writing them is a privileged right.
 
 ### 6. Grants are pinned by a test (invariant 6)
 
-A test of the module pins every role assignment it creates: role (or its definition's data actions), scope and principal. The analyzer gets inference on the Foundry account and blob write access on the one container; the executor gets sign on the one key. Anything else, a wider scope, an added action, a new assignment, fails the test. Changing the test is a change to invariant 6 and needs the maintainer's review, like a change to the operator's RBAC. **The analyzer's blob grant is built as in the lab:** `blobs/write` plus `blobs/add/action` (`foundation/analysis-store.tf`). That role can overwrite an existing blob, so it is not create-only. The recovery evidence is blob versioning, which the module requires and the pinned test pins; this is the state of [ADR-0015](0015-analysis-records-outlive-the-lab.md) after its 2026-11-04 amendment. Making the role create-only is [#154](https://github.com/pkalin/shadewright/issues/154), which must close before the module's first release. The container is shared by all clusters of an environment, so until #154 one cluster's analyzer can overwrite another's records.
+A test of the module pins every role assignment it creates: role (or its definition's data actions), scope and principal. The analyzer gets inference on the Foundry account and blob write access on the one container; the executor gets sign on the one key. Anything else, a wider scope, an added action, a new assignment, fails the test. Changing the test is a change to invariant 6 and needs the maintainer's review, like a change to the operator's RBAC. **The analyzer's blob grant is built as in the lab:** `blobs/write` plus `blobs/add/action` (`foundation/analysis-store.tf`). That role can overwrite an existing blob, so it is not create-only. The recovery evidence is blob versioning, which the module requires and the pinned test pins; this is the state of [ADR-0015](0015-analysis-records-outlive-the-lab.md) after its 2026-11-04 amendment. Making the role create-only is [#154](https://github.com/shadewright-labs/shadewright/issues/154), which must close before the module's first release. The container is shared by all clusters of an environment, so until #154 one cluster's analyzer can overwrite another's records.
 
 **Admin grants.** The module takes an operator input, an admin principal and admin network CIDRs. The principal gets Key Vault Crypto Officer on the vault, for importing and rotating the App key (`foundation/keyvault.tf`, [identity-rotation.md](../identity-rotation.md)), and the CIDRs are added to the service firewalls so the admin can reach the services. These assignments are pinned by the same test. The evaluation identity of the lab (`foundation/evaluation.tf`) stays lab-only in `shadewright-azure`.
 

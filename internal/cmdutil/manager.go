@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/pkalin/shadewright/internal/cmdutil/sharedflags"
+	"github.com/shadewright-labs/shadewright/internal/cmdutil/sharedflags"
 )
 
 // Leader election Lease names. The manifests create the three Leases (config/rbac/<id>/leader_election.yaml,

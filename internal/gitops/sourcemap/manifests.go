@@ -31,10 +31,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/yaml"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/gitops/gityaml"
-	"github.com/pkalin/shadewright/internal/gitops/repopath"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/gitops/gityaml"
+	"github.com/shadewright-labs/shadewright/internal/gitops/repopath"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // Limits on what the mapping reads from Git, so a hostile repository cannot make it read without bound.

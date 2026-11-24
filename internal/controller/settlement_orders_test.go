@@ -34,10 +34,10 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/policy/freshness"
-	"github.com/pkalin/shadewright/internal/providers"
-	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	fakegit "github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 // slowGit runs out the caller's time on the methods slow names: the call waits for the context and fails with it,

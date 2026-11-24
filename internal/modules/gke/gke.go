@@ -32,7 +32,7 @@ limitations under the License.
 // imports only the standard library and this module, and no Google Cloud SDK (ADR-0013).
 package gke
 
-import "github.com/pkalin/shadewright/internal/modules"
+import "github.com/shadewright-labs/shadewright/internal/modules"
 
 // Name is the module's name in RemediationSettings.
 const Name = "gke"

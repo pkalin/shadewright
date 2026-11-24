@@ -16,7 +16,7 @@ limitations under the License.
 
 package modules
 
-import "github.com/pkalin/shadewright/api/v1alpha1"
+import "github.com/shadewright-labs/shadewright/api/v1alpha1"
 
 // Names and group versions the tests use more than once.
 const (

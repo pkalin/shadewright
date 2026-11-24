@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
 )
 
 const (

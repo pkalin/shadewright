@@ -20,7 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 
-	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/modules"
 )
 
 // EventOf returns what a diagnosis rule reads from an event. The fields are copied as they are: rules treat

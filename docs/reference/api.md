@@ -3,7 +3,7 @@
 # API reference
 
 This page lists every Shadewright custom resource and the types they use, generated from the Go types in
-[`api/`](https://github.com/pkalin/shadewright/tree/main/api). Field descriptions come from the doc
+[`api/`](https://github.com/shadewright-labs/shadewright/tree/main/api). Field descriptions come from the doc
 comments; validation comes from the kubebuilder markers and CEL rules that the API server enforces.
 
 API group and version: `remediation.shadewright.io/v1alpha1`

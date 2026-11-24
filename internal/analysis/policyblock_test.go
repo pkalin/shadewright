@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
 )
 
 // The policy bounds block (#493) is labelled as operator configuration, never as evidence: its notice says

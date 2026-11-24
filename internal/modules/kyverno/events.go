@@ -20,7 +20,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/modules"
 )
 
 // RuleAdmissionRefused is the name of the diagnosis rule for a refused admission request.

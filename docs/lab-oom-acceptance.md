@@ -19,7 +19,7 @@ the end turns the analysis on for one analysis.
 
 !!! warning "Costs money and changes real systems"
     Steps 1 and 11 create and destroy Azure resources (about 0.10 EUR per hour while the lab is up, see
-    [shadewright-azure, Cost](https://github.com/pkalin/shadewright-azure#cost)). Steps 6 to 9 open and close a real
+    [shadewright-azure, Cost](https://github.com/shadewright-labs/shadewright-azure#cost)). Steps 6 to 9 open and close a real
     pull request in your fleet repository. Run them yourself; nothing here is meant for CI or an agent.
 
 Commands run from the repository named at the start of each step. `<owner>` is your GitHub account. Nothing below
@@ -28,7 +28,7 @@ into the samples on your machine only, and the samples in Git keep their `REPLAC
 
 ## Before you start
 
-- The one-time setup of [shadewright-azure](https://github.com/pkalin/shadewright-azure#first-run) is done: state
+- The one-time setup of [shadewright-azure](https://github.com/shadewright-labs/shadewright-azure#first-run) is done: state
   storage, foundation, and the GitHub App registered with its key imported and the executor's `sign` grant
   (`github_app_key_imported = true`).
 - The fleet repository has the branch `cluster/lab` and its two rulesets (ADR-0022, decision 5). The scenario
@@ -395,20 +395,20 @@ make lab-down    # plan of the destroy, asks; applies on "yes", then lab-check
 Expect a destroy plan for the `lab` root only and, after `yes`, a passing `lab-check`: nothing of the lab left, and
 no hourly-billed resource outside it. Remove `/tmp/shadewright-lab`, which holds your filled samples.
 
-Issue [#58](https://github.com/pkalin/shadewright/issues/58) closes once the field log holds the recorded run.
+Issue [#58](https://github.com/shadewright-labs/shadewright/issues/58) closes once the field log holds the recorded run.
 
 ## Evaluation run: the first analysis with a real model
 
 Optional, in a lab that is up. A real model reads a real context of the OOM scenario's Incident
-([#76](https://github.com/pkalin/shadewright/issues/76)). It is an **evaluation run, not production use**: the
-evaluation harness ([#78](https://github.com/pkalin/shadewright/issues/78), [Evaluate the model](evaluation.md)) is
+([#76](https://github.com/shadewright-labs/shadewright/issues/76)). It is an **evaluation run, not production use**: the
+evaluation harness ([#78](https://github.com/shadewright-labs/shadewright/issues/78), [Evaluate the model](evaluation.md)) is
 built but its fail-closed check in the analyzer is not, and that check is the gate before any release that starts the loop
 ([ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md), decision 7). A proposal it makes is a
 `RemediationRequest` with `approvalRequired: true`, which the executor checks against policy like a hand-written one;
 do not approve it as a fix.
 
-Since shadewright-fleet [#37](https://github.com/pkalin/shadewright-fleet/pull/37) and
-[#38](https://github.com/pkalin/shadewright-fleet/pull/38), the fleet's `main` turns it on with nothing applied by hand:
+Since shadewright-fleet [#37](https://github.com/shadewright-labs/shadewright-fleet/pull/37) and
+[#38](https://github.com/shadewright-labs/shadewright-fleet/pull/38), the fleet's `main` turns it on with nothing applied by hand:
 
 - `infrastructure/shadewright-lab` sets `analyzer.analysis` in the HelmRelease values: `triageModel` (the model of the
   foundation deployment `triage`, as its replies name it), `endpointSuffixes` limited to the lab's own AI Services
@@ -428,7 +428,7 @@ Since shadewright-fleet [#37](https://github.com/pkalin/shadewright-fleet/pull/3
    ```
 
    The settings arrive minutes after the cluster starts, so any baseline Incident already open is analyzed as soon as
-   they do, and each takes one of the day's analyses ([#423](https://github.com/pkalin/shadewright/issues/423)).
+   they do, and each takes one of the day's analyses ([#423](https://github.com/shadewright-labs/shadewright/issues/423)).
 
 2. Switch the OOM scenario on (`make scenario-oom CLUSTER=lab`) and wait for its Incident to be analyzed:
 
@@ -457,10 +457,10 @@ Since shadewright-fleet [#37](https://github.com/pkalin/shadewright-fleet/pull/3
    summary and, for a `MissingData` hand-off, the `missingData` list from the `Analyzed Incident` line, and the
    request's spec if one was made. A wrong or unsupported proposal is a
    finding for #78, not something to fix in the run. The summary and `missingData` are in the log from
-   [#422](https://github.com/pkalin/shadewright/issues/422) on. With the record store set
+   [#422](https://github.com/shadewright-labs/shadewright/issues/422) on. With the record store set
    (`analyzer.analysis.recordStore.azureBlob.account`, the `analysis_store` output of `foundation`), the same
    fields are in the record named by the Incident's `status.analysisRecords`, in the `analyses` container
-   ([#77](https://github.com/pkalin/shadewright/issues/77)); a record not written is logged (such as `Failed to write the
+   ([#77](https://github.com/shadewright-labs/shadewright/issues/77)); a record not written is logged (such as `Failed to write the
    analysis record`), counted in `shadewright_analysis_records_total` and reported with a Warning event
    `AnalysisRecordNotWritten` on the Incident, and changes nothing else.
 

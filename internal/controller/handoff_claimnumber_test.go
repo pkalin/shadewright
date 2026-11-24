@@ -26,9 +26,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/providers"
-	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	fakegit "github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 // A claim on a merge of another head decides by its own pull request number everywhere it is read (decision of

@@ -7,7 +7,7 @@
 # silently ignored):
 #   make docker-build DOCKER_BUILD_ARGS='--build-context <FROM reference>=docker-image://<mirror>/<image>'
 # The builder always runs on the build host and cross-compiles (CGO is off), so a multi-arch build needs no QEMU.
-FROM --platform=$BUILDPLATFORM golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -34,21 +34,21 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpat
 # Distroless static, nonroot: no shell or package manager, and it runs as 65532, so the pod can set
 # runAsNonRoot and readOnlyRootFilesystem (the binaries write nothing to disk).
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931 AS executor
+FROM gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5 AS executor
 WORKDIR /
 COPY --from=builder /workspace/LICENSE /workspace/NOTICE /licenses/
 COPY --from=builder /workspace/manager .
 USER 65532:65532
 ENTRYPOINT ["/manager"]
 
-FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931 AS analyzer
+FROM gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5 AS analyzer
 WORKDIR /
 COPY --from=builder /workspace/LICENSE /workspace/NOTICE /licenses/
 COPY --from=builder /workspace/analyzer .
 USER 65532:65532
 ENTRYPOINT ["/analyzer"]
 
-FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931 AS verifier
+FROM gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5 AS verifier
 WORKDIR /
 COPY --from=builder /workspace/LICENSE /workspace/NOTICE /licenses/
 COPY --from=builder /workspace/verifier .
@@ -56,7 +56,7 @@ USER 65532:65532
 ENTRYPOINT ["/verifier"]
 
 # All binaries, for config/manager (the analyzer and verifier Deployments set their own command). Last, so it is the default target.
-FROM gcr.io/distroless/static:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931 AS local
+FROM gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5 AS local
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/analyzer .

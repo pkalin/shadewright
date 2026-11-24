@@ -25,8 +25,8 @@ import (
 	"testing"
 	"time"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/redact"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // The tally of [bothTally], as the summary writes it.

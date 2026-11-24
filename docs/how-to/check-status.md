@@ -8,12 +8,12 @@ title: Check status with kubectl
 
 ## Install
 
-Each release (pre-releases too) carries `kubectl-shadewright` archives for linux and darwin on amd64 and arm64, a `checksums.txt` and its signature `checksums.txt.sigstore.json`, built and signed by the [release-plugin workflow](https://github.com/pkalin/shadewright/blob/main/.github/workflows/release-plugin.yml). Download the files of one release, verify them, and put the binary on your `PATH`; kubectl finds any executable named `kubectl-shadewright` there.
+Each release (pre-releases too) carries `kubectl-shadewright` archives for linux and darwin on amd64 and arm64, a `checksums.txt` and its signature `checksums.txt.sigstore.json`, built and signed by the [release-plugin workflow](https://github.com/shadewright-labs/shadewright/blob/main/.github/workflows/release-plugin.yml). Download the files of one release, verify them, and put the binary on your `PATH`; kubectl finds any executable named `kubectl-shadewright` there.
 
 ```bash
 VERSION=0.2.0                 # the release without the leading v; the tag is v$VERSION
 OS=linux ARCH=amd64           # linux or darwin, amd64 or arm64
-gh release download "v${VERSION}" --repo pkalin/shadewright \
+gh release download "v${VERSION}" --repo shadewright-labs/shadewright \
   --pattern "kubectl-shadewright_${VERSION}_${OS}_${ARCH}.tar.gz" \
   --pattern checksums.txt --pattern checksums.txt.sigstore.json
 ```
@@ -23,13 +23,15 @@ Verify before you run anything. The signature covers `checksums.txt`, which list
 ```bash
 cosign verify-blob checksums.txt \
   --bundle checksums.txt.sigstore.json \
-  --certificate-identity-regexp '^https://github\.com/pkalin/shadewright/\.github/workflows/release-plugin\.yml@refs/tags/v[0-9].*$' \
+  --certificate-identity-regexp '^https://github\.com/shadewright-labs/shadewright/\.github/workflows/release-plugin\.yml@refs/tags/v[0-9].*$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 sha256sum --check --ignore-missing checksums.txt     # macOS: shasum -a 256 --check --ignore-missing checksums.txt
 gh attestation verify "kubectl-shadewright_${VERSION}_${OS}_${ARCH}.tar.gz" \
-  --repo pkalin/shadewright \
-  --signer-workflow pkalin/shadewright/.github/workflows/release-plugin.yml
+  --repo shadewright-labs/shadewright \
+  --signer-workflow shadewright-labs/shadewright/.github/workflows/release-plugin.yml
 ```
+
+For v0.6.0 and earlier, signed before the project moved to the `shadewright-labs` organisation, write `pkalin` in place of `shadewright-labs` in the identity, `--repo` and `--signer-workflow`.
 
 To pin one release, replace `v[0-9].*$` in the regular expression with `vX.Y.Z$`. Each command exits non-zero when the signature, the identity, the checksum or the provenance does not match. Then install:
 
@@ -45,7 +47,7 @@ For development, build from a checkout or install with Go. These binaries are no
 
 ```bash
 make build-plugin      # bin/kubectl-shadewright
-go install github.com/pkalin/shadewright/cmd/kubectl-shadewright@latest   # or @vX.Y.Z; reports version dev
+go install github.com/shadewright-labs/shadewright/cmd/kubectl-shadewright@latest   # or @vX.Y.Z; reports version dev
 ```
 
 `make build-plugin` stamps the version from `git describe` (override with `PLUGIN_VERSION=...`); a plain `go build` or `go install` is `dev`.
@@ -94,7 +96,7 @@ Namespace shadewright-system
 ```
 
 - **Due** is the `AnalysisDue` condition: `yes` or `no`, its reason and its message. The reasons are explained in [troubleshooting](../troubleshooting.md#not-request-reasons).
-- **Analysis** is when the last analysis began (`status.lastAnalysisTime`) and the outcome the analysis wrote in the `Analyzed` condition. The model and the tokens of a run are not stored in the cluster: they are in the analyzer log (`Analyzed Incident`) and, with a record store configured, in an analysis record whose ID is in `status.analysisRecords` ([#77](https://github.com/pkalin/shadewright/issues/77)). The last entry is the latest run only when that run stored its record: a run whose record was not written adds no ID, and neither does a run whose claim was lost after its record was stored (the analyzer log names that record in its "Dropped the outcome" line), so compare the time in the ID (the run's `lastAnalysisTime`, as `<uid>-YYYYMMDDtHHMMSSz`) with **Analysis**, and look for a Warning event `AnalysisRecordNotWritten` on the Incident and `shadewright_analysis_records_total`.
+- **Analysis** is when the last analysis began (`status.lastAnalysisTime`) and the outcome the analysis wrote in the `Analyzed` condition. The model and the tokens of a run are not stored in the cluster: they are in the analyzer log (`Analyzed Incident`) and, with a record store configured, in an analysis record whose ID is in `status.analysisRecords` ([#77](https://github.com/shadewright-labs/shadewright/issues/77)). The last entry is the latest run only when that run stored its record: a run whose record was not written adds no ID, and neither does a run whose claim was lost after its record was stored (the analyzer log names that record in its "Dropped the outcome" line), so compare the time in the ID (the run's `lastAnalysisTime`, as `<uid>-YYYYMMDDtHHMMSSz`) with **Analysis**, and look for a Warning event `AnalysisRecordNotWritten` on the Incident and `shadewright_analysis_records_total`.
 - **Request** lines list the RemediationRequests whose `spec.incidentRef` names the Incident (name and UID), oldest first, with the phase, the reason of the `PolicyAllowed` condition and the pull request. A request that names an Incident not in the list (deleted, or another UID) is listed under "Requests without a listed Incident".
 - **Analyses today** is the analysis budget ConfigMap `shadewright-analysis-budget`, read with the analyzer's own parser, against the daily limit in `RemediationSettings`. When the analyzer refuses every analysis, the line says `analysis stopped:`, why, and the analyzer's own `AnalysisDue` reason: `SettingsNotFound`, `SettingsIncomplete`, `BudgetNotFound` (recreate the ConfigMap empty), `BudgetUnreadable` (content the analyzer does not trust, taken as spent), `AnalysisDisabled` (limit 0) or `DailyBudgetReached` (resets at 00:00 UTC). These are checked in the analyzer's order.
 - **Kill switch** is `spec.paused` of `RemediationSettings` `default` ([pause and resume](pause-and-resume.md)).

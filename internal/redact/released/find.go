@@ -19,7 +19,7 @@ package released
 import (
 	"sync"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // exprs holds the meter.Expr of each rule's expression, made on its first read: one per built-in rule and one per

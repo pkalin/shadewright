@@ -32,9 +32,9 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/policy"
-	"github.com/pkalin/shadewright/internal/providers"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/policy"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // MaxResultBytes bounds the structured output the loop decodes. The largest valid result is far shorter.

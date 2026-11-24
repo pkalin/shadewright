@@ -19,7 +19,7 @@ package openaicompatible
 import (
 	"net/http"
 
-	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/openaiwire"
 )
 
 // SetTestTransport replaces networking for offline factory boundary tests.

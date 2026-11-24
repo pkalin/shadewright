@@ -41,7 +41,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // azCLITokens asks the Azure CLI for a Cognitive Services token. For the manual smoke test only.

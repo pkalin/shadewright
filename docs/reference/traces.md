@@ -4,7 +4,7 @@ title: Traces reference
 
 # Traces reference
 
-The analyzer can export one OpenTelemetry trace per analysis ([#90](https://github.com/pkalin/shadewright/issues/90)): a span for each phase, model call and tool call, with token counts and durations. Tracing is **off by default**. The executor makes no traces.
+The analyzer can export one OpenTelemetry trace per analysis ([#90](https://github.com/shadewright-labs/shadewright/issues/90)): a span for each phase, model call and tool call, with token counts and durations. Tracing is **off by default**. The executor makes no traces.
 
 ## Turning it on
 

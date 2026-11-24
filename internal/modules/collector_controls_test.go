@@ -24,8 +24,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // The collector's readings decide as origin/main (#852, decision of 2026-11-22): fingerprint.Normalize, Symptom,

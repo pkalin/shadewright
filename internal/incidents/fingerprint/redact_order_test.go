@@ -32,8 +32,8 @@ import (
 
 	yaml "go.yaml.in/yaml/v3"
 
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // orderToken is a made-up token the order test places under a key.

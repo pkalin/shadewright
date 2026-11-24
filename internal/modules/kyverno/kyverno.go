@@ -16,7 +16,7 @@ limitations under the License.
 
 package kyverno
 
-import "github.com/pkalin/shadewright/internal/modules"
+import "github.com/shadewright-labs/shadewright/internal/modules"
 
 // Name is the module's name in RemediationSettings and its status.
 const Name = "kyverno"

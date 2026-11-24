@@ -23,9 +23,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
-	"github.com/pkalin/shadewright/internal/incidents/quiet"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/incidents/analysisdue"
+	"github.com/shadewright-labs/shadewright/internal/incidents/quiet"
 )
 
 // ConditionAnalysisDue is [analysisdue.ConditionAnalysisDue], the Incident condition that says whether the

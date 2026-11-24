@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
 )
 
 // The model sees the reworded label of a log excerpt whose restart is uncertain, whole, in the block's header

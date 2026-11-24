@@ -35,8 +35,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/github/auth"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/github/auth"
 )
 
 const (

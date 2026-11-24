@@ -29,4 +29,4 @@ An LLM can produce a plausible fix for most incidents, and is also steerable by 
 
 ## Amendments
 
-- 2026-11-04: the model has no `submit_remediation_proposal` tool. The structured output of the analysis call is the single proposal path, as [ADR-0023](0023-how-the-analyzer-calls-the-model.md) decision 5 decided on 2026-11-03; the Decision now says so. The decision itself stands: the model only proposes, and policy decides ([#244](https://github.com/pkalin/shadewright/issues/244)).
+- 2026-11-04: the model has no `submit_remediation_proposal` tool. The structured output of the analysis call is the single proposal path, as [ADR-0023](0023-how-the-analyzer-calls-the-model.md) decision 5 decided on 2026-11-03; the Decision now says so. The decision itself stands: the model only proposes, and policy decides ([#244](https://github.com/shadewright-labs/shadewright/issues/244)).

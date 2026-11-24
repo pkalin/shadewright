@@ -46,13 +46,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
-	"github.com/pkalin/shadewright/internal/modules"
-	"github.com/pkalin/shadewright/internal/modules/cloudflared"
-	"github.com/pkalin/shadewright/internal/modules/flux"
-	"github.com/pkalin/shadewright/internal/modules/keda"
-	"github.com/pkalin/shadewright/internal/modules/kyverno"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/modules/cloudflared"
+	"github.com/shadewright-labs/shadewright/internal/modules/flux"
+	"github.com/shadewright-labs/shadewright/internal/modules/keda"
+	"github.com/shadewright-labs/shadewright/internal/modules/kyverno"
 )
 
 const (

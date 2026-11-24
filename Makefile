@@ -1,9 +1,9 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
-# Names of the images CI publishes to ghcr.io/pkalin (the executor is the manager binary).
-IMG_EXECUTOR ?= ghcr.io/pkalin/shadewright-executor:dev
-IMG_ANALYZER ?= ghcr.io/pkalin/shadewright-analyzer:dev
-IMG_VERIFIER ?= ghcr.io/pkalin/shadewright-verifier:dev
+# Names of the images CI publishes to ghcr.io/shadewright-labs (the executor is the manager binary).
+IMG_EXECUTOR ?= ghcr.io/shadewright-labs/shadewright-executor:dev
+IMG_ANALYZER ?= ghcr.io/shadewright-labs/shadewright-analyzer:dev
+IMG_VERIFIER ?= ghcr.io/shadewright-labs/shadewright-verifier:dev
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 # It defaults to the year in the committed deepcopy header, so regenerating does not rewrite every header
 # on 1 January; the current year is used only if that file has none. Evaluated once, when make starts.

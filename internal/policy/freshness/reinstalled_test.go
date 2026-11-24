@@ -19,8 +19,8 @@ package freshness_test
 import (
 	"testing"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/policy/freshness"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
 )
 
 // TestFindReinstalled checks that only the plan's URL under another GitHub installation is the same repository

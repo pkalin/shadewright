@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // A section is decided once, on the values as they were read (#845, fifteenth decision of 2026-11-18). The

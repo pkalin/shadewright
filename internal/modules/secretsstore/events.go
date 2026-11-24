@@ -20,7 +20,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/modules"
 )
 
 // RuleMountFailed is the name of the diagnosis rule for a secrets volume the kubelet could not set up.

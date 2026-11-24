@@ -36,9 +36,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/phasegauge"
-	"github.com/pkalin/shadewright/internal/testutil/metricguard"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/phasegauge"
+	"github.com/shadewright-labs/shadewright/internal/testutil/metricguard"
 )
 
 // reservationResults are the values of the result label of analysisReservations.

@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // The corpus tests of the Responses API wire format (#501). Each generated case is built with its right answer

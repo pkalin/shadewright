@@ -24,7 +24,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // The Responses API (#501): the same request as a chat completion, in another shape. Messages become input

@@ -25,7 +25,7 @@ import (
 
 	yaml "go.yaml.in/yaml/v3"
 
-	"github.com/pkalin/shadewright/internal/gitops/gityaml"
+	"github.com/shadewright-labs/shadewright/internal/gitops/gityaml"
 )
 
 // MaxTransformBytes bounds what the patches and transformers of a build can add to its render (#495), counted

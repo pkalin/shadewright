@@ -27,8 +27,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // longNote returns a note of n bytes, more than redact.MaxShortEntry for the long-note tests, with a secret the

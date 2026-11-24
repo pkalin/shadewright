@@ -30,8 +30,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/github/ratelimit"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/github/ratelimit"
 )
 
 // Fixed labels for errors. They name the operation, never its arguments.

@@ -22,8 +22,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/intake"
-	"github.com/pkalin/shadewright/internal/testutil/intakerun"
+	"github.com/shadewright-labs/shadewright/internal/intake"
+	"github.com/shadewright-labs/shadewright/internal/testutil/intakerun"
 )
 
 // The scoring intake's judge, run on this adapter over an httptest server: the second request, which carries

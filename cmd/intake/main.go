@@ -38,11 +38,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/intake"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/model/anthropic"
-	"github.com/pkalin/shadewright/internal/providers/model/openaicompatible"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/intake"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/anthropic"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/openaicompatible"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // Exit codes: 0 an outcome was written (scored, unjudged, invalid, quarantined or budget), 1 a failed step to

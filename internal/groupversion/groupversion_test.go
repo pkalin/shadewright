@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/testutil/crdschema"
+	"github.com/shadewright-labs/shadewright/internal/testutil/crdschema"
 )
 
 func TestValid(t *testing.T) {

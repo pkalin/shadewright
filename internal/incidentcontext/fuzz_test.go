@@ -21,8 +21,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // FuzzLogExcerpt checks the order of redaction and cuts on untrusted log text: whatever the text around it

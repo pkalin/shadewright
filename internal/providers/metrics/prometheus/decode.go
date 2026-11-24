@@ -29,7 +29,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // errBodyTooLarge is returned by capReader once more than the cap has been read.

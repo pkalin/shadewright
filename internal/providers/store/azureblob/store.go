@@ -36,9 +36,9 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/retryafter"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/retryafter"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // MaxRecordBytes bounds the data of one record. A record holds counts, names and a few redacted sentences.

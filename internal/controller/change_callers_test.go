@@ -37,7 +37,8 @@ const (
 	// fnChangeByNumber is the reader of the recorded number, named in the allowlists below.
 	fnChangeByNumber = "changeByNumber"
 	// colFailed is the column of verdictRow that says a read failed.
-	colFailed = "failed"
+	colFailed  = "failed"
+	testPassed = "passed"
 )
 
 // unknownRowMayHold names the columns of the changeUnknown row that may hold a value other than their zero.
@@ -340,7 +341,7 @@ func restoreStatus(rr *R, before *S) { rr.Status = *before }
 			caught[owner] = true
 		}
 	})
-	for _, owner := range []string{"star", "plain", "alias", "varAlias", "passed", "returned", "parenStar", "viaStatus",
+	for _, owner := range []string{"star", "plain", "alias", "varAlias", testPassed, "returned", "parenStar", "viaStatus",
 		"addr", "literal", "replace", "copyInto", "decode", "patch", "early", "wrapped", "release"} {
 		if !caught[owner] {
 			t.Errorf("the guard misses the write in %s", owner)

@@ -1452,6 +1452,9 @@ func (r *RemediationRequestReconciler) afterLook(ctx context.Context, rr *remedi
 		}
 		current := live.ResourceVersion == rr.ResourceVersion
 		if want == nil {
+			if !live.DeletionTimestamp.IsZero() {
+				return nil
+			}
 			base := live.DeepCopy()
 			if err := r.failCheckAfterLook(ctx, live); err != nil {
 				if ctx.Err() != nil {
@@ -1499,26 +1502,25 @@ func (r *RemediationRequestReconciler) afterLook(ctx context.Context, rr *remedi
 }
 
 // carryCheckOutcome sets, on live, the outcome of the failed review check's rule that want holds (the review check
-// state of the recorded pull request and condition ReviewCheckNotFailed), and reports whether anything is left to
-// write. Nothing is carried when live records another pull request or head than want; the review check state is not
-// carried onto a request whose merge is recorded (a merge receipt pins it), and the condition is not set on a request
-// that no longer holds the lock or whose merge is recorded (its looks have ended; ending it is carried).
+// state Stale and condition ReviewCheckNotFailed), and reports whether anything is left to write. Both outcomes
+// belong to the recorded pull request and head. A merge receipt pins the review check. The condition says the
+// holder will retry, so it can only be set while the holder is still responsible for the check.
 func carryCheckOutcome(live *remediationv1alpha1.RemediationRequest, want *remediationv1alpha1.RemediationRequestStatus) bool {
 	lp, wp := live.Status.PullRequest, want.PullRequest
 	if !samePullRequest(lp, wp) {
 		return false
 	}
 	base := live.Status.DeepCopy()
-	if lp != nil && !mergeRecorded(live) {
-		// A recorded merge keeps its review check: a merge receipt pins it (a validation rule on the object), and
-		// the looks have ended, so the state the look wrote is not carried onto it.
+	if lp != nil && !mergeRecorded(live) && wp.ReviewCheck != nil &&
+		wp.ReviewCheck.State == remediationv1alpha1.ReviewCheckStale {
 		lp.ReviewCheck = wp.ReviewCheck.DeepCopy()
 	}
 	c := meta.FindStatusCondition(want.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 	switch {
 	case c == nil:
 		meta.RemoveStatusCondition(&live.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
-	case ptr.Deref(live.Status.HoldsTarget, false) && !mergeRecorded(live):
+	case ptr.Deref(live.Status.HoldsTarget, false) && !mergeRecorded(live) &&
+		live.DeletionTimestamp.IsZero() && !handedOff(live) && intent(live) == nil:
 		meta.SetStatusCondition(&live.Status.Conditions, *c)
 	}
 	return !equality.Semantic.DeepEqual(base, &live.Status)

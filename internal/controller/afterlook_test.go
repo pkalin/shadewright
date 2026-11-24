@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	fakegit "github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 // reviewCheckPinned is the CEL rule of RemediationRequest that keeps status.pullRequest.reviewCheck once a merge
@@ -201,5 +202,169 @@ func TestStoppedHolderRetryOnStoredStaleReadsTheCheck(t *testing.T) {
 	}
 	if c := meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed); c != nil {
 		t.Fatalf("ReviewCheckNotFailed %+v after the retry: want it removed", c)
+	}
+}
+
+// failCheckDuringUpdate changes the stored request while Git handles CreateCheckRun.
+// The failed write's status update must then conflict with the competing writer.
+func failCheckDuringUpdate(t *testing.T, r *RemediationRequestReconciler, g *fakegit.Git, rr *api.RemediationRequest,
+	update func(*api.RemediationRequest)) {
+	t.Helper()
+	calls := 0
+	g.SetFail(func(op string) error {
+		if op != opCreateCheckRun {
+			return nil
+		}
+		calls++
+		if calls == 1 {
+			update(rr.DeepCopy())
+		}
+		return errors.New("check write failed")
+	})
+	if err := r.afterLook(t.Context(), rr); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("CreateCheckRun calls = %d, want 1", calls)
+	}
+}
+
+func TestAfterLookRetryPreservesStale(t *testing.T) {
+	for _, previous := range []string{"unset", testPassed} {
+		t.Run(previous, func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			r.ReviewerHints = true
+			setTargetMain(t, r)
+			if previous == testPassed {
+				pr := rr.Status.PullRequest
+				pr.ReviewCheck = &api.ReviewCheck{Head: pr.HeadSHA, State: api.ReviewCheckPassed}
+				if err := r.Status().Update(t.Context(), rr); err != nil {
+					t.Fatal(err)
+				}
+			}
+			failCheckDuringUpdate(t, r, g, rr, func(other *api.RemediationRequest) {
+				pr := other.Status.PullRequest
+				pr.ReviewCheck = &api.ReviewCheck{Head: pr.HeadSHA, State: api.ReviewCheckStale}
+				if err := r.Status().Update(t.Context(), other); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if err := r.Get(t.Context(), client.ObjectKeyFromObject(rr), rr); err != nil {
+				t.Fatal(err)
+			}
+			if !staleOnHead(rr) || !meta.IsStatusConditionTrue(rr.Status.Conditions, api.ConditionReviewCheckNotFailed) {
+				t.Fatalf("review check %+v, conditions %+v: want the concurrent Stale and the failed write's condition",
+					rr.Status.PullRequest.ReviewCheck, rr.Status.Conditions)
+			}
+		})
+	}
+}
+
+func startHolderFinalization(t *testing.T, r *RemediationRequestReconciler, rr *api.RemediationRequest) {
+	t.Helper()
+	ctx := t.Context()
+	rr.Finalizers = append(rr.Finalizers, FinalizerName)
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.beginFinalize(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if rr.DeletionTimestamp.IsZero() || !holdsLock(rr) ||
+		meta.FindStatusCondition(rr.Status.Conditions, api.ConditionReviewCheckNotFailed) != nil {
+		t.Fatalf("want a deleting holder with its check condition cleared: %+v", rr.Status)
+	}
+}
+
+func TestAfterLookSkipsDeletingHolder(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stale bool
+	}{
+		{name: "writes paused"},
+		{name: "recorded Stale", stale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			r.ReviewerHints = true
+			setTargetMain(t, r)
+			if tc.stale {
+				pr := rr.Status.PullRequest
+				pr.ReviewCheck = &api.ReviewCheck{Head: pr.HeadSHA, State: api.ReviewCheckStale}
+			} else {
+				setPaused(t, r, true)
+			}
+			r.noteCheckNotFailed(rr, ReasonGitFailed, notWrittenYet)
+			if err := r.Status().Update(t.Context(), rr); err != nil {
+				t.Fatal(err)
+			}
+			beforeDeletion := rr.DeepCopy()
+			startHolderFinalization(t, r, rr)
+			version := rr.ResourceVersion
+			recorder := record.NewFakeRecorder(10)
+			r.Recorder = recorder
+			g.SetFail(func(op string) error {
+				t.Errorf("unexpected Git call during deletion: %s", op)
+				return errors.New("Git unavailable")
+			})
+			if err := r.afterLook(t.Context(), beforeDeletion); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Get(t.Context(), client.ObjectKeyFromObject(rr), rr); err != nil {
+				t.Fatal(err)
+			}
+			if rr.ResourceVersion != version {
+				t.Errorf("afterLook updated the deleting request from version %s to %s", version, rr.ResourceVersion)
+			}
+			select {
+			case event := <-recorder.Events:
+				t.Errorf("unexpected event during deletion: %s", event)
+			default:
+			}
+		})
+	}
+}
+
+func TestAfterLookRetryLeavesCheckConditionCleared(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handoff api.HandoffPhase
+	}{
+		{name: "deletion"},
+		{name: "handoff intent", handoff: api.HandoffIntent},
+		{name: "handoff done", handoff: api.HandoffDone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+			r.ReviewerHints = true
+			setTargetMain(t, r)
+			r.noteCheckNotFailed(rr, ReasonWritesPaused, notWrittenYet)
+			if err := r.Status().Update(t.Context(), rr); err != nil {
+				t.Fatal(err)
+			}
+			failCheckDuringUpdate(t, r, g, rr, func(other *api.RemediationRequest) {
+				if tc.handoff == "" {
+					startHolderFinalization(t, r, other)
+					return
+				}
+				other.Status.Handoff = &api.Handoff{To: &api.OutgoingHandoff{Name: nextRequestName, Phase: tc.handoff}}
+				meta.RemoveStatusCondition(&other.Status.Conditions, api.ConditionReviewCheckNotFailed)
+				if err := r.Status().Update(t.Context(), other); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if err := r.Get(t.Context(), client.ObjectKeyFromObject(rr), rr); err != nil {
+				t.Fatal(err)
+			}
+			if c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionReviewCheckNotFailed); c != nil {
+				t.Fatalf("retry restored ReviewCheckNotFailed: %+v", c)
+			}
+		})
 	}
 }

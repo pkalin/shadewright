@@ -28,11 +28,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/gitops/repopath"
-	"github.com/pkalin/shadewright/internal/policy/pathmatch"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/quantity"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/gitops/repopath"
+	"github.com/shadewright-labs/shadewright/internal/policy/pathmatch"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/quantity"
 )
 
 // defaultTargetBranch is the default of GitRepository.targetBranch in RemediationSettings.

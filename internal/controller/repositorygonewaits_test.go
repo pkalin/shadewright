@@ -23,7 +23,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // #884: a pass that stops because the repository of the plan left the settings is evidence that the last read of a

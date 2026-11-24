@@ -24,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
 
-	"github.com/pkalin/shadewright/internal/gitops/semdiff"
+	"github.com/shadewright-labs/shadewright/internal/gitops/semdiff"
 )
 
 // TestRenderCPURefusalWithinTheStep checks, by computation, that the render process reaches its CPU time limit

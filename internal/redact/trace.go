@@ -19,7 +19,7 @@ package redact
 import (
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // trace is a text as the release before held it at one of its passes, traced back to the text decided on: byte

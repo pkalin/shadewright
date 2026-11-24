@@ -26,9 +26,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/fake"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 // readsAt is a GitProvider that allows only ReadFile and ListDir at one commit. Every other method is the nil

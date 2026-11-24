@@ -24,7 +24,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 const (

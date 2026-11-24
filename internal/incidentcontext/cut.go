@@ -19,7 +19,7 @@ package incidentcontext
 import (
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // keepHead returns the longest prefix of s made of whole lines that fits in n bytes, and whether anything

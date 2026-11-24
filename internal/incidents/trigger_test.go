@@ -36,8 +36,8 @@ import (
 	corerecord "k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/testfixtures"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/testfixtures"
 )
 
 // triggerNow is the fixed clock of these tests: noon UTC, so a few minutes either way stay on one day.

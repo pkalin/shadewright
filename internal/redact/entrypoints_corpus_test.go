@@ -21,12 +21,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/incidentcontext"
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
-	"github.com/pkalin/shadewright/internal/modules"
-	"github.com/pkalin/shadewright/internal/providers/logs/kube"
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/tools"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/providers/logs/kube"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // entryPoints are the functions that turn text read from the cluster into text for the model, a status, an

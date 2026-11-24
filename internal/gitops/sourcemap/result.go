@@ -16,7 +16,7 @@ limitations under the License.
 
 package sourcemap
 
-import "github.com/pkalin/shadewright/internal/gitops/sourcemap/fluxrules"
+import "github.com/shadewright-labs/shadewright/internal/gitops/sourcemap/fluxrules"
 
 // The result types and reasons live in [fluxrules], which imports no Kubernetes client; the names below are
 // aliases, so callers of this package do not change.

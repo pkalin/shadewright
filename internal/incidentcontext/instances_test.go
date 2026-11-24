@@ -31,8 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/testutil/metricguard"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/testutil/metricguard"
 )
 
 // Which instance of a container the log section reads (#943). The properties:

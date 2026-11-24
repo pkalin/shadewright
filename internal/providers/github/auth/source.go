@@ -32,8 +32,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/github/ratelimit"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/github/ratelimit"
 )
 
 var _ interface {

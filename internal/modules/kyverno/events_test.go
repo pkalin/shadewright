@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/modules"
 )
 
 // active returns a selection with kyverno enabled and detected.

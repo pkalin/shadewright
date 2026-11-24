@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // deletedWindow is the aggregation window of the tests here. The writer's tick is a tenth of it in real time,

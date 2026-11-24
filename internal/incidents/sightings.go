@@ -21,7 +21,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/analyzer/collector"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/collector"
 )
 
 // When a symptom opens an Incident (design 3.2, #267). A symptom that has no Incident yet opens it at once

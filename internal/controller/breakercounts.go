@@ -33,7 +33,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // The breaker's watermark (design section 10.7, #390). The circuit breaker needs, of all the requests that ended,

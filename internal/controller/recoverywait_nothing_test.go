@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // countStatusWrites wraps r's client so that every status write of the request named name is counted.

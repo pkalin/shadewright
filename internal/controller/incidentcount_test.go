@@ -29,8 +29,8 @@ import (
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/incidents/aggregation"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/incidents/aggregation"
 )
 
 // TestResolvedBeforeRollout checks the rule of ADR-0030 section 4: ResolvedBeforeRollout only with both

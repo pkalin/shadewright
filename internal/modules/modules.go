@@ -16,7 +16,7 @@ limitations under the License.
 
 package modules
 
-import "github.com/pkalin/shadewright/api/v1alpha1"
+import "github.com/shadewright-labs/shadewright/api/v1alpha1"
 
 // GenericPlatform is the name of the generic platform, which is always registered and is detected whenever no
 // other platform is certain. It is the API's name for it, which settings may not list.

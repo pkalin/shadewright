@@ -40,9 +40,9 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
-	"github.com/pkalin/shadewright/internal/fluxstatus"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/cmd/kubectl-shadewright/internal/readclient"
+	"github.com/shadewright-labs/shadewright/internal/fluxstatus"
 )
 
 // Names of the doctor tests.

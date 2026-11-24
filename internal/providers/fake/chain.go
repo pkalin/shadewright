@@ -24,7 +24,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // The supersede handoff of ADR-0028 section 4: a branch that carries a chain of commits, the commit appended

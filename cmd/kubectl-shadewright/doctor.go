@@ -34,12 +34,12 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
-	"github.com/pkalin/shadewright/internal/fluxstatus"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap/fluxrules"
-	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
-	"github.com/pkalin/shadewright/internal/providers"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/cmd/kubectl-shadewright/internal/readclient"
+	"github.com/shadewright-labs/shadewright/internal/fluxstatus"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap/fluxrules"
+	"github.com/shadewright-labs/shadewright/internal/incidents/analysisdue"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // The levels of a check. Only a fail makes the command exit non-zero.

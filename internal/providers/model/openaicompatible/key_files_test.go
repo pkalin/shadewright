@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // These tests check decision 7 of #834: a key file belongs to one declaration. Two declarations naming one

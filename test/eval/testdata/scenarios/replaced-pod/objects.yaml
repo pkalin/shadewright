@@ -1,5 +1,5 @@
 # Synthetic: the objects the context builder and the read tools read for this case, from the lab run of
-# 2026-11-14 (pkalin/shadewright#724), not recorded. The Deployment's template is back to the healthy 64Mi and
+# 2026-11-14 (shadewright-labs/shadewright#724), not recorded. The Deployment's template is back to the healthy 64Mi and
 # its pod, of the new ReplicaSet, is Running and Ready. The last pod of the previous ReplicaSet (48Mi) is
 # terminating: it has a deletion timestamp and still reports OOMKilled. A pod being deleted needs a finalizer
 # for the fake API server to keep it.

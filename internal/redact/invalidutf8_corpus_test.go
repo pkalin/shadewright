@@ -24,11 +24,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/incidentcontext"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
-	"github.com/pkalin/shadewright/internal/tools"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // The invalid bytes corpus: the sample secret of every built-in rule (redacttest.Samples) with an invalid UTF-8

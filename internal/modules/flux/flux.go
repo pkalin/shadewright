@@ -17,8 +17,8 @@ limitations under the License.
 package flux
 
 import (
-	"github.com/pkalin/shadewright/internal/fluxstatus"
-	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/fluxstatus"
+	"github.com/shadewright-labs/shadewright/internal/modules"
 )
 
 // Name is the module's name in RemediationSettings and its status.

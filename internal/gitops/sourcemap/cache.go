@@ -25,8 +25,8 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // Bounds of the read cache the executor shares between the policy check and the freshness rechecks.

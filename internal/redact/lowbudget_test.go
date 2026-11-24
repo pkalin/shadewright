@@ -29,11 +29,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // redacttestPath is the import path of the package that lowers the budget for tests.
-const redacttestPath = "github.com/pkalin/shadewright/internal/redact/redacttest"
+const redacttestPath = "github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 
 // moduleRoot returns the directory of go.mod above the package.
 func moduleRoot(t *testing.T) string {

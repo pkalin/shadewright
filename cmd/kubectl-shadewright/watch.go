@@ -28,7 +28,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
+	"github.com/shadewright-labs/shadewright/cmd/kubectl-shadewright/internal/readclient"
 )
 
 // The bounds of --interval.

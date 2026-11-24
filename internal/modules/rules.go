@@ -23,8 +23,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // Bounds of a [Symptom], checked by [ValidSymptom], and of what a rule is shown.

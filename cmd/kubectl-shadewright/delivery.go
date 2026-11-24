@@ -33,12 +33,12 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/validation"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
-	"github.com/pkalin/shadewright/internal/cmdutil/sharedflags"
-	"github.com/pkalin/shadewright/internal/fluxstatus"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap/fluxrules"
-	"github.com/pkalin/shadewright/internal/providers"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/cmd/kubectl-shadewright/internal/readclient"
+	"github.com/shadewright-labs/shadewright/internal/cmdutil/sharedflags"
+	"github.com/shadewright-labs/shadewright/internal/fluxstatus"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap/fluxrules"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // The states of a delivery source in the report.

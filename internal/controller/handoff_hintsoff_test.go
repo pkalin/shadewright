@@ -7,7 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // TestHintsOffAfterTakeoverRecordBeforeReviewCheck: an executor restarted with reviewer hints off after the

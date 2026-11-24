@@ -21,7 +21,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // plainAnswer is a cross-check answer the redactor leaves unchanged.

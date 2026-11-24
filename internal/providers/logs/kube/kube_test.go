@@ -42,9 +42,9 @@ import (
 	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 const (

@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // hookPlatform is a platform module with hooks, for the symptom source checks.

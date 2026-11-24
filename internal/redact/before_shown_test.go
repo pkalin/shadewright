@@ -20,8 +20,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/incidentcontext"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // The reading of the release before leaves out a value on a line at the bound incidentcontext.Value leaves it

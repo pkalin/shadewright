@@ -26,7 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // The order of the log reads (#943, decision of 2026-11-20). The properties:

@@ -23,8 +23,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/utils/ptr"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/providers"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // The second round of #786 against the model: one directed sequence per mechanism changed, each failing without it.

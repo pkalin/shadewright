@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
 )
 
 // A tool result and the context use the same text for a log excerpt whose restart is uncertain (#951).

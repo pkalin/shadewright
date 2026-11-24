@@ -33,9 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/kedaready"
-	"github.com/pkalin/shadewright/internal/ownership"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/kedaready"
+	"github.com/shadewright-labs/shadewright/internal/ownership"
 )
 
 const (

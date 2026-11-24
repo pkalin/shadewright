@@ -18,7 +18,7 @@ limitations under the License.
 
 package redact
 
-import "github.com/pkalin/shadewright/internal/redact/meter"
+import "github.com/shadewright-labs/shadewright/internal/redact/meter"
 
 // tick reports n steps of work to wm, the budget of the redaction it is part of (package meter, #873). Without
 // the build tag redactwork nothing else counts them: the product build holds no counter and no other shared state

@@ -19,7 +19,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // ErrTransient matches every error [Resolver.Resolve] returns except a [RefusedError]: a failure that may

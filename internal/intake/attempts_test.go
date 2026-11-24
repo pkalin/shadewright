@@ -28,8 +28,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/analysis"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/analysis"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // Run IDs of the attempt tests.

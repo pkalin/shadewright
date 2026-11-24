@@ -55,10 +55,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/pkalin/shadewright/internal/fluxstatus"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/fluxstatus"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // MaxMessageBytes bounds the message copied from the unit's Ready condition. [StatusReader] bounds it after

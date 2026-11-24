@@ -43,12 +43,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	analyzerpkg "github.com/pkalin/shadewright/internal/analyzer"
-	"github.com/pkalin/shadewright/internal/cmdutil"
-	"github.com/pkalin/shadewright/internal/controller"
-	"github.com/pkalin/shadewright/internal/incidents"
-	"github.com/pkalin/shadewright/internal/testfixtures"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	analyzerpkg "github.com/shadewright-labs/shadewright/internal/analyzer"
+	"github.com/shadewright-labs/shadewright/internal/cmdutil"
+	"github.com/shadewright-labs/shadewright/internal/controller"
+	"github.com/shadewright-labs/shadewright/internal/incidents"
+	"github.com/shadewright-labs/shadewright/internal/testfixtures"
 )
 
 const (

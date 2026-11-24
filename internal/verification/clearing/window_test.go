@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // A reset is never recorded before the previous one, even when the clock went back to a time between the

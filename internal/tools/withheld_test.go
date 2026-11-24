@@ -27,9 +27,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // tokenRun is "--token,}" repeated to 72 KiB, twice redacttest.OverLowBudget: a redactor of redacttest.LowBudget

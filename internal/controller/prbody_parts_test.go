@@ -24,9 +24,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // partBound stands in for the size bound of the redactor of #873 (redact.MaxEntry there): an entry longer than

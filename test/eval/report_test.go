@@ -30,10 +30,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analysis"
-	"github.com/pkalin/shadewright/internal/incidentcontext"
-	"github.com/pkalin/shadewright/internal/providers"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/analysis"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // reportSchemaVersion is the version of the report format (docs/evaluation.md). Bump it on any change of

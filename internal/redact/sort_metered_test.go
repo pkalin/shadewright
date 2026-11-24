@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // unmeteredSorts are the functions that may call a sort of package slices or sort directly: sortFunc, which counts

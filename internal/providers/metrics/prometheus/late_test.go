@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // lateAnswer is a transport whose answer arrives only once the request's context has ended, as net/http can

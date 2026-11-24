@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // This test counts work with [redact.Work], which exists only in a build with the tag redactwork; make test

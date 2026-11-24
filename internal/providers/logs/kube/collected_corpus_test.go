@@ -25,8 +25,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // The generated corpus of the kubelet's answer for a container whose log it no longer holds: a logs request

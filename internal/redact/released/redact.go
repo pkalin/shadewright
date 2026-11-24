@@ -95,7 +95,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // Kinds of redacted data, used in markers such as "[REDACTED:jwt]".

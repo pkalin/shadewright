@@ -25,7 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/pkalin/shadewright/internal/tools"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // The memory get_resource takes grows with the size of the pod, not faster (#845, seventh decision of

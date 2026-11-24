@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/modules"
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // The collector never waits for the limit on the heap of the redactions running at once (#1087, decision of

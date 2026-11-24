@@ -24,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // #878: a request with an open MergeCheck wait is deleted while the reads of its pull request fail, so the cleanup

@@ -32,9 +32,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analyzer/collector"
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/collector"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 )
 
 // The tests of the consequence rule (ADR-0039 points 6, 7, 16, 17, 24 and 25). Each builds its observations

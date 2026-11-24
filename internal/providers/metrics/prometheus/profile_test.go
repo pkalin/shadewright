@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // The source profile: what each template computes when the source holds one scrape of the cluster, duplicate

@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	v052 "github.com/pkalin/shadewright/internal/redact/released/testdata/v052"
+	v052 "github.com/shadewright-labs/shadewright/internal/redact/released/testdata/v052"
 )
 
 // #1087 keeps no part for an empty run between slashes in the reading of base64 windows (windows.go), counting

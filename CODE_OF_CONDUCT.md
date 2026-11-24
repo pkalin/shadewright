@@ -8,7 +8,7 @@ tolerated.
 ## Reporting
 
 The maintainer is [pkalin](https://github.com/pkalin). Report a concern privately through GitHub's
-[security advisory form](https://github.com/pkalin/shadewright/security/advisories/new) of this repository,
+[security advisory form](https://github.com/shadewright-labs/shadewright/security/advisories/new) of this repository,
 which only the maintainer can read; mark it as a conduct report in the title. It is the private channel the
 project has, and it works for this too. Reports are read within 7 days and handled as the Covenant's
 enforcement guidelines describe, from a private warning to a permanent ban, in proportion to the behaviour.

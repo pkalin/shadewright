@@ -23,7 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 const (

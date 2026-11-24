@@ -23,8 +23,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/incidentcontext"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // overBoundVariant is the variant whose summary is over its bound with no absorbed tally (#841).

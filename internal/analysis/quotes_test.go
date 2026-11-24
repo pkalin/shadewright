@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
 )
 
 // logExcerpt is a log block of two lines, indented as a multi-line message would be.

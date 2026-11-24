@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers/retryafter"
+	"github.com/shadewright-labs/shadewright/internal/providers/retryafter"
 )
 
 const (

@@ -25,7 +25,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files")

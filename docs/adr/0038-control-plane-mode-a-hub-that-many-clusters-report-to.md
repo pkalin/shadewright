@@ -5,11 +5,11 @@
 
 ## Context
 
-Shadewright runs in one cluster today. Epic [#559](https://github.com/pkalin/shadewright/issues/559) asks for a second way to run it, for people who operate several clusters: one place that shows what the agents in all of them see and do. Task [#669](https://github.com/pkalin/shadewright/issues/669) asks for the ADR that settles how a cluster gets an identity a hub can check, what it reports, and how the hub reaches it. This is that ADR. Nothing in it is built.
+Shadewright runs in one cluster today. Epic [#559](https://github.com/shadewright-labs/shadewright/issues/559) asks for a second way to run it, for people who operate several clusters: one place that shows what the agents in all of them see and do. Task [#669](https://github.com/shadewright-labs/shadewright/issues/669) asks for the ADR that settles how a cluster gets an identity a hub can check, what it reports, and how the hub reaches it. This is that ADR. Nothing in it is built.
 
 How to read it. Every statement is one of three kinds:
 
-- **Decided** means the maintainer decided it on [#559](https://github.com/pkalin/shadewright/issues/559), on the date given. This ADR only writes it down.
+- **Decided** means the maintainer decided it on [#559](https://github.com/shadewright-labs/shadewright/issues/559), on the date given. This ADR only writes it down.
 - **Proposed** means this ADR proposes it. It becomes a decision when the ADR is accepted.
 - **Open** means nobody has decided it. It is listed under "Open questions" and the ADR does not guess.
 
@@ -154,7 +154,7 @@ At the hub:
 
 - **`intake`**: an HTTPS service, stateless, N replicas. It verifies the token, validates the report and stores it, together with the key observations of section 3 (pending keys seen and the tokens that carried them). It reads `Cluster` objects and has no write on them.
 - **`fleet controller`**: reconciles `Cluster` objects into a namespace, a RoleBinding for intake in that namespace, an object-count quota and staleness conditions. It deletes the namespace of a removed `Cluster` after the retention (section 3). It alone writes `Cluster.status` (`update` on `clusters/status`), including the trusted and pending keys, which it promotes and drops from the key observations intake recorded. It reads those records in the spoke namespaces.
-- **A read-only status page**, and later the notifier ([#97](https://github.com/pkalin/shadewright/issues/97)).
+- **A read-only status page**, and later the notifier ([#97](https://github.com/shadewright-labs/shadewright/issues/97)).
 
 In phase 1 the hub has no model credential and no Git write identity.
 
@@ -375,7 +375,7 @@ Whether a refusal that is not about the cluster's state (a rate limit, a malform
 - **Spokes write to the hub's Kubernetes API directly.** Rejected. Onboarding would be an Azure control plane change on AKS (JWT authenticators are a preview feature there, configured per authenticator through the Azure API, and they need a public discovery endpoint; other vendors were not checked), inline keys have no path, validation and rate limits would have no single place, and a plain-service hub would later change every spoke.
 - **The analyzer at the hub.** Evidence and redacted prompts would cross to the hub, analysis would stop when the hub is down, a channel into every spoke would be needed to read evidence on demand, and one model credential and budget would serve all clusters. Decided against on 2026-11-14.
 - **The hub as a plain service from the start.** It needs a `StateStore` on Table and Blob Storage before there is a reason to have one, and gives up namespaces, RBAC, quotas and Flux for the hub's own configuration. The `StateStore` interface keeps this open for phase 3.
-- **A bootstrap token exchanged once for a client certificate, as `kubeadm join` does.** It needs a shared secret to hand out and protect, a hub CA, and certificate rotation. The reviewed object with inline public keys needs none of them. It was a fallback candidate on [#559](https://github.com/pkalin/shadewright/issues/559) and was replaced by the decision of 2026-11-14.
+- **A bootstrap token exchanged once for a client certificate, as `kubeadm join` does.** It needs a shared secret to hand out and protect, a hub CA, and certificate rotation. The reviewed object with inline public keys needs none of them. It was a fallback candidate on [#559](https://github.com/shadewright-labs/shadewright/issues/559) and was replaced by the decision of 2026-11-14.
 - **A message broker (Service Bus, NATS) now.** It adds a component, a credential per spoke and a cost, to carry level-based reports that are a small HTTPS post. Not needed for phase 1. It can come back behind the same transport interface.
 - **Reusing the `Incident` kind at the hub.** A hub controller that reconciles `Incident` or `RemediationRequest` could act on an object a spoke supplied, which breaks invariants 3 and 4, and the same name would mean two things. The hub stores `ReportedIncident` and `ReportedRequest`, which nothing acts on.
 
@@ -393,7 +393,7 @@ Whether a refusal that is not about the cluster's state (a rate limit, a malform
 10. Whether a refusal for a rate limit or a malformed body makes the reporter back off like a refusal for a suspended cluster, the reason names, and the leeway for clock difference when intake checks a token's expiry.
 11. Whether intake refuses private and link-local addresses after name resolution of an issuer host, besides the host allow-list.
 12. Whether intake should impersonate a per-namespace identity when it writes, so that RBAC enforces the boundary between spokes, and the cost of that.
-13. Closed, 2026-11-14: the price of the prototype ([#669](https://github.com/pkalin/shadewright/issues/669)) is in section 14.
+13. Closed, 2026-11-14: the price of the prototype ([#669](https://github.com/shadewright-labs/shadewright/issues/669)) is in section 14.
 14. Whether the chart value that picks `Discovery` or `Inline` for the registration manifest has `Inline` as its default, and its name.
 15. Whether the hub's repository gets a CI check that fetches the issuer's discovery document for a new `Cluster` object and reports whether keys resolve, and who owns it.
 16. The name of the command that prints the registration (`kubectl shadewright registration` is a proposal), and whether the hub's status page shows the expected shape of the manifest.

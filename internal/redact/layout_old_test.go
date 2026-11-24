@@ -20,7 +20,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // The layout's map of units and its line kinds as they were before they were kept as checkpoints (#873, decision

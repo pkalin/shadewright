@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 )
 
 const (

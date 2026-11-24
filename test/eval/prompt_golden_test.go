@@ -30,7 +30,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // promptGolden holds, per scenario whose Incident has an empty absorbed tally, the SHA-256 of the first model

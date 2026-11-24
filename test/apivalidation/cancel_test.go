@@ -33,8 +33,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	fx "github.com/pkalin/shadewright/internal/testfixtures"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	fx "github.com/shadewright-labs/shadewright/internal/testfixtures"
 )
 
 // spec.cancel (#289): the one field of the spec that can change after create.

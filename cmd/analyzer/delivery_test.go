@@ -36,10 +36,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
-	"github.com/pkalin/shadewright/internal/analyzer/collector"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/tools"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/collector"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // fluxGroups are the API groups of the objects get_delivery_status reads: the delivery units and the

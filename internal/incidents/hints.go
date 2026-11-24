@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // Reviewer hints (ADR-0028 section 3): the executor stores a hint from the pull request in the status of the

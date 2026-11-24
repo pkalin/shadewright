@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 func subjectIs(t *testing.T, got remediationv1alpha1.ObjectRef, kind, name string, uid types.UID) {

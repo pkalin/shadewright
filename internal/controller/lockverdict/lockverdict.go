@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // ErrNoVerdict is Release's answer to a nil or zero Verdict: nothing proves the release, so the lock is kept.

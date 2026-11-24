@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/fake"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 // UpdateChangeRequest refuses a title or body the GitHub adapter refuses with ErrRejected, after the open state

@@ -23,8 +23,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // metricsKeyScene returns sources whose every metric template answers series per template that each carry key as

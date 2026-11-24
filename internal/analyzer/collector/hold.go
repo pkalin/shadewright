@@ -119,9 +119,9 @@ type consequenceHold struct {
 	// obs is the observation of the last sample that showed cause, without its count: what a hold with a cause
 	// emits, whatever the pod or the owner chain look like at its end.
 	obs Observation
-	// exits are the non-zero exits the samples of a BackOff offered as its cause (Observation.exitCause), oldest
-	// first, at most maxHeldExits, with the observation of the last sample that offered each (decided 2026-11-21 on
-	// #432), and the hold is indexed by each (byCause). A hold has exits only while it has no cause: a sample that
+	// exits are the non-zero exits the samples of a BackOff offered as its cause (Observation.exitCause), ordered
+	// by most recent sample, oldest first, at most maxHeldExits (decided 2026-11-21 on #432). The hold is
+	// indexed by each (byCause). A hold has exits only while it has no cause: a sample that
 	// shows an OOM kill or a wait drops them, and the hold links as main does (decided 2026-11-22). One counts only
 	// once Config.CauseSeen confirmed it (heldExit.confirmed); the newest confirmed one is then the cause the hold
 	// emits (linked).
@@ -170,22 +170,24 @@ type heldExit struct {
 // #432): the newest exit is the one most likely to have an Incident by the end of the hold.
 const maxHeldExits = 4
 
-// addExit adds the exit candidate of the sample obs to the hold, or refreshes its observation when it is there.
-// When the hold has maxHeldExits already, the oldest is dropped to make room, and its fingerprint is returned ("" when
-// none was). The slice is copied first: holds are stored by value.
+// addExit puts the exit candidate of the sample obs last, refreshing its observation when it is already held.
+// A new candidate drops the oldest when the hold is full and returns its fingerprint ("" when none was
+// dropped). The slice is copied first: holds are stored by value.
 func (s *consequenceHold) addExit(obs Observation) string {
 	i := slices.IndexFunc(s.exits, func(e heldExit) bool { return e.fp == obs.exitCause })
 	s.exits = slices.Clone(s.exits)
+	candidate := heldExit{fp: obs.exitCause}
 	var dropped string
-	if i < 0 {
-		if len(s.exits) >= maxHeldExits {
-			dropped = s.exits[0].fp
-			s.exits = slices.Delete(s.exits, 0, 1)
-		}
-		s.exits = append(s.exits, heldExit{fp: obs.exitCause})
-		i = len(s.exits) - 1
+	switch {
+	case i >= 0:
+		candidate = s.exits[i]
+		s.exits = slices.Delete(s.exits, i, i+1)
+	case len(s.exits) >= maxHeldExits:
+		dropped = s.exits[0].fp
+		s.exits = slices.Delete(s.exits, 0, 1)
 	}
-	s.exits[i].obs = obs
+	candidate.obs = obs
+	s.exits = append(s.exits, candidate)
 	return dropped
 }
 

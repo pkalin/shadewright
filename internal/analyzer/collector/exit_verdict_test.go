@@ -118,6 +118,22 @@ const (
 	newExit = "exit-new"
 )
 
+func TestRefreshedHeldExitWinsAtExpiry(t *testing.T) {
+	c := &Collector{cfg: Config{CauseSeen: func(context.Context, Observation) (bool, error) {
+		return true, nil
+	}}}
+	var s consequenceHold
+	s.addExit(Observation{exitCause: oldExit})
+	s.addExit(Observation{exitCause: newExit})
+	s.addExit(Observation{exitCause: oldExit})
+	if err := c.judgeExits(t.Context(), &s); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := s.linked(); !ok || got.CauseFingerprint != oldExit {
+		t.Fatalf("linked exit %q, want the refreshed exit %q", got.CauseFingerprint, oldExit)
+	}
+}
+
 // TestExitVerdictNamesTheFailedExit: with two exit candidates, the ask about the older one fails and the newer one
 // is not confirmed. The cause_unanswered log names the exit whose ask failed, not the last one.
 func TestExitVerdictNamesTheFailedExit(t *testing.T) {

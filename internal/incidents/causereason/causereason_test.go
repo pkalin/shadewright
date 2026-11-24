@@ -24,7 +24,7 @@ import (
 // A reader that changes the list it was given changes no other reader's list.
 func TestListsAreCopies(t *testing.T) {
 	for name, list := range map[string]func() []string{"Waiting": Waiting, "Tallied": Tallied} {
-		want := list()
+		want := slices.Clone(list())
 		got := list()
 		got[0] = "Changed"
 		if !slices.Equal(list(), want) {

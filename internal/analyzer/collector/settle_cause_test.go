@@ -348,7 +348,7 @@ func (e *exitHold) eventLogged(sink *kvSink, after time.Duration) reconcile.Resu
 	if err != nil {
 		e.t.Fatalf("event reconcile: %v", err)
 	}
-	e.got = append(e.got, e.drain()...)
+	e.collect()
 	return res
 }
 
@@ -357,6 +357,24 @@ func (e *exitHold) eventLogged(sink *kvSink, after time.Duration) reconcile.Resu
 // decided, and what was counted and logged when the exit was removed.
 func TestExitCauseRemovedOnlyAfterAsking(t *testing.T) {
 	grace := ConsequenceGrace + time.Second
+	decide := func(e *exitHold, sink *kvSink, after time.Duration) reconcile.Result {
+		e.t.Helper()
+		query := e.c.cfg.CauseSeen
+		if query == nil {
+			return e.eventLogged(sink, after)
+		}
+		asked := false
+		e.c.cfg.CauseSeen = func(ctx context.Context, o Observation) (bool, error) {
+			asked = asked || o.CauseFingerprint == e.fp
+			return query(ctx, o)
+		}
+		defer func() { e.c.cfg.CauseSeen = query }()
+		res := e.eventLogged(sink, after)
+		if !asked {
+			e.t.Errorf("the deciding reconcile did not ask CauseSeen about %q", e.fp)
+		}
+		return res
+	}
 	type logWant struct {
 		label string // the outcome counted for the removal, "" for none
 		error bool   // the removal logged at error level
@@ -379,30 +397,34 @@ func TestExitCauseRemovedOnlyAfterAsking(t *testing.T) {
 			cur.Status = crashLoopPod(t0, 1).Status
 			e.update(cur)
 			e.log.book.record(e.fp)
-			e.eventLogged(sink, grace)
+			decide(e, sink, grace)
 		}, endCause, logWant{}},
 		{"pod gone, controller has it, no release mark", true, Config{}, func(t *testing.T, e *exitHold, sink *kvSink) {
 			e.eventLogged(sink, 0)
 			e.log.book.record(e.fp)
 			e.podGone(t)
-			e.eventLogged(sink, time.Minute)
+			decide(e, sink, time.Minute)
 		}, endCause, logWant{}},
 		{"delivery retry after the verdict, confirmed in between", true, Config{Buffer: 1}, func(t *testing.T, e *exitHold, sink *kvSink) {
 			e.eventLogged(sink, 0)
 			e.eventLogged(sink, time.Minute)
 			e.c.out <- Observation{Fingerprint: fillerFingerprint}
-			if res := e.eventLogged(sink, grace); res.RequeueAfter != retryAfter {
+			if res := decide(e, sink, grace); res.RequeueAfter != retryAfter {
 				t.Fatalf("requeue after %s, want the delivery retry", res.RequeueAfter)
 			}
 			e.log.book.record(e.fp)
 			e.drain()
+			asked := e.log.book.asked
 			e.eventLogged(sink, grace+retryAfter)
+			if e.log.book.asked != asked {
+				t.Error("the delivery retry called CauseSeen")
+			}
 		}, endBare, logWant{label: holdCauseUnconfirmed}},
 		{"end of hold, CauseSeen fails", true, Config{}, func(t *testing.T, e *exitHold, sink *kvSink) {
 			e.eventLogged(sink, 0)
 			e.eventLogged(sink, time.Minute)
 			e.log.book.fail(errors.New("synthetic: the Incident store is not loaded"))
-			if res := e.eventLogged(sink, grace); res.RequeueAfter != 0 {
+			if res := decide(e, sink, grace); res.RequeueAfter != 0 {
 				t.Fatalf("requeue after %s at the end of the hold, want no further wait", res.RequeueAfter)
 			}
 		}, endBare, logWant{label: holdCauseUnanswered, error: true}},
@@ -411,19 +433,19 @@ func TestExitCauseRemovedOnlyAfterAsking(t *testing.T) {
 			e.eventLogged(sink, time.Minute)
 			e.log.book.fail(context.DeadlineExceeded)
 			e.c.ReleaseCause(e.fp)
-			if res := e.eventLogged(sink, grace); res.RequeueAfter != 0 {
+			if res := decide(e, sink, grace); res.RequeueAfter != 0 {
 				t.Fatalf("requeue after %s at the end of the hold, want no further wait", res.RequeueAfter)
 			}
 		}, endBare, logWant{label: holdCauseUnanswered, error: true}},
 		{"end of hold, answer no", true, Config{}, func(_ *testing.T, e *exitHold, sink *kvSink) {
 			e.eventLogged(sink, 0)
 			e.eventLogged(sink, time.Minute)
-			e.eventLogged(sink, grace)
+			decide(e, sink, grace)
 		}, endBare, logWant{label: holdCauseUnconfirmed}},
 		{"end of hold, CauseSeen nil", false, Config{}, func(_ *testing.T, e *exitHold, sink *kvSink) {
 			e.eventLogged(sink, 0)
 			e.eventLogged(sink, time.Minute)
-			e.eventLogged(sink, grace)
+			decide(e, sink, grace)
 		}, endBare, logWant{label: holdCauseUnconfirmed}},
 	}
 	for _, r := range rows {
@@ -432,14 +454,11 @@ func TestExitCauseRemovedOnlyAfterAsking(t *testing.T) {
 			sink := newKVSink()
 			before := holdOutcomeCounts()
 			r.run(t, e, sink)
-			if bad := e.log.unconfirmed(e.got); len(bad) > 0 {
+			if bad := e.unconfirmedCauses; len(bad) > 0 {
 				t.Errorf("emitted with unconfirmed causes %v", bad)
 			}
 			if got := e.end(); got != r.want {
 				t.Errorf("the hold ended %s, want %s", got, r.want)
-			}
-			if r.withCauseSeen && e.log.book.asked == 0 {
-				t.Error("CauseSeen was never asked")
 			}
 			d := outcomesSince(before)
 			for _, l := range []string{holdCauseUnconfirmed, holdCauseUnanswered} {

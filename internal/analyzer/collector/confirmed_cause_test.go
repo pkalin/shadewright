@@ -104,8 +104,8 @@ func (l *confirmLog) fn(ctx context.Context, o Observation) (bool, error) {
 	return ok, err
 }
 
-// unconfirmed returns the cause fingerprints on emitted consequences that CauseSeen never confirmed. The pods of
-// these tests show only non-zero exits, so every cause on a consequence must be a confirmed one.
+// unconfirmed returns the cause fingerprints on collected consequences that CauseSeen has yet to confirm.
+// Only non-zero exit causes require confirmation.
 func (l *confirmLog) unconfirmed(obs []Observation) []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -129,12 +129,13 @@ func exitPod() *corev1.Pod {
 // delivered (returned as fp), and the BackOff event ev-hold at at about the container, not yet reconciled.
 type exitHold struct {
 	*harness
-	log *confirmLog
-	cfg Config
-	q   workqueue.TypedRateLimitingInterface[reconcile.Request]
-	fp  string
-	at  time.Time
-	got []Observation
+	log               *confirmLog
+	cfg               Config
+	q                 workqueue.TypedRateLimitingInterface[reconcile.Request]
+	fp                string
+	at                time.Time
+	got               []Observation
+	unconfirmedCauses []string
 }
 
 func newExitHold(t *testing.T, withCauseSeen bool, cfg Config) *exitHold {
@@ -237,7 +238,15 @@ func (e *exitHold) event(after time.Duration) {
 	e.t.Helper()
 	e.clock.set(e.at.Add(after))
 	e.reconcileEvent("ev-hold")
-	e.got = append(e.got, e.drain()...)
+	e.collect()
+}
+
+// collect checks a batch against confirmations so far, before a later reconcile can confirm another cause.
+func (e *exitHold) collect() {
+	e.t.Helper()
+	obs := e.drain()
+	e.unconfirmedCauses = append(e.unconfirmedCauses, e.log.unconfirmed(obs)...)
+	e.got = append(e.got, obs...)
 }
 
 // restart gives the harness a new collector over the same API server: an analyzer restart, with an empty hold
@@ -360,7 +369,7 @@ func TestExitCauseOnlyWhenConfirmed(t *testing.T) {
 			if n := e.processQueue(e.q); n != 1 {
 				t.Fatalf("the mark queued %d reconciles, want 1", n)
 			}
-			e.got = append(e.got, e.drain()...)
+			e.collect()
 			e.event(grace)
 		}, endBare},
 		{"analyzer restarted, empty hold table", true, Config{}, func(_ *testing.T, e *exitHold) {
@@ -402,7 +411,7 @@ func TestExitCauseOnlyWhenConfirmed(t *testing.T) {
 			if n := e.processQueue(e.q); n != 1 {
 				t.Fatalf("the release queued %d reconciles, want 1", n)
 			}
-			e.got = append(e.got, e.drain()...)
+			e.collect()
 			e.event(grace)
 		}, endCause},
 		{"confirmed before the first sight", true, Config{}, func(_ *testing.T, e *exitHold) {
@@ -421,7 +430,7 @@ func TestExitCauseOnlyWhenConfirmed(t *testing.T) {
 		t.Run(r.name, func(t *testing.T) {
 			e := newExitHold(t, r.withCauseSeen, r.cfg)
 			r.run(t, e)
-			if bad := e.log.unconfirmed(e.got); len(bad) > 0 {
+			if bad := e.unconfirmedCauses; len(bad) > 0 {
 				t.Errorf("emitted with unconfirmed causes %v", bad)
 			}
 			if got := e.end(); got != r.want {
@@ -486,14 +495,14 @@ func exitSequence(t *testing.T, seed uint64, counts map[string]int) {
 	var steps []string
 	process := func() {
 		e.processQueue(e.q)
-		e.got = append(e.got, e.drain()...)
+		e.collect()
 	}
 	for range 4 + rng.IntN(10) {
 		switch rng.IntN(11) {
 		case 0, 1:
 			steps = append(steps, "sample")
 			e.reconcileEvent("ev-hold")
-			e.got = append(e.got, e.drain()...)
+			e.collect()
 		case 2:
 			if !exists {
 				continue
@@ -575,11 +584,11 @@ func exitSequence(t *testing.T, seed uint64, counts map[string]int) {
 		}
 	}
 	e.reconcileEvent("ev-hold")
-	e.got = append(e.got, e.drain()...)
+	e.collect()
 	e.clock.add(ConsequenceGrace + time.Second)
 	e.reconcileEvent("ev-hold")
-	e.got = append(e.got, e.drain()...)
-	if bad := e.log.unconfirmed(e.got); len(bad) > 0 {
+	e.collect()
+	if bad := e.unconfirmedCauses; len(bad) > 0 {
 		t.Errorf("seed %d %v: emitted with unconfirmed causes %v", seed, steps, bad)
 	}
 	if n := e.c.holds.len(); n != 0 {

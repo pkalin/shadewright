@@ -50,14 +50,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	kyaml "sigs.k8s.io/kustomize/kyaml/yaml"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/gitops/semdiff"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/incidents/quiet"
-	"github.com/pkalin/shadewright/internal/policy/freshness"
-	"github.com/pkalin/shadewright/internal/providers"
-	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
-	fx "github.com/pkalin/shadewright/internal/testfixtures"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/gitops/semdiff"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/incidents/quiet"
+	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	fakegit "github.com/shadewright-labs/shadewright/internal/providers/fake"
+	fx "github.com/shadewright-labs/shadewright/internal/testfixtures"
 )
 
 // testAppsPath is the build directory and Kustomization name the fleet fixtures use.

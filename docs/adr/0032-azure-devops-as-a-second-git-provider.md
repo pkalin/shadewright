@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-11-13
 
-This ADR took number 0032. The ADR for [#166](https://github.com/pkalin/shadewright/issues/166) is written at the same time and would take 0031, so this one skips it. If that ADR takes another number, this one keeps 0032.
+This ADR took number 0032. The ADR for [#166](https://github.com/shadewright-labs/shadewright/issues/166) is written at the same time and would take 0031, so this one skips it. If that ADR takes another number, this one keeps 0032.
 
 Nothing in it is built. The adapter, the settings fields and the identity wiring are planned. Every statement about what Azure DevOps does cites the page it comes from in the section "Sources", or is marked as something the first slice must check against the test organization.
 
@@ -166,7 +166,7 @@ The six questions of the first draft are all decided: five on 2026-11-13 (identi
 - **Login rule:** the exact pattern `login` takes for an Azure DevOps author (section 1): the characters a unique name can hold are not in the pages read, so the rule waits for a spike against the test organization.
 - **Pull request body length:** can the body for the largest plan pass 4000 characters (section 3, row `OpenChangeRequest`)?
 - **Settings shape:** one repository entry with organization and project repeated, or an organization level block (section 7)?
-- **Withdrawn approval after a pass (GitHub):** answered by [#748](https://github.com/pkalin/shadewright/issues/748) in ADR-0028 (second #748 entry): the GitHub gate reads the reviews and its own check run on every caught-up look while the request waits for approval, as long as it waits, and takes the pass back when the approval is gone.
+- **Withdrawn approval after a pass (GitHub):** answered by [#748](https://github.com/shadewright-labs/shadewright/issues/748) in ADR-0028 (second #748 entry): the GitHub gate reads the reviews and its own check run on every caught-up look while the request waits for approval, as long as it waits, and takes the pass back when the approval is gone.
 - **Red team:** the vote reset window and the status policy bound to an authorized identity (section 4) need a red-team pass before this ADR is accepted.
 
 ## Amendments this ADR would need
@@ -255,4 +255,4 @@ Not read yet, so nothing is stated from them: Items, Trees, the pull request lis
 
 ## Amendments
 
-- 2026-11-19: the method map follows the `GitProvider` interface as built for [#892](https://github.com/pkalin/shadewright/issues/892) and recorded in [ADR-0030](0030-merge-receipt-and-verification-outcomes.md#amendments) (entry of 2026-11-19) and decided in [ADR-0043](0043-the-executor-follows-its-own-pull-request-to-any-base.md). `GetChangeRequest` no longer refuses a pull request whose target is another branch of the repository: it answers it with that target as its base, so an adapter built from this map does not answer a pull request a person moved to another target with not found, which the executor would take for gone and release the lock. Two rows are added, `ListChangeRequestsAnyBase` and `CloseChangeRequestAnyBase`.
+- 2026-11-19: the method map follows the `GitProvider` interface as built for [#892](https://github.com/shadewright-labs/shadewright/issues/892) and recorded in [ADR-0030](0030-merge-receipt-and-verification-outcomes.md#amendments) (entry of 2026-11-19) and decided in [ADR-0043](0043-the-executor-follows-its-own-pull-request-to-any-base.md). `GetChangeRequest` no longer refuses a pull request whose target is another branch of the repository: it answers it with that target as its base, so an adapter built from this map does not answer a pull request a person moved to another target with not found, which the executor would take for gone and release the lock. Two rows are added, `ListChangeRequestsAnyBase` and `CloseChangeRequestAnyBase`.

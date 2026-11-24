@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // An extra pattern whose expression reads the rest of the text on every match attempt (a.*z|a on a run of a:

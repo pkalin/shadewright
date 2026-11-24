@@ -30,8 +30,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // The unchanged table of the shown view (#1100, decision of 2026-11-23): text that is valid UTF-8 is decided

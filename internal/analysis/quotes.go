@@ -22,7 +22,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/tools"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // shownBlock is one context block or tool result as the model saw it, by ID: its name (the context section or

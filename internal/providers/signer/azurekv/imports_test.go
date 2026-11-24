@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/testutil/importguard"
+	"github.com/shadewright-labs/shadewright/internal/testutil/importguard"
 )
 
 // azureSDK is the import path prefix of the Azure SDK for Go, including Entra ID and MSAL.

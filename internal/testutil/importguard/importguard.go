@@ -37,7 +37,7 @@ import (
 )
 
 // Module is the import path prefix of this module.
-const Module = "github.com/pkalin/shadewright/"
+const Module = "github.com/shadewright-labs/shadewright/"
 
 // VendorSDKs are import path prefixes of product SDKs, allowed only in their adapter package.
 var VendorSDKs = []string{

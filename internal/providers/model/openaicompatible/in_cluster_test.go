@@ -32,7 +32,7 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // fakeResolver answers every A and AAAA question with the given addresses, over an in-process stream, so a

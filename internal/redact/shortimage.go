@@ -19,7 +19,7 @@ package redact
 import (
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // The image of a container as its command word (#1075, second decision of 2026-11-22). A container read as an

@@ -27,7 +27,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // hpaTemplates are the templates that read one HorizontalPodAutoscaler's metrics.

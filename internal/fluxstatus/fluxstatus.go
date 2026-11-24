@@ -35,7 +35,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // Flux API groups, versions and kinds read.

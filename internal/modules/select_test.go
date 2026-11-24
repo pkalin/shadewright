@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // aksWithRule is the aks stub with one event rule, so its hooks can be seen in the selection.

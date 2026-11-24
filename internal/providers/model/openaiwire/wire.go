@@ -24,7 +24,7 @@ import (
 	"io"
 	"regexp"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // Bounds of a reply. A reply outside them is malformed.

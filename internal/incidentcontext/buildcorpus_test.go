@@ -26,7 +26,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // A corpus of generated metric blocks, built whole (#873, second round): whatever makes Build cheaper must not

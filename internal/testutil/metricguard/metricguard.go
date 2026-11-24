@@ -28,7 +28,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // Prefix is the name prefix of Shadewright's own metrics.

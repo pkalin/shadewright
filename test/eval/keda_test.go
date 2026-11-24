@@ -24,7 +24,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 
-	"github.com/pkalin/shadewright/internal/analysis"
+	"github.com/shadewright-labs/shadewright/internal/analysis"
 )
 
 const (

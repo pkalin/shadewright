@@ -22,9 +22,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/pkalin/shadewright/internal/redact/released"
+	"github.com/shadewright-labs/shadewright/internal/redact/released"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // The count of [Work], built only with the tag redactwork, for the linearity tests (make test); the product

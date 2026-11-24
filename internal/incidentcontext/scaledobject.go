@@ -24,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/pkalin/shadewright/internal/kedaready"
+	"github.com/shadewright-labs/shadewright/internal/kedaready"
 )
 
 // scaledObjectConditions are the conditions of a ScaledObject the status section shows, in this order

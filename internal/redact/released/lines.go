@@ -20,7 +20,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // lineIndex answers indentedLines and blockLooksLikeSecret for one text in logarithmic work per call (#873).

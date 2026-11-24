@@ -23,7 +23,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/groupversion"
+	"github.com/shadewright-labs/shadewright/internal/groupversion"
 )
 
 var (

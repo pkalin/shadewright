@@ -32,7 +32,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // Workload identity variables, as the workload identity webhook injects them.

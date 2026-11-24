@@ -23,8 +23,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/intake"
-	"github.com/pkalin/shadewright/internal/testutil/intakerun"
+	"github.com/shadewright-labs/shadewright/internal/intake"
+	"github.com/shadewright-labs/shadewright/internal/testutil/intakerun"
 )
 
 // The scoring intake's judge, run on this adapter: the second request, which carries the judge's first reply

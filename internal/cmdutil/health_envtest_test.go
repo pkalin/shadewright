@@ -42,11 +42,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analyzer"
-	"github.com/pkalin/shadewright/internal/cmdutil"
-	"github.com/pkalin/shadewright/internal/controller"
-	"github.com/pkalin/shadewright/internal/verifier"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/analyzer"
+	"github.com/shadewright-labs/shadewright/internal/cmdutil"
+	"github.com/shadewright-labs/shadewright/internal/controller"
+	"github.com/shadewright-labs/shadewright/internal/verifier"
 )
 
 // The operator namespace of the tests, and the namespace the analyzer watches.

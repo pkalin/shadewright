@@ -22,8 +22,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/testutil/crdschema"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/testutil/crdschema"
 )
 
 // ptrPlatform and ptrIntegration have pointer receivers that read their fields, so a nil one panics when

@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/gitops/semdiff"
+	"github.com/shadewright-labs/shadewright/internal/gitops/semdiff"
 )
 
 // mergedKeysBound is semdiff.MaxMergedKeys as a literal, so the test pins the bound (#626).

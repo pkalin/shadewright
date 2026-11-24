@@ -56,7 +56,7 @@ The redaction is best effort and errs towards removing too much: a text it canno
 
 ## In depth
 
-- [Invariants in AGENTS.md](https://github.com/pkalin/shadewright/blob/main/AGENTS.md)
+- [Invariants in AGENTS.md](https://github.com/shadewright-labs/shadewright/blob/main/AGENTS.md)
 - [Threat model](../threat-model.md)
 - [Design 9: identity](../design/9-identity.md#9-identity)
 - [Design 10: security](../design/10-security.md#10-security)

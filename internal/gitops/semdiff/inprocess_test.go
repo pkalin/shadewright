@@ -26,8 +26,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/gitops/semdiff"
-	"github.com/pkalin/shadewright/internal/testutil/importguard"
+	"github.com/shadewright-labs/shadewright/internal/gitops/semdiff"
+	"github.com/shadewright-labs/shadewright/internal/testutil/importguard"
 )
 
 // TestCheckInProcessAnswersAsTheRenderProcess checks the render of the tests (#717): with

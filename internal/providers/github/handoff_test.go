@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // shaMid is the apps tree of shaOld, the first commit of a two-commit chain.

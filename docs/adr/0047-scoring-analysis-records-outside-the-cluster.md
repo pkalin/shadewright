@@ -5,13 +5,13 @@
 
 ## Context
 
-Epic [#987](https://github.com/pkalin/shadewright/issues/987), task [#988](https://github.com/pkalin/shadewright/issues/988), decisions of the maintainer on the epic on 2026-11-21.
+Epic [#987](https://github.com/shadewright-labs/shadewright/issues/987), task [#988](https://github.com/shadewright-labs/shadewright/issues/988), decisions of the maintainer on the epic on 2026-11-21.
 
 The analyzer writes one record per analysis to a blob container ([ADR-0015](0015-analysis-records-outlive-the-lab.md), [ADR-0029](0029-azure-module-environment-and-cluster-layers.md)). A record holds the Incident's identity, counts, the model deployments and providers, the prompt version, a redacted summary and a list of missing data, and no context, prompt or raw reply (`internal/analysis/record.go:46-73`). The analyzer writes it create-only, as `<ID>.json`, and checks the decoded strings of the record with the redactor before the write (`internal/providers/store/azureblob/store.go:241-272`, `:280-283`). Today nothing reads records except a person. The blind runs of 2026-11-20, in which the analyzer of the www cluster analyzed scenarios without being told the answer, were scored by hand.
 
 The epic wants records written by an analyzer we do not run (first the www cluster, later installations that opt in) scored without anyone reading them: a quality score when a record arrives, later a truth score when the answer is known. Scoring needs a model call, and the input of that call is text that an analyzer we do not control produced from a cluster we do not control. That text is untrusted (invariant 4), and what it costs is a model bill. This ADR decides where the scoring runs, what it may read, write and call, and what it must check before any model sees a record. It builds nothing.
 
-What is out of scope: any change to what the analyzer sends or where it writes (it keeps writing records to its record store), truth scores and draft evaluation scenarios (P2 of the epic), and records from installations of other people. Those need their own ADR ([#995](https://github.com/pkalin/shadewright/issues/995)); a second writer into the records container is not allowed before it is accepted.
+What is out of scope: any change to what the analyzer sends or where it writes (it keeps writing records to its record store), truth scores and draft evaluation scenarios (P2 of the epic), and records from installations of other people. Those need their own ADR ([#995](https://github.com/shadewright-labs/shadewright/issues/995)); a second writer into the records container is not allowed before it is accepted.
 
 ## Decision
 
@@ -248,7 +248,7 @@ The blob source, the containers, the queue, the job and its image are not built 
 
 ### 2026-11-21 (#1093): every token but plain words and plain numbers becomes a placeholder before a model is sent anything
 
-The form is confirmed by the maintainer's decision of 2026-11-22 (issue [#1093](https://github.com/pkalin/shadewright/issues/1093)). The figures in it (the digit bound of six, the number-like shapes, the bar of the score comparison) are a starting point: they may be adjusted from the records of the site cluster's runs by a dated amendment (A7). It adds a second layer to sections 3 and 4. It changes no sentence of them, it removes no check, and it is not a reason to relax one. The build tasks of #1093 start once this change is merged.
+The form is confirmed by the maintainer's decision of 2026-11-22 (issue [#1093](https://github.com/shadewright-labs/shadewright/issues/1093)). The figures in it (the digit bound of six, the number-like shapes, the bar of the score comparison) are a starting point: they may be adjusted from the records of the site cluster's runs by a dated amendment (A7). It adds a second layer to sections 3 and 4. It changes no sentence of them, it removes no check, and it is not a reason to relax one. The build tasks of #1093 start once this change is merged.
 
 **About the references.** References are to `main` at 025b65d6.
 
@@ -371,7 +371,7 @@ A run that misses the bar is a reason to keep more (the unit of a decimal, the e
 | A change that replaces more (a lower digit bound, a unit removed, a separator turned into a token character) | may be a build constant, with the corpus tests of A5 changed to match | closed | narrows what section 4 allows, so no widening; [ADR-0021](0021-amending-accepted-adrs.md) for the form |
 | Building the matcher | the digit bound (6 per run) and the number shapes are set by the maintainer's decision of 2026-11-22, so the build may start once this change is merged | closed | this amendment |
 | Scoring live records with the replacement | the bar of A5 is set by the same decision; live scoring starts after the build and the first comparison pass the bar | closed: no live record is scored with it before then | this amendment |
-| Order of merges | pull request [#1092](https://github.com/pkalin/shadewright/pull/1092) is merged; the references of this amendment point to `main` at 025b65d6 | n/a | n/a |
+| Order of merges | pull request [#1092](https://github.com/shadewright-labs/shadewright/pull/1092) is merged; the references of this amendment point to `main` at 025b65d6 | n/a | n/a |
 
 ### A8. Known limits added
 

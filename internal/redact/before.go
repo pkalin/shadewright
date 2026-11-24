@@ -22,9 +22,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/redact/released"
+	"github.com/shadewright-labs/shadewright/internal/redact/released"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // The reading of the release before (#845, thirteenth decision of 2026-11-18). The redactor of the release

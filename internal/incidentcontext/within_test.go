@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers/fake"
+	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 // #981: the total a build is given (maxContextBytes) bounds the context in place of the configured one; zero

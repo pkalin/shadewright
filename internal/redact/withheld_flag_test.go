@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // flagged is an entry point that says with a flag whether it withheld its entry, its output joined. run is the

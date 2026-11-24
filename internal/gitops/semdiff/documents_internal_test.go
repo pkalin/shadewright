@@ -25,7 +25,7 @@ import (
 
 	"sigs.k8s.io/kustomize/api/provider"
 
-	"github.com/pkalin/shadewright/internal/gitops/gityaml"
+	"github.com/shadewright-labs/shadewright/internal/gitops/gityaml"
 )
 
 // kustomizeObjects returns how many objects kustomize reads from data, or false when it refuses it.

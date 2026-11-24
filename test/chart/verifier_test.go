@@ -219,7 +219,7 @@ func TestVerifierHasNoCloudIdentity(t *testing.T) {
 func TestVerifierImageFollowsItsOwnValues(t *testing.T) {
 	r := render(t, false)
 	if got, want := container(t, r, verifierDeployment).Image,
-		"ghcr.io/pkalin/shadewright-verifier@sha256:"+strings.Repeat("3", 64); got != want {
+		"ghcr.io/shadewright-labs/shadewright-verifier@sha256:"+strings.Repeat("3", 64); got != want {
 		t.Errorf("image %s, want %s", got, want)
 	}
 	out, err := runErr(t, helmArgsWith(t, nil, testCluster, "image.allowTag=false", withVerifier,

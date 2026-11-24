@@ -26,7 +26,7 @@ import (
 	"testing"
 	"unicode"
 
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // What main did with the answers of TestReadingsKeepTheSignalOfAHiddenText (#845, eleventh decision of

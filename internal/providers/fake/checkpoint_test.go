@@ -21,7 +21,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 var errPaused = errors.New("paused")

@@ -25,7 +25,7 @@ import (
 
 	yaml "go.yaml.in/yaml/v3"
 
-	"github.com/pkalin/shadewright/internal/gitops/gityaml"
+	"github.com/shadewright-labs/shadewright/internal/gitops/gityaml"
 )
 
 // treeNodes returns the nodes go.yaml.in/yaml/v3 builds for data, documents included, and whether it parses.

@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // Every built-in rule has a sample in package redacttest, in rule order, which that rule alone redacts: the

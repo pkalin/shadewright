@@ -24,10 +24,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/analysis"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/store/azureblob"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/analysis"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/store/azureblob"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // fakeToken is shaped like a GitHub token, built from parts so no literal looks like one.

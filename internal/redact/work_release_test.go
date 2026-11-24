@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/released"
+	"github.com/shadewright-labs/shadewright/internal/redact/released"
 )
 
 // The work bound of String since the fourteenth decision of 2026-11-18 (#845). String applies the redactor of

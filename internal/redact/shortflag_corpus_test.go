@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // The short password flags of #1075 (decision of 2026-11-22): a fixed table of tools and the short flag each reads

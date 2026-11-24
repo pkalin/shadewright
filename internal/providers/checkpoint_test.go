@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 var errClass = errors.New("paused")

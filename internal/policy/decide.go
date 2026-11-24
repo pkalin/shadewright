@@ -69,10 +69,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/kedaready"
-	"github.com/pkalin/shadewright/internal/policy/pathmatch"
-	"github.com/pkalin/shadewright/internal/quantity"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/kedaready"
+	"github.com/shadewright-labs/shadewright/internal/policy/pathmatch"
+	"github.com/shadewright-labs/shadewright/internal/quantity"
 )
 
 // Outcome is the result of a policy decision.

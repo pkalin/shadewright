@@ -28,10 +28,10 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	"sigs.k8s.io/yaml"
 
-	"github.com/pkalin/shadewright/internal/modules"
-	"github.com/pkalin/shadewright/internal/modules/aks"
-	"github.com/pkalin/shadewright/internal/modules/eks"
-	"github.com/pkalin/shadewright/internal/modules/gke"
+	"github.com/shadewright-labs/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/modules/aks"
+	"github.com/shadewright-labs/shadewright/internal/modules/eks"
+	"github.com/shadewright-labs/shadewright/internal/modules/gke"
 )
 
 // The EKS and GKE node fixtures, used by the detection and status tests.

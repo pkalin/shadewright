@@ -59,7 +59,7 @@ executor:
 ```
 
 ```bash
-helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+helm upgrade shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --version <version> \
   --namespace shadewright-system -f my-values.yaml --wait --timeout 10m
 ```
 

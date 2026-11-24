@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // Through every entry point, no secret part of a connection string that origin/main kept out of an output

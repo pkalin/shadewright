@@ -19,8 +19,8 @@ package flux
 import (
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/fluxstatus"
-	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/fluxstatus"
+	"github.com/shadewright-labs/shadewright/internal/modules"
 )
 
 // Evidence fields the rules write.

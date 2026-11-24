@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // The heap one entry holds. Two figures are checked against it (TestHeapPerByteOfEveryShape): the bound of one

@@ -24,8 +24,8 @@ import (
 	"testing"
 	"unicode"
 
-	"github.com/pkalin/shadewright/internal/analysis"
-	"github.com/pkalin/shadewright/internal/tools"
+	"github.com/shadewright-labs/shadewright/internal/analysis"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // heldControl reports whether a string of v, walked by reflection, holds a control code point that model

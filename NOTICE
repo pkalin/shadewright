@@ -3,7 +3,7 @@ Copyright 2026 The Shadewright Authors
 
 This repository holds the Shadewright operator (the executor, the analyzer and the verifier).
 Project site: https://shadewright.io
-Source: https://github.com/pkalin/shadewright
+Source: https://github.com/shadewright-labs/shadewright
 
 Licensed under the Apache License, Version 2.0 (see LICENSE). Under section 4(d)
 of that license, a redistribution of this work or of a derivative work must

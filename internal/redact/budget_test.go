@@ -25,8 +25,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // The work budget of an entry (#873, decision of 2026-11-20; budget.go). The meter counts the steps of one

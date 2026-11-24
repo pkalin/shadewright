@@ -1,4 +1,4 @@
-# Artifact Hub repository metadata (Verified Publisher) for oci://ghcr.io/pkalin/charts/shadewright. Artifact Hub
+# Artifact Hub repository metadata (Verified Publisher) for oci://ghcr.io/shadewright-labs/charts/shadewright. Artifact Hub
 # reads it once per repository, not per chart version, from the OCI tag `artifacthub.io` next to the chart.
 # chart.yml pushes it on every release tag, so a deleted tag comes back with the next release. The ID is the one
 # Artifact Hub shows for the repository; it is public. Change it only by pull request.

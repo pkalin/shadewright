@@ -30,7 +30,7 @@ import (
 	"strings"
 	"testing"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 const (
@@ -368,7 +368,7 @@ func isPackage(e ast.Expr, pkg string) bool {
 }
 
 // lockverdictPath is the import path of package lockverdict.
-const lockverdictPath = "github.com/pkalin/shadewright/internal/controller/lockverdict"
+const lockverdictPath = "github.com/shadewright-labs/shadewright/internal/controller/lockverdict"
 
 // importedAs returns the names under which f imports path: its own name or the one the import gives ("." for a
 // dot import). A package of another path that happens to have the same name is not in it.

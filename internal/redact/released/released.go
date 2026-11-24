@@ -19,7 +19,7 @@ package released
 import (
 	"slices"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // This package is the redactor of the release before #845 (origin/main at 0701cd3a): redact.go, extent.go and
@@ -33,7 +33,7 @@ import (
 // and the tick files are new. The work budget of #873 (decision of 2026-11-20, package meter) is threaded
 // through every function of the kept files as a first parameter wm and spent where they count their work and
 // on each comparison of their sorts (sortFunc);
-// TestReleasedIsTheReleaseBefore pins the kept files with it taken out. The package is retired, with its reading, by its own issue (pkalin/shadewright#922)
+// TestReleasedIsTheReleaseBefore pins the kept files with it taken out. The package is retired, with its reading, by its own issue (shadewright-labs/shadewright#922)
 // once a release has run with both readings.
 //
 // The package comment of the kept redact.go says that matching takes time linear in the input. That holds of one

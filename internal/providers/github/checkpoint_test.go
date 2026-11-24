@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // errStopped stands for the kill switch's refusal: a class the adapter must keep, wrapped in fixed text.

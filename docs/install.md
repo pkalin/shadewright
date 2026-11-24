@@ -8,6 +8,8 @@ The first step for every user: install Shadewright so that it watches and record
 
 What is built and what is not is on the [Get started](getting-started.md) page: read its box first.
 
+Releases after v0.6.0 publish the images and the chart under `ghcr.io/shadewright-labs`, as the commands below show. v0.6.0 and earlier stay under `ghcr.io/pkalin` (images `ghcr.io/pkalin/shadewright-{executor,analyzer,verifier}`, chart `oci://ghcr.io/pkalin/charts/shadewright`), signed by the workflows of `github.com/pkalin/shadewright`; [verify a release](upgrade-uninstall.md#verify-a-release) gives the commands for both.
+
 ## Install with kubectl and kustomize
 
 Observe-only means the analyzer watches the namespaces you name and records `Incident` objects, and nothing else happens: no model is called (nothing calls one yet), no settings entry names a repository, and `spec.paused` is true, so the executor could not write to Git even if a request existed. It writes only its own control state: Incidents, the budget ConfigMap, the settings status and Events.
@@ -18,13 +20,13 @@ What you need:
 - The namespaces to watch already exist.
 - `kubectl` with built-in kustomize (`kubectl apply -k`).
 
-The base is `config/default` of the release tag `v0.2.0`, so the manifests match the images. Both Deployments use the placeholder image `controller:latest`, and the two images are published as separate repositories, so the overlay replaces each by digest. Check the digests against the [release](https://github.com/pkalin/shadewright/releases/tag/v0.2.0) before you use them. Create a directory outside any Git repository of the project with two files.
+The base is `config/default` of the release tag `v0.2.0`, so the manifests match the images. Both Deployments use the placeholder image `controller:latest`, and the two images are published as separate repositories, so the overlay replaces each by digest. Check the digests against the [release](https://github.com/shadewright-labs/shadewright/releases/tag/v0.2.0) before you use them. Create a directory outside any Git repository of the project with two files.
 
 `kustomization.yaml`:
 
 ```yaml
 resources:
-  - github.com/pkalin/shadewright/config/default?ref=v0.2.0
+  - github.com/shadewright-labs/shadewright/config/default?ref=v0.2.0
   - watch-rolebinding.yaml
 patches:
   - target:
@@ -60,7 +62,7 @@ A release whose `config/default` has the verifier (`shadewright-verifier`, the t
     patch: |-
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: ghcr.io/pkalin/shadewright-verifier@sha256:<verifier digest of the release>
+        value: ghcr.io/shadewright-labs/shadewright-verifier@sha256:<verifier digest of the release>
       # The base passes --watch-namespaces=demo. The verifier does not start with an empty list.
       - op: add
         path: /spec/template/spec/containers/0/args/-
@@ -147,15 +149,15 @@ To remove observe-only, `kubectl delete -k .` and delete the settings object fir
 
 The chart installs the same objects as `config/default`, except the helper roles (off by default) and the Namespace, plus one `RoleBinding` per watched namespace, with the images, cluster ID, watched namespaces and workload identity as values. With no values the published chart installs an idle Shadewright: no watched namespace, no Azure workload identity, the cluster ID from the `kube-system` UID, and the release's images by digest.
 
-Pick a version on the [releases page](https://github.com/pkalin/shadewright/releases), verify the chart (the commands are in [verify a release](upgrade-uninstall.md#verify-a-release) and in the release's own notes), then install it from the registry:
+Pick a version on the [releases page](https://github.com/shadewright-labs/shadewright/releases), verify the chart (the commands are in [verify a release](upgrade-uninstall.md#verify-a-release) and in the release's own notes), then install it from the registry:
 
 ```bash
-helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+helm install shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --version <version> \
   --namespace shadewright-system --create-namespace \
   --set clusterId=my-cluster --set 'analyzer.watchNamespaces={default}'
 ```
 
-`clusterId` is optional (it defaults to the UID of `kube-system`); `analyzer.watchNamespaces` is what makes the analyzer watch anything. The verifier follows it while `verifier.watchNamespaces` is unset, and the chart deploys the verifier only when that list is not empty: with no namespace (the default) there is no verifier, so with `executor.verification.enabled` a merged request can end only `Inconclusive`, never `Succeeded`. With a verifier deployed, the executor reads its report as untrusted evidence and decides `Cleared` (#683). There is no `helm repo add` step because the chart is an OCI artifact, and `--version` is required for a pre-release such as `0.2.0-rc.1`, because Helm does not pick pre-releases by itself. For the strict path, install the digest you verified: `oci://ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>` in place of the reference and `--version` (see the [configuration reference](reference/configuration.md#helm-chart)).
+`clusterId` is optional (it defaults to the UID of `kube-system`); `analyzer.watchNamespaces` is what makes the analyzer watch anything. The verifier follows it while `verifier.watchNamespaces` is unset, and the chart deploys the verifier only when that list is not empty: with no namespace (the default) there is no verifier, so with `executor.verification.enabled` a merged request can end only `Inconclusive`, never `Succeeded`. With a verifier deployed, the executor reads its report as untrusted evidence and decides `Cleared` (#683). There is no `helm repo add` step because the chart is an OCI artifact, and `--version` is required for a pre-release such as `0.2.0-rc.1`, because Helm does not pick pre-releases by itself. For the strict path, install the digest you verified: `oci://ghcr.io/shadewright-labs/charts/shadewright@sha256:<chart digest>` in place of the reference and `--version` (see the [configuration reference](reference/configuration.md#helm-chart)).
 
 To run a triage or escalation deployment on the Anthropic API ([ADR-0037](adr/0037-the-anthropic-api-as-a-second-model-provider.md)), create a Secret with the key in the release namespace yourself (the chart never creates it) and pass `--set analyzer.analysis.anthropic.apiKey.secretName=<secret>` (key `api-key`, or set `secretKey`), or an `apiKey.volume` source such as a Secrets Store CSI volume. The chart mounts it read-only into the analyzer only. Use a dedicated vendor workspace with a spend limit for the key, and rotate it by updating the Secret: no restart is needed. See [Model API key](reference/configuration.md#model-api-key-helm-chart-optional) for the values and who can read the key.
 
@@ -170,7 +172,7 @@ The same settings object and checks as above apply (`--set settings.create=true`
 To try Shadewright on a cluster with real workloads, install only the analyzer. Nothing in the release can write to Git then: the analyzer reads the cluster, records Incidents and, with a triage model, diagnoses them.
 
 ```bash
-helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+helm install shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --version <version> \
   --namespace shadewright-system --create-namespace \
   --set executor.enabled=false --set-json 'verifier.watchNamespaces=[]' \
   --set 'analyzer.watchNamespaces={default}'
@@ -195,7 +197,7 @@ The Chart workflow installs this shape on Kind (`hack/chart-analyzer-only-instal
 The chart assumes the Azure workload identity mutating webhook: it sets the ServiceAccount annotation `azure.workload.identity/client-id` and the Pod label `azure.workload.identity/use`, and the webhook adds the token volume and the `AZURE_*` variables. On a cluster without the webhook, set `identity.azure.projectToken` for the component and the chart renders those itself. It applies to the analyzer and the executor; the verifier has no cloud identity.
 
 ```bash
-helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+helm install shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --version <version> \
   --set executor.identity.azure.clientId=<executor client ID> \
   --set executor.identity.azure.tenantId=<tenant ID> \
   --set executor.identity.azure.projectToken=true

@@ -23,7 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/pkalin/shadewright/internal/testutil/metricguard"
+	"github.com/shadewright-labs/shadewright/internal/testutil/metricguard"
 )
 
 // TestWatchedNamespacesGauge checks that the gauge reports the count, 0 included, has no labels and is

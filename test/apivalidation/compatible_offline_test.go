@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/yaml"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 const compatibleEndpoint = "https://api.openai.com/v1"

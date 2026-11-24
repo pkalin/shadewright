@@ -20,8 +20,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/released"
-	v052 "github.com/pkalin/shadewright/internal/redact/released/testdata/v052"
+	"github.com/shadewright-labs/shadewright/internal/redact/released"
+	v052 "github.com/shadewright-labs/shadewright/internal/redact/released/testdata/v052"
 )
 
 // The reading of the release before finds, on every input of the corpora releasedTable is written from, the

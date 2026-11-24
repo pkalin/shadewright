@@ -26,9 +26,9 @@ import (
 
 	"sigs.k8s.io/yaml"
 
-	"github.com/pkalin/shadewright/internal/gitops/repopath"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/gitops/repopath"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // Limits on a build, so a hostile repository cannot make the check read or render without bound.

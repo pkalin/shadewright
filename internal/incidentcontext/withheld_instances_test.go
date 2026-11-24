@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // A log read redaction withheld, the first or the second of a container (#943), makes the logs a failed source

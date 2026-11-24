@@ -85,7 +85,7 @@ func TestNoForbiddenDepsPassesTheCore(t *testing.T) {
 func TestIsStandardOrModule(t *testing.T) {
 	for path, want := range map[string]bool{
 		"fmt": true, "net/http": true, Module + "api/v1alpha1": true,
-		"k8s.io/api/core/v1": false, "github.com/pkalin/other": false,
+		"k8s.io/api/core/v1": false, "github.com/shadewright-labs/other": false,
 	} {
 		if got := IsStandardOrModule(path); got != want {
 			t.Errorf("IsStandardOrModule(%q) = %v, want %v", path, got, want)

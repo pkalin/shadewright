@@ -23,9 +23,9 @@ import (
 	"io"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/analysis"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/analysis"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // PromptVersion is the version of the judge's prompt and answer schema, recorded in each score. It changes

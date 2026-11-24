@@ -28,7 +28,7 @@ import (
 	"github.com/go-logr/logr/funcr"
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // analyzerGoMemLimit is the Go memory limit both install paths give the analyzer: 90 percent of its 256 Mi.

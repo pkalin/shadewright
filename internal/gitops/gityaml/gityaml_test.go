@@ -20,7 +20,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/gitops/gityaml"
+	"github.com/shadewright-labs/shadewright/internal/gitops/gityaml"
 )
 
 // The count, the refusals and their lines; semdiff's tests cover the count against kustomize in depth.

@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/gitops/semdiff"
-	"github.com/pkalin/shadewright/internal/providers/fake"
+	"github.com/shadewright-labs/shadewright/internal/gitops/semdiff"
+	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 const oneByteOver = "one byte over"

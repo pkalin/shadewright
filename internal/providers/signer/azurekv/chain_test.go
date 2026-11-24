@@ -38,7 +38,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // failingTransport fails every request with err, as a broken connection or an SDK failure would.

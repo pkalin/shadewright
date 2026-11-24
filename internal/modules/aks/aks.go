@@ -60,7 +60,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/modules"
 )
 
 // Name is the module's name in RemediationSettings.

@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/testutil/importguard"
+	"github.com/shadewright-labs/shadewright/internal/testutil/importguard"
 )
 
 // TestStandardLibraryOnly keeps the adapter free of SDKs (ADR-0013): its code imports the standard library

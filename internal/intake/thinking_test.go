@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // thinkingRun scores a record whose judge first asks one cross-check question with blocks as its provider blocks,

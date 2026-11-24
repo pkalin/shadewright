@@ -31,9 +31,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/ownership"
-	"github.com/pkalin/shadewright/internal/verification/rollout"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/ownership"
+	"github.com/shadewright-labs/shadewright/internal/verification/rollout"
 )
 
 // StatefulSetRevisionLabel is the label a StatefulSet's controller sets on each pod to the revision it was

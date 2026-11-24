@@ -5,7 +5,7 @@
 
 ## Context
 
-Issue [#925](https://github.com/pkalin/shadewright/issues/925), built in pull request [#939](https://github.com/pkalin/shadewright/pull/939). [ADR-0043](0043-the-executor-follows-its-own-pull-request-to-any-base.md) lets the executor follow its own pull request when a person changes its base branch, and lists "check run" among the things it never does on another base. [ADR-0028](0028-reviewer-hints-through-the-pull-request.md) section 5 makes the check run `shadewright/review` the merge check of a pull request the executor opened, when reviewer hints are on (`--reviewer-hints`).
+Issue [#925](https://github.com/shadewright-labs/shadewright/issues/925), built in pull request [#939](https://github.com/shadewright-labs/shadewright/pull/939). [ADR-0043](0043-the-executor-follows-its-own-pull-request-to-any-base.md) lets the executor follow its own pull request when a person changes its base branch, and lists "check run" among the things it never does on another base. [ADR-0028](0028-reviewer-hints-through-the-pull-request.md) section 5 makes the check run `shadewright/review` the merge check of a pull request the executor opened, when reviewer hints are on (`--reviewer-hints`).
 
 A check run belongs to a commit, not to a base. A passing check written while the pull request was on the target branch stays the latest check of its head after a person moves the pull request to another base. If the request then stops (its plan goes stale, it is cancelled, or it stops for another reason), nobody updates the check. A person can merge, on that old pass, a change the executor no longer stands behind, and moving the pull request back to the target branch does the same. The only fix is to complete the check as failed, which is a Git write on a pull request that is on another base. ADR-0043 listed that write under "never", so this decision widens a write.
 
@@ -70,7 +70,7 @@ Known limits:
 - (e) A window between the read and the write. A person who moves the pull request again between the two gets the check on a pull request that is now elsewhere. A check run belongs to the commit, so it shows on every pull request with that head, including one on the target branch. That can only block.
 - (f) The failed check is final for the request. Moving the pull request back does not clear it, and the request writes nothing else. A person who wants the change makes a new request.
 - (g) A write for a pull request read gone is on the recorded head with no read that ties it to an open pull request: a gone read is a 404 or a number from another branch. A person who later opens a new pull request at that commit meets the failed required check and needs a new commit. This fails closed.
-- (h) It does not make the lock follow a reopened pull request: that is [#940](https://github.com/pkalin/shadewright/issues/940).
+- (h) It does not make the lock follow a reopened pull request: that is [#940](https://github.com/shadewright-labs/shadewright/issues/940).
 
 ## Alternatives considered
 

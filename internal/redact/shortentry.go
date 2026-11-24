@@ -21,7 +21,7 @@ import (
 
 	"golang.org/x/sync/semaphore"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // Short entries (#1087, decisions of 2026-11-22). The collector redacts event notes, symptoms and module evidence

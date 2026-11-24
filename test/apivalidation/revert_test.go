@@ -22,8 +22,8 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	fx "github.com/pkalin/shadewright/internal/testfixtures"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	fx "github.com/shadewright-labs/shadewright/internal/testfixtures"
 )
 
 // The revert link of ADR-0030 section 8: spec.reverts.

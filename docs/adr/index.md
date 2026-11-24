@@ -49,5 +49,6 @@
 | [0045](0045-the-failed-review-check-on-a-pull-request-on-another-base.md) | The failed review check on a pull request on another base | Accepted, amended |
 | [0046](0046-the-failed-review-check-of-a-stopped-holder-while-the-lock-is-held.md) | The failed review check of a stopped holder while the lock is held | Accepted |
 | [0047](0047-scoring-analysis-records-outside-the-cluster.md) | Analysis records written by an analyzer we do not run are scored by an intake outside any user cluster | Accepted, amended |
+| [0049](0049-one-way-handoff-of-application-code-incidents.md) | One-way handoff of application-code incidents through the coordinator | Proposed |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

@@ -26,8 +26,8 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
-	"github.com/pkalin/shadewright/internal/incidents/causereason"
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 )
 
 // Class is the part an observation plays in the consequence rule of ADR-0039: a cause read from pod status,

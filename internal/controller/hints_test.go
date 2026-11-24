@@ -43,12 +43,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/policy/freshness"
-	"github.com/pkalin/shadewright/internal/providers"
-	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
-	fx "github.com/pkalin/shadewright/internal/testfixtures"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	fakegit "github.com/shadewright-labs/shadewright/internal/providers/fake"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+	fx "github.com/shadewright-labs/shadewright/internal/testfixtures"
 )
 
 // statusHook wraps a client so a test can fail a status update of a request before or after it is written:
@@ -430,6 +432,29 @@ var _ = Describe("RemediationRequest reviewer hints", func() {
 		Expect(refusals()).To(HaveKeyWithValue(unclean, remediationv1alpha1.HintRefusalNotRedactable))
 		Expect(fetch().Status.Hints).To(BeEmpty(), "nothing is stored in part")
 		Expect(asks()).To(Equal(2), "the author is asked first, once per look")
+	})
+
+	It("refuses a hint redaction withholds whole as not redactable, never storing the marker (#873)", func() {
+		// On the lowered work budget of redacttest the hint is withheld for its work: it redacts to
+		// redact.Withheld, which is short and clean but is not the hint.
+		red, err := redact.New()
+		Expect(err).NotTo(HaveOccurred())
+		saved := hintRedact
+		hintRedact = redacttest.LowBudget(red).StringChecked
+		DeferCleanup(func() { hintRedact = saved })
+		withheld := byWriter("/shadewright reanalyze: " + redacttest.OverLowBudget)
+		poll()
+		Expect(refusals()).To(HaveKeyWithValue(withheld, remediationv1alpha1.HintRefusalNotRedactable))
+		Expect(fetch().Status.Hints).To(BeEmpty())
+	})
+
+	It("stores a hint that spells the withheld marker as text: withheld is a flag, not a text (#873)", func() {
+		spelled := byWriter("/shadewright reanalyze: " + redact.Withheld)
+		poll()
+		Expect(refusals()).NotTo(HaveKey(spelled))
+		hints := fetch().Status.Hints
+		Expect(hints).To(HaveLen(1))
+		Expect(hints[0].Text).To(Equal(redact.Withheld))
 	})
 
 	It("handles a comment once across restarts, also when it is returned again on the watermark", func() {

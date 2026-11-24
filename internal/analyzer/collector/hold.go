@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	"github.com/pkalin/shadewright/internal/incidents/causereason"
+	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
 )
 
 // ConsequenceGrace is how long the collector holds a consequence before it decides on it: one whose pod status

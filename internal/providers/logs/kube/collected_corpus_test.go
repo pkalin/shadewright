@@ -25,8 +25,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // The generated corpus of the kubelet's answer for a container whose log it no longer holds: a logs request
@@ -174,7 +174,10 @@ func TestCollectedAnswerCorpus(t *testing.T) {
 			continue
 		}
 		text++
-		want, _ := Excerpt(s.redactor, []byte(c.body), false, DefaultBytes)
+		want, _, werr := Excerpt(s.redactor, []byte(c.body), false, DefaultBytes)
+		if werr != nil {
+			t.Fatalf("%d %s: the expected excerpt was withheld: %v", i, c.name, werr)
+		}
 		if err != nil || got.Text != want {
 			t.Errorf("%d %s (previous %v, id %q): body %q gave %q, %v; want the log text %q", i, c.name,
 				c.previous, c.id, c.body, got.Text, err, want)

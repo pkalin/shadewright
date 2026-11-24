@@ -24,11 +24,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/fake"
-	"github.com/pkalin/shadewright/internal/providers/github"
-	"github.com/pkalin/shadewright/internal/providers/github/auth"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/fake"
+	"github.com/shadewright-labs/shadewright/internal/providers/github"
+	"github.com/shadewright-labs/shadewright/internal/providers/github/auth"
 )
 
 const (

@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/gitops/repopath"
+	"github.com/shadewright-labs/shadewright/internal/gitops/repopath"
 )
 
 const (

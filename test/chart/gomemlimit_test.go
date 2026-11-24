@@ -22,16 +22,20 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/pkalin/shadewright/internal/gitops/semdiff"
+	"github.com/shadewright-labs/shadewright/internal/gitops/semdiff"
 )
+
+// goMemLimitEnv is the variable the chart and the manifests set the Go memory limit in.
+const goMemLimitEnv = "GOMEMLIMIT"
 
 func goMemLimit(t *testing.T, r rendered, k string) string {
 	t.Helper()
 	var found []string
 	for _, e := range container(t, r, k).Env {
-		if e.Name == "GOMEMLIMIT" {
+		if e.Name == goMemLimitEnv {
 			found = append(found, e.Value)
 		}
 	}
@@ -51,11 +55,11 @@ func TestGoMemLimitFollowsTheMemoryLimit(t *testing.T) {
 		wantExecutor string
 		wantAnalyzer string
 	}{
-		"default 640Mi and 128Mi": {nil, "241591910", "120795955"},
-		"2Gi executor only":       {[]string{"executor.resources.limits.memory=2Gi"}, "773094113", "120795955"},
+		"default 640Mi and 256Mi": {nil, "241591910", "241591910"},
+		"2Gi executor only":       {[]string{"executor.resources.limits.memory=2Gi"}, "773094113", "241591910"},
 		"1Gi analyzer":            {[]string{"analyzer.resources.limits.memory=1Gi"}, "241591910", "966367641"},
-		"decimal 1000M":           {[]string{"executor.resources.limits.memory=1000M"}, "360000000", "120795955"},
-		"plain bytes":             {[]string{"executor.resources.limits.memory=671088640"}, "241591910", "120795955"},
+		"decimal 1000M":           {[]string{"executor.resources.limits.memory=1000M"}, "360000000", "241591910"},
+		"plain bytes":             {[]string{"executor.resources.limits.memory=671088640"}, "241591910", "241591910"},
 		"fraction":                {[]string{"analyzer.resources.limits.memory=1.5Gi"}, "241591910", "1449551462"},
 		"override":                {[]string{"executor.goMemLimit=100MiB", "analyzer.goMemLimit=64MiB"}, "100MiB", "64MiB"},
 	}
@@ -248,6 +252,33 @@ func TestChartReadsLargeMemoryLimits(t *testing.T) {
 		got, err := strconv.ParseInt(goMemLimit(t, r, executorDeployment), 10, 64)
 		if err != nil || got <= 0 || got != want {
 			t.Errorf("%s: GOMEMLIMIT = %d (%v), want %d", limit, got, err, want)
+		}
+	}
+}
+
+// TestManifestsSetTheChartsGoMemLimit: the manifests in config/manager give the executor and the analyzer the
+// same GOMEMLIMIT and memory limit as the chart's defaults, so a kustomize install never runs the analyzer's limit
+// on the heap of the redactions at once on its fallback (#1087).
+func TestManifestsSetTheChartsGoMemLimit(t *testing.T) {
+	r := render(t, false)
+	for _, k := range []string{executorDeployment, analyzerDeployment} {
+		u := r.kustomize[k]
+		if u == nil {
+			t.Fatalf("%s not in the manifests", k)
+		}
+		d := convert[appsv1.Deployment](t, u)
+		var got []string
+		for _, e := range d.Spec.Template.Spec.Containers[0].Env {
+			if e.Name == goMemLimitEnv {
+				got = append(got, e.Value)
+			}
+		}
+		if want := goMemLimit(t, r, k); len(got) != 1 || got[0] != want {
+			t.Errorf("%s: manifests GOMEMLIMIT %v, want the chart's %s", k, got, want)
+		}
+		chartLimit := container(t, r, k).Resources.Limits[corev1.ResourceMemory]
+		if limit := d.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]; limit.Cmp(chartLimit) != 0 {
+			t.Errorf("%s: manifests memory limit %s, chart %s", k, limit.String(), chartLimit.String())
 		}
 	}
 }

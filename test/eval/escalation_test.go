@@ -27,9 +27,9 @@ import (
 	"sync"
 	"testing"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analysis"
-	"github.com/pkalin/shadewright/internal/providers"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/analysis"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // roleSpy replays a scenario's recording and records, per call, the role the loop asked the factory for and

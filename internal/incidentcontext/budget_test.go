@@ -26,7 +26,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // The time budget of the log section (#943). The properties:
@@ -125,12 +125,15 @@ func (l *timedLogs) Logs(ctx context.Context, q providers.LogQuery) (providers.L
 	}
 	switch o {
 	case slow:
-		select {
-		case <-time.After(l.slowFor):
-			return answer, nil
-		case <-ctx.Done():
+		// Decided by the call's deadline, not by racing two timers: a goroutine that a loaded machine wakes
+		// after both have fired would pick either. The answer comes when the deadline leaves slowFor from the
+		// start of the call, however late the wait ends.
+		if d, ok := ctx.Deadline(); ok && d.Before(now.Add(l.slowFor)) {
+			<-ctx.Done()
 			return l.cut(ctx)
 		}
+		time.Sleep(l.slowFor)
+		return answer, nil
 	case empty:
 		return providers.LogExcerpt{CollectedAt: testNow}, nil
 	case collected:
@@ -147,29 +150,27 @@ func (l *timedLogs) Logs(ctx context.Context, q providers.LogQuery) (providers.L
 }
 
 // timedBuild builds the context of two exited containers with the given log source and call and build
-// timeouts. It returns the context, the metric reads, how long the log section took (from its first log call
-// to the first metric call, which follows the section at once) and how long the build took to reach the log
-// section.
-func timedBuild(t *testing.T, l *timedLogs, call, whole time.Duration) (*Context, int, time.Duration, time.Duration) {
+// timeouts. It returns the context, the metric reads, and whether the build reached the log section (made a log
+// call; see [underLoad]).
+func timedBuild(t *testing.T, l *timedLogs, call, whole time.Duration) (*Context, int, time.Duration, bool) {
 	t.Helper()
 	return timedBuildOf(t, bothExited(), l, call, whole)
 }
 
-// timedBuildOf is timedBuild over the given objects.
-func timedBuildOf(t *testing.T, objs []client.Object, l *timedLogs, call, whole time.Duration) (*Context, int, time.Duration, time.Duration) {
+// timedBuildOf is timedBuild over the given objects. Besides the context and the metric reads it returns how
+// long the build took to reach the log section (from its start to the first log call), and false when it made
+// no log call: the reads of the target ran out of their call timeout on a loaded machine, or the build
+// deadline passed before the section ([underLoad]).
+func timedBuildOf(t *testing.T, objs []client.Object, l *timedLogs, call, whole time.Duration) (*Context, int, time.Duration, bool) {
 	t.Helper()
 	src := webSources()
 	var mu sync.Mutex
 	var metricReads int
-	var metricsAt time.Time
 	b := newBuilder(t, reader(t, objs...), src, func(c *Config) {
 		c.SourceTimeout, c.BuildTimeout = call, whole
 		c.Logs = l
 		c.Metrics = metricsFunc(func(ctx context.Context, q providers.MetricsQuery) (providers.MetricsResult, error) {
 			mu.Lock()
-			if metricReads == 0 {
-				metricsAt = time.Now()
-			}
 			metricReads++
 			mu.Unlock()
 			return src.metrics.Query(ctx, q)
@@ -177,18 +178,48 @@ func timedBuildOf(t *testing.T, objs []client.Object, l *timedLogs, call, whole 
 	})
 	start := time.Now()
 	c := build(t, b, incident(deploymentRef()))
-	end := time.Now()
 	mu.Lock()
 	defer mu.Unlock()
-	if metricReads > 0 {
-		end = metricsAt
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.first.IsZero() {
-		t.Fatal("no log call")
+		return c, metricReads, 0, false
 	}
-	return c, metricReads, end.Sub(l.first), l.first.Sub(start)
+	return c, metricReads, l.first.Sub(start), true
+}
+
+// timedRun is what one attempt of a timing test observed: the context, its log source and the metric reads.
+type timedRun struct {
+	c           *Context
+	l           *timedLogs
+	metricReads int
+}
+
+// maxLoadScale is the largest factor [underLoad] multiplies the durations of a test by.
+const maxLoadScale = 8
+
+// underLoad runs attempt with the durations of a timing test multiplied by k = 1, then 2, 4 and 8, until
+// attempt reports that the build reached the source calls the test is about before its deadlines, and returns
+// that attempt's result and k. The builder's deadlines are wall-clock times set when a build or a call starts,
+// with no clock to inject, and a build does CPU work before the log section (the summary's redaction, the reads
+// of the target), which a loaded machine stretches: under -race on a runner whose four cores the other packages'
+// tests share, that work alone took longer than a deadline of 500 ms (#873). The attempt reports only whether
+// the build got where the test starts; the test checks what it asserts on the attempt returned, with the
+// durations scaled by k, so no assertion is relaxed. A build that never gets there at maxLoadScale fails the
+// test.
+func underLoad[T any](t testing.TB, attempt func(k time.Duration) (T, bool)) (T, time.Duration) {
+	t.Helper()
+	var r T
+	for k := time.Duration(1); k <= maxLoadScale; k *= 2 {
+		var reached bool
+		if r, reached = attempt(k); reached {
+			return r, k
+		}
+		t.Logf("the build did not reach the log section in time with the durations times %d: trying again with "+
+			"twice the durations", k)
+	}
+	t.Fatalf("the build did not reach the log section in time with the durations times %d", maxLoadScale)
+	return r, 0
 }
 
 // B1, B3: the case the second review of the fix proved. Two exited containers, each answering its current
@@ -196,16 +227,20 @@ func timedBuildOf(t *testing.T, objs []client.Object, l *timedLogs, call, whole 
 // that follows stops at the section's budget without marking the log excerpt failed, both excerpts stay, and
 // the metrics are still read within the build deadline.
 func TestLogSectionKeepsItsTimeBudget(t *testing.T) {
-	// A slow answer comes 150 ms before the call timeout, and the build deadline is 1.2 s after the section's
-	// end: margins for a runner under heavy load. The section's time is checked by the calls' deadlines,
-	// which load does not move, not by the clock. Reading the first container's previous instance before the
-	// second container's current one would cut that read at 800 ms and lose its excerpt.
-	const call = 400 * time.Millisecond
-	l := &timedLogs{
-		plan:    map[string][2]outcome{crashPod: {slow, hangs}, secondPod: {slow, hangs}},
-		slowFor: 250 * time.Millisecond,
-	}
-	c, metricReads, _, _ := timedBuild(t, l, call, 2*time.Second)
+	// A slow answer comes 150 ms before the call timeout (decided by the call's deadline), and the build
+	// deadline is 1.2 s after the section's end. The section's time is checked by the calls' deadlines, which
+	// load does not move, not by the clock. Reading the first container's previous instance before the second
+	// container's current one would cut that read at 800 ms and lose its excerpt. The build must reach the
+	// section within a quarter of its deadline, or it runs again with longer durations (underLoad).
+	r, k := underLoad(t, func(k time.Duration) (timedRun, bool) {
+		l := &timedLogs{
+			plan:    map[string][2]outcome{crashPod: {slow, hangs}, secondPod: {slow, hangs}},
+			slowFor: 250 * time.Millisecond * k,
+		}
+		c, metricReads, reach, reached := timedBuild(t, l, 400*time.Millisecond*k, 2*time.Second*k)
+		return timedRun{c, l, metricReads}, reached && reach < 500*time.Millisecond*k
+	})
+	c, l, metricReads, call := r.c, r.l, r.metricReads, 400*time.Millisecond*k
 	if metricReads == 0 {
 		t.Errorf("no metric reads: the log section used up the build deadline")
 	}

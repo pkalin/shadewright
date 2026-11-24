@@ -23,7 +23,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // endInBody passes requests to the script and ends a context on the first read of the answer's body for path,

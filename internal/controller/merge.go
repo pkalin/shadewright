@@ -30,9 +30,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/policy/freshness"
-	"github.com/pkalin/shadewright/internal/providers"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // Reasons of condition Verified on a merged request that has no merge receipt (ADR-0030 sections 1 and 5).

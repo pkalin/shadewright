@@ -22,8 +22,8 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/policy/freshness"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // TestNothingToCloseNamesItsCases pins which errors of the close after a stale stop mean "nothing to close". An

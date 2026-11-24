@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,9 +32,9 @@ import (
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/fake"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 // The happy path: every section is there in order, tagged with its provenance, and nothing escalates.
@@ -348,21 +349,28 @@ func TestCancelledAfterLastSourceReturnsAnError(t *testing.T) {
 func TestValueStaysOnOneLine(t *testing.T) {
 	b := newBuilder(t, reader(t), sources{}, func(c *Config) { c.Redactor = canary{} })
 	in := "a\nb\rc\vd\fe\u0085f\u2028g\u2029h\ti"
-	if got := b.value(in); got != "a b c d e f g h i" {
+	if got := b.shown(in); got != "a b c d e f g h i" {
 		t.Fatalf("value(%q) = %q", in, got)
 	}
 }
 
 // A source call that runs out of its own timeout while the build goes on is a failed source.
+// The call timeout of 20 ms bounds the reads of the target too: a build whose target reads ran out of it on a
+// loaded machine made no log call and runs again with a longer timeout (underLoad).
 func TestSourceTimeoutIsAFailure(t *testing.T) {
-	b := newBuilder(t, reader(t, webObjects()...), webSources(), func(c *Config) {
-		c.SourceTimeout = 20 * time.Millisecond
-		c.Logs = logFunc(func(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
-			<-ctx.Done()
-			return providers.LogExcerpt{}, ctx.Err()
+	c, _ := underLoad(t, func(k time.Duration) (*Context, bool) {
+		var logCalls atomic.Int32
+		b := newBuilder(t, reader(t, webObjects()...), webSources(), func(c *Config) {
+			c.SourceTimeout = 20 * time.Millisecond * k
+			c.Logs = logFunc(func(ctx context.Context, _ providers.LogQuery) (providers.LogExcerpt, error) {
+				logCalls.Add(1)
+				<-ctx.Done()
+				return providers.LogExcerpt{}, ctx.Err()
+			})
 		})
+		c := build(t, b, incident(deploymentRef()))
+		return c, logCalls.Load() > 0
 	})
-	c := build(t, b, incident(deploymentRef()))
 	if one(t, c, SectionLogs).Availability != CouldNotFetch || !c.Escalate() {
 		t.Fatalf("timed-out source: %+v", c)
 	}
@@ -451,6 +459,9 @@ const canaryMark = "CANARY-7f3a"
 func (canary) String(s string) string {
 	return strings.ReplaceAll(s, canaryMark, "[x]")
 }
+
+// StringChecked never withholds.
+func (c canary) StringChecked(s string) (string, bool) { return c.String(s), true }
 
 // Acceptance: redaction is always applied, to every section, the summary included, whatever the source.
 func TestRedactionIsAlwaysApplied(t *testing.T) {

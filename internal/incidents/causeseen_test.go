@@ -28,9 +28,9 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analyzer/collector"
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/collector"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 )
 
 // The tests of the answer the collector's hold of a consequence waits for (ADR-0039 point 7, #828).

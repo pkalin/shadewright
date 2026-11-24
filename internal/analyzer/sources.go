@@ -25,10 +25,10 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/logs/kube"
-	"github.com/pkalin/shadewright/internal/providers/metrics/prometheus"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/logs/kube"
+	"github.com/shadewright-labs/shadewright/internal/providers/metrics/prometheus"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // SourcesConfig configures the metrics and log sources of the context builder (design 2.3 and 3.3).

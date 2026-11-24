@@ -31,7 +31,7 @@ import (
 
 	yaml "go.yaml.in/yaml/v3"
 
-	"github.com/pkalin/shadewright/internal/gitops/gityaml"
+	"github.com/shadewright-labs/shadewright/internal/gitops/gityaml"
 )
 
 // widestMapping returns the most keys of one mapping in the documents go.yaml.in/yaml/v3 builds for data, and

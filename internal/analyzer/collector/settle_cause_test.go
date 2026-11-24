@@ -37,8 +37,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/pkalin/shadewright/internal/incidents/causereason"
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 )
 
 // The decision of 2026-11-21 on #432 (Count and Decision, head 30f136dd, narrowed at head 5caef316): one function

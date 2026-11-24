@@ -34,13 +34,13 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/gitops/patch"
-	"github.com/pkalin/shadewright/internal/gitops/semdiff"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/policy/freshness"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/gitops/patch"
+	"github.com/shadewright-labs/shadewright/internal/gitops/semdiff"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // The pull request step (design sections 6 and 8.2, steps 2 to 7): an allowed request becomes one branch
@@ -2980,15 +2980,15 @@ func pullRequestBody(rr *remediationv1alpha1.RemediationRequest, incident string
 }
 
 // redactBodyValue redacts one value of a pull request body with the built-in rules, keeping whole occurrences of
-// keep. ok false means the redactor withheld the value whole; the redactor does not withhold yet, and the work
-// budget of #873 is to report it with its flag here, never by comparing the text with a marker.
+// keep. ok false means the redactor withheld the value whole (its work budget ran out, #873): it says so with its
+// flag (redact.StringKeepingChecked), never by a comparison of the text with a marker.
 func redactBodyValue(s string, keep ...string) (out string, ok bool) {
-	return redact.StringKeeping(s, keep...), true
+	return redact.StringKeepingChecked(s, keep...)
 }
 
 // withheldValue is the text a withheld value of the body stands as, the redactor's fixed marker for a withheld
 // entry.
-const withheldValue = "[REDACTED:withheld]"
+const withheldValue = redact.Withheld
 
 // bodyWithheld is the paragraph a body with a withheld value carries before its marker. It is fixed text: it
 // names no value.

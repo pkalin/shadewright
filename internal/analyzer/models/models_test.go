@@ -29,11 +29,11 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analysis"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/model/anthropic"
-	"github.com/pkalin/shadewright/internal/providers/model/openaicompatible"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/analysis"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/anthropic"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/openaicompatible"
 )
 
 // foundrySuffix is the Microsoft Foundry host suffix of these tests.

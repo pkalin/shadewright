@@ -23,12 +23,12 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/pkalin/shadewright/internal/modules"
-	"github.com/pkalin/shadewright/internal/modules/cloudflared"
-	"github.com/pkalin/shadewright/internal/modules/flux"
-	"github.com/pkalin/shadewright/internal/modules/keda"
-	"github.com/pkalin/shadewright/internal/modules/kyverno"
-	"github.com/pkalin/shadewright/internal/testutil/metricguard"
+	"github.com/shadewright-labs/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/modules/cloudflared"
+	"github.com/shadewright-labs/shadewright/internal/modules/flux"
+	"github.com/shadewright-labs/shadewright/internal/modules/keda"
+	"github.com/shadewright-labs/shadewright/internal/modules/kyverno"
+	"github.com/shadewright-labs/shadewright/internal/testutil/metricguard"
 )
 
 // TestSymptomSourceWatchedIsBounded checks that the gauge's labels take their values from SourceKinds only
@@ -90,6 +90,6 @@ func TestSymptomSourceWatchedIsBounded(t *testing.T) {
 	// Registered by package analyzer, which the envtest harness imports; checked there.
 	all := map[string]metricguard.Labels{"shadewright_analyzer_watched_namespaces": {}}
 	maps.Copy(all, want)
-	metricguard.Check(t, metrics.Registry, all)
+	metricguard.Check(t, metrics.Registry, metricguard.WithRedaction(all))
 	metricguard.Documented(t, filepath.Join("..", "..", "..", "docs", "reference", "metrics.md"), want)
 }

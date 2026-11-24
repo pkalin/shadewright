@@ -11,10 +11,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/providers"
-	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
-	fx "github.com/pkalin/shadewright/internal/testfixtures"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	fakegit "github.com/shadewright-labs/shadewright/internal/providers/fake"
+	fx "github.com/shadewright-labs/shadewright/internal/testfixtures"
 )
 
 // The first request of the chain in handoffAppendedWorld.

@@ -33,15 +33,15 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/incidentcontext"
-	"github.com/pkalin/shadewright/internal/incidents"
-	"github.com/pkalin/shadewright/internal/kedaready"
-	"github.com/pkalin/shadewright/internal/policy"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/quantity"
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/tools"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/incidents"
+	"github.com/shadewright-labs/shadewright/internal/kedaready"
+	"github.com/shadewright-labs/shadewright/internal/policy"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/quantity"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // Bounds of an analysis.
@@ -369,6 +369,9 @@ type Outcome struct {
 	Calls int
 	// ToolCalls is the number of tool calls run.
 	ToolCalls int
+	// ToolCallsWithControls is the number of tool calls refused because their name, ID or arguments held a
+	// control character (#852). Each is also counted in ToolCalls and used a step, as any refused call does.
+	ToolCallsWithControls int
 	// Tokens is what the analysis was charged: reported usage, or the upper bound of a call whose usage is
 	// unknown or that failed, and nothing for a call that sent nothing or that its host refused before
 	// processing.
@@ -594,6 +597,8 @@ type run struct {
 	// spent is the tokens charged per deployment.
 	spent map[string]int64
 	tools int
+	// asRead is the stored free text of the result last decoded, as the reply held it ([run.decodeReply]).
+	asRead storedText
 }
 
 func (r *run) handOff(reason Reason) (Outcome, error) {
@@ -647,7 +652,7 @@ func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alph
 			code = retryToolCall
 			continue
 		}
-		res, action, err := decodeResult(c.Content)
+		res, action, err := r.decodeReply(c)
 		if err == nil {
 			return res, action, "", nil
 		}
@@ -657,6 +662,40 @@ func (r *run) triage(model providers.ModelProvider) (*Result, *remediationv1alph
 		}
 	}
 	return nil, nil, "", nil
+}
+
+// decodeReply decodes the structured result of a reply ([decodeResult]). A reply that held a control
+// character anywhere but in a free-text field of the result is refused as not matching the schema
+// ([controlsRefused], #852), before its cleaned text is read. For a result it accepts, it keeps the free text
+// that is stored (the summary and the missing data) as the reply held it, controls included, in r.asRead, for
+// [run.shownModelText].
+func (r *run) decodeReply(c providers.Completion) (*Result, *remediationv1alpha1.Action, error) {
+	if controlsRefused(c.ContentControls) {
+		return nil, nil, errInvalid
+	}
+	res, action, err := decodeResult(c.Content)
+	if err != nil {
+		return res, action, err
+	}
+	r.asRead = storedText{Summary: res.Summary, MissingData: res.MissingData}
+	if c.ContentAsRead != "" {
+		// The cleaned content decoded, and removing controls changes no token of the JSON (StripControlsJSON), so
+		// the content as read decodes to the same members with their controls; a key that held one was refused
+		// above. A reply that does not decode the same way is refused rather than stored from the cleaned text.
+		var read storedText
+		if json.Unmarshal([]byte(c.ContentAsRead), &read) != nil || len(read.MissingData) != len(res.MissingData) {
+			return nil, nil, errInvalid
+		}
+		r.asRead = read
+	}
+	return res, action, nil
+}
+
+// storedText is the free text of a result that is stored (the outcome's log line and the analysis record), as
+// the reply held it ([run.decodeReply]).
+type storedText struct {
+	Summary     string   `json:"summary"`
+	MissingData []string `json:"missingData"`
 }
 
 // escalate calls the escalation model with the read tools, bound to the Incident's namespace, for at most
@@ -692,7 +731,7 @@ func (r *run) escalate(model providers.ModelProvider) (*Result, *remediationv1al
 			return nil, nil, reason, err
 		}
 		if len(c.ToolCalls) == 0 {
-			res, action, err := decodeResult(c.Content)
+			res, action, err := r.decodeReply(c)
 			if err != nil {
 				return nil, nil, ReasonInvalidOutput, nil
 			}
@@ -775,6 +814,11 @@ func (r *run) callTool(call providers.ToolCall, offered map[string]bool) (string
 	return "Tool result " + id + ".\n" + content, nil
 }
 
+// heldControlsRefusal is the fixed result of a tool call that held a control character. It quotes nothing of
+// the call.
+const heldControlsRefusal = "refused: the tool call held control characters in its name, ID or arguments " +
+	"and was not run\n"
+
 // boundCall runs one call within the bounds of the escalation. It returns the result as the model sees it,
 // and the parts of it a quote may cite as evidence ([tools.Result.Data]; none when none may). It records the
 // fixed status of the result on span, never its text or the call's arguments.
@@ -783,6 +827,16 @@ func (r *run) boundCall(ctx context.Context, span trace.Span, call providers.Too
 	refused := func(text string) (string, []string, error) {
 		span.SetAttributes(attrResult.String(resultRefused), attrToolStatus.String(string(tools.StatusRefused)))
 		return refusedResult(call.Name, offered, text), nil, nil
+	}
+	// A call that held a control character is never run (#852): removing the control could turn a value that
+	// would be refused into one that is accepted ("sh" ESC "op" into "shop"), and the provider blocks replayed
+	// to the model still hold what it wrote. call is the cleaned form, so the label and the log hold none.
+	if call.HeldControls {
+		r.out.ToolCallsWithControls++
+		span.SetAttributes(attrHeldControls.Bool(true))
+		log.FromContext(r.parent).Info("Refused a tool call that held control characters",
+			"incident", r.inc.Name, "tool", toolLabel(call.Name, offered))
+		return refused(heldControlsRefusal)
 	}
 	// Defence in depth: the adapter already refuses a reply that names a tool the request did not offer.
 	if !offered[call.Name] {
@@ -960,6 +1014,11 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 		c = providers.Completion{UsageUnknown: true, AttemptsReported: c.AttemptsReported, BilledAttempts: c.BilledAttempts}
 		err = fmt.Errorf("openai-compatible: reported usage exceeds the request bound: %w", providers.ErrMalformedOutput)
 	}
+	// Model text is untrusted and is read without control characters, for every provider, before anything
+	// parses, logs or compares it (#852): what is stored is what any terminal shows. The free text that is
+	// stored is redacted from the content as it was read, before its controls are removed ([run.shownModelText]):
+	// removing them first could hide a secret from the rules ("x" CR "Bearer" and a token).
+	c = providers.WithoutControls(c)
 	notSent := providers.IsNotSent(err)
 	if !notSent {
 		r.a.sent(r.parent, r.inc, role, d.ProviderName())
@@ -1081,9 +1140,9 @@ func estimateInput(req providers.CompletionRequest) int64 { return providers.Est
 // has evidence found in the blocks the model saw, may target the subject and has a policy configured. action
 // is the proposal's action as decodeResult converted it, before the catalog check, nil without a proposal.
 func (r *run) finish(res *Result, action *remediationv1alpha1.Action) (Outcome, error) {
-	r.out.Summary, r.out.MissingData = r.redact(res.Summary), nil
-	for _, m := range res.MissingData {
-		r.out.MissingData = append(r.out.MissingData, r.redact(m))
+	r.out.Summary, r.out.MissingData = r.shownModelText(r.asRead.Summary), nil
+	for _, m := range r.asRead.MissingData {
+		r.out.MissingData = append(r.out.MissingData, r.shownModelText(m))
 	}
 	if res.Proposal == nil || action == nil {
 		switch {
@@ -1256,6 +1315,17 @@ func (r *run) redact(s string) string {
 	return r.a.cfg.Redactor.StringKeeping(s, r.inc.Name)
 }
 
+// shownModelText redacts a free-text field of a result as the reply held it, then removes its control
+// characters (#852, decision of 2026-11-22): the decision is taken on the text as read ([run.redact]; package
+// redact also reads it without its controls and only adds what that reading finds), every marker is put in place,
+// and only then are the controls removed, so removing them uncovers nothing a reading hid and the text stored
+// holds no control but newline and tab. The markers hold none. The text stored may be a few bytes longer than the
+// bound of the field, which counts it without its controls: a marker that replaces a secret with controls in it
+// can be longer than the secret.
+func (r *run) shownModelText(asRead string) string {
+	return redact.WithoutControls(r.redact(asRead))
+}
+
 // evidenced reports whether at least one quote is found verbatim in a quotable part of the block or tool
 // result it cites.
 func (r *run) evidenced(ev []Evidence) bool {
@@ -1265,7 +1335,10 @@ func (r *run) evidenced(ev []Evidence) bool {
 			continue
 		}
 		for _, part := range r.shown[e.Source].parts {
-			if strings.Contains(part, q) {
+			// The quote was read without control characters (providers.WithoutControls), and the context keeps the
+			// controls of cluster text (#852): the part is compared without them too, so a quote of a log line
+			// coloured with escapes is found. Nothing is shown from this comparison.
+			if strings.Contains(redact.WithoutControls(part), q) {
 				return true
 			}
 		}

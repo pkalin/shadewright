@@ -31,7 +31,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/pkalin/shadewright/internal/incidents/causereason"
+	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
 )
 
 const (

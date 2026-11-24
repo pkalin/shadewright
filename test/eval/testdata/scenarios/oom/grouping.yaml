@@ -1,6 +1,6 @@
 # Synthetic: the kubelet's events of the oom fault that the grouping case (grouping_test.go, ADR-0039, #795) adds
 # to objects.yaml, written from the lab runs where one OOM of demo/web opened OOMKilled, BackOff and Unhealthy
-# Incidents (pkalin/shadewright#432), not recorded. Both name the web container (regarding.fieldPath) of the pod
+# Incidents (shadewright-labs/shadewright#432), not recorded. Both name the web container (regarding.fieldPath) of the pod
 # objects.yaml holds. Their last occurrences are at or after the kill objects.yaml shows (finishedAt 11:56:00)
 # and within 10 minutes of it, so both link to it and count on its Incident; without the cause rule each is an
 # observation of its own, which the gate opens once it recurs, as in the lab. The analysis does not read this

@@ -9,7 +9,7 @@ The controller needs watches, caching, leader election, status conditions and ge
 
 ## Decision
 
-Go with Kubebuilder, `controller-runtime` and `client-go`, in one module (`github.com/pkalin/shadewright`). Two binaries: the remediation controller (`cmd/main.go`) and the analyzer (`cmd/analyzer`), deployed as separate Deployments with separate ServiceAccounts and identities. Tests use envtest; end-to-end tests use Kind in CI.
+Go with Kubebuilder, `controller-runtime` and `client-go`, in one module (`github.com/shadewright-labs/shadewright`). Two binaries: the remediation controller (`cmd/main.go`) and the analyzer (`cmd/analyzer`), deployed as separate Deployments with separate ServiceAccounts and identities. Tests use envtest; end-to-end tests use Kind in CI.
 
 ## Consequences
 

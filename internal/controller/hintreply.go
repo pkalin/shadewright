@@ -31,10 +31,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/policy/freshness"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // Replies to reviewer hints (ADR-0028 section 7, #542). While a request waits for review with its pull request
@@ -310,7 +310,8 @@ func replyMarker(source remediationv1alpha1.HintSource, comment int64) string {
 }
 
 // replyBody builds the reply to it with mark as its last line, and checks it: a reply the redactor would
-// change gives NotRedactable, and no body. The only kept string is rr's recorded head, when it is a commit ID.
+// change, or whose check redaction withheld because it ran out of its work budget (redact.Clean is then false),
+// gives NotRedactable, and no body. The only kept string is rr's recorded head, when it is a commit ID.
 // Its parts are bounded (a login, IDs, a quote of at most maxReplyQuoteBytes, the target's names), so it stays
 // far below the provider's limit for a comment.
 func replyBody(rr *remediationv1alpha1.RemediationRequest, it replyItem, mark string) (

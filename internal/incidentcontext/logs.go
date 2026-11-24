@@ -28,7 +28,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // MaxLogExcerpts bounds the containers whose logs the log section reads; the section's bound is split evenly
@@ -59,15 +59,16 @@ type logPick struct {
 
 // logPicks chooses the containers to read, most relevant first: one whose last instance terminated inside
 // the window, then one that waits with a reason or terminated with an error, then one that is not ready. A
-// termination that finished before the window, and a container that ran to completion (a finished init
-// container), are not trouble. When no container shows trouble, the first regular container of the most
-// troubled pod is read.
+// termination that finished before the window, a container that ran to completion (a finished init
+// container) and one that exited after its pod's deletion began ([shutdown]) are not trouble. When no container shows
+// trouble, the first regular container of the most troubled pod is read.
 //
 // Which instance is read first: for a container whose current instance has terminated, that instance, the
 // newest dead one (the kubelet keeps one terminated instance per container, so the one before it is usually
 // gone); for any other container whose last instance terminated inside the window, the previous instance,
 // whose tail holds the lines before the termination (while a container waits, the kubelet serves that same
-// instance for both); otherwise the current one.
+// instance for both), and so for a container whose current instance exited after its pod's deletion began: the
+// instance that terminated before it is the one in trouble; otherwise the current one.
 func logPicks(t *target, w window) []logPick {
 	var all []logPick
 	for i := range t.pods {
@@ -80,11 +81,11 @@ func logPicks(t *target, w window) []logPick {
 			}
 			switch {
 			case last != nil && last.FinishedAt.After(w.start):
-				pick.score, pick.previous = 3, !pick.currentDead
+				pick.score, pick.previous = 3, !pick.currentDead || shutdown(p, cs)
 			case cs.State.Waiting != nil && cs.State.Waiting.Reason != "",
-				cs.State.Terminated != nil && !completed(cs):
+				cs.State.Terminated != nil && !settled(p, cs):
 				pick.score = 2
-			case !cs.Ready && !completed(cs):
+			case !cs.Ready && !settled(p, cs):
 				pick.score = 1
 			}
 			// The current instance always exists; a previous one only after a termination.
@@ -173,8 +174,11 @@ type containerReads struct {
 	out   []Block
 	notes strings.Builder
 	// failed: the first read failed (the source failed, timed out, refused the identity or answered
-	// oversized). A second read that failed is only named in notes.
+	// oversized), or a read was withheld by redaction. A second read that failed otherwise is only named in
+	// notes.
 	failed bool
+	// withheld: redaction withheld a read whole (#873); its blocks carry LabelWithheld.
+	withheld bool
 }
 
 // wantsSecond reports whether the container's other instance is read after its first read: the other
@@ -197,11 +201,17 @@ func (r *containerReads) blocks() []Block {
 		if r.failed {
 			blk.Availability = CouldNotFetch
 		}
+		if r.withheld {
+			blk.addLabel(LabelWithheld)
+		}
 		blk.headLen = len(blk.Text)
 		return []Block{blk}
 	}
 	out := slices.Clone(r.out)
 	out[0].Text, out[0].headLen = r.notes.String()+out[0].Text, r.notes.Len()+out[0].headLen
+	if r.withheld {
+		out[0].addLabel(LabelWithheld)
+	}
 	return out
 }
 
@@ -247,6 +257,11 @@ func (b *Builder) readInstance(ctx context.Context, r *containerReads, previous 
 	if r.reads == 1 && (v.Read == LogReadFailed || v.Read == LogReadOversized) {
 		r.failed = true
 	}
+	if v.Read == LogReadWithheld {
+		// A withheld read is a failed source whichever read it is, as the decision of 2026-11-20 on #873 has
+		// it for every caller of the log source.
+		r.failed, r.withheld = true, true
+	}
 	return nil
 }
 
@@ -262,7 +277,7 @@ func instanceName(previous bool) string {
 // ([Builder.renderBlock]). It reports whether the source failed.
 func (b *Builder) logBlock(pick logPick, ex providers.LogExcerpt, err error, budget int) (Block, bool) {
 	blk, v := b.renderBlock(pick, ex, err, budget)
-	failed := v.Read == LogReadFailed || v.Read == LogReadOversized
+	failed := v.Read == LogReadFailed || v.Read == LogReadOversized || v.Read == LogReadWithheld
 	if failed {
 		blk.Availability = CouldNotFetch
 	}
@@ -277,8 +292,12 @@ func (b *Builder) renderBlock(pick logPick, ex providers.LogExcerpt, err error, 
 	if pick.init {
 		kind = "init container"
 	}
-	title := "pod " + b.value(pick.pod) + " " + kind + " " + b.value(pick.container) + ", " + instanceName(pick.previous)
-	v := RenderLog(b.redactor.String, title, ex, err, budget, budget)
+	title := "pod " + b.shown(pick.pod) + " " + kind + " " + b.shown(pick.container) + ", " + instanceName(pick.previous)
+	v := RenderLog(b.redactor, false, title, ex, err, budget, budget)
+	if v.Read == LogReadWithheld {
+		blk.Availability = CouldNotFetch
+		blk.addLabel(LabelWithheld)
+	}
 	for _, m := range []struct {
 		on bool
 		l  Label
@@ -303,12 +322,14 @@ const (
 	reasonFailed
 	reasonOversized
 	reasonEmpty
+	reasonWithheld
 )
 
 // logReadReasons are every value of the label "reason" of logReadsWithoutLines, by reason.
 var logReadReasons = []string{
 	reasonLogGone: "collected", reasonPodNotFound: "pod_not_found", reasonRejected: "rejected",
 	reasonForbidden: "forbidden", reasonFailed: "failed", reasonOversized: "oversized", reasonEmpty: "empty",
+	reasonWithheld: "withheld",
 }
 
 // logReasonLabelName is the label of logReadsWithoutLines.
@@ -319,7 +340,7 @@ const logReasonLabelName = "reason"
 var logReadsWithoutLines = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "shadewright_analyzer_context_log_reads_without_lines_total",
 	Help: "Log reads of the incident context builder that gave no lines, by reason (collected, pod_not_found, " +
-		"rejected, forbidden, failed, oversized, empty).",
+		"rejected, forbidden, failed, oversized, empty, withheld).",
 }, []string{logReasonLabelName})
 
 func init() {
@@ -347,6 +368,8 @@ func noLinesReason(read LogRead, err error) int {
 		return reasonFailed
 	case LogReadOversized:
 		return reasonOversized
+	case LogReadWithheld:
+		return reasonWithheld
 	default:
 		return reasonEmpty
 	}

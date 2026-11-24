@@ -266,7 +266,7 @@ var blockInnocentKeys = []string{
 }
 
 // isBareShortCorpusKey reports whether the corpus key counts only with a value that looks like a secret.
-func isBareShortCorpusKey(key string) bool { return isBareShortKey(key) }
+func isBareShortCorpusKey(key string) bool { return isBareShortKey(nil, key) }
 
 // blockCorpus returns the corpus over keys; with secret, the values are secrets (opaque tokens, and
 // passphrases where the key counts them), otherwise innocent words.
@@ -423,6 +423,7 @@ func blockLeaks(c blockCase, spans []span) (leaked, lost []string) {
 //   - nor is the part of a quoted or plain scalar over several lines under a bare short key ("pass: 'x" and
 //     the closing line below) after its first line, which main leaves too (TestKeyNameKnownLeaks).
 func TestBlockValueCorpusRedactsEverySecret(t *testing.T) {
+	parallelUnderRace(t)
 	cases := blockCorpus(blockSecretKeys, true)
 	failed, notRequired := 0, 0
 	for i, c := range cases {
@@ -432,14 +433,14 @@ func TestBlockValueCorpusRedactsEverySecret(t *testing.T) {
 		var leaked, lost []string
 		switch {
 		case c.indicator:
-			leaked, lost = blockLeaks(c, defaultRedactor.spans(c.in))
+			leaked, lost = blockLeaks(c, defaultRedactor.spans(nil, c.in))
 		case c.afterText || c.bareQuoted:
 			notRequired++
 			continue
 		case c.lined != c.in:
 			leaked, lost = blockPipelineLeaks(c)
 		default:
-			leaked, lost = blockLeaks(c, defaultRedactor.spans(c.in))
+			leaked, lost = blockLeaks(c, defaultRedactor.spans(nil, c.in))
 		}
 		if len(leaked)+len(lost) == 0 {
 			continue
@@ -540,7 +541,7 @@ func TestWriteBlockMainTable(t *testing.T) {
 	enc := json.NewEncoder(w)
 	for _, c := range blockCorpus(blockSecretKeys, true) {
 		row := blockMainRow{Hash: blockInputHash(c.in)}
-		for _, sp := range defaultRedactor.spans(c.in) {
+		for _, sp := range defaultRedactor.spans(nil, c.in) {
 			row.Spans = append(row.Spans, [2]int{sp.start, sp.end})
 		}
 		if err := enc.Encode(row); err != nil {
@@ -557,6 +558,7 @@ func TestWriteBlockMainTable(t *testing.T) {
 
 // Each byte main redacted in the secret corpus is still redacted: the rules of #840 only add.
 func TestBlockValueStillRedactsWhatMainRedacted(t *testing.T) {
+	parallelUnderRace(t)
 	f, err := os.Open(blockMainTable)
 	if err != nil {
 		t.Fatal(err)
@@ -582,7 +584,7 @@ func TestBlockValueStillRedactsWhatMainRedacted(t *testing.T) {
 		if !raceKeeps(t.Name(), cases-1) {
 			continue // a seeded sample under -race; all of them without it
 		}
-		red := redactedBytes(in, defaultRedactor.spans(in))
+		red := redactedBytes(in, defaultRedactor.spans(nil, in))
 		for _, want := range row.Spans {
 			for i := want[0]; i < want[1]; i++ {
 				if !red[i] {
@@ -636,32 +638,24 @@ var anyKeyHostileUnits = map[string]func(i int) string{
 	"many keys before a block":      func(i int) string { return []string{"x token: | pass: | ", "\n  a\n"}[min(i%64, 1)] },
 }
 
-// anyKeyWork returns the work ([Work]) of String on the hostile input of about n
-// bytes built from unit, and the size of that input.
-func anyKeyWork(t *testing.T, unit func(int) string, n int) (work, size int) {
+// anyKeySample returns the work of String and of the reading of the release before (sampleWork) on the hostile
+// input of about n bytes built from unit.
+func anyKeySample(t *testing.T, unit func(int) string, n int) workSample {
 	var b strings.Builder
 	for i := 0; b.Len() < n; i++ {
 		b.WriteString(unit(i))
 	}
-	in := b.String()
-	return int(countWork(t, func() { String(in) })), len(in)
+	return sampleWork(t, b.String())
 }
 
 // The rule for block indicators reads each line a bounded number of times, whatever the input: on
-// every hostile input the work of redaction ([Work]) is at most maxWorkPerByte per byte, and eight times the
-// input costs at most about eight times as much. Work is counted, not timed, so a loaded machine cannot fail
+// every hostile input the work of redaction ([Work]) is bounded as checkWork bounds it: what String adds to
+// the reading of the release before is at most ownWorkPerByte per byte, and eight times the input costs at
+// most about eight times as much. Work is counted, not timed, so a loaded machine cannot fail
 // it (#825).
 func TestAnyKeyWorkIsLinear(t *testing.T) {
-	const perByte = maxWorkPerByte
 	for name, unit := range anyKeyHostileUnits {
-		small, smallSize := anyKeyWork(t, unit, 16<<10)
-		large, largeSize := anyKeyWork(t, unit, 128<<10)
-		if large > perByte*largeSize {
-			t.Errorf("%s: %d steps for a %d-byte input, more than %d per byte", name, large, largeSize, perByte)
-		}
-		if float64(large)/float64(largeSize) > 1.125*float64(max(small, 1))/float64(smallSize)+0.5 {
-			t.Errorf("%s: %d steps for %d bytes, %d for %d: more than linear", name, small, smallSize, large, largeSize)
-		}
+		checkWork(t, name, []workSample{anyKeySample(t, unit, 16<<10), anyKeySample(t, unit, 128<<10)})
 	}
 }
 

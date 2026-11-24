@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 func TestGoodSamplesOpenAWindow(t *testing.T) {

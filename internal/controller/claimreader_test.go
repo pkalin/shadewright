@@ -32,9 +32,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/providers"
-	fakegit "github.com/pkalin/shadewright/internal/providers/fake"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	fakegit "github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 // A held claim on a merge of another head is read and settled by one reader (settleClaim), by the claim's own number

@@ -16,7 +16,11 @@ limitations under the License.
 
 package incidentcontext
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/shadewright-labs/shadewright/internal/providers"
+)
 
 // keepHead returns the longest prefix of s made of whole lines that fits in n bytes, and whether anything
 // was cut. A line is whole when it ends with a newline, or ends s. It only ever removes text, and is applied
@@ -43,21 +47,7 @@ func keepHead(s string, n int) (string, bool) {
 // alone. It reports whether it dropped anything. An excerpt whose every line is indented is dropped whole:
 // the builder cannot tell where its first entry starts.
 func dropLeadingContinuation(s string) (string, bool) {
-	start := 0
-	for start < len(s) {
-		end := strings.IndexByte(s[start:], '\n')
-		if end < 0 {
-			end = len(s)
-		} else {
-			end += start + 1
-		}
-		line := strings.TrimRight(s[start:end], "\r\n")
-		if line != "" && line[0] != ' ' && line[0] != '\t' && line != "-" && !strings.HasPrefix(line, "- ") &&
-			!strings.HasPrefix(line, "-\t") {
-			break
-		}
-		start = end
-	}
+	start := providers.LeadingContinuation(s)
 	return s[start:], start > 0
 }
 

@@ -20,10 +20,10 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"reflect"
+	"errors"
+	"fmt"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -33,7 +33,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/pkalin/shadewright/internal/analyzer/refcheck"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/refcheck"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // Kinds of the allow lists.
@@ -124,20 +126,28 @@ func (s *Set) getResource(ctx context.Context, a getResourceArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	// Every string of the object is redacted as it was read, before JSON escapes its line breaks and quotes
-	// (a block under a secret key is found by its lines), and the encoding leaves out HTML escapes (an
-	// escaped ">" hid a folded block indicator from the second pass over the whole answer, #840).
-	view := reflect.ValueOf(strip(obj))
-	redactStrings(view, s.redact)
-	var b strings.Builder
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", " ")
-	if err := enc.Encode(view.Interface()); err != nil {
+	// The object's JSON is the answer, decided once on its bytes (#845, jsonAnswer). The encoding leaves out HTML
+	// escapes, so a reader sees the values as decided. The object is only read, never written (it may be the
+	// cache's).
+	stripped := strip(obj)
+	if stripped == nil {
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	r.Text, r.raw = b.String(), true
+	text, leftOut, err := s.jsonAnswer(stripped, resourceBytes)
+	if errors.Is(err, providers.ErrWithheld) {
+		r.withhold()
+		return nil
+	}
+	if err != nil {
+		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
+		return nil
+	}
+	if leftOut {
+		// Values left out to keep the answer within its bound and valid JSON: the answer is cut, as one the bound cut.
+		r.addLabel(LabelCut)
+	}
+	r.Text, r.raw = text, true
 	return nil
 }
 
@@ -173,59 +183,6 @@ func strip(obj client.Object) any {
 		return c
 	}
 	return nil
-}
-
-// redactStrings replaces every exported string reachable from v with f of it. It writes through pointers,
-// slices and maps into new copies, never into what v shares with the object that was read (a cache's).
-// Unexported fields (a time, a quantity) hold no free text and are left as they are.
-func redactStrings(v reflect.Value, f func(string) string) {
-	switch v.Kind() {
-	case reflect.Pointer:
-		if v.IsNil() {
-			return
-		}
-		c := reflect.New(v.Elem().Type())
-		c.Elem().Set(v.Elem())
-		redactStrings(c.Elem(), f)
-		if v.CanSet() {
-			v.Set(c)
-		} else {
-			v.Elem().Set(c.Elem())
-		}
-	case reflect.Struct:
-		for _, field := range v.Fields() {
-			if field.CanSet() {
-				redactStrings(field, f)
-			}
-		}
-	case reflect.Slice:
-		if v.IsNil() || !v.CanSet() {
-			return
-		}
-		c := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
-		reflect.Copy(c, v)
-		for i := range c.Len() {
-			redactStrings(c.Index(i), f)
-		}
-		v.Set(c)
-	case reflect.Map:
-		if v.IsNil() || !v.CanSet() {
-			return
-		}
-		c := reflect.MakeMapWithSize(v.Type(), v.Len())
-		for it := v.MapRange(); it.Next(); {
-			e := reflect.New(v.Type().Elem()).Elem()
-			e.Set(it.Value())
-			redactStrings(e, f)
-			c.SetMapIndex(it.Key(), e)
-		}
-		v.Set(c)
-	case reflect.String:
-		if v.CanSet() {
-			v.SetString(f(v.String()))
-		}
-	default:
-	}
 }
 
 func tm(apiVersion, kind string) metav1.TypeMeta {
@@ -365,15 +322,109 @@ func (s *Set) listEvents(ctx context.Context, a listEventsArgs, r *Result) error
 	slices.SortStableFunc(evs, func(x, y *eventsv1.Event) int {
 		return cmp.Or(eventTime(y).Compare(eventTime(x)), cmp.Compare(x.Name, y.Name))
 	})
-	var l lines
-	l.add("%d events match; the newest %d are shown", len(evs), min(len(evs), a.Limit.v))
-	for _, e := range evs[:min(len(evs), a.Limit.v)] {
-		l.add("%s %s %s %s/%s count %d: %s", eventTime(e).UTC().Format(time.RFC3339), l.data(s.value(e.Type)),
-			l.data(s.value(e.Reason)), l.data(s.value(e.Regarding.Kind)), l.data(s.value(e.Regarding.Name)),
-			eventCount(e), l.data(s.value(e.Note)))
+	// The answer is one text, decided once on the lines it returns (layout.go).
+	var ans answer
+	shown := evs[:min(len(evs), a.Limit.v)]
+	header := ans.text(fmt.Sprintf("%d events match; the newest %d are shown\n", len(evs), len(shown)))
+	var at, notes []int
+	for _, e := range shown {
+		ans.text(eventTime(e).UTC().Format(time.RFC3339) + " ")
+		at = append(at, ans.value("type", e.Type))
+		ans.text(" ")
+		at = append(at, ans.value("reason", e.Reason))
+		ans.text(" ")
+		at = append(at, ans.value("kind", e.Regarding.Kind))
+		ans.text("/")
+		at = append(at, ans.value("name", e.Regarding.Name))
+		ans.text(fmt.Sprintf(" count %d: ", eventCount(e)))
+		notes = append(notes, ans.value(noteKey, e.Note))
+		at = append(at, notes[len(notes)-1])
+		ans.text("\n")
 	}
-	r.Text, r.Values = l.String(), l.values
+	leaveOutNotes(&ans, header, notes)
+	out, text, ok := s.lines(&ans)
+	if !ok {
+		r.withhold()
+		return nil
+	}
+	r.Text = text
+	for _, i := range at {
+		r.Values = append(r.Values, out[i])
+	}
 	return nil
+}
+
+// noteKey is the key of an event's note in the answer of list_events.
+const noteKey = "note"
+
+// longNote is what stands in the answer of list_events for a note of n bytes left out unread (leaveOutNotes): its
+// length, in the form the collector shows a long note in (package fingerprint, #1087).
+func longNote(n int) string { return "<long note: " + strconv.Itoa(n) + " bytes>" }
+
+// notesLeftOut is the line of the answer of list_events that says how many notes were left out unread.
+func notesLeftOut(n int) string {
+	return fmt.Sprintf("the notes of %d events are left out unread, each shown as its length: the notes together "+
+		"are longer than one answer may be\n", n)
+}
+
+// leaveOutNotes bounds the answer of list_events to the largest entry the heap of one redaction was measured for
+// (redact.LargestEntry; #1106, decision of 2026-11-22). An answer within it is left as it is, so it is decided as
+// before. A larger one keeps the notes, newest first, that fit (notesWithin); each other note is replaced by
+// longNote, text the tool writes that holds nothing of the note, and the header line is followed by notesLeftOut.
+// notes are the indices of the notes' pieces, newest first. The size is counted on the pieces as written, before
+// any normalisation (redact.PiecesSize). The work is linear in the number of pieces.
+func leaveOutNotes(ans *answer, header int, notes []int) {
+	size := redact.PiecesSize(ans.pieces)
+	if size <= redact.LargestEntry {
+		return
+	}
+	lens := make([]int, len(notes))
+	for k, i := range notes {
+		lens[k] = len(ans.pieces[i].Text)
+		size -= lens[k] + len(noteKey)
+	}
+	// The line is reserved for every note, the most digits it can have.
+	keep, left := notesWithin(redact.LargestEntry, size+len(notesLeftOut(len(notes))), lens)
+	if left == 0 {
+		return
+	}
+	for k, i := range notes {
+		if !keep[k] {
+			ans.pieces[i] = redact.Piece{Text: longNote(lens[k])}
+		}
+	}
+	ans.pieces[header].Text += notesLeftOut(left)
+}
+
+// notesWithin returns which notes of lens bytes each, newest first, an answer of fixed bytes besides them keeps
+// within bound bytes, and how many it leaves out: every note's longNote is reserved first; a note no longer than
+// its longNote (with its key) is always kept, and every other note is kept, newest first, when the bytes it takes
+// past its longNote still fit. So the answer is at most bound bytes whenever fixed and the longNotes fit, no note
+// left out would fit in the room left, and an older note shorter than a newer one left out may still be kept. The
+// work is linear in the number of notes.
+func notesWithin(bound, fixed int, lens []int) (keep []bool, left int) {
+	room := bound - fixed
+	for _, n := range lens {
+		redact.Tick(1)
+		room -= len(longNote(n))
+	}
+	keep = make([]bool, len(lens))
+	left = len(lens)
+	// A note no longer than its marker takes no room: each is kept first, so the room only shrinks after.
+	more := func(n int) int { return n + len(noteKey) - len(longNote(n)) }
+	for k, n := range lens {
+		redact.Tick(1)
+		if more(n) <= 0 {
+			keep[k], room, left = true, room-more(n), left-1
+		}
+	}
+	for k, n := range lens {
+		redact.Tick(1)
+		if !keep[k] && more(n) <= room {
+			keep[k], room, left = true, room-more(n), left-1
+		}
+	}
+	return keep, left
 }
 
 type checkReferenceArgs struct {
@@ -439,22 +490,30 @@ func (s *Set) checkReference(ctx context.Context, a checkReferenceArgs, r *Resul
 		return nil
 	}
 	res := refcheck.Check(&pod, list.Items, refcheck.Kind(a.Kind), a.Name, s.now())
-	var l lines
-	l.add("answer: %s", res.Answer)
-	l.add("referenced by the pod spec: %s", strconv.FormatBool(res.Referenced))
+	// The answer is one text, decided once on the lines it returns (layout.go).
+	var ans answer
+	ans.text("answer: " + string(res.Answer) + "\n")
+	ans.text("referenced by the pod spec: " + strconv.FormatBool(res.Referenced) + "\n")
+	var at []int
 	if res.Answer == refcheck.Missing {
-		l.add("what is missing: %s", res.What)
-		l.add("evidence: %s", res.Source)
-		if res.Key != "" {
-			l.add("key: %s", l.data(s.value(res.Key)))
-		}
-		if res.Container != "" {
-			l.add("container: %s", l.data(s.value(res.Container)))
-		}
-		if res.Volume != "" {
-			l.add("volume: %s", l.data(s.value(res.Volume)))
+		ans.text("what is missing: " + string(res.What) + "\n")
+		ans.text("evidence: " + string(res.Source) + "\n")
+		for _, f := range []struct{ name, v string }{{"key", res.Key}, {"container", res.Container}, {"volume", res.Volume}} {
+			if f.v != "" {
+				ans.text(f.name + ": ")
+				at = append(at, ans.value(f.name, f.v))
+				ans.text("\n")
+			}
 		}
 	}
-	r.Text, r.Values = l.String(), l.values
+	out, text, ok := s.lines(&ans)
+	if !ok {
+		r.withhold()
+		return nil
+	}
+	r.Text = text
+	for _, i := range at {
+		r.Values = append(r.Values, out[i])
+	}
 	return nil
 }

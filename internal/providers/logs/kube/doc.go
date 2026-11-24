@@ -70,9 +70,9 @@ limitations under the License.
 // stream that makes no progress for 100 reads in a row fails as cut short.
 //
 // The log is untrusted input (invariant 4). The text is redacted with internal/redact ([Config.Redactor], or
-// the built-in rules) as it was read, before the cut and before invalid UTF-8 is replaced, and the excerpt is
-// redacted again before it leaves the adapter ([Excerpt], #840): a block scalar or a PEM key whose first line
-// the cut drops is still redacted in the lines kept. Redaction never makes the text longer, so the excerpt
+// the built-in rules) as it was read, before the cut and before invalid UTF-8 is replaced ([Excerpt], #840): a
+// block scalar or a PEM key whose first line the cut drops is still redacted in the lines kept. The excerpt is
+// not redacted again after the cut (#845). Redaction never makes the text longer, so the excerpt
 // stays within its byte bound. Redaction is best effort (see package redact). The volume of logs is controlled by
 // whoever can write logs in a watched namespace, so Truncated and EndMissing say nothing about the incident.
 // The adapter logs nothing.

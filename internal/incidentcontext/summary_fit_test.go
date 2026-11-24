@@ -23,8 +23,8 @@ import (
 	"strings"
 	"testing"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // The tests of the third decision of 2026-11-16 on #796: the fit holds at every summary bound the settings

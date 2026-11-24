@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -31,8 +32,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/pkalin/shadewright/internal/incidentcontext"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // Bounds of get_pod_logs.
@@ -133,7 +134,9 @@ func (s *Set) podLogs(ctx context.Context, a podLogsArgs, r *Result) error {
 	}
 	title := "pod " + s.value(a.Pod) + " container " + s.value(a.Container) + ", " + instance
 	// The header is budgeted first; the excerpt, redacted again whatever the source did, keeps its newest lines.
-	v := incidentcontext.RenderLog(s.redactor.String, title, ex, err, a.MaxBytes.v, logBytes)
+	// Call fits the text again (FitLog), where the release before redacted it a second time (#845, thirteenth
+	// decision of 2026-11-18).
+	v := incidentcontext.RenderLog(s.redactor, true, title, ex, err, a.MaxBytes.v, logBytes)
 	switch v.Read {
 	case incidentcontext.LogReadNotFound:
 		r.Status = StatusNotFound
@@ -141,6 +144,10 @@ func (s *Set) podLogs(ctx context.Context, a podLogsArgs, r *Result) error {
 		r.Status = StatusNotAvailable
 	case incidentcontext.LogReadFailed, incidentcontext.LogReadOversized:
 		r.Status = StatusCouldNotFetch
+	case incidentcontext.LogReadWithheld:
+		// Nothing of the excerpt, not even its header with the names, is shown (#873).
+		r.withhold()
+		return nil
 	}
 	for _, m := range []struct {
 		on bool
@@ -292,17 +299,36 @@ func (s *Set) queryMetrics(ctx context.Context, t metricTemplate, a queryMetrics
 	if res.Partial {
 		r.addLabel(LabelMetricsPartial)
 	}
-	var l lines
-	l.add("%s: %d series", t.name, len(res.Series))
+	// The answer is one text, decided once on the lines it returns (layout.go): each label's name and value
+	// as the line shows them, the value under its name (a label named like a secret key hides its whole value).
+	var ans answer
+	ans.text(fmt.Sprintf("%s: %d series\n", t.name, len(res.Series)))
+	type line struct{ from, to int }
+	var ls []line
 	for _, se := range res.Series {
-		var lb []string
-		for _, k := range slices.Sorted(maps.Keys(se.Labels)) {
-			lb = append(lb, s.value(k)+"="+s.value(se.Labels[k]))
+		from := ans.text("{")
+		for j, k := range slices.Sorted(maps.Keys(se.Labels)) {
+			if j > 0 {
+				ans.text(", ")
+			}
+			ans.value("", k)
+			ans.text("=")
+			ans.value(k, se.Labels[k])
 		}
-		// A series line is the source's answer.
-		l.add("%s", l.data("{"+strings.Join(lb, ", ")+"} "+summary(se.Samples, t.overWindow)))
+		ans.text("} " + summary(se.Samples, t.overWindow))
+		ls = append(ls, line{from, len(ans.pieces)})
+		ans.text("\n")
 	}
-	r.Text, r.Values = l.String(), l.values
+	out, text, ok := s.lines(&ans)
+	if !ok {
+		r.withhold()
+		return nil
+	}
+	r.Text = text
+	// A series line is the source's answer.
+	for _, l := range ls {
+		r.Values = append(r.Values, strings.Join(out[l.from:l.to], ""))
+	}
 	return nil
 }
 
@@ -379,12 +405,24 @@ func (s *Set) deliveryStatus(ctx context.Context, a deliveryArgs, r *Result) err
 		r.Status, r.Text = StatusCouldNotFetch, couldNotFetch
 		return nil
 	}
-	var l lines
-	l.add("delivery: %s", deliveryState(st))
-	l.add("applied revision: %s", l.data(s.value(st.AppliedRevision)))
-	l.add("ready: %s", strconv.FormatBool(st.Ready))
-	l.add("message: %s", l.data(s.value(st.Message)))
-	r.Text, r.Values = l.String(), l.values
+	if st.MessageWithheld {
+		// The source redacted the message whole before it bounded it, and redaction withheld it.
+		r.withhold()
+		return nil
+	}
+	// The answer is one text, decided once on the lines it returns (layout.go).
+	var ans answer
+	ans.text("delivery: " + deliveryState(st) + "\napplied revision: ")
+	rev := ans.value("applied revision", st.AppliedRevision)
+	ans.text("\nready: " + strconv.FormatBool(st.Ready) + "\nmessage: ")
+	msg := ans.value("message", st.Message)
+	ans.text("\n")
+	out, text, ok := s.lines(&ans)
+	if !ok {
+		r.withhold()
+		return nil
+	}
+	r.Text, r.Values = text, []string{out[rev], out[msg]}
 	return nil
 }
 

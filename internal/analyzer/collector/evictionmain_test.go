@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 )
 
 // Evictions are out of the scope of #432 (decided 2026-11-21, designed in #1077): an eviction, its

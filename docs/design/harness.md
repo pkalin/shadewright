@@ -16,13 +16,14 @@ Dashed boxes are designed, not built. The teal box is GitHub, outside the cluste
 | Context builder | <span class="sw-status sw-built">built</span> | [3.3, the context builder](3-observation-and-deduplication.md#the-context-builder); `internal/incidentcontext`, `internal/redact` |
 | Pod logs, metrics, the Incident (made from Events) | <span class="sw-status sw-built">built</span> | [3.1](3-observation-and-deduplication.md#31-collecting), [4.1](4-tools.md#41-query_metrics), [4.2](4-tools.md#42-get_pod_logs) |
 | Read-only tools | <span class="sw-status sw-built">built</span> | [4. Tools](4-tools.md); `internal/tools` |
-| `read_git_file` | <span class="sw-status sw-planned">planned</span> | [4. Tools](4-tools.md), [#373](https://github.com/pkalin/shadewright/issues/373) |
+| `read_git_file` | <span class="sw-status sw-planned">planned</span> | [4. Tools](4-tools.md), [#373](https://github.com/shadewright-labs/shadewright/issues/373) |
 | Analyzer RBAC | <span class="sw-status sw-built">built</span> | [10.1](10-security.md#101-least-privilege-rbac), [10.11](10-security.md#1011-what-each-identity-can-read-and-write) |
 | Budget and time limit | <span class="sw-status sw-built">built</span> | [3.2, the analysis budget](3-observation-and-deduplication.md#the-analysis-budget), [the loop and its limits](3-observation-and-deduplication.md#the-loop-and-its-limits) |
 | Malformed output refused | <span class="sw-status sw-built">built</span> | [3.3, the prompt and the result](3-observation-and-deduplication.md#the-prompt-and-the-result); `internal/analysis/result.go` |
 | Eval harness and injection corpus | <span class="sw-status sw-built">built</span>, the analyzer's own gate <span class="sw-status sw-planned">planned</span> | [11.2, evaluation gate](11-model.md#evaluation-gate), [evaluation](../evaluation.md); `test/eval` |
 | OpenTelemetry traces | <span class="sw-status sw-built">built</span>, off by default | [Traces reference](../reference/traces.md) |
 | Analysis records | <span class="sw-status sw-built">built</span>, with a record store | [ADR-0015](../adr/0015-analysis-records-outlive-the-lab.md); `internal/analysis/record.go` |
+| Scoring of records outside the cluster | <span class="sw-status sw-built">built</span> as a command that scores one record file; the job and its trigger <span class="sw-status sw-planned">planned</span> | [ADR-0047](../adr/0047-scoring-analysis-records-outside-the-cluster.md), [scoring intake](../reference/intake.md); `cmd/intake`, `internal/intake` |
 | Proposal, policy check, GitOps PR | <span class="sw-status sw-built">built</span>, up to `Merged`, then `WaitingForDelivery` and `Verifying` ending `Failed` or `Inconclusive` behind `--verify-outcomes` (off by default) | [6. Reconciliation](6-reconciliation.md), [8. GitOps on GitHub](8-gitops-on-github.md) |
 | Person merges (GitHub), Flux deploys (in the cluster) | not part of Shadewright | [8. GitOps on GitHub](8-gitops-on-github.md) |
 | Step log and replay by step | <span class="sw-status sw-planned">planned</span> | [Working with models](../how-it-works/models.md) |

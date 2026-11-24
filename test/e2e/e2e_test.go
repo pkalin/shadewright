@@ -31,7 +31,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/pkalin/shadewright/test/utils"
+	"github.com/shadewright-labs/shadewright/test/utils"
 )
 
 // namespace where the project is deployed in

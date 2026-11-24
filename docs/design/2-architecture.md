@@ -69,7 +69,7 @@ A controller compares desired and actual state no matter which event woke it up.
 
 ### 2.2.1. Three binaries
 
-The analyzer, the remediation controller and the verifier are separate binaries in one Go module (`cmd/analyzer`, `cmd/main.go`, `cmd/verifier`). They are deployed as separate Deployments with separate ServiceAccounts and identities, and three images (`shadewright-analyzer`, `shadewright-executor`, `shadewright-verifier`). A slow model call must never block the controller's other reconciles.
+The analyzer, the remediation controller and the verifier are separate binaries in one Go module (`cmd/analyzer`, `cmd/main.go`, `cmd/verifier`). They are deployed as separate Deployments with separate ServiceAccounts and identities, and three images (`shadewright-analyzer`, `shadewright-executor`, `shadewright-verifier`). A slow model call must never block the controller's other reconciles. A fourth binary, the scoring intake (`cmd/intake`, [ADR-0047](../adr/0047-scoring-analysis-records-outside-the-cluster.md)), is built from the same module but never runs in a cluster and is not part of an installation: it scores analysis records outside every cluster. The command that is built runs with the model keys of whoever runs it; the identity of its own belongs to the planned job that runs it (#991).
 
 - The collector, the incident store and the analyzer run in the analyzer binary.
 - The policy engine, the remediation controller and the GitOps adapter run in the executor (`cmd/main.go`).
@@ -89,7 +89,7 @@ The analyzer calls a configured model endpoint: Foundry, the Anthropic API or an
 - That is a ClusterRole that is only a catalogue of verbs, bound by one RoleBinding per watched namespace and never cluster-wide.
 - Its cache is restricted to the same list for those kinds, and to the operator namespace for Incidents and requests.
 - The cache drops managed fields before it stores an object.
-- Cluster-wide it may read the cluster-scoped `RemediationSettings`, and `list` Nodes for platform detection, with no `get` or `watch`, so it starts no informer on them. The discovery API needs no grant. With the chart value `analyzer.modules.kyverno.clusterWide.enabled` (off by default) it may also read Kyverno's cluster-scoped kinds (below). With the analysis on and `analyzer.analysis.actionPolicies` set, it may `get` the RemediationPolicies named there, and only those (`resourceNames`; no `list` or `watch`), so the context builder can show the model the bounds of the policy that will decide its proposal (3.3, [#493](https://github.com/pkalin/shadewright/issues/493)). Without a name there is no rule.
+- Cluster-wide it may read the cluster-scoped `RemediationSettings`, and `list` Nodes for platform detection, with no `get` or `watch`, so it starts no informer on them. The discovery API needs no grant. With the chart value `analyzer.modules.kyverno.clusterWide.enabled` (off by default) it may also read Kyverno's cluster-scoped kinds (below). With the analysis on and `analyzer.analysis.actionPolicies` set, it may `get` the RemediationPolicies named there, and only those (`resourceNames`; no `list` or `watch`), so the context builder can show the model the bounds of the policy that will decide its proposal (3.3, [#493](https://github.com/shadewright-labs/shadewright/issues/493)). Without a name there is no rule.
 
 **What it may write.** All of this is in the operator namespace (a Role), except the settings status.
 
@@ -126,7 +126,7 @@ The analyzer calls a configured model endpoint: Foundry, the Anthropic API or an
 - The chart defaults it to the UID of the `kube-system` namespace, read by Helm with `lookup` at install time (the installer's permission, not the analyzer's). An explicit `clusterId` wins.
 - GitOps tools and client-side renders (`helm template`, helm diff, Argo CD, Flux with a dry-run) ask no cluster, and an installer without `get` on the `kube-system` namespace cannot read it. Each of those must set `clusterId` explicitly.
 
-**Reads of the add-ons' own kinds** ([#409](https://github.com/pkalin/shadewright/issues/409)). Each module's reads are a ClusterRole of their own, made from the markers of `internal/analyzer/modulerbac/<name>` (`config/rbac/analyzer/modules/<name>`), with `list` and `watch` only, for the sources' informers, and `get` on `scaledobjects` alone, where the owner a KEDA HPA names is read by name. The read tool `get_delivery_status` reads one Kustomization or HelmRelease of a watched namespace, and a Kustomization's GitRepository, with the Flux role's `list`, by a field selector on the name ([#562](https://github.com/pkalin/shadewright/issues/562), section 4). The chart renders each only while its value is on, so an add-on that is not deployed gets no grant, and passes the list of rendered roles to the analyzer (`--module-grants`, 2.2.2); the value grants reads only, and whether a module runs is still `spec.modules` and detection.
+**Reads of the add-ons' own kinds** ([#409](https://github.com/shadewright-labs/shadewright/issues/409)). Each module's reads are a ClusterRole of their own, made from the markers of `internal/analyzer/modulerbac/<name>` (`config/rbac/analyzer/modules/<name>`), with `list` and `watch` only, for the sources' informers, and `get` on `scaledobjects` alone, where the owner a KEDA HPA names is read by name. The read tool `get_delivery_status` reads one Kustomization or HelmRelease of a watched namespace, and a Kustomization's GitRepository, with the Flux role's `list`, by a field selector on the name ([#562](https://github.com/shadewright-labs/shadewright/issues/562), section 4). The chart renders each only while its value is on, so an add-on that is not deployed gets no grant, and passes the list of rendered roles to the analyzer (`--module-grants`, 2.2.2); the value grants reads only, and whether a module runs is still `spec.modules` and detection.
 
 | Chart value | Default | Role, binding | Kinds |
 |---|---|---|---|
@@ -169,7 +169,7 @@ What it does: every 30 seconds, for each `RemediationRequest` in phase `Verifyin
 
 The executor reads the report as untrusted evidence and decides the outcome (<span class="sw-status sw-built">built</span>, #683, 2.2.3 and 6). It writes no report for a revert, a request with `spec.reverts` (<span class="sw-status sw-built">built</span>, #96, ADR-0030 section 8).
 
-None of the three binaries can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
+None of the three binaries that run in the cluster can read `Secret` objects. An envtest suite (`test/rbac`) checks this boundary against a real API server.
 
 ## 2.3. Provider interfaces
 
@@ -201,11 +201,11 @@ Provider SDKs are imported only inside their adapter package. Each interface has
 
 **What it does.** The adapter (`internal/providers/metrics/prometheus`) speaks the plain Prometheus HTTP query API with the standard library. It runs only the templates listed in section 4, and only for the namespaces it is configured with (section 4).
 
-**How the analyzer wires it.** With `--prometheus-url` set, the analyzer creates it with the watched namespaces (`--watch-namespaces`, the set of the cache and the RoleBindings) and gives it to the context builder (3.3), which the analysis loop calls when the analyzer runs with `--triage-model` ([#76](https://github.com/pkalin/shadewright/issues/76)). Without the flag the metrics section is "not available". More than 256 watched namespaces with the flag set refuse the start.
+**How the analyzer wires it.** With `--prometheus-url` set, the analyzer creates it with the watched namespaces (`--watch-namespaces`, the set of the cache and the RoleBindings) and gives it to the context builder (3.3), which the analysis loop calls when the analyzer runs with `--triage-model` ([#76](https://github.com/shadewright-labs/shadewright/issues/76)). Without the flag the metrics section is "not available". More than 256 watched namespaces with the flag set refuse the start.
 
 - With `--prometheus-cluster`, the analyzer checks at startup and every 10 minutes, on every replica, with one fixed query that is not a template and returns no label, that kube-state-metrics and cAdvisor both hold series with that `cluster` value. With no watched namespace it builds no source and runs no check.
 - When they do not, the analyzer still starts and logs an error, and metrics are **unavailable**: every query fails, so the metrics section is "could not fetch", which escalates (3.3), rather than empty answers read as evidence of absence. A label that disappears later switches metrics off at the next check, and one that appears switches them on.
-- A check that cannot reach Prometheus is not "not found": it changes nothing the last answer said, and before any answer, or once the last one is older than 10 minutes, a query checks first. One check runs at a time; a query waits for it no longer than its own deadline. Decided on [#371](https://github.com/pkalin/shadewright/issues/371) (2026-11-05), instead of refusing to start, which would crash-loop the analyzer on a typo.
+- A check that cannot reach Prometheus is not "not found": it changes nothing the last answer said, and before any answer, or once the last one is older than 10 minutes, a query checks first. One check runs at a time; a query waits for it no longer than its own deadline. Decided on [#371](https://github.com/shadewright-labs/shadewright/issues/371) (2026-11-05), instead of refusing to start, which would crash-loop the analyzer on a typo.
 
 **Limits.**
 
@@ -227,8 +227,8 @@ HTTP status handling is in 2.6.
 
 **Limits.**
 
-- The analyzer creates it unless `--pod-logs=false`, with the watched namespaces, and gives it to the context builder (3.3), which the analysis loop calls when the analyzer runs with `--triage-model` ([#76](https://github.com/pkalin/shadewright/issues/76)). It reads with the analyzer's own identity: `get` on `pods/log` in the watch role, so only in the watched namespaces (2.2.2).
-- It takes at most 256 namespaces. With more in `--watch-namespaces` and logs on, the analyzer refuses to start with a configuration error that names the limit (decided on [#371](https://github.com/pkalin/shadewright/issues/371)): running without logs would make every analysis escalate on a source it could not fetch.
+- The analyzer creates it unless `--pod-logs=false`, with the watched namespaces, and gives it to the context builder (3.3), which the analysis loop calls when the analyzer runs with `--triage-model` ([#76](https://github.com/shadewright-labs/shadewright/issues/76)). It reads with the analyzer's own identity: `get` on `pods/log` in the watch role, so only in the watched namespaces (2.2.2).
+- It takes at most 256 namespaces. With more in `--watch-namespaces` and logs on, the analyzer refuses to start with a configuration error that names the limit (decided on [#371](https://github.com/shadewright-labs/shadewright/issues/371)): running without logs would make every analysis escalate on a source it could not fetch.
 - It reads one container of one pod per call, only in the namespaces it is configured with, within the bounds of section 4. It redacts the excerpt before returning it.
 
 **Tying an excerpt to a pod.** It reads the pod (`get` on pods, granted by the analyzer watch role, which is bound only in the watched namespaces) before the first and after the last log request.
@@ -237,7 +237,7 @@ HTTP status handling is in 2.6.
 - It marks the excerpt uncertain when the two reads differ or the second fails (section 4).
 - A failed first check is an error, not an excerpt.
 
-**A log the node no longer holds.** The kubelet keeps one terminated instance per container, and not for long. Asked for the log of an instance it has removed, it answers with HTTP 200 and the body `unable to retrieve container logs for <runtime>://<id>`. The adapter returns that answer as `ErrLogGone` (a "not found"), never as log text, when the whole body is that sentence followed by at most one newline, and the sentence names the container ID the pod's status gives for the instance asked for (or, when the status names none, an ID of that form). A log that holds the sentence among other lines, after a timestamp, with other text on its line or for another container stays log text ([#943](https://github.com/pkalin/shadewright/issues/943)).
+**A log the node no longer holds.** The kubelet keeps one terminated instance per container, and not for long. Asked for the log of an instance it has removed, it answers with HTTP 200 and the body `unable to retrieve container logs for <runtime>://<id>`. The adapter returns that answer as `ErrLogGone` (a "not found"), never as log text, when the whole body is that sentence followed by at most one newline, and the sentence names the container ID the pod's status gives for the instance asked for (or, when the status names none, an ID of that form). A log that holds the sentence among other lines, after a timestamp, with other text on its line or for another container stays log text ([#943](https://github.com/shadewright-labs/shadewright/issues/943)).
 
 **What can go wrong.**
 
@@ -249,7 +249,7 @@ Status mapping is in 2.6.
 
 ### 2.3.3. Reviewer hints
 
-<span class="sw-status sw-built">built</span> ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md), epic [#533](https://github.com/pkalin/shadewright/issues/533); off by default, opt-in with the executor flag `--reviewer-hints` (#631)). A person with write access can steer the analysis from the pull request with a comment `/shadewright reanalyze: <hint>`. Policy still decides; a hint never authorizes anything.
+<span class="sw-status sw-built">built</span> ([ADR-0028](../adr/0028-reviewer-hints-through-the-pull-request.md), epic [#533](https://github.com/shadewright-labs/shadewright/issues/533); off by default, opt-in with the executor flag `--reviewer-hints` (#631)). A person with write access can steer the analysis from the pull request with a comment `/shadewright reanalyze: <hint>`. Policy still decides; a hint never authorizes anything.
 
 [![Reviewer hints, built and off by default, except the coordinator, other systems and the required-check ruleset, which are planned: the executor reads a comment from the code host through its GitProvider adapter, checks the author's permission, redacts and pins the hint into the request status; the analyzer reads it and proposes a replacement request; the executor takes the existing pull request over, adds one commit, creates the check run shadewright/review and replies. Other integrations belong to a future coordinator.](../assets/diagrams/reviewer-hints.svg)](../assets/diagrams/reviewer-hints.svg "Open full size")
 
@@ -380,7 +380,7 @@ The EKS (`internal/modules/eks`) and GKE (`internal/modules/gke`) modules contri
 - Text longer than 16 KiB is not shown to a rule, and a rule that panics is skipped.
 - The subject of a finding (the event's regarding object, or the node) is untrusted too: a field that breaks the pattern of `ObjectRef` is emptied.
 - No rule changes an Incident or its fingerprint.
-- The rules run on what the analysis context (3.3) feeds them through the current selection (planned, [#70](https://github.com/pkalin/shadewright/issues/70)).
+- The rules run on what the analysis context (3.3) feeds them through the current selection (planned, [#70](https://github.com/shadewright-labs/shadewright/issues/70)).
 
 **What can go wrong.**
 
@@ -500,7 +500,7 @@ It watches `ScaledObject`, `ScaledJob` and the `HorizontalPodAutoscaler` (`autos
 
 Its evidence is the `ScaledObject`'s name, `spec.maxReplicas`, `status.currentReplicas`, the limit reason and, for up to two external metrics, the current value (the backlog the HPA sees) and its target. It begins at `ScalingLimited`'s `lastTransitionTime`.
 
-**The Incident is about the `ScaledObject`** (decided 2026-11-05, [#380](https://github.com/pkalin/shadewright/issues/380)): the object `AdjustKedaMaxReplicas` patches, with the HPA condition as evidence. The source declares the `ScaledObject` as its subject owner. The collector takes it as the subject only when the HPA's controller reference names it, a `get` finds it in the same namespace with the referenced UID, and its `status.hpaName`, which KEDA writes, names the HPA; while `status.hpaName` is empty (KEDA has not reconciled the `ScaledObject` yet) the collector waits and reads it again, from 2 seconds doubling to 2 minutes, at most 15 times (about 20 minutes); after that it logs that the owner never claimed the HPA and takes the HPA itself as the subject, so the symptom is not hidden for good; otherwise the HPA itself is the subject. The fingerprint hashes the `ScaledObject`'s UID and the fixed summary, so a recreated HPA and changing metric values keep one Incident. A ceiling that lasts is one occurrence; one that ends and comes back (a new `lastTransitionTime`, or one the collector saw end, 3.1) is another.
+**The Incident is about the `ScaledObject`** (decided 2026-11-05, [#380](https://github.com/shadewright-labs/shadewright/issues/380)): the object `AdjustKedaMaxReplicas` patches, with the HPA condition as evidence. The source declares the `ScaledObject` as its subject owner. The collector takes it as the subject only when the HPA's controller reference names it, a `get` finds it in the same namespace with the referenced UID, and its `status.hpaName`, which KEDA writes, names the HPA; while `status.hpaName` is empty (KEDA has not reconciled the `ScaledObject` yet) the collector waits and reads it again, from 2 seconds doubling to 2 minutes, at most 15 times (about 20 minutes); after that it logs that the owner never claimed the HPA and takes the HPA itself as the subject, so the symptom is not hidden for good; otherwise the HPA itself is the subject. The fingerprint hashes the `ScaledObject`'s UID and the fixed summary, so a recreated HPA and changing metric values keep one Incident. A ceiling that lasts is one occurrence; one that ends and comes back (a new `lastTransitionTime`, or one the collector saw end, 3.1) is another.
 
 **Why a ceiling is only a candidate.**
 
@@ -657,7 +657,7 @@ The command, args and env (which hold the tunnel token, `--token` or `TUNNEL_TOK
 
 ### 2.5.7. Verification checks
 
-Verification checks are planned ([#19](https://github.com/pkalin/shadewright/issues/19)). The verifier binary (<span class="sw-status sw-built">built</span>, 2.2.4) runs only the pod sampling; which identity resolves the module checks below is decided with #19, and the verifier holds no grant on `RemediationSettings` today.
+Verification checks are planned ([#19](https://github.com/shadewright-labs/shadewright/issues/19)). The verifier binary (<span class="sw-status sw-built">built</span>, 2.2.4) runs only the pod sampling; which identity resolves the module checks below is decided with #19, and the verifier holds no grant on `RemediationSettings` today.
 
 - It is to build its own registry from the same compiled-in module list as the analyzer, and look a check up by name among the integrations enabled in `RemediationSettings` `spec.modules`.
 - It runs no detection: a check on an add-on that is not installed finds no object and fails.

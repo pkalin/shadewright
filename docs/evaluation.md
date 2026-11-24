@@ -2,7 +2,7 @@
 
 The evaluation harness checks what the analysis concludes for every lab scenario: in CI against a fake model that
 replays recorded replies, and on demand against the real model ([design 11.2](design/11-model.md#evaluation-gate),
-[ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md) decision 3, [#78](https://github.com/pkalin/shadewright/issues/78)).
+[ADR-0025](adr/0025-analysis-claims-units-and-evaluation-manifest.md) decision 3, [#78](https://github.com/shadewright-labs/shadewright/issues/78)).
 
 <span class="sw-status sw-built">built</span> The harness, the recorded contexts of ten fleet scenarios and of
 their variants, five [escalation scenarios](#the-escalation-scenarios) whose deciding fact only a read tool shows, the CI run on the fake model, the manual Evaluation workflow for the real model, the report and its evaluation manifest.
@@ -53,7 +53,7 @@ with a plan of the expected action type whose desired value lies inside the expe
 be the limit that template sets; an `AdjustKedaMaxReplicas` plan's previous value must be the `maxReplicaCount` of the
 recorded ScaledObject. The plan must also pass the scenario's policy: the executor's checks that need no
 Git (`policy.Preflight`: request and target namespace, labels, module, the policy's entry, `min`, `max` and the
-step limits), on a request of the plan for the Incident's subject ([#493](https://github.com/pkalin/shadewright/issues/493)).
+step limits), on a request of the plan for the Incident's subject ([#493](https://github.com/shadewright-labs/shadewright/issues/493)).
 So in `oom`, under `demo-memory` (64Mi to 128Mi, at most +50%), 48Mi to 96Mi fails with `IncreaseTooLarge` although
 96Mi is inside the expected bounds, as the lab's policy Denied it, and 48Mi to 72Mi passes. The request's
 phase (`NeedsIntervention`) and the file `paths` are decided by the executor and its source mapping, so they are
@@ -64,13 +64,13 @@ state the size its recorded evidence supports in `size` (`supported`, and `why`:
 proposal above that size fails the outcome, even when it is below the policy maximum; a value at or below the
 supported size passes. The model sees the bounds ([ADR-0026](adr/0026-the-analyzer-shows-the-model-the-policy-bounds.md)),
 but those bounds do not determine what the evidence supports (decided 2026-11-17 on
-[#505](https://github.com/pkalin/shadewright/issues/505)). The catalog actions were checked for a number the model
+[#505](https://github.com/shadewright-labs/shadewright/issues/505)). The catalog actions were checked for a number the model
 chooses:
 
 | Action | Number | Who chooses it | Rubric `size` |
 | --- | --- | --- | --- |
 | `AdjustKedaMaxReplicas` | `desiredValue` (`maxReplicaCount`) | the model, inside the policy bounds; `previousValue` comes from the ScaledObject | yes |
-| `SetContainerMemoryLimit` | `desired` (the memory limit) | code, from the metrics, once [ADR-0040](adr/0040-code-sizes-a-memory-proposal-from-the-metrics.md) is built ([#508](https://github.com/pkalin/shadewright/issues/508)); its sizing rule's own tests cover it | no: the harness refuses it |
+| `SetContainerMemoryLimit` | `desired` (the memory limit) | code, from the metrics, once [ADR-0040](adr/0040-code-sizes-a-memory-proposal-from-the-metrics.md) is built ([#508](https://github.com/shadewright-labs/shadewright/issues/508)); its sizing rule's own tests cover it | no: the harness refuses it |
 
 `keda-at-ceiling` states 3 replicas (13 requests per second over a target of 5 per replica), which its policy's
 maximum from 2 also is; its variant `wide-policy` allows up to 6 and its reply asks for 3. In that variant 3
@@ -99,7 +99,7 @@ scored from the Incident, not from the reply. What the model must infer and can 
 is healthy on the old template (`statefulset-oom`), and the pull error of `bad-image`. The hard gates are
 unchanged: the verbatim quote check, the refusal scenarios and the action bounds.
 
-Terms match on word boundaries ([#848](https://github.com/pkalin/shadewright/issues/848)), case ignored, with a
+Terms match on word boundaries ([#848](https://github.com/shadewright-labs/shadewright/issues/848)), case ignored, with a
 rule that depends on the side and on how the term ends. An end of the term that is not a letter or a digit (a
 space, a colon, a brace) is a delimiter of its own and takes no check.
 
@@ -127,7 +127,7 @@ version are not comparable with it: the same replies score higher under version 
 run of 2026-11-09 went from 30 to 36 passed).
 
 **Reads.** A rubric may list the tool reads the model is expected to make, in `reads`
-([#505](https://github.com/pkalin/shadewright/issues/505)). Each expected read passes when the loop ran at least
+([#505](https://github.com/shadewright-labs/shadewright/issues/505)). Each expected read passes when the loop ran at least
 one call that matches it and the tool accepted the call; it fails otherwise, and so does the scenario run. A
 read the rubric does not list is counted (`extra`), never failed, and a call that read nothing, refused by the loop
 or the tool, is counted apart (`refused`). Tools are offered only on escalation, so a scenario that expects reads
@@ -166,7 +166,7 @@ error names the read and what is wrong. The parser and its generated tests are i
 `test/eval/reads_corpus_test.go`.
 
 A scenario run passes when all three parts pass and no quote of its result holds the cut note, a tally line or a
-part the summary cut ([Quotes of the summary](#the-scenario-files), [#841](https://github.com/pkalin/shadewright/issues/841)). The run passes when the share of passing scenario runs reaches the
+part the summary cut ([Quotes of the summary](#the-scenario-files), [#841](https://github.com/shadewright-labs/shadewright/issues/841)). The run passes when the share of passing scenario runs reaches the
 threshold (`EVAL_MIN_PASS_RATE`, 1 by default; CI always uses 1).
 
 ## Run it
@@ -200,7 +200,7 @@ the access token (about an hour) expires finds a valid one. The report is the jo
 Before the first run, the maintainer sets up:
 
 1. **An identity.** An app registration or user-assigned managed identity with a federated credential whose
-   subject is `repo:pkalin/shadewright:environment:evaluation` and audience `api://AzureADTokenExchange`, and the
+   subject is `repo:shadewright-labs/shadewright:environment:evaluation` and audience `api://AzureADTokenExchange`, and the
    role **Cognitive Services OpenAI User** on the Foundry resource only. Not the analyzer's lab identity: a
    separate one, so the lab cluster's credential never leaves it.
 2. **The environment `evaluation`** in the repository settings, with a required reviewer if a run should wait for
@@ -217,7 +217,7 @@ Before the first run, the maintainer sets up:
 | `EVAL_ESCALATION_DEPLOYMENT` | no | Name of the escalation deployment; without it an escalation is handed off |
 | `EVAL_ESCALATION_MODEL` | with the above | Model ID and version of the escalation replies, as `--escalation-model` |
 | `EVAL_API_VERSION` | no | Inference API version, `v1` by default |
-| `EVAL_TRIAGE_INFERENCE_API`, `EVAL_ESCALATION_INFERENCE_API` | no | `inferenceAPI` of the triage or escalation deployment: unset (chat completions), `ChatCompletions` or `Responses` (needs `EVAL_API_VERSION` `v1`). Set `Responses` for a model that refuses function tools on chat completions, such as `gpt-6.1-sol` on escalation ([#501](https://github.com/pkalin/shadewright/issues/501)). Any other value is an error before the identity is used; the escalation one needs `EVAL_ESCALATION_DEPLOYMENT` |
+| `EVAL_TRIAGE_INFERENCE_API`, `EVAL_ESCALATION_INFERENCE_API` | no | `inferenceAPI` of the triage or escalation deployment: unset (chat completions), `ChatCompletions` or `Responses` (needs `EVAL_API_VERSION` `v1`). Set `Responses` for a model that refuses function tools on chat completions, such as `gpt-6.1-sol` on escalation ([#501](https://github.com/shadewright-labs/shadewright/issues/501)). Any other value is an error before the identity is used; the escalation one needs `EVAL_ESCALATION_DEPLOYMENT` |
 | `EVAL_PRICE_INPUT_PER_MTOK`, `EVAL_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_PRICE_OUTPUT_PER_MTOK` | no | USD per million tokens of the deployment, for the cost estimate: all three or none. Nothing is built in; take them from the Azure price list for the region |
 | `EVAL_ESCALATION_PRICE_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_CACHED_INPUT_PER_MTOK`, `EVAL_ESCALATION_PRICE_OUTPUT_PER_MTOK` | no | The escalation deployment's own prices: all three or none, and only with the ones above and `EVAL_ESCALATION_DEPLOYMENT`. Without them the escalation calls are never priced as the triage ones: the cost of a run whose escalation used tokens, and of the totals, is unknown and left out, and the report says why (`costUnknown`) |
 | `EVAL_FORCE_ESCALATION` | no | `1` sends every run to the escalation model with its read tools (below); needs `EVAL_ESCALATION_DEPLOYMENT`. Any other value is an error, checked before the identity is used, and `make eval` (the replay) refuses it. The escalation scenarios go to the escalation model without it |
@@ -236,7 +236,7 @@ federated credential for the `evaluation` environment and the inference role on 
 
 A run of the ten scenarios, their variants (four so far, `oom/rollout`, `oom/absorbed`, `keda-at-ceiling/wide-policy`
 and `unschedulable/over-bound`) and the five escalation scenarios is nineteen analyses per repeat. The real-model
-run for [#841](https://github.com/pkalin/shadewright/issues/841), before the v0.6.0 release, is a run of all of them,
+run for [#841](https://github.com/shadewright-labs/shadewright/issues/841), before the v0.6.0 release, is a run of all of them,
 so it includes both `oom/absorbed` and `unschedulable/over-bound`. The escalation scenarios need an escalation
 model: on Foundry `EVAL_ESCALATION_DEPLOYMENT` with `EVAL_ESCALATION_MODEL` (the deployment alone is refused
 before any call), through the Anthropic API ([below](#a-claude-model-the-anthropic-api)) `EVAL_ESCALATION_MODEL`.
@@ -248,9 +248,9 @@ locally without such an identity; run it once by hand after setting it up.
 ### A Claude model: the Anthropic API
 
 `EVAL_MODEL=anthropic make eval-model` runs the same harness against a Claude model through the Anthropic API
-adapter (`internal/providers/model/anthropic`, [#728](https://github.com/pkalin/shadewright/issues/728)), so the
-model comparison of [#503](https://github.com/pkalin/shadewright/issues/503) gets Claude rows. Only the
-evaluation uses this adapter; the analyzer cannot be configured with it yet ([#729](https://github.com/pkalin/shadewright/issues/729)).
+adapter (`internal/providers/model/anthropic`, [#728](https://github.com/shadewright-labs/shadewright/issues/728)), so the
+model comparison of [#503](https://github.com/shadewright-labs/shadewright/issues/503) gets Claude rows. Only the
+evaluation uses this adapter; the analyzer cannot be configured with it yet ([#729](https://github.com/shadewright-labs/shadewright/issues/729)).
 It runs by hand on the maintainer's machine, never in CI or in the Evaluation workflow, and it costs money. There
 is no fallback: a model that is throttled or unavailable fails its runs, it is never replaced by Foundry or by
 another Claude model.
@@ -384,7 +384,7 @@ Escalation runs only on the deterministic signals (a context cut to its total bo
 failed, or a triage result that failed the schema twice; [design 3.3](design/3-observation-and-deduplication.md)),
 and the recorded fleet scenarios almost never raise them, so they hardly ever call the escalation model; the
 [escalation scenarios](#the-escalation-scenarios) always do, and score the reads it makes. To
-compare escalation candidates on every scenario ([#80](https://github.com/pkalin/shadewright/issues/80)), run `make eval-model`
+compare escalation candidates on every scenario ([#80](https://github.com/shadewright-labs/shadewright/issues/80)), run `make eval-model`
 by hand, with the identity and network reach above (the Evaluation workflow does not pass these variables),
 with `EVAL_FORCE_ESCALATION=1` and the candidate as `EVAL_ESCALATION_DEPLOYMENT` and `EVAL_ESCALATION_MODEL`:
 the harness marks every built context with a failed source, the builder's own signal, so the loop calls the
@@ -405,7 +405,7 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 
 | File | Content |
 | --- | --- |
-| `expected.yaml` | The scenario's expectation, copied unchanged from `pkalin/shadewright-fleet` at the commit `source.yaml` names (schema `scenarios.shadewright.io/v1alpha1`, owned by the fleet repository) |
+| `expected.yaml` | The scenario's expectation, copied unchanged from `shadewright-labs/shadewright-fleet` at the commit `source.yaml` names (schema `scenarios.shadewright.io/v1alpha1`, owned by the fleet repository) |
 | `rubric.yaml` | How each fact of `expected.yaml` is scored, and the reads the model is expected to make and, for a proposal whose number the model chooses, the size the evidence supports (above) |
 | `incident.yaml` | The Incident as the analyzer would have it; its reason and subject must match `expected.yaml` |
 | `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events, and the KEDA ScaledObject of `broken-keda-trigger` and `keda-at-ceiling` (spec from the fleet's scenario file, synthetic status; decoded as unstructured JSON, as the analyzer reads it) |
@@ -423,7 +423,7 @@ why, required), its own `replies.yaml`, and an `incident.yaml`, `objects.yaml`, 
 its Incident, objects, series or policies differ (otherwise the scenario's are used; a variant's Incident must match
 `expected.yaml` as the scenario's does). The evaluation manifest hashes its files with the scenario files. `oom/rollout` is the
 `oom` scenario during a rollout, as the lab met it on 2026-11-07
-([#494](https://github.com/pkalin/shadewright/issues/494)): the pod template sets 48Mi while the old ReplicaSet's
+([#494](https://github.com/shadewright-labs/shadewright/issues/494)): the pod template sets 48Mi while the old ReplicaSet's
 pod still runs with 64Mi, and the reply takes a value from a running pod (the new pod's working set, copied from
 the metrics) as the previous value, as the lab's model took the old pod's 64Mi. The loop takes the previous
 value from the pod template instead
@@ -440,7 +440,7 @@ or 6, all inside the policy, fails it ([Size](#scoring)).
 [ADR-0039](adr/0039-consequence-symptoms-attach-to-their-causes-incident.md) (#791): `status.cause` set and the
 kubelet's `BackOff` (5, last 11:56:10) and `Unhealthy` (4, last 11:56:00) counted in `status.absorbed`, the counts
 the grouping case takes from `grouping.yaml`. Its context's summary shows the absorbed tally (point 18,
-[#796](https://github.com/pkalin/shadewright/issues/796), [design 3.3](design/3-observation-and-deduplication.md#the-context-builder));
+[#796](https://github.com/shadewright-labs/shadewright/issues/796), [design 3.3](design/3-observation-and-deduplication.md#the-context-builder));
 everything else is the scenario's, and so is its reply, unchanged: the tally adds lines at the end of the summary block and
 moves no block ID, and none of its lines is quotable. It is the recorded scenario the evaluation gate of ADR-0025
 asked for before the tally reached the model. `TestPromptShowsTheAbsorbedTally` replays it, checks that it passes
@@ -517,7 +517,7 @@ of the metrics block verbatim as evidence.
 
 **The HPA metric of `keda-at-ceiling`.** Its subject, a `ScaledObject`, resolves no pods, so the builder asks only
 the two HPA templates, for the HPA the ScaledObject's `status.hpaName` names, once that HPA in `objects.yaml` passes
-the owner check (design 3.3, [#480](https://github.com/pkalin/shadewright/issues/480)). Its `metrics.yaml` (synthetic, as no recording of a cluster with these series exists yet) holds the external metric
+the owner check (design 3.3, [#480](https://github.com/shadewright-labs/shadewright/issues/480)). Its `metrics.yaml` (synthetic, as no recording of a cluster with these series exists yet) holds the external metric
 `s0-prometheus` at 6.5 per replica, about 13 requests per second over the 2 replicas of the ceiling, against an average
 target of 5, and the backlog fact is scored from it: the current value (per replica or in all) and the target with its
 value. The rubric matches each number with a delimiter after it, so a value at the very end of the reply's text (the
@@ -526,16 +526,16 @@ a milli quantity such as `6500m` into a placeholder, so the recorded Incident le
 replica history stay unscored: no template reads them.
 
 **Cases that expect no proposal after a wrong one.** `startup-probe` (a readiness probe that failed once at pod start,
-the pod Ready now, no restart, no `OOMKilled`; [#726](https://github.com/pkalin/shadewright/issues/726)) and
+the pod Ready now, no restart, no `OOMKilled`; [#726](https://github.com/shadewright-labs/shadewright/issues/726)) and
 `replaced-pod` (a healthy current template and one terminating pod of the previous ReplicaSet that still reports
-`OOMKilled`; [#724](https://github.com/pkalin/shadewright/issues/724)) come from lab runs where the model proposed a
+`OOMKilled`; [#724](https://github.com/shadewright-labs/shadewright/issues/724)) come from lab runs where the model proposed a
 memory increase the evidence did not support. Both expect a refusal (`NoProposal` or `MissingData`), and a memory
 proposal of any value fails the case. The `startup-probe` fact that memory is ruled out ("no container was
 OOMKilled and nothing points at memory") is scored by a list of phrases. In the runs of 2026-11-14 and 2026-11-17
 five replies refused as expected and stated the fact in words the list did not hold ("not a memory issue", "not
 memory or scaling", "nothing points to memory", "memory limit is not implicated", "no evidence that the
 pod-template memory limit ... caused this failure"), so they failed on wording alone. Since
-[#843](https://github.com/pkalin/shadewright/issues/843) the list holds exactly those phrasings, each with a comment
+[#843](https://github.com/shadewright-labs/shadewright/issues/843) the list holds exactly those phrasings, each with a comment
 naming the run it comes from. A reply that says nothing about memory still fails the fact, and none of the added
 phrases matches a reply that blames memory ("it is a memory issue", "points to memory"); `TestStartupProbeMemoryFact`
 checks both. The context is unchanged. The change alters the hash of the scenario's `rubric.yaml`, so the manifest
@@ -570,7 +570,7 @@ field the version does not know. The JSON fields:
 | `scenarios[].diagnosis` | `pass`, `facts[]` (`fact`, `pass`, `missing` terms), `unscored[]` (`fact`, `why`), `detail` |
 | `scenarios[].quoteFailures` | Only for a run that ended `NoEvidence`: one entry per quote of the refused result, in order, with `source` (the cited ID), `block` (the cited block's context section or tool name), `class` (below), `quoteBytes`, `blockBytes` and, for `partial`, `matchedBytes`. No text of the block; the quote's own text, redacted, is in `reply` |
 | `scenarios[].summaryQuotes` | Only for a run whose result the loop accepted (not `NoEvidence`): one entry per quote the summary check reports, with `source` (the cited ID), `kind` (`cut-note`, `tally-line`, `cut-part`, `near-miss` or `not-shown`, [Quotes of the summary](#the-scenario-files)), `fails` (true for the first three, which fail the run; the others are only recorded) and `quoteBytes`. No text of the quote; it is in `reply`. The Markdown report lists them in a table after the runs |
-| `scenarios[].reply` | Only for a run whose last reply decoded as a result, whether the loop then accepted it or refused it (`NoEvidence`) ([#600](https://github.com/pkalin/shadewright/issues/600)): the model's `summary`, `hypotheses` (their descriptions) and `evidence[]` (`source`, `quote`), so a missed fact can be traced to what the model wrote. Redacted as the analyzer redacts the result's text (built-in rules, the Incident's name kept) and capped: the summary at 1024 bytes, each hypothesis, source and quote at 512, at most 10 hypotheses and 10 quotes (the result's own bounds, so a decoded reply is kept whole today); a cut field ends with ` [truncated]` and `truncated` is then true. In `report.json` only, not in the Markdown |
+| `scenarios[].reply` | Only for a run whose last reply decoded as a result, whether the loop then accepted it or refused it (`NoEvidence`) ([#600](https://github.com/shadewright-labs/shadewright/issues/600)): the model's `summary`, `hypotheses` (their descriptions) and `evidence[]` (`source`, `quote`), so a missed fact can be traced to what the model wrote. Redacted as the analyzer redacts the result's text (built-in rules, the Incident's name kept) and capped: the summary at 1024 bytes, each hypothesis, source and quote at 512, at most 10 hypotheses and 10 quotes (the result's own bounds, so a decoded reply is kept whole today); a cut field ends with ` [truncated]` and `truncated` is then true. In `report.json` only, not in the Markdown |
 | `totals` | `runs`, `passed`, `passRate`, `pass` (whether the threshold was reached), `seconds` (every run, failed ones included, on a monotonic clock), `secondsPerPassed` and `tokensPerPassed` (charged), each over the passed runs with failed runs counted in, and left out when no run passed, `tokens` (summed, with `byRole`), `toolCalls`, `costUSD` and `costUSDByRole`, each role at its deployment's prices (only with prices), `incompleteRuns` (runs with a call of unknown usage or that stopped with an error), `costIncomplete` when there is any, so the estimate is a lower bound (the Markdown summary says so; compare `charged`), and `costPerPassedRunUSD`, the cost of every run, failed ones included, over the passed runs: left out without prices or when no run passed (the Markdown says "none, no run passed", never 0), and a lower bound when `costIncomplete` is set. A failed call is never priced as zero: it counts in `usageUnknownCalls` and makes the cost incomplete. The exception is a call the adapter marks as refused before processing (a Foundry 429), which was not billed and has a known usage of 0 (#725). A role that used tokens (or made a call of unknown usage) with no prices of its own, the escalation without `EVAL_ESCALATION_PRICE_*`, is never priced at another role's prices: `costUSD` and `costPerPassedRunUSD` are then left out, `costUnknown` says why, `costUSDByRole` keeps the priced roles, and the Markdown says "unknown" |
 
 The report holds no prompt, no token and no endpoint, and no model text beyond the redacted, capped `reply`.
@@ -580,7 +580,7 @@ The report holds no prompt, no token and no endpoint, and no model text beyond t
 A proposal needs a quote copied exactly from within one data value of the block it cites
 ([design 3.3](design/3-observation-and-deduplication.md#the-prompt-and-the-result)). When none of its quotes passes,
 the loop ends `NoEvidence` and the report gives each quote the first class that fits, in this order
-(`internal/analysis/quotes.go`, [#474](https://github.com/pkalin/shadewright/issues/474)). From `unescaped` on,
+(`internal/analysis/quotes.go`, [#474](https://github.com/shadewright-labs/shadewright/issues/474)). From `unescaped` on,
 only the cited block's data values are searched, never its labels, so each of those classes names the change that
 would have made the quote pass. The class only diagnoses
 the prompt and the check; nothing reads it to decide, and the check itself stays exact. The classification is
@@ -634,7 +634,7 @@ output schema and the tool definitions: a change to that code that alters behavi
 example how a tool reads or how a result is checked) needs a new evaluation by hand, as ADR-0025 says for any change
 to the tools or the context.
 
-**The absorbed tally and the digest.** The tally block ([#796](https://github.com/pkalin/shadewright/issues/796))
+**The absorbed tally and the digest.** The tally block ([#796](https://github.com/shadewright-labs/shadewright/issues/796))
 changes `contextBuilder.source`, since it is code in `internal/incidentcontext`, `redaction.builtInRules`, since
 `MarkerShapes` in `internal/redact` is hashed, and `scenarios`, since it adds the `oom/absorbed` variant. So every manifest digest changes, for every Incident, with or without a tally: a real-model
 result recorded before it no longer matches. No passing result is stored in this repository yet (planned), so
@@ -649,9 +649,9 @@ repeats, which ADR-0025 checks when the list of passing results is built); that 
 
 The fleet scenarios hold every fact of their diagnosis in the context, so a model escalated on them never needs a
 tool (the forced-escalation benchmark of 2026-11-07 escalated 27 times and called none,
-[#503](https://github.com/pkalin/shadewright/issues/503)). Each escalation scenario under
+[#503](https://github.com/shadewright-labs/shadewright/issues/503)). Each escalation scenario under
 `test/eval/testdata/escalation/` has a fact that only a read tool shows
-([#504](https://github.com/pkalin/shadewright/issues/504)). Its report name is `escalation/<directory>`.
+([#504](https://github.com/shadewright-labs/shadewright/issues/504)). Its report name is `escalation/<directory>`.
 
 No deterministic signal of the context fires for a fact that is merely missing (a `missingData` entry is never
 one, design 3.3), so unless a scenario names a `signal`, the harness sends every run of it to the escalation model
@@ -669,11 +669,11 @@ scenario, `expected.yaml`, `incident.yaml`, `objects.yaml` and `policy.yaml`, an
 | `fleetScenario` | The fleet scenario whose `expected.yaml`, `incident.yaml`, `objects.yaml`, `policy.yaml`, `metrics.yaml` and `logs.yaml` it takes, unchanged; the directory may not hold its own. Left out, the scenario is synthetic: its own `expected.yaml`, in the fleet's schema, under a name no fleet scenario has |
 | `behindReads` | Required: the facts of `rubric.yaml`, verbatim, that only the expected reads show; a name that is no scored fact of the rubric is refused |
 | `signal` | The product's own escalation signal the scenario relies on: `truncated` (the builder cut the context to its total bound) or `failedSource` (a configured source failed). Left out, no signal fires and the harness forces the escalation |
-| `contextBytes` | The builder's total bound on the context, the section bounds staying at their defaults; required with `signal: truncated` and refused otherwise, 4096 to 262144 (the builder's range; `maxContextBytes` of RemediationSettings allows 4096 to 49152). The default section bounds add up to the default total, so with the defaults the total cut never happens; only a total below their sum can cut the context. A deployed analyzer bounds the context the same way when `maxContextBytes` of RemediationSettings has this value ([#981](https://github.com/pkalin/shadewright/issues/981)) |
+| `contextBytes` | The builder's total bound on the context, the section bounds staying at their defaults; required with `signal: truncated` and refused otherwise, 4096 to 262144 (the builder's range; `maxContextBytes` of RemediationSettings allows 4096 to 49152). The default section bounds add up to the default total, so with the defaults the total cut never happens; only a total below their sum can cut the context. A deployed analyzer bounds the context the same way when `maxContextBytes` of RemediationSettings has this value ([#981](https://github.com/shadewright-labs/shadewright/issues/981)) |
 | `metricsSource` | `down`: a configured metrics source that fails every query, a Prometheus that is down. Required with `signal: failedSource` and refused otherwise, and refused with a `metrics.yaml` |
 
 `escalation/cut-context` tests the total bound only. A logs section cut at its own bound, with the total within
-its limit, sets no signal and the product does not escalate on it ([#851](https://github.com/pkalin/shadewright/issues/851)); no scenario covers that case.
+its limit, sets no signal and the product does not escalate on it ([#851](https://github.com/shadewright-labs/shadewright/issues/851)); no scenario covers that case.
 
 The harness refuses an escalation scenario whose rubric lists no `reads`, or that has variants. The tests check,
 for every escalation scenario, that it passes on its recorded replies (`TestEscalationScenariosPass`); that each
@@ -702,7 +702,7 @@ an image on the reserved `.invalid` domain. The log lines are synthetic too, and
 
 Two cases of #504 are not built. A Service selector that does not match the pod labels: no read tool reads a
 Service (`get_resource` reads Pods, Deployments, StatefulSets and ReplicaSets) and the analyzer has no RBAC on
-Services, so the selector cannot sit behind a read ([#847](https://github.com/pkalin/shadewright/issues/847)). A
+Services, so the selector cannot sit behind a read ([#847](https://github.com/shadewright-labs/shadewright/issues/847)). A
 renamed Secret key: the kubelet's error in the context already names the missing key, and the fact only a read
 could add, which keys the Secret has, is shown by no read tool (`check_missing_reference` answers from the pod
 status and Events and never reads the Secret, and `get_resource` reads no Secret). For the same reason the missing
@@ -713,7 +713,7 @@ ConfigMap key of `oom-config-key` is a key of a mounted ConfigMap that the appli
 
 Two cases of [ADR-0039](adr/0039-consequence-symptoms-attach-to-their-causes-incident.md) count what a lab run
 counts, and need no model to decide: `oom` gives one Incident, one analysis and at most one request for `demo/web`,
-and `startup-probe` opens nothing ([#795](https://github.com/pkalin/shadewright/issues/795)). `test/eval/grouping_test.go`
+and `startup-probe` opens nothing ([#795](https://github.com/shadewright-labs/shadewright/issues/795)). `test/eval/grouping_test.go`
 runs them in `make test` on a real API server (envtest): it creates the scenario's objects (with `grouping.yaml` for
 `oom`), their times moved so that the fault happened seconds ago, and runs the analyzer's pipeline on them as
 `cmd/analyzer` wires it: the collector, the Incident controller with its analysis trigger, and the analysis controller
@@ -748,7 +748,7 @@ analyses (units taken from the daily budget, and model calls) and the requests.
   these cases wire the collector without `CauseSeen`, so it emits a consequence that shows a cause at once and the
   relays above decide the order; the hold and its release by the Incident controller are covered by the unit
   tests of `internal/analyzer/collector` and `internal/incidents`. A consequence Incident that already has a request with no pull request is
-  the executor's to cancel ([#794](https://github.com/pkalin/shadewright/issues/794)); this case does not cover it.
+  the executor's to cancel ([#794](https://github.com/shadewright-labs/shadewright/issues/794)); this case does not cover it.
 - `TestGroupingStartupProbeOpensNothing`: the readiness probe failure of the new `demo/worker` pod. The collector
   skips it as part of the pod's start (its counter
   `shadewright_analyzer_settled_probe_failures_skipped_total{probe="Readiness"}` rises, design 3.1, #726), and no

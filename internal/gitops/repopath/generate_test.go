@@ -24,8 +24,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/gitops/repopath"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/gitops/repopath"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // tree is a listing per directory.

@@ -8,7 +8,7 @@ Short answers, each pointing to the page that has the detail. Terms are in the [
 
 ## What will it never do?
 
-These are the project's six invariants ([AGENTS.md](https://github.com/pkalin/shadewright/blob/main/AGENTS.md), [design 10](design/10-security.md#10-security), [threat model](threat-model.md)); a change that weakened one would need a new ADR first.
+These are the project's six invariants ([AGENTS.md](https://github.com/shadewright-labs/shadewright/blob/main/AGENTS.md), [design 10](design/10-security.md#10-security), [threat model](threat-model.md)); a change that weakened one would need a new ADR first.
 
 1. **Model output is never authorization.** The analyzer can only submit a proposal. Deterministic policy decides whether it may run, and the executor acts only on a plan whose digest matches the approved one.
 2. **Actions are a closed catalog.** Each action is an enum value with typed, bounded parameters (today `SetContainerMemoryLimit` and `AdjustKedaMaxReplicas`). There is no free-form command, no `exec` and no direct `apply` against the cluster, not even as a fallback when a pull request fails ([ADR-0003](adr/0003-gitops-only-typed-remediation.md)).
@@ -40,7 +40,7 @@ Yes: install in [observe-only mode](install.md). It records Incidents and has no
 
 ## It proposed nothing. Why?
 
-The analysis that diagnoses and proposes is built but off by default (`--triage-model`), and until its evaluation gate ([#78](https://github.com/pkalin/shadewright/issues/78)) exists it is for evaluation runs in the lab only, so today requests are written by hand ([your first proposal](first-proposal.md)). To see what the analyzer saw, [read an Incident](how-to/read-an-incident.md).
+The analysis that diagnoses and proposes is built but off by default (`--triage-model`), and until its evaluation gate ([#78](https://github.com/shadewright-labs/shadewright/issues/78)) exists it is for evaluation runs in the lab only, so today requests are written by hand ([your first proposal](first-proposal.md)). To see what the analyzer saw, [read an Incident](how-to/read-an-incident.md).
 
 ## A request stopped. Where do I look?
 

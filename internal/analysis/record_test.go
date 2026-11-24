@@ -38,11 +38,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	kfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/fake"
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/testutil/metricguard"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/fake"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/testutil/metricguard"
 )
 
 // With a store, a run writes one record and its ID goes into status.analysisRecords in the outcome update. The
@@ -112,9 +112,13 @@ func TestControllerRecordFailureKeepsTheOutcome(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err    error
 		result string
+		says   string // a part of the event's message
 	}{
-		"transient": {&providers.RetryableError{Err: errors.New("azureblob: no answer from Blob Storage")}, recordFailed},
-		"refused":   {fmt.Errorf("azureblob: the record still holds data: %w", providers.ErrRejected), recordRefused},
+		"transient": {&providers.RetryableError{Err: errors.New("azureblob: no answer from Blob Storage")}, recordFailed, "the write failed"},
+		"refused":   {fmt.Errorf("azureblob: the record still holds data: %w", providers.ErrRejected), recordRefused, "the store refused it"},
+		// Every try of the store's redaction check waited for the heap limit (#1087, decision of 2026-11-22).
+		"not checked": {&providers.RetryableError{Err: fmt.Errorf("azureblob: the check did not run: %w", providers.ErrNotChecked)},
+			recordFailed, "its redaction check waited for other redactions to finish on every try"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ns := namespace(t)
@@ -141,8 +145,9 @@ func TestControllerRecordFailureKeepsTheOutcome(t *testing.T) {
 			}
 			select {
 			case e := <-events.Events:
-				if !strings.HasPrefix(e, "Warning "+EventRecordNotWritten+" ") || strings.Contains(e, "azureblob") {
-					t.Errorf("event %q, want the fixed Warning %s", e, EventRecordNotWritten)
+				if !strings.HasPrefix(e, "Warning "+EventRecordNotWritten+" ") || strings.Contains(e, "azureblob") ||
+					!strings.Contains(e, tc.says) {
+					t.Errorf("event %q, want the fixed Warning %s saying %q", e, EventRecordNotWritten, tc.says)
 				}
 			default:
 				t.Error("no event for the record that was not written")

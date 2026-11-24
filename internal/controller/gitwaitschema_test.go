@@ -32,8 +32,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/yaml"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
-	fx "github.com/pkalin/shadewright/internal/testfixtures"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	fx "github.com/shadewright-labs/shadewright/internal/testfixtures"
 )
 
 // statusSchema checks a RemediationRequest status against the OpenAPI schema of the generated CRD (lengths,

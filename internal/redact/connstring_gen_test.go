@@ -26,11 +26,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/incidentcontext"
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
-	"github.com/pkalin/shadewright/internal/modules"
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/tools"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // This file compiles on origin/main as well (with entrypoints_tools_test.go and a defaultRedactor), so that
@@ -143,17 +143,17 @@ func connEntryPoints() map[string]func(in string) []string {
 		"fingerprint.Value":  func(in string) []string { return []string{fingerprint.Value(in)} },
 		"modules.BoundValue": func(in string) []string { return []string{modules.BoundValue(in)} },
 		"incidentcontext.Value": func(in string) []string {
-			return []string{incidentcontext.Value(redact.String, in)}
+			return []string{incidentcontext.Value(stringTwice, in)}
 		},
 		"incidentcontext.Value of the symptom": func(in string) []string {
-			return []string{incidentcontext.Value(redact.String, fingerprint.Symptom(fingerprint.Observation{Note: in}))}
+			return []string{incidentcontext.Value(stringTwice, fingerprint.Symptom(fingerprint.Observation{Note: in}))}
 		},
 		tools.NameGetResource: toolText(tools.NameGetResource,
 			map[string]any{argKind: toolKind, argNamespace: toolNS, argName: toolPod}),
 		tools.NameListEvents: toolText(tools.NameListEvents,
 			map[string]any{argNamespace: toolNS, argKind: toolKind, argName: toolPod, "limit": 5}),
 		tools.NameGetPodLogs: toolText(tools.NameGetPodLogs,
-			map[string]any{argNamespace: toolNS, "pod": toolPod, "container": toolContainer}),
+			map[string]any{argNamespace: toolNS, argPod: toolPod, argContainer: toolContainer}),
 	}
 }
 

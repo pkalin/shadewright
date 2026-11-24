@@ -10,7 +10,7 @@ ADR-0037. Foundry already speaks Chat Completions and Responses, but binds them 
 an Entra identity. Operators also need the OpenAI API, gateways and models served
 inside a cluster. A protocol name is not a claim that every server enforces schemas.
 The decision of 2026-11-16 is one configurable provider, not one fixed vendor host.
-On 2026-11-17 the [decision on issue #834](https://github.com/pkalin/shadewright/issues/834#issuecomment-6946338496)
+On 2026-11-17 the [decision on issue #834](https://github.com/shadewright-labs/shadewright/issues/834#issuecomment-6946338496)
 bound the models at install time as well: each endpoint declaration names an exact
 base URL and the model names allowed at it, so settings choose neither the base nor
 the model alias a gateway routes on.
@@ -169,7 +169,7 @@ raw bytes.
 The check does not model terminal escape sequences. Model text is stored without
 control characters: every code point of Unicode category Cc (C0, DEL, C1) except
 newline and tab is removed where model output enters the analysis loop, for every
-provider ([#852](https://github.com/pkalin/shadewright/issues/852)). What is
+provider ([#852](https://github.com/shadewright-labs/shadewright/issues/852)). What is
 stored is then what any terminal shows, and the view drops a superset of what
 storage removes, so a key that is contiguous in stored text is contiguous in the
 view and is refused. A sequence with visible parameters inside the key, such as
@@ -177,7 +177,7 @@ view and is refused. A sequence with visible parameters inside the key, such as
 `[0m` between the key's characters, so no reader sees the key whole. A grammar
 of terminal behaviour in the scan was tried and dropped: it is a list of what a
 screen hides again, and it diverged from what a reader sees field by field. This
-provider must not ship before #852. Every pass is linear in the size of the
+provider needed #852, which is built (amendment of 2026-11-22). Every pass is linear in the size of the
 reply; the tests bound the work at a fixed multiple of it.
 
 The key must be printable ASCII and at least 16 bytes; anything else is refused
@@ -195,7 +195,7 @@ found, and no check of this kind can find it. The endpoint is given the key at
 install and is trusted with it: the check stops an echo from reaching status,
 Events, logs and pull requests in a form a reader can use, and is not a defence
 against an endpoint that hides the key. The check covers terminal tricks only
-together with #852: without that change, control characters and escape sequences
+together with #852 (built): without it, control characters and escape sequences
 inserted into the key could hide letters from a raw terminal that the view keeps.
 Outputs remain untrusted: the redactor
 checks records and telemetry, typed result and tool argument validation and
@@ -309,4 +309,4 @@ Offline transport tests do not replace scenario qualification.
 
 ## Amendments
 
-None.
+- 2026-11-22 ([#852](https://github.com/shadewright-labs/shadewright/issues/852)): #852, the condition this ADR set for shipping the provider, is built. Model text is stored without control characters and a tool call that holds one is refused, for every provider ([ADR-0023](0023-how-the-analyzer-calls-the-model.md), amendment of that date). Nothing else changes.

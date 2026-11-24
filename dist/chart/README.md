@@ -22,7 +22,7 @@ This chart installs the three components (the analyzer, the executor and the ver
 With no values the published chart installs an idle Shadewright. The analyzer starts and is Ready but watches no namespace (no RoleBinding outside the operator namespace, no Incident): it reads no namespaced object outside the operator namespace, has no Git identity, and writes only in the operator namespace (its Leases, the budget ConfigMap, Events) plus the settings status once a settings object exists; it still lists Nodes and reads discovery and the settings cluster-wide. The executor has no Azure workload identity, so it cannot reach Key Vault to sign for the GitHub App. The verifier follows `analyzer.watchNamespaces` (`verifier.watchNamespaces` is `null`), so it reads no pod either. It has no cloud identity of any kind: no model access and no Git credentials, so there is nothing to configure for it. The cluster ID defaults to the UID of the `kube-system` namespace. To catch a forgotten watch list, alert on `shadewright_analyzer_watched_namespaces == 0`.
 
 ```bash
-helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+helm install shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --version <version> \
   --namespace shadewright-system --create-namespace
 helm test shadewright --namespace shadewright-system
 ```
@@ -40,7 +40,7 @@ analyzer:
 ```
 
 ```bash
-helm upgrade --install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+helm upgrade --install shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --version <version> \
   --namespace shadewright-system --create-namespace -f my-values.yaml
 ```
 
@@ -88,7 +88,7 @@ verifier:
 
 - **What a standby gives.** Leader election is always on, so one Pod per component holds the Lease and works; the others wait. When the leader's Pod fails or is evicted, a standby takes over after about one Lease duration (15 seconds by default) instead of after a Pod start. Writes use optimistic concurrency and deterministic names, so a second Pod is safe.
 - **What it costs.** An idle Pod per component and identity (its requests and limits, and one more node slot).
-- **What it does not give.** No throughput: only the leader reconciles. Horizontal scaling is a separate feature ([#559](https://github.com/pkalin/shadewright/issues/559)).
+- **What it does not give.** No throughput: only the leader reconciles. Horizontal scaling is a separate feature ([#559](https://github.com/shadewright-labs/shadewright/issues/559)).
 - **What the chart adds above 1.** A PodDisruptionBudget with `minAvailable: 1` for that component, and a preferred Pod anti-affinity by node (`kubernetes.io/hostname`), so a node drain or a node failure leaves one Pod. With a single node both Pods share it, and a drain of that node stops at the second Pod: its replacement cannot be scheduled while the node is cordoned, so the budget holds until you delete the Pod yourself or uncordon the node. An `affinity` of your own that sets `podAntiAffinity` replaces the chart's term. With 1 replica neither object is rendered.
 - **No RBAC change.** Each component already holds the grant for its own Lease.
 
@@ -97,7 +97,7 @@ verifier:
 On by default (`networkPolicy.enabled: true`). The chart installs a default deny for the release namespace (ingress and egress), one egress policy per component and one ingress policy for the metrics port:
 
 - All three components may send DNS (`networkPolicy.dns`) and TCP 443 and 6443 to any address. 443 is the model endpoint, Key Vault, Entra ID, GitHub and the API server of a managed cluster; 6443 is the API server on kubeadm and kind. The policies are separate objects, so you can narrow one without touching the other.
-- The analyzer gets one more rule when you set `networkPolicy.analyzer.prometheus.enabled`: TCP to the Prometheus Pods you name (default port 9090). It is off by default because the analyzer sends Prometheus nothing unless `--prometheus-url` is set: with `--prometheus-cluster` too, it probes it at startup and every 10 minutes, and it queries it when the analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76), on with `analyzer.analysis.triageModel`) calls the context builder or a read tool. The executor never gets it. Allow the analyzer in the ingress policy of the Prometheus namespace as well; the chart changes nothing outside its own namespace.
+- The analyzer gets one more rule when you set `networkPolicy.analyzer.prometheus.enabled`: TCP to the Prometheus Pods you name (default port 9090). It is off by default because the analyzer sends Prometheus nothing unless `--prometheus-url` is set: with `--prometheus-cluster` too, it probes it at startup and every 10 minutes, and it queries it when the analysis loop ([#76](https://github.com/shadewright-labs/shadewright/issues/76), on with `analyzer.analysis.triageModel`) calls the context builder or a read tool. The executor never gets it. Allow the analyzer in the ingress policy of the Prometheus namespace as well; the chart changes nothing outside its own namespace.
 - Ingress to the metrics port comes only from namespaces labeled `metrics: enabled`. Nothing else is allowed in.
 
 **What this does not do.** A NetworkPolicy cannot match host names, and the API server has no label to select, so the chart limits ports and directions, not destinations. The analyzer can reach any HTTPS address at the network level, `api.github.com` included. What keeps it away from GitHub is that its binary has no GitHub adapter and holds no GitHub credential, not the policy. Restricting egress by host name (for example a Cilium `CiliumNetworkPolicy` with `toFQDNs`, or Azure CNI powered by Cilium on AKS with an FQDN policy) is your choice and is not shipped or tested here. The API server address is unknown when the chart renders, so the rule allows 443 and 6443 to any address; to narrow it, replace that rule with `ipBlock` ranges for the API server (on AKS, the private cluster endpoint or the address in `kubectl get endpoints kubernetes`) through your own policy.
@@ -110,17 +110,17 @@ The chart and the images are signed with cosign keyless (GitHub OIDC) by digest.
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github\.com/pkalin/shadewright/\.github/workflows/chart\.yml@refs/tags/v[0-9].*$' \
+  --certificate-identity-regexp '^https://github\.com/shadewright-labs/shadewright/\.github/workflows/chart\.yml@refs/tags/v[0-9].*$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/pkalin/charts/shadewright@sha256:<chart digest>
+  ghcr.io/shadewright-labs/charts/shadewright@sha256:<chart digest>
 ```
 
-The digest is in the run summary of the Chart workflow, or `helm pull oci://ghcr.io/pkalin/charts/shadewright --version <version>` prints it (`Digest:`). Image signatures are verified the same way: use the image name (`ghcr.io/pkalin/shadewright-executor@sha256:<digest>`, `shadewright-analyzer` or `shadewright-verifier`) and the `images\.yml` workflow in the identity.
+The digest is in the run summary of the Chart workflow, or `helm pull oci://ghcr.io/shadewright-labs/charts/shadewright --version <version>` prints it (`Digest:`). Image signatures are verified the same way: use the image name (`ghcr.io/shadewright-labs/shadewright-executor@sha256:<digest>`, `shadewright-analyzer` or `shadewright-verifier`) and the `images\.yml` workflow in the identity. v0.6.0 and earlier are published under `ghcr.io/pkalin` and signed by the workflows of `github.com/pkalin/shadewright`: write `pkalin` in place of `shadewright-labs` in the reference and the identity for them.
 
 ## Upgrade
 
 ```bash
-helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+helm upgrade shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --version <version> \
   --namespace shadewright-system -f my-values.yaml
 ```
 
@@ -154,13 +154,13 @@ helm uninstall shadewright --namespace shadewright-system
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | image.allowTag | bool | `false` | Allow an image without a digest to run by the `appVersion` tag. Off by default, so the chart fails to render when a digest is missing: the published chart carries the release's signed digests and needs nothing here. Set `true` only from a source checkout, with images built from that same checkout (older images, such as v0.1.0, stop at start with an empty `analyzer.watchNamespaces`). |
-| executor.image.repository | string | `"ghcr.io/pkalin/shadewright-executor"` | Repository of the executor image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true. |
+| executor.image.repository | string | `"ghcr.io/shadewright-labs/shadewright-executor"` | Repository of the executor image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true. |
 | executor.image.digest | string | the release's digest in the published chart, empty in the source | Digest of the executor image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field. |
 | executor.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. One of `Always`, `IfNotPresent` or `Never`. |
-| analyzer.image.repository | string | `"ghcr.io/pkalin/shadewright-analyzer"` | Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true. |
+| analyzer.image.repository | string | `"ghcr.io/shadewright-labs/shadewright-analyzer"` | Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true. |
 | analyzer.image.digest | string | the release's digest in the published chart, empty in the source | Digest of the analyzer image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field. |
 | analyzer.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. One of `Always`, `IfNotPresent` or `Never`. |
-| verifier.image.repository | string | `"ghcr.io/pkalin/shadewright-verifier"` | Repository of the verifier image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true. |
+| verifier.image.repository | string | `"ghcr.io/shadewright-labs/shadewright-verifier"` | Repository of the verifier image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true. |
 | verifier.image.digest | string | the release's digest in the published chart, empty in the source | Digest of the verifier image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field. |
 | verifier.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. One of `Always`, `IfNotPresent` or `Never`. |
 
@@ -278,7 +278,7 @@ helm uninstall shadewright --namespace shadewright-system
 | analyzer.serviceAccount.annotations | object | `{}` | Further ServiceAccount annotations, for another cloud's workload identity. Keys under `azure.workload.identity/` are refused: use `analyzer.identity.azure.clientId`. |
 | analyzer.goMemLimit | string | 90 percent of `resources.limits.memory` | Go memory limit (`GOMEMLIMIT`) of the container, such as `100MiB`. Empty (the default) sets 90 percent of `resources.limits.memory`, so it follows that limit: the Go runtime then collects before the heap reaches the container's limit, and a large but bounded parse is not OOM-killed. Set it for a limit the chart cannot read (not a number of bytes or a number with an optional fraction and a `Ki`, `Mi`, `Gi`, `Ti`, `k`, `K`, `M`, `G` or `T` suffix, such as `1e9`: the chart then refuses to render) or for another margin. |
 | analyzer.resources.limits.cpu | string | `"500m"` | CPU limit (optional; removing it with `null` lets the container use idle CPU). |
-| analyzer.resources.limits.memory | string | `"128Mi"` | Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never unbounded. |
+| analyzer.resources.limits.memory | string | `"256Mi"` | Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never unbounded. 256Mi since #1087: one redaction of the largest object can hold up to about 117 MiB of heap, and the redactions running at once share half of `goMemLimit`. |
 | analyzer.resources.requests.cpu | string | `"10m"` | CPU request. |
 | analyzer.resources.requests.memory | string | `"64Mi"` | Memory request. |
 | analyzer.extraArgs | list | `[]` | Further command line flags, each `--name` or `--name=value`. The chart refuses the flags it sets itself, so a free list cannot turn off leader election, metrics authentication or the watched namespaces: `--leader-elect`, `--health-probe-bind-address`, `--metrics-bind-address`, `--metrics-secure`, `--metrics-cert-path`, `--metrics-cert-name`, `--metrics-cert-key`, `--namespace`, `--watch-namespaces`, `--cluster-id`, `--max-incidents`, the context source flags and the analysis flags. |

@@ -42,7 +42,7 @@ const (
 )
 
 var (
-	commaFirstKeys   = []string{"password", "TOKEN", "API_TOKEN", "DB_PASSWORD", clientSecretKey, "user", "--password ", "export TOKEN"}
+	commaFirstKeys   = []string{"password", "TOKEN", "API_TOKEN", "DB_PASSWORD", clientSecretKey, "user", spacedPasswordFlag, "export TOKEN"}
 	commaSeps        = []string{"=", ": ", "= ", ":"}
 	commaFirstValues = []string{`"abc"`, `'abc'`, `"a b"`, `'a b'`, `"a"x`, plainABC, `"abc"def`, `""`}
 	commaSecondKeys  = []string{
@@ -98,7 +98,7 @@ func TestWriteCommaFieldsMainTable(t *testing.T) {
 	enc := json.NewEncoder(w)
 	for _, in := range commaFieldsCorpus(3000) {
 		c := mainRedaction{In: in, Out: String(in)}
-		for _, sp := range defaultRedactor.spans(in) {
+		for _, sp := range defaultRedactor.spans(nil, in) {
 			c.Spans = append(c.Spans, [2]int{sp.start, sp.end})
 		}
 		if err := enc.Encode(c); err != nil {
@@ -117,6 +117,8 @@ func TestWriteCommaFieldsMainTable(t *testing.T) {
 // by a comma, each byte main redacted is still redacted, so a secret-named key after the comma keeps its
 // value redacted at least as well as on main.
 func TestCommaFieldsStillRedactWhatMainRedacted(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	f, err := os.Open(commaFieldsMainTable)
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +138,10 @@ func TestCommaFieldsStillRedactWhatMainRedacted(t *testing.T) {
 		if len(c.Spans) > 0 {
 			redacted++
 		}
-		now := defaultRedactor.spans(c.In)
+		if !raceKeeps(t.Name(), cases-1) {
+			continue // a seeded sample under -race; all of them without it
+		}
+		now := defaultRedactor.spans(nil, c.In)
 	spans:
 		for _, want := range c.Spans {
 			for i := want[0]; i < want[1]; i++ {

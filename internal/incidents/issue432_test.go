@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/analyzer/collector"
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/collector"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 )
 
 // The reproduction of #432 at the Incident controller, with the observations the collector emits for a crash

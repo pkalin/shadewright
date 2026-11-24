@@ -32,10 +32,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analyzer/collector"
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/collector"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 )
 
 // The tests of the late-cause fold (ADR-0039 points 12 to 15 and 23).

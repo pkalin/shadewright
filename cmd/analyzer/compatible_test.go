@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/providers/model/foundry"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/foundry"
 )
 
 func TestCompatibleOnlyDoesNotReadAzureIdentity(t *testing.T) {

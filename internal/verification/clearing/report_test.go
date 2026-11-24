@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // e0 is the executor's clock at its first check in a test. It is unrelated to the verifier's t0.

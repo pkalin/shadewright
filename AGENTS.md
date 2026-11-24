@@ -57,6 +57,8 @@ so the **pull request title** is what counts; a required check (`Conventional PR
 - Leave the code safer than you found it: when you notice a security or reliability problem nearby, fix it
   or raise it in the pull request, do not ignore it.
 - Prefer boring, well-known solutions and the project's existing patterns over new dependencies or clever code.
+- Never create a repository named `shadewright`, `shadewright-azure` or `shadewright-fleet` under the old account
+  `pkalin`: the repositories moved to `shadewright-labs`, and a new one under the old name ends the redirects.
 
 ## Taking a task
 
@@ -64,9 +66,11 @@ Work is tracked as GitHub issues, written with the "Task" template so that any c
 can work on one without further context. Milestones are releases (`v0.1.0`, `v0.2.0`, ...), each with a due
 date and a one-line goal; the design stages (`docs/design/13-milestones.md`) are tracked by the epics instead.
 A task takes the milestone of the release it is needed for, which may be earlier than its epic's.
-Feature sets are `epic` issues (the "Epic" template) and tasks are their sub-issues. Issues for all three
-repositories live here; a task for `shadewright-azure` or `shadewright-fleet` names that repository in its
-scope, and its pull request says `Closes pkalin/shadewright#<n>`.
+Feature sets are `epic` issues (the "Epic" template) and tasks are their sub-issues. Each issue lives in the
+repository whose files it changes: Terraform and lab infrastructure in `shadewright-azure`, scenarios and
+cluster config in `shadewright-fleet`, everything else and every epic here. Epics take sub-issues from all
+three repositories, work that spans two gets an issue in each (linked as blocked by), and every issue goes
+on the [roadmap board](https://github.com/orgs/shadewright-labs/projects/1).
 
 Every issue names the ADRs it is tied to:
 
@@ -118,7 +122,7 @@ Every issue names the ADRs it is tied to:
   The Dockerfile builds the three binaries once (builder pinned by digest, Go release equal to go.mod's toolchain
   line) and has the targets `executor`, `analyzer`, `verifier` (one binary each) and `local` (all, the default). The
   Images workflow builds `executor`, `analyzer` and `verifier` for linux/amd64 on pull requests without pushing, and for
-  linux/amd64 and linux/arm64 and pushes `ghcr.io/pkalin/shadewright-{executor,analyzer,verifier}` from main and `v*` tags only, in the one job
+  linux/amd64 and linux/arm64 and pushes `ghcr.io/shadewright-labs/shadewright-{executor,analyzer,verifier}` from main and `v*` tags only, in the one job
   that has `packages: write`. `make docker-build-images` builds all three for the host platform.
 - **CI scope.** `.github/workflows/ci.yml` is the one graph of a pull request and of a push to main. Its
   `changes` job runs `hack/ci-changed.sh` once on the files the pull request changes; the jobs that call the
@@ -149,19 +153,28 @@ Every issue names the ADRs it is tied to:
   `trivy-config` job of `chart-test.yml`, so it runs only when the `chart` group changed; HIGH and CRITICAL
   findings fail it unless `.trivyignore.yaml` lists them with a statement of why.
 - **Tests.** Every bug fix gets a test that fails without it; every new API rule gets a refusal test.
-  `make test` runs with the race detector (`-race`), then runs `internal/redact` and the log source once
-  more without it and with the build tag `redactwork`: the timing tests skip under `-race`, the generated
-  corpora of block values and connection strings check a seeded sample there and every input without it, and
-  the linearity tests count redaction work only with that tag (the product build holds no counter). Dynamic
+  `make test` runs with the race detector (`-race`), then runs `internal/redact`, its meter, the log source, the context
+  builder and the read tools, and the kept reading of the release before (`internal/redact/released`), once more without it and with
+  the build tag `redactwork` (CI runs `make test REDACTWORK_IN_TEST=no` and each of those runs in a job of its
+  own, the list from `make redactwork-list`): the timing tests skip under `-race`, the generated corpora (block values, connection
+  strings, and those compared with main or with the release before) check a seeded sample there and every input
+  without it, and the linearity tests count
+  redaction work only with that tag (the product build spends each step on the meter of its call, the work budget,
+  and holds no shared counter). Dynamic
   analysis is the race detector and the Go fuzz targets: a `Fuzz` function in a parser or matcher of untrusted
   input goes into `FUZZ_TARGETS` in the Makefile (`make fuzz` fails when one is missing or an entry names no
-  such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a few minutes weekly. A failing input
-  it finds is committed to the package's `testdata/fuzz/` with the fix.
+  such function, `hack/fuzz-targets.sh`), and `fuzz.yml` runs each for a few minutes weekly, one job per target; a
+  target in a package with a file built only with `redactwork` (the differential targets of `internal/redact`, of
+  its kept reading of the release before and of the context builder) runs with that tag. The budget stops the work of an entry where it would pass its bound and withholds
+  the entry whole, whatever its shape; the fuzz targets check that nothing withheld is released in part, not how
+  the work grows. Growth is checked by the corpus tests (`TestCorpusWorkGrowsLinearly`: the work at 64 KiB at most
+  2.3 times the work at 32 KiB on every shape, none excused by name since #962). A failing input it finds is committed to
+  the package's `testdata/fuzz/` with the fix, or listed as a known failure with its issue.
 
 ## Design choices
 
 - Providers sit behind interfaces so the project stays generic: `GitProvider` (GitHub first, Azure DevOps later), `DeliveryVerifier` (Flux first, Argo CD later), `ModelProvider` (Microsoft Foundry first). Do not import a provider SDK outside its adapter package.
-- Layout beyond the Kubebuilder scaffold: `cmd/analyzer`, `cmd/verifier`, `cmd/kubectl-shadewright` (the read-only kubectl plugin, run by people with their own kubeconfig), `internal/analyzer` (with the collector), `internal/verifier` (the verifier controller, with `watchrbac` holding the markers of its read role in the watched namespaces), `internal/{incidents,incidentcontext,tools,analysis,policy,gitops,redact,providers,modules,groupversion,cmdutil}` (`incidentcontext` is the context builder, not named `context` so that it never shadows the standard library package; `tools` holds the read tools for the model; `analysis` is the analysis loop and its controller), `internal/testutil` (helpers for tests only), `test/eval` (the evaluation harness: recorded scenarios replayed through the analysis loop, docs/evaluation.md); `internal/verification` (`rollout`, the rollout check; `clearing`, the stable window and the `VerificationReport` checks of ADR-0030), `internal/ownership` (owner chain rules shared by the collector, the context builder and `clearing`); planned: `internal/remediation`, `test/scenarios`.
+- Layout beyond the Kubebuilder scaffold: `cmd/analyzer`, `cmd/verifier`, `cmd/kubectl-shadewright` (the read-only kubectl plugin, run by people with their own kubeconfig), `cmd/intake` and `internal/intake` (the scoring intake of ADR-0047, outside every cluster), `internal/analyzer` (with the collector), `internal/verifier` (the verifier controller, with `watchrbac` holding the markers of its read role in the watched namespaces), `internal/{incidents,incidentcontext,tools,analysis,policy,gitops,redact,providers,modules,groupversion,cmdutil}` (`incidentcontext` is the context builder, not named `context` so that it never shadows the standard library package; `tools` holds the read tools for the model; `analysis` is the analysis loop and its controller), `internal/testutil` (helpers for tests only), `test/eval` (the evaluation harness: recorded scenarios replayed through the analysis loop, docs/evaluation.md); `internal/verification` (`rollout`, the rollout check; `clearing`, the stable window and the `VerificationReport` checks of ADR-0030), `internal/ownership` (owner chain rules shared by the collector, the context builder and `clearing`); planned: `internal/remediation`, `test/scenarios`.
 - `Incident` keeps deduplication state (fingerprint, counters, timestamps) and must survive restarts. Never put raw logs or large payloads in a CR.
 
 ## Commands
@@ -180,7 +193,7 @@ make fuzz                 # each Go fuzz target for FUZZTIME (default 30s), or o
 KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.37.0 --bin-dir "$PWD/bin" -p path)" \
   go test ./internal/controller/... -ginkgo.focus "RemediationRequest"   # one spec; run `make test` once first, the bin dir must be absolute
 make test-e2e             # installs the pinned kind (KIND_VERSION) into bin/ and creates an isolated cluster; CI runs it, not needed locally
-make build                # bin/manager and bin/analyzer
+make build                # bin/manager, bin/analyzer, bin/verifier and bin/intake
 make build-plugin         # bin/kubectl-shadewright, the read-only `kubectl shadewright status` (also `status --watch`), `explain` and `doctor` plugin
 make run                  # controller against the current kubeconfig context
 ```

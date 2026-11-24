@@ -27,8 +27,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analyzer/collector"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/collector"
 )
 
 // What a write does to a Resolved Incident (design 3.2, #251): observations seen no later than resolvedTime
@@ -188,25 +188,92 @@ func TestRecurrenceWithinTheWindowEscalates(t *testing.T) {
 		{"resolvedTime missing", -1, ReasonResolvedTimeUnknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ns := namespace(t)
-			createSettings(t, 10)
-			createBudget(t, ns, nil)
-			createNamed(t, ns, 1, resolvedStatus(tc.resolvedAgo))
-			r := start(t, ns, triggerConfig)
-			r.obs <- immediate(seenAt(100, triggerNow))
-			inc := eventually(t, ns, 1, func(inc *remediationv1alpha1.Incident) bool {
-				return inc.Status.Phase == remediationv1alpha1.IncidentEscalated && inc.Status.Count == 2
+			// The trigger's reason comes from a pass, whose deadline is wall-clock time (underLoadTrigger). The
+			// settings are cluster-wide: made once, by the first attempt (namespace starts the API server).
+			settings := false
+			underLoadTrigger(t, func(cfg Config) (*running, bool) {
+				ns := namespace(t)
+				if !settings {
+					createSettings(t, 10)
+					settings = true
+				}
+				createBudget(t, ns, nil)
+				createNamed(t, ns, 1, resolvedStatus(tc.resolvedAgo))
+				r := start(t, ns, cfg)
+				r.obs <- immediate(seenAt(100, triggerNow))
+				inc := eventually(t, ns, 1, func(inc *remediationv1alpha1.Incident) bool {
+					return inc.Status.Phase == remediationv1alpha1.IncidentEscalated && inc.Status.Count == 2
+				})
+				cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionRecurred)
+				if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != tc.reason || cond.Message == "" {
+					t.Fatalf("Recurred condition %+v, want True %s", cond, tc.reason)
+				}
+				if !marked(t, r, ns, dueIs(false, ReasonRecurred)) {
+					return r, false
+				}
+				absent(t, ns, second)
+				if got := r.writes.creates.Load(); got != 0 {
+					t.Fatalf("%d creates, want none", got)
+				}
+				return r, true
 			})
-			cond := meta.FindStatusCondition(inc.Status.Conditions, ConditionRecurred)
-			if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != tc.reason || cond.Message == "" {
-				t.Fatalf("Recurred condition %+v, want True %s", cond, tc.reason)
-			}
-			eventually(t, ns, 1, dueIs(false, ReasonRecurred))
-			absent(t, ns, second)
-			if got := r.writes.creates.Load(); got != 0 {
-				t.Fatalf("%d creates, want none", got)
-			}
 		})
+	}
+}
+
+// maxTriggerScale is the largest factor underLoadTrigger multiplies the trigger interval by.
+const maxTriggerScale = 8
+
+// underLoadTrigger runs attempt with triggerConfig's interval multiplied by k = 1, then 2, 4 and 8, until attempt
+// reports that the trigger's passes ran: attempt returns false when a wait for a pass's write (marked) ended while
+// the passes ran into their deadline. A pass has nine tenths of the interval (180 ms in triggerConfig), and on a
+// loaded machine, under -race, every pass ran past it for the whole wait (#1095), so the mark the test waited for
+// was never written. Each attempt starts from a namespace of its own; its controller is stopped before the next.
+// The checks are the same at every k, so none is relaxed; a pass that never writes at maxTriggerScale fails.
+func underLoadTrigger(t *testing.T, attempt func(cfg Config) (*running, bool)) {
+	t.Helper()
+	for k := time.Duration(1); k <= maxTriggerScale; k *= 2 {
+		cfg := triggerConfig
+		cfg.TriggerInterval = testTriggerInterval * k
+		r, ok := attempt(cfg)
+		r.stop()
+		if ok {
+			return
+		}
+		t.Logf("the trigger's passes ran into their deadline with the interval %s: trying again with twice the "+
+			"interval", cfg.TriggerInterval)
+	}
+	t.Fatalf("the trigger's passes ran into their deadline with the interval %s", testTriggerInterval*maxTriggerScale)
+}
+
+// passTimeouts is how many passes of the trigger r logged as failed on a deadline.
+func passTimeouts(r *running) int {
+	return len(r.logs.with("Failed a pass of the analysis trigger", "deadline exceeded"))
+}
+
+// marked waits until cond, which a pass of the trigger writes, holds for the Incident of fp(1), and reports
+// true. It reports false, for underLoadTrigger to try again, once three passes ran into their deadline while it
+// waited, and fails the test when cond does not hold after 20 seconds of passes that did not.
+func marked(t *testing.T, r *running, ns string, cond func(*remediationv1alpha1.Incident) bool) bool {
+	t.Helper()
+	before := passTimeouts(r)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		inc := &remediationv1alpha1.Incident{}
+		err := env.admin.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: Name(fp(1))}, inc)
+		if err == nil && cond(inc) {
+			return true
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
+			t.Fatal(err)
+		}
+		if passTimeouts(r)-before >= 3 {
+			return false
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met; last %+v (%v)", inc.Status, err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

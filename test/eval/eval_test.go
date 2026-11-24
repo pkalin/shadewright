@@ -30,15 +30,15 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analysis"
-	"github.com/pkalin/shadewright/internal/analyzer/models"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/fake"
-	"github.com/pkalin/shadewright/internal/providers/model/anthropic"
-	"github.com/pkalin/shadewright/internal/providers/model/foundry"
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/tools"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/analysis"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/models"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/fake"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/anthropic"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/foundry"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // Environment of a run. EVAL_REPORT_DIR applies to both modes; the others to the real model only.

@@ -23,7 +23,7 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // ErrClusterNotFound means the source holds no series of [Config.Cluster] from kube-state-metrics, or none

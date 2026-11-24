@@ -51,9 +51,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
-	"github.com/pkalin/shadewright/internal/modules"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/modules"
 )
 
 // SourceKinds are the kinds whose module symptom sources the collector evaluates when [Config.Modules] is set.

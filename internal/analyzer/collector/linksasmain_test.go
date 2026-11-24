@@ -38,7 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 )
 
 // The decision of 2026-11-21 on #432 (Count and Decision, head 5caef316) narrows the crash loop link: a confirmed

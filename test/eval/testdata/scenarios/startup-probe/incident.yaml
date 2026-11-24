@@ -1,4 +1,4 @@
-# Synthetic: written from the lab run of 2026-11-14 (v0.5.0-rc.1, pkalin/shadewright#726), not recorded. The
+# Synthetic: written from the lab run of 2026-11-14 (v0.5.0-rc.1, shadewright-labs/shadewright#726), not recorded. The
 # symptom is the kubelet's probe note as fingerprint.Normalize leaves it. UIDs and the fingerprint are
 # placeholders.
 apiVersion: remediation.shadewright.io/v1alpha1

@@ -23,7 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/pkalin/shadewright/internal/testutil/metricguard"
+	"github.com/shadewright-labs/shadewright/internal/testutil/metricguard"
 )
 
 // TestWatchedNamespacesGauge checks that the gauge reports the count, 0 included, has no labels and is
@@ -36,6 +36,6 @@ func TestWatchedNamespacesGauge(t *testing.T) {
 		}
 	}
 	want := map[string]metricguard.Labels{"shadewright_analyzer_watched_namespaces": {}}
-	metricguard.Check(t, metrics.Registry, want)
+	metricguard.Check(t, metrics.Registry, metricguard.WithRedaction(want))
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), want)
 }

@@ -22,8 +22,9 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
+
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // The corpus builds every token-shaped value at run time from obviously synthetic parts, so no realistic
@@ -547,21 +548,29 @@ func skipLarge(t *testing.T) {
 	}
 }
 
-// maxWorkPerByte bounds the work ([Work]) of redaction per byte of input on every hostile input of the tests.
-// The largest, about 710 on runs of commas after a quoted value ("blanks commas"), comes from the extent rule,
-// which reads up to maxValueExtent bytes from each value; the rules that read every byte a fixed number of
-// times account for 30 to 75.
+// maxWorkPerByte bounds the work ([Work]) per byte of input on every hostile input of the tests: of String
+// where it has no reading of the release before, and of that reading alone (released.Spans) where it has,
+// except on the shapes of releasedSuperlinear (none since #873). The extent rule reads up to maxValueExtent bytes
+// from each value; on runs of commas after a quoted value ("blanks commas") it cost about 710 until #873, which
+// stopped reading the rest of the value again after each comma (28 since); the rules that read every byte a
+// fixed number of times account for 30 to 75. Since the thirteenth decision
+// of 2026-11-18 (#845) String also applies one pass of the reading of the release before (package released),
+// whose extent rule costs as much again; what String adds to that reading is bounded by ownWorkPerByte.
 const maxWorkPerByte = 1024
 
 // Repeating the shapes the scanning rules look for must cost linear work: each value is scanned once and
 // keys inside a value already redacted are skipped. The work ([Work]) is counted, not timed, so a busy machine
-// cannot fail the test (#825): on 1 MiB it is at most maxWorkPerByte per byte, and its work per byte is at
-// most an eighth more than on an eighth of the input (a quadratic scan does eight times the work per byte).
+// cannot fail the test (#825): on 256 KiB checkWork bounds it, and the work per byte of what String adds to
+// the reading of the release before is at most an eighth more than on an eighth of the input (a quadratic scan
+// does eight times the work per byte).
+// 256 KiB, not 1 MiB, since #845: the ratio shows a quadratic scan at any size, and the larger input took most
+// of the tagged run's time.
 func TestRepeatedPatternsStayLinear(t *testing.T) {
 	skipLarge(t)
-	const size = 1 << 20
+	const size = 1 << 18
 	// tails close the units that open a quote, once, at the end of the text.
 	tails := map[string]string{"quote closed at the end": "'", "flag quote closed at end": `"`}
+	largest, largestName := 0.0, ""
 	for name, unit := range map[string]string{
 		"yaml empty headers":       "password:\n",
 		"yaml headers over values": "password:\n  password:\n",
@@ -678,17 +687,44 @@ func TestRepeatedPatternsStayLinear(t *testing.T) {
 		"blanks escaped punctuation": `--password "a"\!`,
 		"blanks backslash arguments": `["--password=\a `,
 		"blanks comma secret keys":   `TOKEN="a",DB_PASSWORD= "b",x-token= `,
+		// Issue #845: the canonical view. Keys on one line, bare short keys whose blocks are refused, brackets
+		// inside a flow value, other indentation and line ends, keys and values in two strings, and environment
+		// entries in either order.
+		"view keys on a line":      "pass: | token: | ",
+		"view bare keys on a line": "pass: > a b ",
+		"view bare nested blocks":  "pass: |\n \u00a0",
+		"view refused blocks":      "sig: >\r\u2007a b\r",
+		"view flow brackets":       "[password: > a]b{",
+		"view flow plain brackets": "{token: a]b[",
+		"view open flows":          "[{",
+		"view neighbour keys":      "token=a ",
+		"view wide indentation":    "password: |\r\u3000\x00",
+		"view sequence items":      `"password:", "`,
+		"view escaped items":       `\"token: |\", \"`,
+		"view env value first":     "{value: a, name: TOKEN}",
+		"view env lines":           "- name: TOKEN\r",
+		"view autolinks":           "<https://a>,<b:c@",
 	} {
 		tail := tails[name]
-		small, smallSize := workString(t, name, rep(unit, size/8/len(unit))+tail)
-		large, largeSize := workString(t, name, rep(unit, size/len(unit))+tail)
-		if large > maxWorkPerByte*int64(largeSize) {
-			t.Errorf("%s: %d steps for %d bytes, more than %d per byte", name, large, largeSize, maxWorkPerByte)
+		small := sampleString(t, name, rep(unit, size/8/len(unit))+tail)
+		large := sampleString(t, name, rep(unit, size/len(unit))+tail)
+		if per := perByte(large.own(), large.size); per > largest {
+			largest, largestName = per, name
 		}
-		if float64(large)/float64(largeSize) > 1.125*float64(max(small, 1))/float64(smallSize)+0.5 {
-			t.Errorf("%s: %d steps for %d bytes, %d for %d: more than linear", name, small, smallSize, large, largeSize)
-		}
+		checkWork(t, name, []workSample{small, large})
 	}
+	// The figure the docs give for the unit to which String adds the most ("extent backticks in quotes").
+	t.Logf("largest unit: %s, String adds %.1f steps per byte to the release's reading", largestName, largest)
+}
+
+// sampleString is sampleWork on in, and fails when String's output is longer than the input.
+func sampleString(t *testing.T, name, in string) workSample {
+	t.Helper()
+	w := sampleWork(t, in)
+	if out := String(in); len(out) > len(in) {
+		t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+	}
+	return w
 }
 
 // workString returns the work of String on in and the size of in, and fails when the output is longer
@@ -705,9 +741,18 @@ func workString(t *testing.T, name, in string) (int64, int) {
 	return w, len(in)
 }
 
-// Nested entries whose lines all belong to the first one: each match reads a bounded part of them.
+// Nested entries whose lines all belong to the first one: each match reads a bounded part of them, so the steps
+// String spends (its budget's count, in every build) grow with the text. The test compares the steps per byte at
+// two sizes instead of timing a call (decision of 2026-11-21 on #873): 64 KiB and 1 MiB without -race, where
+// the flag block scalars spend 735 steps per byte at 1 MiB against 244 at 64 KiB when the extent rule reads
+// without its bound (maxValueExtent), and 4 KiB and 16 KiB under -race, which take about two seconds there and
+// show a read of the rest of the text per entry, but not one cut at 4 KiB: only the run without -race sees that.
 func TestNestedBlocksStayLinear(t *testing.T) {
-	skipLarge(t)
+	parallelUnderRace(t)
+	small, large := 1<<16, 1<<20
+	if raceDetector {
+		small, large = 1<<12, 1<<14
+	}
 	for name, line := range map[string]func(indent string) string{
 		"env entries":   func(in string) string { return in + "- name: DB_PASSWORD\n" },
 		"empty headers": func(in string) string { return in + "password:\n" },
@@ -718,18 +763,32 @@ func TestNestedBlocksStayLinear(t *testing.T) {
 		// Issue #708: block scalars after a flag item, each below the one before.
 		"flag block scalars": func(in string) string { return in + "- --password\n" + in + "- |\n" },
 	} {
-		var b strings.Builder
-		for i := 0; b.Len() < 1<<20; i++ {
-			b.WriteString(line(strings.Repeat(" ", i)))
+		var perByte [2]float64
+		for i, size := range []int{small, large} {
+			var b strings.Builder
+			for i := 0; b.Len() < size; i++ {
+				b.WriteString(line(strings.Repeat(" ", i)))
+			}
+			in := b.String()
+			wm := meter.New(budgetOf(len(in)))
+			over := false
+			var out string
+			func() {
+				defer meter.Catch(&over)
+				out = render(wm, in, defaultRedactor.spans(wm, in))
+			}()
+			if over {
+				t.Errorf("%s: %d bytes used up the budget of %d steps", name, len(in), budgetOf(len(in)))
+				continue
+			}
+			if len(out) > len(in) {
+				t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+			}
+			perByte[i] = float64(wm.Spent()) / float64(len(in))
 		}
-		in := b.String()
-		start := time.Now()
-		out := String(in)
-		if d := time.Since(start); d > 10*time.Second {
-			t.Errorf("%s: %d bytes took %s", name, len(in), d)
-		}
-		if len(out) > len(in) {
-			t.Errorf("%s: output grew from %d to %d bytes", name, len(in), len(out))
+		if perByte[0] > 0 && perByte[1] > 1.5*perByte[0] {
+			t.Errorf("%s: %.0f steps per byte at %d bytes, %.0f at %d: the work grows faster than the text",
+				name, perByte[1], large, perByte[0], small)
 		}
 	}
 }
@@ -934,6 +993,30 @@ func TestClean(t *testing.T) {
 	}
 }
 
+// Clean takes the withheld marker, which the callers that keep the text form write in place of a withheld value,
+// as a marker in any place, and only its exact long form: the short form and look-alikes stay values (#873).
+func TestCleanTakesTheWithheldMarker(t *testing.T) {
+	for _, in := range []string{
+		Withheld,
+		"password: " + Withheld,
+		"token=" + Withheld + " and pw=" + Withheld,
+	} {
+		if !defaultRedactor.Clean(in) {
+			t.Errorf("Clean(%q) = false, want the withheld marker taken as a marker", in)
+		}
+	}
+	for _, in := range []string{
+		"password: [withheld]",
+		"password: [REDACTED:withheldx]",
+		"password: [REDACTED:Withheld]",
+		"password: " + Withheld + "x",
+	} {
+		if defaultRedactor.Clean(in) {
+			t.Errorf("Clean(%q) = true, want the value found", in)
+		}
+	}
+}
+
 // A Redactor's StringKeeping applies its own rules, extra patterns included, around the kept strings.
 func TestRedactorStringKeeping(t *testing.T) {
 	r, err := New(Pattern{Kind: "ticket", Expr: `TICKET-[0-9]{4}`})
@@ -944,6 +1027,36 @@ func TestRedactorStringKeeping(t *testing.T) {
 	if out := r.StringKeeping("TICKET-1234 for "+name, name); !strings.HasSuffix(out, " for "+name) ||
 		strings.Contains(out, "TICKET-1234") {
 		t.Errorf("StringKeeping = %q, want the ticket redacted and the name kept", out)
+	}
+}
+
+// New refuses an extra pattern that compiles alone but whose search from a later start (meter.Expr, which
+// wraps it in three more levels) nests too deeply to compile: an error when the redactor is made, never a panic
+// at its first read (#873).
+func TestNewRefusesAPatternWhoseSearchCannotBeWrapped(t *testing.T) {
+	const depth = 998
+	expr := strings.Repeat("(?:", depth) + "a" + strings.Repeat(")*", depth)
+	if _, err := regexp.Compile(expr); err != nil {
+		t.Fatalf("the pattern itself does not compile, so the test proves nothing: %v", err)
+	}
+	r, err := New(Pattern{Kind: "nested", Expr: expr})
+	if err == nil {
+		t.Fatalf("New accepted a pattern whose search cannot be wrapped (redactor %p)", r)
+	}
+	if !strings.Contains(err.Error(), "extra pattern 0 (nested)") || !strings.Contains(err.Error(), "nests too deeply") {
+		t.Errorf("New's error = %v, want it to name the pattern and the nesting", err)
+	}
+}
+
+// A pattern that ends inside a quoted literal (`\Q...` without `\E`) is a valid operator rule: New accepts it and
+// its search from a later start finds what the pattern finds (#873, review of 2026-11-21).
+func TestNewAcceptsAPatternEndingInAQuotedLiteral(t *testing.T) {
+	r, err := New(Pattern{Kind: "quoted", Expr: `\Qprobe-value)`})
+	if err != nil {
+		t.Fatalf("New refused a valid pattern: %v", err)
+	}
+	if out := r.String("a probe-value) b"); strings.Contains(out, "probe-value") {
+		t.Errorf("String(...) = %q, want the quoted literal redacted", out)
 	}
 }
 
@@ -1021,11 +1134,19 @@ func keyParts(k string) []string {
 // seeds is the number of seeded keys or names each case of the slash-split tests runs with.
 const seeds = 1000
 
+// raceKeepsSeed is raceKeeps for a seed of these tests: under -race a case checks a seeded sample of its seeds,
+// and make test runs this package again without -race on all of them (decision of 2026-11-21 on #873).
+func raceKeepsSeed(name string, seed uint64) bool {
+	return raceKeeps(name, int(seed)) // #nosec G115 -- seed is below 2*seeds
+}
+
 // A standard base64 secret whose slashes cut it into parts shorter than minTokenLength is redacted by the
 // long-token rule wherever it stands: after its key name and a blank (a CLI flag, "aws configure set"), in
 // prose, and at the start, in the middle or at the end of a path or a URL, also after a long lower-case path.
 // The path around it stays (#525).
 func TestSlashSplitBase64IsRedacted(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	contexts := []struct{ name, before, after string }{
 		{"aws configure set", "aws configure set aws_secret_access_key ", "\nnext: field"},
 		{"cli flag", "run --aws-secret-access-key ", flagAfter},
@@ -1041,6 +1162,9 @@ func TestSlashSplitBase64IsRedacted(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			leaks, lost := 0, 0
 			for seed := range uint64(seeds) {
+				if !raceKeepsSeed(t.Name(), seed) {
+					continue
+				}
 				k := seededKey(seed)
 				in := c.before + k + c.after
 				out := String(in)
@@ -1077,6 +1201,9 @@ func TestSlashSplitBase64IsRedacted(t *testing.T) {
 	const middle = "/api/v1/namespaces/orders/pods/orders-worker-7db6d8ff4d-x2x9q/"
 	bridged := 0
 	for seed := range uint64(seeds) {
+		if !raceKeepsSeed(t.Name(), seed) {
+			continue
+		}
 		a, b := seededKey(seed), seededKey(seed+seeds)
 		in := "GET https://example.com/" + a + middle + b + " 404"
 		out := String(in)
@@ -1108,6 +1235,8 @@ func seededName(seed uint64, n int, alphabet string) string {
 // Paths, image references, hosts and URLs stay readable next to the slash-split base64 rule (#525): path
 // words, GUIDs, Kubernetes names with hash suffixes and generated temp names, each with seeded random parts.
 func TestSlashSplitRuleKeepsPaths(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	const hex, upperHex, lowerAlnum = "0123456789abcdef", "0123456789ABCDEF", "bcdfghjklmnpqrstvwxz2456789"
 	guid := func(s uint64, a string) string {
 		g := seededName(s, 32, a)
@@ -1134,6 +1263,9 @@ func TestSlashSplitRuleKeepsPaths(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			changed := 0
 			for seed := range uint64(seeds) {
+				if !raceKeepsSeed(t.Name(), seed) {
+					continue
+				}
 				in := text(seed)
 				if out := String(in); out != in {
 					if changed++; changed <= 3 {
@@ -1226,6 +1358,9 @@ func TestBase64WithoutSlashOrDigitIsRedacted(t *testing.T) {
 	const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+"
 	leaks := 0
 	for seed := range uint64(seeds) {
+		if !raceKeepsSeed(t.Name(), seed) {
+			continue
+		}
 		k := seededName(seed, 40, letters)
 		in := "aws configure set aws_secret_access_key " + k + "\nnext: field"
 		if out := String(in); strings.Contains(out, k) {
@@ -1261,7 +1396,7 @@ func TestSlashSplitKeyEndingInAWordIsRedacted(t *testing.T) {
 		k := seededKey(seed)
 		out := String("rotated " + k + " today")
 		for _, p := range keyParts(k) {
-			if strings.Contains(out, p) && !pathWord(p) {
+			if strings.Contains(out, p) && !pathWord(nil, p) {
 				t.Errorf("seed %d: part %q of the key kept:\n in: %s\nout: %s", seed, p, k, out)
 			}
 		}
@@ -1370,7 +1505,7 @@ func TestKnownLeaksAfterAKeyNameAreRedacted(t *testing.T) {
 	)
 	for _, f := range keyNameForms {
 		for _, v := range values {
-			if f.opaqueOnly && !opaqueToken(v.key) {
+			if f.opaqueOnly && !opaqueToken(nil, v.key) {
 				continue // the blank form takes only an opaque key (TestKeyNameKnownLeaks)
 			}
 			for _, before := range []string{f.before, f.probe} {
@@ -1393,24 +1528,39 @@ func TestSeededKeysAfterAKeyNameAreRedacted(t *testing.T) {
 		t.Skip("100,000 keys: runs without -race")
 	}
 	const n = 100_000
-	whole, fragments, notOpaque := 0, 0, 0
-	for seed := range uint64(n) {
+	// Each seed is decided on its own (forEachParallel), into its own slot; the counts and messages are then
+	// taken in the order of the seeds, as a serial run takes them.
+	type outcome struct {
+		notOpaque, ok, whole bool
+		out                  string
+	}
+	outs := make([]outcome, n)
+	forEachParallel(n, func(i int) {
+		seed := uint64(i) // #nosec G115 -- i is below n
 		f := keyNameForms[seed%uint64(len(keyNameForms))]
 		k := seededKey(seed)
-		if f.opaqueOnly && !opaqueToken(k) {
+		o := &outs[i]
+		o.notOpaque = f.opaqueOnly && !opaqueToken(nil, k)
+		o.out, o.ok = redactedAfterKeyName(f.before, k, f.after)
+		o.whole = !o.ok && strings.Contains(o.out, k)
+	})
+	whole, fragments, notOpaque := 0, 0, 0
+	for i, o := range outs {
+		if o.notOpaque {
 			notOpaque++ // counted, never skipped: such a key fails below as well
 		}
-		out, ok := redactedAfterKeyName(f.before, k, f.after)
-		if ok {
+		if o.ok {
 			continue
 		}
-		if strings.Contains(out, k) {
+		if o.whole {
 			whole++
 		} else {
 			fragments++
 		}
 		if whole+fragments <= 3 {
-			t.Errorf("seed %d, %s: value not redacted whole:\n in: %s\nout: %s", seed, f.name, f.before+k+f.after, out)
+			seed := uint64(i) // #nosec G115 -- i is below n
+			f := keyNameForms[seed%uint64(len(keyNameForms))]
+			t.Errorf("seed %d, %s: value not redacted whole:\n in: %s\nout: %s", seed, f.name, f.before+seededKey(seed)+f.after, o.out)
 		}
 	}
 	if whole+fragments > 0 || notOpaque > 0 {
@@ -1560,6 +1710,8 @@ func seededEntraSecret(seed uint64) string {
 // precedes it (a CLI flag, prose, a JSON value under an unrelated key); its "~" and "." do not cut it into
 // parts the long-token rule keeps, and the text around it stays (#581).
 func TestEntraClientSecretIsRedacted(t *testing.T) {
+	// A corpus test that counts no work: it runs beside the others (#873).
+	t.Parallel()
 	contexts := []struct{ name, before, after string }{
 		{"az login flag", "az login --service-principal -u app -p ", " --tenant t"},
 		{"az set", "az webapp config appsettings set --settings X=1 --password ", "\nnext: field"},
@@ -1573,6 +1725,9 @@ func TestEntraClientSecretIsRedacted(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			leaks := 0
 			for seed := range uint64(seeds) {
+				if !raceKeepsSeed(t.Name(), seed) {
+					continue
+				}
 				k := seededEntraSecret(seed)
 				in := c.before + k + c.after
 				if out := String(in); out != c.before+"[REDACTED:token]"+c.after {

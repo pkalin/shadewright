@@ -127,7 +127,7 @@ executor:
   image:
     # -- Repository of the executor image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true.
     # @section -- Images
-    repository: ghcr.io/pkalin/shadewright-executor
+    repository: ghcr.io/shadewright-labs/shadewright-executor
     # -- Digest of the executor image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field.
     # @default -- the release's digest in the published chart, empty in the source
     # @section -- Images
@@ -229,7 +229,7 @@ analyzer:
   image:
     # -- Repository of the analyzer image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true.
     # @section -- Images
-    repository: ghcr.io/pkalin/shadewright-analyzer
+    repository: ghcr.io/shadewright-labs/shadewright-analyzer
     # -- Digest of the analyzer image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field.
     # @default -- the release's digest in the published chart, empty in the source
     # @section -- Images
@@ -353,9 +353,10 @@ analyzer:
       # @section -- Analyzer
       cpu: 500m
       # -- Memory limit. Required by the schema (a `null` override is refused), so the container's memory is never
-      # unbounded.
+      # unbounded. 256Mi since #1087: one redaction of the largest object can hold up to about 117 MiB of heap, and
+      # the redactions running at once share half of `goMemLimit`.
       # @section -- Analyzer
-      memory: 128Mi
+      memory: 256Mi
     requests:
       # -- CPU request.
       # @section -- Analyzer
@@ -405,7 +406,7 @@ verifier:
   image:
     # -- Repository of the verifier image (a mirror, for example). The Deployment runs repository@digest, or repository:appVersion without a digest when `image.allowTag` is true.
     # @section -- Images
-    repository: ghcr.io/pkalin/shadewright-verifier
+    repository: ghcr.io/shadewright-labs/shadewright-verifier
     # -- Digest of the verifier image: `sha256:` and 64 lower case hex digits. The chart published on a release tag carries the digest of that release's signed image here. Empty (a source checkout) fails to render unless `image.allowTag` is true, which runs the `appVersion` tag instead. The schema refuses a tag in this field.
     # @default -- the release's digest in the published chart, empty in the source
     # @section -- Images

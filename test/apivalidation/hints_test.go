@@ -26,8 +26,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	fx "github.com/pkalin/shadewright/internal/testfixtures"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	fx "github.com/shadewright-labs/shadewright/internal/testfixtures"
 )
 
 // The reviewer hints and the supersede handoff of ADR-0028: spec.replaces and spec.chainRoot, status.hints,

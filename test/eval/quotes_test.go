@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/analysis"
+	"github.com/shadewright-labs/shadewright/internal/analysis"
 )
 
 // quotesDir holds the recorded replies whose quotes the evidence check refuses, one file per way a quote can

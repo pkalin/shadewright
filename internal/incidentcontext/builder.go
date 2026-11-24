@@ -25,9 +25,10 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/incidents/causereason"
-	"github.com/pkalin/shadewright/internal/providers"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // Timeouts of one source call (a cluster read, a metrics query or a log read) and of a whole build. A build
@@ -59,8 +60,18 @@ const maxValueBytes = 1024
 
 // Redactor redacts text: in the analyzer, a *redact.Redactor with the built-in rules (operator patterns are
 // planned; nothing configures them yet). Its output must never be longer than its input, as package redact guarantees.
+// StringChecked is String with the flag of a withheld text (false: redaction withheld s whole, #873): the builder
+// reads that flag for every section it shows, so a redactor without it, or a wrapper that drops it, does not
+// compile (decision of 2026-11-21 on #873).
 type Redactor interface {
 	String(s string) string
+	StringChecked(s string) (string, bool)
+}
+
+// contextRedactor is a [Redactor] whose wait for the heap limit of the redactions running at once can end with a
+// context (*redact.Redactor's WithContext).
+type contextRedactor interface {
+	WithContext(ctx context.Context) *redact.Redactor
 }
 
 // Config configures a [Builder].
@@ -218,7 +229,19 @@ func (b *Builder) build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 		return nil, fmt.Errorf("building the context: %w", err)
 	}
 	w := windowOf(inc, b.now().UTC())
-	ctx = context.WithValue(ctx, buildDeadlineKey{}, time.Now().Add(b.buildTimeout))
+	deadline := time.Now().Add(b.buildTimeout)
+	ctx = context.WithValue(ctx, buildDeadlineKey{}, deadline)
+	if cr, ok := b.redactor.(contextRedactor); ok {
+		// The redactions of this build wait for the heap limit of the redactions at once only as long as the build
+		// may run (redact.Redactor.WithContext): their context has the build deadline as its own deadline, so a
+		// wait past it ends and its block is withheld, a failed source. ctx keeps the deadline as a value only, so
+		// the build itself is not abandoned by it.
+		rctx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
+		within := *b
+		within.redactor = cr.WithContext(rctx)
+		b = &within
+	}
 	c := &Context{}
 	c.Blocks = append(c.Blocks, b.summaryBlock(inc))
 
@@ -266,6 +289,12 @@ func (b *Builder) build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 	c.Blocks = append(c.Blocks, policyBlk)
 	if err := abandoned(ctx); err != nil {
 		return nil, err
+	}
+	// A block that could not fetch is a failed source whatever made it so: a block redaction withheld too.
+	for _, blk := range c.Blocks {
+		if blk.Availability == CouldNotFetch {
+			c.failed(blk.Section)
+		}
 	}
 	b.fitTotal(c)
 	return c, nil
@@ -322,21 +351,51 @@ func abandoned(ctx context.Context) error {
 	return nil
 }
 
+// overLargestEntry reports whether an entry of size bytes, a section's pieces or a text the build would pass to
+// the redactor, is larger than the largest entry the heap of one redaction was measured for (redact.LargestEntry,
+// about 1.5 MiB: the largest object), and counts it as withheld with the reason size (#1106, decision of
+// 2026-11-22). Its caller withholds the entry whole, so the block is could not fetch and its section a failed
+// source, as for any entry redaction withholds. The status section is the one that can pass it: it holds the
+// messages of up to MaxPods pods, each an object of up to that size, and no bound of the builder applies before the
+// decision (TestStatusSectionOverTheLargestEntryIsWithheld). redact.MaxEntry stays the last check in the redactor.
+func overLargestEntry(size int) bool { return redact.OverLargestEntry(size) }
+
 // redact makes s valid UTF-8 and redacts it ([Redact]).
-func (b *Builder) redact(s string) string { return Redact(b.redactor.String, s) }
+func (b *Builder) redact(s string) string { return Redact(Twice(b.redactor), s) }
 
-// value redacts one value from the cluster for a line of a section ([Value]).
-func (b *Builder) value(s string) string { return Value(b.redactor.String, s) }
+// value returns s, a value from the cluster, as a fragment of a section: it is decided with the section
+// ([decide]).
+func (b *Builder) value(s string) frag { return val(s) }
 
-// finish redacts the assembled text of a section block as a whole, then cuts it to n bytes in whole lines,
+// shown redacts one value from the cluster for a text that is not written as pieces ([Value]).
+func (b *Builder) shown(s string) string { return Value(Twice(b.redactor), s) }
+
+// finish decides the pieces of a section block once ([decide]), then cuts the text to n bytes in whole lines,
 // keeping the head: the sections it finishes are written most relevant first. The values the lines recorded
 // become the block's quotable values; [Block.Data] keeps those the redaction and the cuts left in the text.
+//
+// When redaction withholds the section whole, the block holds a fixed text and no values, could not fetch, and the
+// build counts its source as failed (Build).
 func (b *Builder) finish(blk *Block, l *lines, n int) {
-	text, cut := keepHead(b.redact(l.String()), n)
+	decided, values, withheld := decide(b.redactor, l.ps, l.quotes)
+	if withheld {
+		withholdBlock(blk)
+		return
+	}
+	text, cut := keepHead(decided, n)
 	if cut {
 		blk.addLabel(LabelSectionCut)
 	}
-	blk.Text, blk.Values = text, l.values
+	blk.Text, blk.Values = text, values
+}
+
+// withheldText is the text of a block redaction withheld (LabelWithheld).
+const withheldText = "could not fetch: withheld by redaction\n"
+
+// withholdBlock makes blk a block redaction withheld whole: could not fetch, a fixed text, no values.
+func withholdBlock(blk *Block) {
+	blk.Availability, blk.Text, blk.Values, blk.headLen = CouldNotFetch, withheldText, nil, 0
+	blk.addLabel(LabelWithheld)
 }
 
 // cutOrder is the order in which the total bound cuts sections: the attacker-controlled bulk first, the

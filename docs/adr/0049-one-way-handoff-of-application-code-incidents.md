@@ -5,78 +5,115 @@
 
 ## Context
 
-Some incidents have their fix in application code. Shadewright's actions are a closed catalog of manifest changes (invariant 2), so such an analysis ends `Escalated` with no proposal. Sablecourt is a separate agent orchestrator from the same organisation; an operator who runs both may want Shadewright to hand it such an incident ([epic #1130](https://github.com/shadewright-labs/shadewright/issues/1130)). That sends cluster data to a receiver whose agents write code.
+Application-code fixes lie outside Shadewright's closed action catalog (invariant 2). Operators running Sablecourt may want to hand it those incidents ([epic #1130](https://github.com/shadewright-labs/shadewright/issues/1130)). This exports cluster data to a receiver whose agents write code.
 
-[ADR-0028](0028-reviewer-hints-through-the-pull-request.md) section 1 and invariant 6 reserve every integration other than the code host for a future `shadewright-coordinator` with its own ADR. This is that ADR, for one integration. The only other outbound path, the `Notifier` of [ADR-0014](0014-notifications-github-issues-first.md), exists as an interface and a test fake (`internal/providers/notify.go`).
+[ADR-0028](0028-reviewer-hints-through-the-pull-request.md) section 1 and invariant 6 reserve integrations other than the code host for a separate coordinator. [ADR-0014](0014-notifications-github-issues-first.md) describes notifications; `internal/providers/notify.go` defines their interface. This proposes a separate handoff, off by default. Decisions below require implementation unless identified as current code.
 
 ## Decision
 
-1. **Scope: one way, off by default.** Shadewright sends a bounded, redacted incident to one receiver and records the receipt. It sends no rollout report and reads nothing back, the receiver's learnings included. This is a limit: the verifier samples only a `RemediationRequest` in `Verifying` (`sampled` in `internal/verifier/reconciler.go`), and tying a rollout to an outside pull request needs an image digest handshake. That handshake, and any read back, get their own ADR once approved handoffs show the classification below is right often enough.
+### 1. Analyzer-owned candidate selection
 
-2. **Eligibility is decided by code.** All of these must hold:
-   - the subject (Deployment or StatefulSet) is in an install-time allowlist of namespaces and workloads, and an operator-owned mapping gives it a repository alias;
-   - the Incident is not folded (`status.foldedInto` empty), ended `Escalated` with `Analyzed` reason `NoProposal` (so no runbook matched), and no `RemediationRequest` names it;
-   - none of the exclusions holds: `OOMKilled` or exit 137, `Unschedulable`, `ImagePullBackOff`, `ErrImagePull`, `InvalidImageName`, `CreateContainerConfigError`, `CreateContainerError`, a reference that `internal/analyzer/refcheck` finds `Missing`, an exit of a pod being deleted or exit 143, or an Incident from a policy source (a policy report or an admission refusal). A refusal by policy never becomes another route to a change;
-   - positive evidence the analyzer already holds, in at least 3 occurrences of the Incident: a non-zero exit of the same container, a kubelet `BackOff` on it, or `Unhealthy` readiness with a non-empty log excerpt of that container.
+The analyzer selects candidates by code. The analysis must end `Escalated`, and the analyzer must prove no `RemediationRequest` was created for the Incident. It checks retained history and every live request naming the Incident, including a recovered uncertain create. Deletion cannot erase that history. Failed or uncertain checks and policy-refused requests exclude the Incident.
 
-   The model's summary may travel as an untrusted hint. It never opens the gate, picks the repository or overrides an exclusion.
+`NoProposal` in `internal/analysis/loop.go`, `finish`, means the model returned no proposal, not that no runbook matched. Model reasons may only narrow the gate. Without `--triage-model`, `cmd/analyzer/analysis.go` starts no analysis controller: there is no completed analysis, verdict or snapshot. Phase `Escalated` alone is insufficient.
 
-   **Each send also needs a person's approval** until the rules have a measured precision. Shadewright already takes human decisions as a spec field set through the API server under Kubernetes RBAC (`spec.cancel` on a request, `spec.paused` on the settings). The ledger (point 7) gets `spec.approved` in the same way: CEL lets it be set and never unset, and never true at creation. The coordinator may create entries and write their status, with no `update` or `patch` on an entry, so it cannot approve its own sends. The chart ships a ClusterRole for approvers.
+All additional rules must pass:
 
-3. **The sender is `shadewright-coordinator`:** its own Deployment, ServiceAccount, NetworkPolicy and image, off by default. Analyzer, executor and verifier get no new grant. In the operator namespace the coordinator may `get`, `list` and `watch` Incidents, `get` the settings by name (it holds sends while `spec.paused` is true), and `create`, `get`, `list`, `watch` and `delete` its ledger entries, with `update` on their status only. Its egress is DNS, the API server, the storage endpoint and the receiver.
+- An install-time allowlist names the Deployment or StatefulSet, namespace, application image repository and destination repository alias. Parse images as image references; another image repository or an uncertain image identity refuses the workload.
+- `status.folded` is false. Unlike `status.foldedInto`, which clears on reopen, this flag persists (`api/v1alpha1/incident_types.go`). A policy source on this Incident or any Incident folded into it excludes it. The analyzer retains policy-source fold provenance across reopen and deletion. Incomplete provenance excludes the Incident.
+- Exclusions cover `OOMKilled`, exit 137, `Unschedulable`, `ImagePullBackOff`, `ErrImagePull`, `InvalidImageName`, `CreateContainerConfigError`, `CreateContainerError`, exits of deleting pods, exit 143, policy reports and admission refusals. For each Secret or ConfigMap reference, `Missing` and `Unknown` both exclude it: `internal/analyzer/refcheck` has no positive existence answer.
+- Require three distinct observations for the same container. Retain the newest three qualifying records per Incident in analyzer-owned status. Each holds a stable observation ID, container identity, time and a typed reason (`NonzeroExit`, `ContainerBackoff` or `FailedReadiness`), plus the exit code for an exit. Derive IDs from pod UID, container and the failure episode so repeated reads or reports of the same episode count once. Uncertain episode identity supplies no evidence. `OccurrenceRecord` lacks these facts, and `status.count` includes Event series increments.
+- The current analysis context must show a qualifying failure and include a nonempty, checked log excerpt for that container. Missing or withheld evidence excludes the Incident. Workloads can cause these failures and write the logs, so the result is a candidate for human review.
 
-4. **The payload reaches the coordinator as a snapshot, by reference.** After recording the analysis outcome, the analyzer writes an immutable snapshot under the prefix `escalation/` of its record container, through its existing store (`internal/providers/store/azureblob`: create only, checked by the redactor before the write). It puts the blob name, its SHA-256 and a 24 hour expiry in the Incident status it already writes; a failed write leaves a Warning Event and nothing else. The coordinator reads that blob with a storage reader role whose assignment condition limits it to the container and prefix, and refuses a blob whose digest differs. A lifecycle rule deletes snapshots and their versions after a day. The handoff needs a configured record store.
+The analyzer records the verdict, rule version and analysis identity in Incident status, then adds the snapshot reference after storage succeeds. Its digest binds the verdict and payload. A new analysis, request, fold or changed selection verdict invalidates the reference.
 
-5. **The payload** is JSON, `schemaVersion: 1`, at most 16 KiB serialised. Fields and bounds:
-   - `idempotencyKey`: 64 hex characters (point 7);
-   - `incident`: `uid` (UUID), `fingerprint` (`sha256:` and 64 hex), `reason` (one word, 64 bytes), `count`, `firstSeen`, `lastSeen` (RFC 3339);
-   - `workload`: `kind` (enum), `namespace` (63 bytes), `name` (253 bytes), `container` (63 bytes), `imageDigest` (`sha256:` and 64 hex, or absent);
-   - `repositoryAlias`: from the coordinator's own mapping, never from the snapshot, at most 63 bytes, `^[a-z0-9-]+$`;
-   - `rules`: rule set version and matched rule IDs, at most 8, from a fixed list;
-   - `evidence`: at most 16 lines written by code (exit codes, reasons, restart counts, readiness), 2 KiB in all;
-   - `logExcerpts`: at most 2, 4 KiB each, with container, collection time and a cut flag;
-   - `untrustedHint`: the model's summary, at most 1 KiB, control characters removed.
+### 2. Snapshot storage
 
-   Never sent: raw logs, pod specs, environment values, commands, probe headers, labels, annotations, Secrets, ConfigMaps, image names, URLs, prompts, transcripts and tool results. Every string goes through the redactor's checked path (`StringTwiceChecked`, `internal/redact/before.go`), which withholds a whole entry, never part of one. A withheld excerpt is left out and marked; a withheld required field (identity, workload, evidence) means no snapshot. Before each send the coordinator checks the serialised bytes again: a match ends the entry `Withheld`, and a check that cannot finish sends nothing.
+The current `azureblob.Store` ID pattern permits one segment. `Put` writes only `<ID>.json` at the container root with `If-None-Match: *` and refuses an existing name. It cannot write the proposed prefix.
 
-6. **Transport.** One exact HTTPS URL fixed at install, with the controls of [ADR-0042](0042-openai-compatible-model-endpoints.md) (`openaiwire.NewHTTPClient`): no redirects, no proxy from the environment, TLS 1.2 or later, and the dial guard, with private addresses only for a declared in-cluster Service. A CA bundle, when needed, is a read-only mount used as the only root set (no code reads one today). A projected ServiceAccount token with the receiver's audience is preferred. Where the receiver takes only a static token, this ADR names it under the static credential rules of invariant 6: a file mounted only in the coordinator, reread at each attempt, never logged.
+Add a typed snapshot operation with fixed prefix `escalation/`, validated leaf ID, 16 KiB bound, decoded-string redaction validation and conditional writes refusing existing names. Do not accept arbitrary paths or weaken record IDs. After success the analyzer publishes the name, SHA-256 of the final serialised payload and 24-hour expiry. Failed or uncertain writes publish no usable reference; an existing blob is not assumed to match.
 
-7. **Delivery.** The ledger is the custom resource `CodeEscalation` in the operator namespace, named from the Incident UID. Its immutable spec, stored before the first send, holds the Incident reference, the snapshot name and digest, the alias and `idempotencyKey`, the SHA-256 of the cluster ID (`--cluster-id`) and the Incident UID. States move forward only (CEL): `AwaitingApproval`, `Sending`, then `Accepted`, `Refused`, `GaveUp`, `Withheld` or `Expired` (not approved in time). Attempts take 10 s each, at most 6, with jittered backoff from 1 minute to 1 hour; only a network error, 429 or 5xx is retried. After 5 failures in a row sends pause for 15 minutes, and at most 10 go per UTC day (a chart value). The reply is hostile: at most 4 KiB of JSON, a `status` from a fixed enum and a receipt ID matching `^[A-Za-z0-9_-]{1,64}$`; the rest is discarded. Nothing received becomes a prompt, a policy, a command or a trigger. Final entries are deleted after 30 days.
+Once the outcome is recorded, offer a bounded snapshot job to a separate bounded queue without waiting. Its own workers check and write snapshots under deadlines. They publish the reference only if the analysis identity and verdict are still current. Queue saturation, restart or write failure can lose a handoff without requeuing analysis or changing its outcome.
 
-8. **In-cluster remediation is untouched.** The Incident's status stays the analyzer's, closure rules do not change, and the receiver's acceptance never resolves an Incident.
+This decision extends invariant 6 to permit analyzer snapshot writes in its existing record container and coordinator and approver reads restricted to `escalation/` there. Pin those scopes. The existing `blobs/write` grant covers the writes and permits overwrites. Conditional PUT is adapter behavior. Digest verification protects integrity and versioning provides recovery evidence. A lifecycle rule removes snapshots and versions after a day. A record store is required. See [ADR-0015's amendment](0015-analysis-records-outlive-the-lab.md#amendments), [ADR-0029](0029-azure-module-environment-and-cluster-layers.md) section 6 and [#154](https://github.com/shadewright-labs/shadewright/issues/154).
 
-9. **What Shadewright requires of any receiver**, stated in the install docs because Shadewright cannot check it: a credential valid only on its intake route, with a role of its own and never the receiver's operator role; the same receipt for a repeated key and a refusal for another payload under a used key; every field treated as data, never as an instruction to its agents; redaction on receipt; and every code change through a pull request a person reviews.
+### 3. Payload and redaction
 
-10. **The model gate is a separate question.** `OpenAICompatible` can already call any HTTPS endpoint or declared in-cluster Service that serves Chat Completions or Responses, with an optional static bearer key (ADR-0042). Gaps confirmed in the code, to become tasks under the epic: system CA roots only; no authentication but a static bearer key, and no correlation header; a declared Service in `100.64.0.0/10` is refused (`PrivateServiceControl`); a reply without complete, bounded usage fails as malformed; spend across analyses is not reserved ([#208](https://github.com/shadewright-labs/shadewright/issues/208)).
+The snapshot is the final JSON request body, at most 16 KiB. It carries `schemaVersion: 1`, the selection verdict, fixed rule version, install-mapped repository alias and an `untrusted` object. That object holds all cluster-user-influenced fields: Incident identity, fingerprint, reason, count, timestamps, workload, container alias, optional image digest, matched rule IDs, evidence summaries, excerpts and model hint. None chooses a destination or changes instructions.
+
+Use a UUID, SHA-256 fingerprint and optional image digest, a workload kind enum and RFC 3339 timestamps. Namespace and workload name are bounded at 63 and 253 bytes. All reason fields use the fixed reason enum in decision 1. Use an operator-approved container alias in every container reference, including excerpt metadata, and withhold the snapshot if the mapping is missing. Aliases match `^[a-z0-9-]+$` and have at most 63 bytes. Allow 8 fixed rule IDs, 16 code-written evidence lines totalling 2 KiB, 2 excerpts of 4 KiB each with collection time and cut/withheld flags, and a 1 KiB model hint with controls removed. The schema omits pod specs, environment values, commands, probe headers, labels, annotations, Secret and ConfigMap contents, image names, prompts, transcripts and tool results.
+
+Before storage, strings use `StringTwiceChecked` (`internal/redact/before.go`). Matches are masked in place; matching does not withhold an entire entry. Work exhaustion withholds the entry whole. Code also withholds on size or heap admission limits and expired admission waits (`internal/redact/budget.go`). A withheld optional excerpt is omitted and marked; a withheld required identity or evidence prevents the snapshot.
+
+Before each send, the coordinator checks decoded strings, keys and scalar key/value relationships. An independent outbound check looks for URLs with userinfo and long high-entropy tokens, classes already covered by redactor rules. A match ends `Withheld`. An unfinished check sends nothing. The redactor preserves Kubernetes names. Identifiers and free text can still disclose short passwords or other unrecognised secrets, personal data, internal hosts or plain URLs. Some emails and IP addresses are masked.
+
+### 4. Approval covers content
+
+`CodeEscalation`, a namespaced ledger entry named from Incident UID, stores the Incident reference, analysis identity, snapshot name, expiry, final payload digest, alias and idempotency key in spec. The spec is immutable except for the one-time approval transition, which sets `approved` and its bound digest together. Changed content cannot reuse approval.
+
+A new read-only kubectl plugin view reads the snapshot with the approver's own storage role, prints the exact bytes and computed digest and verifies the ledger digest. It warns that a network policy or admission policy may be the cause, because classification cannot see those causes. Logs stay out of CRs: `AGENTS.md` says, "Never put raw logs or large payloads in a CR."
+
+Every send requires a person's approval of those bytes. Removing that requirement needs another ADR. Approval patches `spec.approved: true` and sets `spec.approvedDigest` to `spec.payloadDigest`. CEL makes approval set-never-unset and pins its digest, following `spec.cancel` for the one-way transition. Creation-time CEL uses `optionalOldSelf=true` to forbid true approval or any approval digest on create.
+
+The shipped approver ClusterRole grants only `patch` on entries. Grant it to designated approvers through explicit RoleBindings in the operator namespace, with no aggregation into namespace `admin` or `edit`. Anything with `update` can also approve, including a GitOps controller applying a manifest. Install guidance forbids broader grants. Approval is enforced in coordinator code and does not survive its compromise.
+
+### 5. Coordinator identity and forged entries
+
+`shadewright-coordinator` has its own Deployment, ServiceAccount, image, storage reader and NetworkPolicy. In the operator namespace it may read Incidents (`get/list/watch`), get settings by name, create/get/list/watch/delete entries and update their status only. It has no request, pod, Event, Secret, model or code-host grant. Executor and verifier gain no privilege.
+
+The coordinator checks the allowlist, repository alias and ledger against the analyzer's selection verdict. It recomputes every non-approval spec field from the Incident and its own mapping and validates both approval fields against the transition rules and recomputed digest. Any differing entry ends `Refused`, including one it did not create. Missing provenance, changed mappings, unknown fields and expired references refuse. It reads only the referenced snapshot under the fixed prefix and verifies its digest. It never repeats symptom classification or trusts an entry's asserted origin.
+
+### 6. Transport and pause
+
+One exact HTTPS intake URL is fixed at install. Adopt [ADR-0042](0042-openai-compatible-model-endpoints.md) controls: verified TLS 1.2 or later, no redirects, no environment proxy and guarded dialing. `openaiwire.NewHTTPClient` supplies these current controls; receiver address pinning and optional mounted CA roots are new work.
+
+A NetworkPolicy cannot name a DNS name. Install fixes the receiver as an IP range, an in-cluster Service whose ClusterIP is pinned for the dial guard, or an operator-controlled egress proxy. Also permit only required DNS, API server and storage paths. DNS outside the pinned destination refuses the dial. Service routing and proxy administration remain operator trust boundaries.
+
+Prefer a projected ServiceAccount token for the receiver's audience. This ADR also permits an intake-only static integration token under invariant 6: coordinator-only read-only file mount, no Secret API read, environment variable or CR field, reread each attempt, never emitted in errors or telemetry.
+
+After reading the token and completing slow preparation, immediately before each attempt, read `spec.paused` live. Paused, missing or unreadable settings send nothing. Every retry repeats the check. This follows `internal/providers/github/client.go`, `once`, where the write check follows token acquisition.
+
+### 7. Delivery and receiver contract
+
+The idempotency key is SHA-256 of a fixed protocol domain and Incident UID, with no cluster ID. The coordinator has its own `--cluster-id` for local accounting; neither it nor a guessable hash is exported. The ledger fixes the key before approval and reuses it after restart, timeout and credential rotation. The key is a transport header recomputed by the coordinator, outside the body.
+
+States advance from `AwaitingApproval` to `Sending`, then `Accepted`, `Refused`, `GaveUp`, `Withheld` or `Expired`. Attempts have 10-second deadlines and at most 6 tries with jittered backoff from 1 minute to 1 hour. Only network errors, 429 and 5xx retry. Five consecutive failures pause sends for 15 minutes. The durable daily limit defaults to 10. Unknown ledger or budget state sends nothing. Terminal entries remain 30 days. The analyzer retains a handoff marker so deletion cannot permit another export for that UID.
+
+Accept at most 4 KiB of JSON with a fixed status enum and a receipt ID matching `^[A-Za-z0-9_-]{1,64}$`. Before persisting any receipt, check the raw reply and decoded JSON against the exact credential sent on that attempt. An echo or a check that cannot finish ends `Refused` with no receipt. Use fixed errors, discard all other reply content and omit response text and wrapped transport errors from logs. Apply the echo guard in [ADR-0042](0042-openai-compatible-model-endpoints.md).
+
+The receiver uses an intake-only credential, returns identical receipts for repeated keys and refuses different bytes under a used key. It treats fields as data, redacts on receipt and changes code only through reviewed pull requests.
+
+`Accepted` is terminal delivery only. An immediate `MoreInformationRequired` reply ends `Refused`. The approving operator owns follow-up outside the integration. There is no callback, learning import or rollout report. Acceptance never resolves an Incident or changes remediation. Verifying outside changes needs a separate image-digest handshake decision.
 
 ## Consequences
 
-- With the handoff off, nothing changes. With it on, an installation runs a fourth Deployment, a new CRD and a cloud read role, while the notifier of ADR-0014 still exists only as an interface.
-- Log text an attacker can influence reaches a coding agent on the other side. Redaction, bounds and approval limit what goes but cannot make it harmless; point 9 asks the receiver to treat it as data.
-- The rules may not tell a code fault from bad configuration: exit code 1 at start-up looks the same for both. Approval carries that risk until approved and refused handoffs give a precision figure.
-- Invariant 6 gains a fourth identity and a static credential; `AGENTS.md` changes with the first build task, after acceptance. Installations without a record store cannot use the handoff.
+This adds a fourth identity, CRD, storage operations, scoped grants and approval workflow. Invariant 6 and installation guidance change with the first build after acceptance. Invariants 1 through 5 retain their authorization, catalog, Git, untrusted-input and idempotency boundaries.
+
+`Unknown` reference results drop some real code faults. Configuration and code failures can look identical, and hidden network or admission policy causes remain possible. Log injection and disclosure remain risks despite redaction and approval. A compromised analyzer can forge a selection verdict. A compromised coordinator can bypass approval and use its credential.
+
+Before enablement, test every exclusion and bound, repeated observations, forged entries, approval at creation, digest mismatch and content mutation. Test the RoleBindings, coordinator patch refusal and approval through a broader GitOps-style update grant. Cover storage conflicts, swapped blobs, a full queue and stalled writes, decoded escaped secrets, withholding, pause after token acquisition on every retry, destination changes, replay, credential echoes and terminal requests for more information.
 
 ## Alternatives considered
 
-- The coordinator rebuilds the context with its own `pods/log` read in opted-in namespaces. Rejected: `pods/log` and `get` on pods reach every raw log line and environment value there, unredacted, and a second context builder would drift from the analyzer's. The snapshot read reaches only bounded, redacted objects the analyzer chose to write.
-- The analyzer or the executor sends: ADR-0028 keeps other integrations out of both.
-- Approval through the code host or chat: the coordinator holds no code host credential, and a new channel needs its own identity checks.
-- The model's classification as the gate: refused by invariant 1 and ADR-0023.
-- Snapshots in a custom resource: those hold no logs or large payloads.
+- Copy bounded payload into ledger status: rejected by the CR log/payload prohibition. Approvers use their own scoped storage access.
+- Rebuild context in the coordinator: pod and log grants expose more data and duplicate classification.
+- Send from analyzer or executor: forbidden by invariant 6 and ADR-0028.
+- Model classification as authorization: forbidden by invariant 1 and [ADR-0023](0023-how-the-analyzer-calls-the-model.md).
+- Chat or code-host approval: requires another identity-verification decision and credential.
 
-## Questions for the red team
+## Red team
 
-1. Can the coordinator, the analyzer or another custom resource writer approve a send, or create an approved entry?
-2. Can cluster data or model output choose the repository alias or the URL, or lift an exclusion?
-3. Does the positive evidence accept a configuration fault that no exclusion catches?
-4. Can a policy denial or an admission refusal still lead to a send?
-5. Can the snapshot read reach analysis records, or a snapshot swapped after the Incident names it be sent?
-6. Can a withheld value reach the receiver in whole or in part?
-7. Can a redirect, a proxy, DNS rebinding or a declared Service carry the credential to another host?
-8. Can a restart or a lost answer send twice under different keys?
-9. Can a reply change anything but its own entry's status, or reach a log, an Event or the model?
-10. Can a failing receiver delay or change an analysis, a request or an Incident?
-11. Does any grant of point 3 reach more than the handoff needs?
+- Model-induced export: decision 1 requires code-based candidate selection and no request.
+- Policy bypass: decision 1 excludes policy sources, folded policy sources and existing requests.
+- Foreign image or repository routing: decisions 1 and 5 bind image repository and alias to install mappings.
+- Forged entry or approval: decisions 4 and 5 require creation guards, spec recomputation and digest-bound approval.
+- Snapshot replacement or unseen content: decisions 2 and 4 require conditional writes, digest checks and exact-byte review.
+- Encoded secrets or log injection: decision 3 checks decoded strings and labels cluster data `untrusted`; receiver isolation remains required.
+- Redirect, proxy or DNS theft: decision 6 fixes destination, TLS and dial restrictions.
+- Pause during token acquisition: decision 6 checks after the read on every attempt.
+- Replay or cluster-ID guessing: decision 7 persists delivery state and omits cluster ID from the key.
+- Hostile reply or receiver outage: decision 7 rejects credential echoes and bounds replies and retries.
+- Coordinator compromise: decisions 4 and 6 state the approval limit and bound credential scope and egress.
 
 ## Amendments
 

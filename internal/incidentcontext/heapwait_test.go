@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/redact"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // The redactions of a build wait for the limit on the heap of the redactions running at once only until the build

@@ -16,7 +16,7 @@ limitations under the License.
 
 package keda
 
-import "github.com/pkalin/shadewright/internal/kedaready"
+import "github.com/shadewright-labs/shadewright/internal/kedaready"
 
 // KedaReady is the KedaReady verification check, for verification (planned, #19): it holds when obj is a
 // keda.sh/v1alpha1 ScaledObject whose Ready condition is True, which is not paused (no pause annotation, and not

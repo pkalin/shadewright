@@ -20,8 +20,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/policy"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/policy"
 )
 
 // laterReasons are the reasons only the checks after the preflight give: the source checks, the target state

@@ -20,8 +20,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
-	"github.com/pkalin/shadewright/internal/tools"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // Secrets a control character splits, which origin/main showed to the model (count of 2026-11-22 on #852): a

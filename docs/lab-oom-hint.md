@@ -7,17 +7,17 @@ title: "Lab runbook: a reviewer hint on the OOM scenario"
 This run shows [reviewer hints](use.md#give-a-reviewer-hint) on the lab: a comment on the pull request of the OOM
 scenario leads to a replacement request that takes over the same pull request and branch with one new commit
 ([ADR-0028](adr/0028-reviewer-hints-through-the-pull-request.md) section 4; epic
-[#533](https://github.com/pkalin/shadewright/issues/533)). It then tries the refusal cases by hand. It continues the
+[#533](https://github.com/shadewright-labs/shadewright/issues/533)). It then tries the refusal cases by hand. It continues the
 [OOM acceptance run](lab-oom-acceptance.md) and uses its names and placeholders (`<owner>`, the namespace
 `shadewright-system`).
 
 !!! note "Reviewer hints are off by default"
     The executor reads hints only with the flag `--reviewer-hints`, which the chart sets from
-    `executor.reviewerHints.enabled` ([#631](https://github.com/pkalin/shadewright/issues/631)). Run this with a release
+    `executor.reviewerHints.enabled` ([#631](https://github.com/shadewright-labs/shadewright/issues/631)). Run this with a release
     that has that value, and turn it on as in [Before you start](#before-you-start). Without it, step 3 ends with no
     record in `status.hints` and nothing below happens. With hints on, the executor also replies in the
     pull request to each answered hint and refused command, once per comment
-    ([#542](https://github.com/pkalin/shadewright/issues/542)): a fixed template, posted only when the redactor would
+    ([#542](https://github.com/shadewright-labs/shadewright/issues/542)): a fixed template, posted only when the redactor would
     change nothing in it.
 
 !!! warning "Costs money and changes real systems"
@@ -280,9 +280,9 @@ still open, reset the scenario and destroy the lab as in
 
 **2026-11-10**, release `v0.4.0-rc.1` (chart `sha256:37127ad8...`, executor
 `sha256:a71f82d1...`, analyzer `sha256:55cf5e15...`), installed by
-[shadewright-fleet#60](https://github.com/pkalin/shadewright-fleet/pull/60) with `executor.reviewerHints.enabled: true`.
+[shadewright-fleet#60](https://github.com/shadewright-labs/shadewright-fleet/pull/60) with `executor.reviewerHints.enabled: true`.
 The `cluster/*` ruleset required `shadewright/review` from the Shadewright App. Model: gpt-5.4-mini as triage, no
-escalation. The pull request was [shadewright-fleet#61](https://github.com/pkalin/shadewright-fleet/pull/61).
+escalation. The pull request was [shadewright-fleet#61](https://github.com/shadewright-labs/shadewright-fleet/pull/61).
 
 | Time (UTC) | Step | Observed |
 | --- | --- | --- |
@@ -314,5 +314,5 @@ Deviations from this page:
   approves its latest head"); the reason for the author's approval is in the executor's comment only.
 - The scenario created three Incidents for the one OOM of `demo/web` (`Unhealthy`, `OOMKilled`, `BackOff`), each with
   a proposal. The two later requests waited behind the target lock (`Queued`, `TargetLocked`). After the close of
-  #61 one of them opened [shadewright-fleet#62](https://github.com/pkalin/shadewright-fleet/pull/62) at 64Mi, closed
+  #61 one of them opened [shadewright-fleet#62](https://github.com/shadewright-labs/shadewright-fleet/pull/62) at 64Mi, closed
   by hand at the end of the run.

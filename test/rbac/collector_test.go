@@ -30,8 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	analyzerpkg "github.com/pkalin/shadewright/internal/analyzer"
-	"github.com/pkalin/shadewright/internal/analyzer/collector"
+	analyzerpkg "github.com/shadewright-labs/shadewright/internal/analyzer"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/collector"
 )
 
 // TestCollectorRunsWithTheAnalyzerRBAC runs the collector as the analyzer's ServiceAccount, with the cache

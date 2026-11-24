@@ -20,7 +20,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // The image row reads each object once (#1075): on a pod of many containers, the steps per byte of the short flag

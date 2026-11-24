@@ -25,8 +25,8 @@ import (
 	"testing"
 	"unicode"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/openaiwire"
 )
 
 // controlInserts are put inside the key: every Unicode Cc code point alone (C0, DEL, C1), and terminal

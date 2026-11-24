@@ -26,8 +26,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/gitops/semdiff"
-	"github.com/pkalin/shadewright/internal/testutil/deadline"
+	"github.com/shadewright-labs/shadewright/internal/gitops/semdiff"
+	"github.com/shadewright-labs/shadewright/internal/testutil/deadline"
 )
 
 // chainedRepo is ordersRepo with a base whose common annotation x holds value bytes on one ConfigMap, an overlay

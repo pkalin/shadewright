@@ -11,7 +11,7 @@ The analyzer reads events and pods only in the namespaces you name. An empty lis
 List the namespaces. Each must exist; the chart gives each a read-only RoleBinding.
 
 ```bash
-helm upgrade shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+helm upgrade shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --version <version> \
   --reuse-values --set 'analyzer.watchNamespaces={team-a,team-b}'
 ```
 

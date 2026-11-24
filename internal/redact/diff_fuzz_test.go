@@ -29,9 +29,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact/redacttest"
-	"github.com/pkalin/shadewright/internal/redact/released"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redact/released"
 )
 
 // The differential fuzz targets of package redact (#845, fifteenth decision of 2026-11-18), one per entry point:

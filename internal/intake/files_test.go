@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/testutil/importguard"
+	"github.com/shadewright-labs/shadewright/internal/testutil/importguard"
 )
 
 // testRecordID is a record ID in the shape the name check gives.
@@ -122,7 +122,7 @@ func TestImportsNoControllerOrGitOps(t *testing.T) {
 	importguard.NoForbiddenDeps(t, ".", ".")
 	for _, p := range importguard.Deps(t, ".", ".", "../../cmd/intake") {
 		for _, banned := range []string{"/internal/controller", "/internal/gitops", "/internal/providers/github"} {
-			if strings.Contains(p.ImportPath, "github.com/pkalin/shadewright"+banned) {
+			if strings.Contains(p.ImportPath, "github.com/shadewright-labs/shadewright"+banned) {
 				t.Errorf("the intake depends on %s", p.ImportPath)
 			}
 		}

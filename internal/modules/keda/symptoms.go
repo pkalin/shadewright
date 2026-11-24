@@ -21,8 +21,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/kedaready"
-	"github.com/pkalin/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/kedaready"
+	"github.com/shadewright-labs/shadewright/internal/modules"
 )
 
 // Condition types and statuses the rules read. KEDA's come from internal/kedaready, the one definition the

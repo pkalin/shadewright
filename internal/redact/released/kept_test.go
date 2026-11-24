@@ -27,7 +27,7 @@ import (
 	"strings"
 	"testing"
 
-	v052 "github.com/pkalin/shadewright/internal/redact/released/testdata/v052"
+	v052 "github.com/shadewright-labs/shadewright/internal/redact/released/testdata/v052"
 )
 
 // #873 makes the work of this reading linear on the shapes where it was not (block scalars under a bare short

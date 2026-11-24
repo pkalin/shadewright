@@ -57,6 +57,8 @@ so the **pull request title** is what counts; a required check (`Conventional PR
 - Leave the code safer than you found it: when you notice a security or reliability problem nearby, fix it
   or raise it in the pull request, do not ignore it.
 - Prefer boring, well-known solutions and the project's existing patterns over new dependencies or clever code.
+- Never create a repository named `shadewright`, `shadewright-azure` or `shadewright-fleet` under the old account
+  `pkalin`: the repositories moved to `shadewright-labs`, and a new one under the old name ends the redirects.
 
 ## Taking a task
 
@@ -64,9 +66,11 @@ Work is tracked as GitHub issues, written with the "Task" template so that any c
 can work on one without further context. Milestones are releases (`v0.1.0`, `v0.2.0`, ...), each with a due
 date and a one-line goal; the design stages (`docs/design/13-milestones.md`) are tracked by the epics instead.
 A task takes the milestone of the release it is needed for, which may be earlier than its epic's.
-Feature sets are `epic` issues (the "Epic" template) and tasks are their sub-issues. Issues for all three
-repositories live here; a task for `shadewright-azure` or `shadewright-fleet` names that repository in its
-scope, and its pull request says `Closes pkalin/shadewright#<n>`.
+Feature sets are `epic` issues (the "Epic" template) and tasks are their sub-issues. Each issue lives in the
+repository whose files it changes: Terraform and lab infrastructure in `shadewright-azure`, scenarios and
+cluster config in `shadewright-fleet`, everything else and every epic here. Epics take sub-issues from all
+three repositories, work that spans two gets an issue in each (linked as blocked by), and every issue goes
+on the [roadmap board](https://github.com/orgs/shadewright-labs/projects/1).
 
 Every issue names the ADRs it is tied to:
 
@@ -118,7 +122,7 @@ Every issue names the ADRs it is tied to:
   The Dockerfile builds the three binaries once (builder pinned by digest, Go release equal to go.mod's toolchain
   line) and has the targets `executor`, `analyzer`, `verifier` (one binary each) and `local` (all, the default). The
   Images workflow builds `executor`, `analyzer` and `verifier` for linux/amd64 on pull requests without pushing, and for
-  linux/amd64 and linux/arm64 and pushes `ghcr.io/pkalin/shadewright-{executor,analyzer,verifier}` from main and `v*` tags only, in the one job
+  linux/amd64 and linux/arm64 and pushes `ghcr.io/shadewright-labs/shadewright-{executor,analyzer,verifier}` from main and `v*` tags only, in the one job
   that has `packages: write`. `make docker-build-images` builds all three for the host platform.
 - **CI scope.** `.github/workflows/ci.yml` is the one graph of a pull request and of a push to main. Its
   `changes` job runs `hack/ci-changed.sh` once on the files the pull request changes; the jobs that call the

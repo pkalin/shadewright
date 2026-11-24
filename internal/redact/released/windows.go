@@ -19,7 +19,7 @@ package released
 import (
 	"strings"
 
-	"github.com/pkalin/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // maxBase64Window is the most characters a window of base64Windows holds: more than the 44 of the longest

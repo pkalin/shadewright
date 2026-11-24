@@ -120,7 +120,7 @@ func TestDefaultValuesWatchNothingAndHaveNoIdentity(t *testing.T) {
 	for _, comp := range []string{executorComp, analyzerComp} {
 		dk := "Deployment/" + operatorNS + "/shadewright-" + comp
 		c := container(t, r, dk)
-		if want := "ghcr.io/pkalin/shadewright-" + comp + ":" + appVersion; c.Image != want {
+		if want := "ghcr.io/shadewright-labs/shadewright-" + comp + ":" + appVersion; c.Image != want {
 			t.Errorf("%s: image %q, want %q (the appVersion tag without a digest)", dk, c.Image, want)
 		}
 		d := convert[appsv1.Deployment](t, r.chart[dk])
@@ -278,7 +278,8 @@ func TestImagesByDigestOrAppVersionTag(t *testing.T) {
 	r := render(t, false)
 	for _, comp := range components {
 		c := container(t, r, "Deployment/"+operatorNS+"/shadewright-"+comp)
-		if !regexp.MustCompile(`^ghcr\.io/pkalin/shadewright-` + comp + `@sha256:[a-f0-9]{64}$`).MatchString(c.Image) {
+		want := `^ghcr\.io/shadewright-labs/shadewright-` + comp + `@sha256:[a-f0-9]{64}$`
+		if !regexp.MustCompile(want).MatchString(c.Image) {
 			t.Errorf("%s: image %q, want repository@digest from the values", comp, c.Image)
 		}
 	}

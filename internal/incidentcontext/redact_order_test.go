@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // A value from the cluster is redacted while it still has its lines, and only then are its line breaks turned

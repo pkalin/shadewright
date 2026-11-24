@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/fluxstatus"
+	"github.com/shadewright-labs/shadewright/internal/fluxstatus"
 )
 
 const (

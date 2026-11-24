@@ -68,7 +68,7 @@ Deleting the `RemediationRequest` also closes its pull request, but only while n
 
 ## 4. Revoke access
 
-Pausing is reversible with one patch. Revoking is what to do when you do not trust the executor's credentials. Both steps are in [shadewright-azure](https://github.com/pkalin/shadewright-azure#readme); use the sections named here and do not copy IDs into Git.
+Pausing is reversible with one patch. Revoking is what to do when you do not trust the executor's credentials. Both steps are in [shadewright-azure](https://github.com/shadewright-labs/shadewright-azure#readme); use the sections named here and do not copy IDs into Git.
 
 - **GitHub App (first, effective at once):** uninstall the App from the fleet repository (GitHub, Settings, Applications, Installed GitHub Apps, Configure, Uninstall). Its installation tokens stop working, so the executor can no longer push, open or close anything there. See "GitHub App" in the shadewright-azure README, which installs it on that one repository alone.
 - **Key Vault `sign` grant (second):** remove the role assignment that lets the executor's identity sign with the App key, by setting `github_app_key_imported = false` in the foundation's `terraform.tfvars` and applying (step 5 of "GitHub App" adds it). This only stops new tokens: the executor caches an installation token until shortly before it expires, up to an hour, so a token it already holds keeps working until then. Show the plan and check that only that one role assignment goes before you apply.

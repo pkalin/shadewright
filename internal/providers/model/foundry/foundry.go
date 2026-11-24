@@ -33,9 +33,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/model/openaiwire"
-	"github.com/pkalin/shadewright/internal/providers/retryafter"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/openaiwire"
+	"github.com/shadewright-labs/shadewright/internal/providers/retryafter"
 )
 
 // Defaults and bounds of [Config].

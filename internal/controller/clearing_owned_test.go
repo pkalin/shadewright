@@ -25,8 +25,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	verification "github.com/pkalin/shadewright/internal/verification/clearing"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	verification "github.com/shadewright-labs/shadewright/internal/verification/clearing"
 )
 
 // ownedCheck is one check of the generated sequences: good or bad, and what became of its status write.

@@ -1,4 +1,4 @@
-module github.com/pkalin/shadewright
+module github.com/shadewright-labs/shadewright
 
 go 1.26.0
 

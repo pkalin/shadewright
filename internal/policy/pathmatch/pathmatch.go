@@ -37,7 +37,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // maxLen is the MaxLength of both GitFilePath and GitPathPattern in the API schema.

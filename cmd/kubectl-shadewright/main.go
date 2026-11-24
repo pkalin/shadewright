@@ -46,7 +46,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
-	"github.com/pkalin/shadewright/cmd/kubectl-shadewright/internal/readclient"
+	"github.com/shadewright-labs/shadewright/cmd/kubectl-shadewright/internal/readclient"
 )
 
 const usage = `kubectl shadewright: read-only view of Shadewright in a cluster.

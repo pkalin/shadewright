@@ -26,9 +26,9 @@ import (
 
 	"k8s.io/client-go/tools/record"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/incidents"
-	"github.com/pkalin/shadewright/internal/providers"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/incidents"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // ADR-0023 decision 8: a reply from another model than the one configured for the role, or one that names

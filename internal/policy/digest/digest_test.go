@@ -26,8 +26,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/testutil/deadline"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/testutil/deadline"
 )
 
 // mustCompute returns the digest of in and fails the test when Compute refuses it.

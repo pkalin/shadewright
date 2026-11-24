@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/duration"
 
-	"github.com/pkalin/shadewright/internal/incidents/analysisdue"
+	"github.com/shadewright-labs/shadewright/internal/incidents/analysisdue"
 )
 
 // renderJSON writes a report or an explanation as indented JSON. Its strings were cleaned in collect or explain;

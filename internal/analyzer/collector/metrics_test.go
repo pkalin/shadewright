@@ -23,12 +23,12 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/pkalin/shadewright/internal/modules"
-	"github.com/pkalin/shadewright/internal/modules/cloudflared"
-	"github.com/pkalin/shadewright/internal/modules/flux"
-	"github.com/pkalin/shadewright/internal/modules/keda"
-	"github.com/pkalin/shadewright/internal/modules/kyverno"
-	"github.com/pkalin/shadewright/internal/testutil/metricguard"
+	"github.com/shadewright-labs/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/modules/cloudflared"
+	"github.com/shadewright-labs/shadewright/internal/modules/flux"
+	"github.com/shadewright-labs/shadewright/internal/modules/keda"
+	"github.com/shadewright-labs/shadewright/internal/modules/kyverno"
+	"github.com/shadewright-labs/shadewright/internal/testutil/metricguard"
 )
 
 // TestSymptomSourceWatchedIsBounded checks that the gauge's labels take their values from SourceKinds only

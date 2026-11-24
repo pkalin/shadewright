@@ -21,7 +21,7 @@ package tools
 import (
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // The choice of the notes list_events keeps is linear in the number of notes (#1106): twice the notes, at most

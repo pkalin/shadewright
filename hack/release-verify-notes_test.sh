@@ -17,7 +17,7 @@ d1="sha256:$(printf '1%.0s' {1..64})"
 d2="sha256:$(printf '2%.0s' {1..64})"
 d3="sha256:$(printf '3%.0s' {1..64})"
 d4="sha256:$(printf '4%.0s' {1..64})"
-notes() { ./release-verify-notes.sh pkalin/shadewright "$1" "$d1" "$d2" "$d4" "$d3"; }
+notes() { ./release-verify-notes.sh shadewright-labs/shadewright "$1" "$d1" "$d2" "$d4" "$d3"; }
 original=$'## 0.2.0 (2027-01-01)\n\n* feat: something\n'
 
 # Appended after the original body, which is kept.
@@ -28,8 +28,8 @@ grep -qF "shadewright-executor@${d1}" "${tmp}/one.md" && grep -qF "shadewright-a
   grep -qF "charts/shadewright@${d3}" "${tmp}/one.md" && ok "digests" || bad "digests"
 grep -qF 'images\.yml@refs/tags/v0\.2\.0$' "${tmp}/one.md" && grep -qF 'chart\.yml@refs/tags/v0\.2\.0$' "${tmp}/one.md" &&
   ok "identities pinned to the tag" || bad "identities pinned to the tag"
-grep -qF "gh attestation verify \"oci://ghcr.io/pkalin/charts/shadewright@${d3}\"" "${tmp}/one.md" &&
-  grep -qF -- '--signer-workflow pkalin/shadewright/.github/workflows/chart.yml' "${tmp}/one.md" &&
+grep -qF "gh attestation verify \"oci://ghcr.io/shadewright-labs/charts/shadewright@${d3}\"" "${tmp}/one.md" &&
+  grep -qF -- '--signer-workflow shadewright-labs/shadewright/.github/workflows/chart.yml' "${tmp}/one.md" &&
   ok "chart provenance command" || bad "chart provenance command"
 grep -qF 'pre-release' "${tmp}/one.md" && bad "plain release says pre-release" || ok "plain release"
 
@@ -39,7 +39,7 @@ diff -u "${tmp}/one.md" "${tmp}/two.md" && ok "idempotent" || bad "idempotent"
 [ "$(grep -c 'shadewright:verify:start' "${tmp}/two.md")" = 1 ] && ok "one section" || bad "one section"
 
 # New digests on a rerun replace the old ones.
-./release-verify-notes.sh pkalin/shadewright v0.2.0 "${d3}" "${d3}" "${d3}" "${d3}" < "${tmp}/one.md" > "${tmp}/three.md"
+./release-verify-notes.sh shadewright-labs/shadewright v0.2.0 "${d3}" "${d3}" "${d3}" "${d3}" < "${tmp}/one.md" > "${tmp}/three.md"
 grep -qF "${d1}" "${tmp}/three.md" || grep -qF "${d4}" "${tmp}/three.md" && bad "old digest left" || ok "old digest replaced"
 
 # A body edited in the web UI has CRLF line endings: the markers are still found, so a rerun replaces.
@@ -54,7 +54,7 @@ grep -qF 'pre-release' "${tmp}/rc.md" && grep -qF 'tags/v0\.2\.0-rc\.1$' "${tmp}
 [ "$(head -n 1 "${tmp}/rc.md")" = '<!-- shadewright:verify:start -->' ] && ok "empty body" || bad "empty body"
 
 # Bad input is refused.
-for args in "pkalin/shadewright main ${d1} ${d2} ${d4} ${d3}" "pkalin/shadewright v1.0.0 sha256:abc ${d2} ${d4} ${d3}" "pkalin/shadewright v1.0.0 ${d1} ${d2} bad ${d3}" "pkalin shadewright v1.0.0 ${d1} ${d2} ${d4} ${d3}"; do
+for args in "shadewright-labs/shadewright main ${d1} ${d2} ${d4} ${d3}" "shadewright-labs/shadewright v1.0.0 sha256:abc ${d2} ${d4} ${d3}" "shadewright-labs/shadewright v1.0.0 ${d1} ${d2} bad ${d3}" "shadewright-labs shadewright v1.0.0 ${d1} ${d2} ${d4} ${d3}"; do
   # shellcheck disable=SC2086
   if echo body | ./release-verify-notes.sh ${args} > /dev/null 2>&1; then bad "accepted: ${args}"; else ok "refused: ${args%% sha256*}"; fi
 done

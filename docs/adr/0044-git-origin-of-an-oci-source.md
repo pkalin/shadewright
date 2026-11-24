@@ -5,7 +5,7 @@
 
 ## Context
 
-Issue [#935](https://github.com/pkalin/shadewright/issues/935). The source mapping of [ADR-0012](0012-object-to-source-mapping.md) follows a Flux Kustomization to its `GitRepository` and refuses every other source: the request ends `NeedsIntervention` with `UnsupportedSource`. Many clusters deliver through OCI artifacts instead. CI builds an artifact from a Git repository (`flux push artifact`) and pushes it to a registry, and Flux pulls it through an `OCIRepository`. The desired state still lives in Git, but an `OCIRepository` says where the artifact is, not which repository, branch and path it was built from. Those clusters get diagnoses and issues, never a pull request.
+Issue [#935](https://github.com/shadewright-labs/shadewright/issues/935). The source mapping of [ADR-0012](0012-object-to-source-mapping.md) follows a Flux Kustomization to its `GitRepository` and refuses every other source: the request ends `NeedsIntervention` with `UnsupportedSource`. Many clusters deliver through OCI artifacts instead. CI builds an artifact from a Git repository (`flux push artifact`) and pushes it to a registry, and Flux pulls it through an `OCIRepository`. The desired state still lives in Git, but an `OCIRepository` says where the artifact is, not which repository, branch and path it was built from. Those clusters get diagnoses and issues, never a pull request.
 
 Today's code, so the change is read against it:
 

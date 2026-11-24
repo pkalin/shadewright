@@ -26,7 +26,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"sigs.k8s.io/yaml"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // status.unfinishedRenders, the executor's mark of render checks that started and did not finish (#714,

@@ -16,7 +16,7 @@ limitations under the License.
 
 package kyverno
 
-import "github.com/pkalin/shadewright/internal/modules"
+import "github.com/shadewright-labs/shadewright/internal/modules"
 
 // MaxReportResults is the most failing results one policy report gives as symptoms: the first ones in the
 // report's order, which Kyverno sorts by policy and rule (kyverno v1.19.2 pkg/utils/report/results.go,

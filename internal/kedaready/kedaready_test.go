@@ -21,8 +21,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/kedaready"
-	"github.com/pkalin/shadewright/internal/testutil/importguard"
+	"github.com/shadewright-labs/shadewright/internal/kedaready"
+	"github.com/shadewright-labs/shadewright/internal/testutil/importguard"
 )
 
 const (

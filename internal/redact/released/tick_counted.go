@@ -18,7 +18,7 @@ limitations under the License.
 
 package released
 
-import "github.com/pkalin/shadewright/internal/redact/meter"
+import "github.com/shadewright-labs/shadewright/internal/redact/meter"
 
 // Counter receives the steps of work of this package in a build with the tag redactwork, so that the
 // linearity tests of package redact count the work of the reading of the release before with its own. Package

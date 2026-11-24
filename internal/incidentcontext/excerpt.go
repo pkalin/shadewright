@@ -23,7 +23,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // RedactFunc redacts text. Its output must never be longer than its input, as package redact guarantees.

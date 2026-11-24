@@ -16,7 +16,7 @@ limitations under the License.
 
 package controller
 
-import "github.com/pkalin/shadewright/internal/controller/lockverdict"
+import "github.com/shadewright-labs/shadewright/internal/controller/lockverdict"
 
 // verdictTable is the one place that decides what each caller does with the verdict of a read of a request's pull
 // request (changeOf, #925): one row per changeState, which is a state of the pull request (open, merged, closed,

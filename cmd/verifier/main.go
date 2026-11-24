@@ -34,9 +34,9 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/cmdutil"
-	"github.com/pkalin/shadewright/internal/verifier"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/cmdutil"
+	"github.com/shadewright-labs/shadewright/internal/verifier"
 )
 
 var (

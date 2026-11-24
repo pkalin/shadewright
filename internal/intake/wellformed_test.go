@@ -25,8 +25,8 @@ import (
 	"testing"
 	"unicode"
 
-	"github.com/pkalin/shadewright/internal/analysis"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/analysis"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // spliceFirst puts member (`"key":value`) as the first member of the JSON object data.

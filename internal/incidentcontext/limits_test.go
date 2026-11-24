@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // The known limits of the log section (#943, decision of 2026-11-20). The bound of the section is its worst

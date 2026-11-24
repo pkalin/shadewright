@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact/testdata/mainredact"
+	"github.com/shadewright-labs/shadewright/internal/redact/testdata/mainredact"
 )
 
 // The wider value extents of #769 are monotonic against the matcher on main (decision of 2026-11-16 on #769):

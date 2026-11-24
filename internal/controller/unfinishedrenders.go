@@ -34,7 +34,7 @@ import (
 	crevent "sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // ReasonRenderNeverFinished: the render check of the plan started remediationv1alpha1.MaxUnfinishedRenders times

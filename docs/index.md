@@ -9,7 +9,7 @@ hide:
 
 <h1 class="sw-visually-hidden">Shadewright</h1>
 
-![Shadewright](assets/wordmark.png)
+![Shadewright by Shadewright Labs](assets/brand/shadewright-horizontal-dark.png){ width="1313" height="403" }
 
 <p class="sw-tagline">Shadewright watches a Kubernetes cluster for failing workloads, works out a fix, and proposes it as a pull request to your GitOps repository for a person to review.</p>
 

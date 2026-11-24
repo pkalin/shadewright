@@ -106,11 +106,39 @@ gh attestation verify "oci://$CHART" \
   --signer-workflow shadewright-labs/shadewright/.github/workflows/chart.yml
 ```
 
-**v0.6.0 and earlier** were published before the project moved to the `shadewright-labs` organisation: their images are `ghcr.io/pkalin/shadewright-{executor,analyzer,verifier}`, their chart `ghcr.io/pkalin/charts/shadewright`, and their signatures and attestations name the workflows of `github.com/pkalin/shadewright` (the kubectl plugin's `release-plugin.yml` too). To verify one of them, write `pkalin` in place of `shadewright-labs` in `IMAGE`, `CHART`, the identities, `--repo` and `--signer-workflow` above. Later releases are published under `ghcr.io/shadewright-labs`.
+**v0.6.0 and earlier** were published before the project moved to the `shadewright-labs` organisation: their images are `ghcr.io/pkalin/shadewright-{executor,analyzer,verifier}`, their chart `ghcr.io/pkalin/charts/shadewright`, and their signatures and attestations name the workflows of `github.com/pkalin/shadewright` (the kubectl plugin's `release-plugin.yml` too). To verify one of them with cosign, write `pkalin` in place of `shadewright-labs` in `IMAGE`, `CHART` and the identities. `gh attestation verify` needs other options for them, see [releases from before the move](#releases-from-before-the-move). Later releases are published under `ghcr.io/shadewright-labs`.
 
 Releases after v0.1.0 list the digests of its images and its chart, with these commands filled in for that tag (the identity pinned to it), once the images and the chart are published. A pre-release tag such as `v0.2.0-rc.1` is built, signed and verified the same way: the identity regexp above accepts it, it is tagged `0.2.0-rc.1` only (no `latest`, no `X.Y`), and its chart has that version and `appVersion`.
 
 Each command exits non-zero when the signature, the identity or the issuer does not match. To pin a single release instead of any `main` or tag build, replace the end of `IDENTITY` with `refs/tags/vX.Y.Z$`. Each SBOM lists the packages of one platform image; the signature and the provenance are on the index digest, the SBOMs on the child digests (images from before [#341](https://github.com/shadewright-labs/shadewright/issues/341) have a single SBOM on the index digest, made from the linux/amd64 image). The same checks run in the [images workflow](https://github.com/shadewright-labs/shadewright/blob/main/.github/workflows/images.yml) right after every push, so a build that cannot be verified fails there.
+
+### Releases from before the move
+
+The attestations of releases up to and including v0.6.0 were made under the old owner, and GitHub keeps them there. `gh attestation verify --repo shadewright-labs/shadewright` finds nothing for them, and `--repo pkalin/shadewright` answers `HTTP 404` unless the attestation is read from the registry. The cosign signature checks above are not affected.
+
+Images and chart: read the attestation from the registry with `--bundle-from-oci` and name the old repository.
+
+```bash
+IMAGE=ghcr.io/pkalin/shadewright-executor   # and shadewright-analyzer, shadewright-verifier
+gh attestation verify "oci://$IMAGE@$DIGEST" \
+  --repo pkalin/shadewright --bundle-from-oci \
+  --signer-workflow pkalin/shadewright/.github/workflows/images.yml
+
+CHART=ghcr.io/pkalin/charts/shadewright@sha256:<chart digest from the release page>
+gh attestation verify "oci://$CHART" \
+  --repo pkalin/shadewright --bundle-from-oci \
+  --signer-workflow pkalin/shadewright/.github/workflows/chart.yml
+```
+
+Only the chart of v0.6.0 and of its release candidates has a provenance attestation. Earlier charts have none, so for them the cosign signature check is the whole verification.
+
+The `kubectl-shadewright` archives are files with no copy in a registry, so `--bundle-from-oci` does not apply. Verify them by owner:
+
+```bash
+gh attestation verify "kubectl-shadewright_${VERSION}_${OS}_${ARCH}.tar.gz" \
+  --owner pkalin \
+  --signer-workflow pkalin/shadewright/.github/workflows/release-plugin.yml
+```
 
 ## Upgrade
 

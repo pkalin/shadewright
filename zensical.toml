@@ -155,12 +155,12 @@ nav = [
 
 [project.theme]
 language = "en"
-logo = "assets/logo.png"
-favicon = "assets/favicon.png"
-# overrides/: the announcement bar, the 404 page and the Open Graph tags (templates only, no Markdown change).
+logo = "assets/brand/shadewright-glyph.svg"
+favicon = "assets/brand/favicon.ico"
+# overrides/: the announcement bar, the 404 page, the footer attribution and the link preview tags (templates only, no Markdown change).
 custom_dir = "overrides"
 # false: no Google Fonts request (the default theme loads Inter and JetBrains Mono from fonts.googleapis.com).
-# Text uses the system font stacks and headings the self-hosted Chakra Petch, both set in brand.css.
+# Headings, body and code text use local system font stacks set in brand.css.
 font = false
 features = [
   "content.action.edit",

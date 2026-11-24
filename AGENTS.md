@@ -66,9 +66,11 @@ Work is tracked as GitHub issues, written with the "Task" template so that any c
 can work on one without further context. Milestones are releases (`v0.1.0`, `v0.2.0`, ...), each with a due
 date and a one-line goal; the design stages (`docs/design/13-milestones.md`) are tracked by the epics instead.
 A task takes the milestone of the release it is needed for, which may be earlier than its epic's.
-Feature sets are `epic` issues (the "Epic" template) and tasks are their sub-issues. Issues for all three
-repositories live here; a task for `shadewright-azure` or `shadewright-fleet` names that repository in its
-scope, and its pull request says `Closes shadewright-labs/shadewright#<n>`.
+Feature sets are `epic` issues (the "Epic" template) and tasks are their sub-issues. Each issue lives in the
+repository whose files it changes: Terraform and lab infrastructure in `shadewright-azure`, scenarios and
+cluster config in `shadewright-fleet`, everything else and every epic here. Epics take sub-issues from all
+three repositories, work that spans two gets an issue in each (linked as blocked by), and every issue goes
+on the [roadmap board](https://github.com/orgs/shadewright-labs/projects/1).
 
 Every issue names the ADRs it is tied to:
 

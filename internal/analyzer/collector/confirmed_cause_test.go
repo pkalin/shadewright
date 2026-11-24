@@ -164,6 +164,74 @@ func newExitHold(t *testing.T, withCauseSeen bool, cfg Config) *exitHold {
 	return e
 }
 
+func TestRetriedExitReleaseSplitsSeries(t *testing.T) {
+	cases := []struct {
+		name     string
+		nextExit int32
+		split    bool
+	}{
+		{"same exit code", 2, false},
+		{"different exit code", 1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			book := &causeBook{}
+			d, rs, _ := workload()
+			ev := consequence("ev-retry", reasonBack, appPath, t0)
+			h := newHarness(t, Config{CauseSeen: book.fn, Buffer: 2}, d, rs, exitPod(), ev)
+			h.reconcilePod(webPod)
+			first := h.one()
+			if res := h.reconcileEvent(ev.Name); res.RequeueAfter != ConsequenceGrace {
+				t.Fatalf("first reconcile requeued after %s, want %s", res.RequeueAfter, ConsequenceGrace)
+			}
+			for range cap(h.c.out) {
+				h.c.out <- Observation{Fingerprint: fillerFingerprint}
+			}
+			book.record(first.Fingerprint)
+			if res := h.reconcileEvent(ev.Name); res.RequeueAfter != retryAfter {
+				t.Fatalf("full channel requeued after %s, want %s", res.RequeueAfter, retryAfter)
+			}
+			h.drain()
+
+			h.clock.add(retryAfter)
+			pod := readPod(t, h, webPod)
+			pod.Status = crashLoopPod(h.clock.Now(), 2).Status
+			pod.Status.ContainerStatuses[0].LastTerminationState.Terminated.ExitCode = tc.nextExit
+			h.update(pod)
+			h.reconcilePod(webPod)
+			next := h.one()
+			if next.Class != ClassCause || (next.Fingerprint != first.Fingerprint) != tc.split {
+				t.Fatalf("next termination has class %q and fingerprint %q, first was %q",
+					next.Class, next.Fingerprint, first.Fingerprint)
+			}
+			book.record(next.Fingerprint)
+			ev.Series = &eventsv1.EventSeries{Count: 3, LastObservedTime: ev.EventTime}
+			h.update(ev)
+
+			type delivery struct {
+				cause string
+				total int64
+				count int64
+			}
+			want := []delivery{{first.Fingerprint, 3, 3}}
+			if tc.split {
+				want = []delivery{{first.Fingerprint, 1, 1}, {next.Fingerprint, 3, 2}}
+			}
+			h.reconcileEvent(ev.Name)
+			drained := h.drain()
+			got := make([]delivery, 0, len(drained))
+			for _, o := range drained {
+				got = append(got, delivery{o.CauseFingerprint, o.Total, o.Count})
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("retry delivered %+v, want %+v", got, want)
+			}
+			h.reconcileEvent(ev.Name)
+			h.none()
+		})
+	}
+}
+
 // event reconciles ev-hold at the given offset from at and keeps what was emitted.
 func (e *exitHold) event(after time.Duration) {
 	e.t.Helper()

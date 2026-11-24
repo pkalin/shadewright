@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	eventsv1 "k8s.io/api/events/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -46,6 +47,52 @@ func TestFailedExitAskRetriedWithinGrace(t *testing.T) {
 	e.eventLogged(sink, retryAfter)
 	if got := e.end(); got != endCause {
 		t.Errorf("the consequence ended %s, want %s at the retry", got, endCause)
+	}
+}
+
+func TestHeldExitWithNoNewOccurrencesSkipsVerdict(t *testing.T) {
+	cases := []struct {
+		name string
+		seen bool
+		err  error
+	}{
+		{"confirmed", true, nil},
+		{"unconfirmed", false, nil},
+		{"unanswered", false, context.DeadlineExceeded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newExitHold(t, true, Config{})
+			ev := readEvent(t, e.harness, "ev-hold")
+			key := reqFor(ev.Name).NamespacedName
+			e.c.series.commit(key, ev.UID, ev.CreationTimestamp.Time, 1)
+			ev.Series = &eventsv1.EventSeries{Count: 2, LastObservedTime: ev.EventTime}
+			e.update(ev)
+			if res := e.reconcileEvent(ev.Name); res.RequeueAfter != ConsequenceGrace {
+				t.Fatalf("increase requeued after %s, want %s", res.RequeueAfter, ConsequenceGrace)
+			}
+			e.none()
+
+			if tc.seen {
+				e.log.book.record(e.fp)
+			}
+			e.log.book.fail(tc.err)
+			asked := e.log.book.asked
+			before := holdOutcomeCounts()
+			ev.Series.Count = 1
+			e.update(ev)
+			if res := e.reconcileEvent(ev.Name); res.RequeueAfter != 0 {
+				t.Errorf("unchanged handled count requeued after %s, want no retry", res.RequeueAfter)
+			}
+			e.none()
+			if _, ok := e.c.holds.get(key, ev.UID); ok {
+				t.Error("hold retained after the series returned to its handled count")
+			}
+			if got := e.log.book.asked - asked; got != 0 {
+				t.Errorf("CauseSeen called %d times, want 0", got)
+			}
+			wantOutcomes(t, before, map[string]float64{holdDropped: 1})
+		})
 	}
 }
 

@@ -201,7 +201,7 @@ func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, i
 			t.class(pod) != ClassCause || !exitLinksAt(t, at) {
 			continue
 		}
-		if newest == nil || t.finished.After(newest.finished) {
+		if newest == nil || !t.finished.Before(newest.finished) {
 			newest = &t
 		}
 	}

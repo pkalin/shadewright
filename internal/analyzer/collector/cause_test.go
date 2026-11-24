@@ -295,6 +295,34 @@ func TestCauseFingerprintKillWindow(t *testing.T) {
 	}
 }
 
+func TestExitCausePrefersCurrentTerminationOnTie(t *testing.T) {
+	cases := []struct {
+		name          string
+		currentOffset time.Duration
+		wantExit      int32
+	}{
+		{"current finished later", time.Second, 2},
+		{"same finish time", 0, 2},
+		{"last finished later", -time.Second, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, pod := causeHarness(t, func(p *corev1.Pod) {
+				withTermination(p, "containerd://last", reasonError, 1, t0)
+				p.Status.ContainerStatuses[0].State.Terminated = terminated("current", reasonError, 2,
+					t0.Add(tc.currentOffset))
+			})
+			owner := ownerOf(t, h)
+			_, got := h.c.causeFingerprint(pod, owner, containerApp, false, t0, true, true)
+			want := fingerprint.Fingerprint(h.c.podStatusInput(pod, owner, reasonError,
+				terminationNote(containerApp, tc.wantExit)))
+			if got != want {
+				t.Errorf("exit cause = %q, want %q for exit code %d", got, want, tc.wantExit)
+			}
+		})
+	}
+}
+
 // TestCauseFingerprintSeriesTime checks that the time of a series is its last observed time.
 func TestCauseFingerprintSeriesTime(t *testing.T) {
 	finished := t0.Add(-30 * time.Minute)

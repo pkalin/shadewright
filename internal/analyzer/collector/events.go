@@ -152,13 +152,15 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	// shown is the cause fingerprint the event's pod shows at this reconcile, once fromEvent has read it.
 	shown := ""
 	leave := func(why string, commit bool) (ctrl.Result, error) {
-		o, ok, err := r.c.heldCause(ctx, key, ev.UID, why)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if ok && (delta > 0 || mayRepeat) {
-			heldEmitted = true
-			return r.emit(ctx, key, &ev, o, shown, delta, mayRepeat)
+		if delta > 0 || mayRepeat {
+			o, ok, err := r.c.heldCause(ctx, key, ev.UID, why)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if ok {
+				heldEmitted = true
+				return r.emit(ctx, key, &ev, o, shown, delta, mayRepeat)
+			}
 		}
 		r.c.probes.done(key)
 		r.c.holds.drop(key)
@@ -178,6 +180,9 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, err
 	}
 	shown = obs.CauseFingerprint
+	if shown == "" {
+		shown = obs.exitCause
+	}
 	switch v {
 	case subjectRetired:
 		// About a pod whose template its workload has retired (#724): handled, counted once.

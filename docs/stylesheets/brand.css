@@ -1,156 +1,144 @@
 /*
- * Shadewright brand for the docs site.
- * Colours are sampled from the mark (docs/assets/logo.png): violet #7c24fc on near-black.
- * Headings use Chakra Petch (SIL OFL 1.1, see docs/assets/fonts/OFL.txt), self-hosted so
- * the site makes no third-party font requests. Body and code text use the system font stacks (the theme's
- * Google Fonts request is switched off with `font = false` in zensical.toml).
+ * Shadewright brand for the docs site (product palette: Night #08060E, Tile #14111C, Bone #EFE9DC,
+ * Luminous Amethyst #A879FF, Deep Amethyst #7C24FC, Working Jade #7FD6B4, Torch Amber #F0B86A,
+ * Stale Grey #8A8594).
  *
- * One scheme: slate (dark only, since #909). Contrast is WCAG 2.2 AA (4.5:1), computed on
- * the sRGB relative luminance of each pair:
- *   body #e2dff2 on #0e0e16 14.7, link #a879ff on #0e0e16 6.3 (on code bg 5.5), code #ddd8f0 on #1d1b2b 12.2,
- *   muted #a9a5c2 on #0e0e16 8.1, comment #8a86a3 on #16151f 5.2
+ * Local system font stacks only (no third-party font requests; `font = false` in zensical.toml):
+ * Georgia serif for headings, system UI sans-serif for body and controls, monospace for code and data.
+ *
+ * One scheme: slate (dark only, since #909). Every text and link pair meets WCAG 2.2 AA (4.5:1) or better,
+ * computed on the sRGB relative luminance of each flat pair:
+ *   body #EFE9DC on #08060E 16.65:1 (on Tile #14111C 15.41:1),
+ *   muted #BBB4C5 on #08060E 10.02:1 (on Tile #14111C 9.27:1),
+ *   link #A879FF on #08060E 6.56:1 (on Tile #14111C 6.07:1, on code bg #100D18 6.26:1),
+ *   link hover / active nav #CAA5FF on #08060E 9.91:1 (on Tile #14111C 9.17:1),
+ *   code #EFE9DC on #100D18 15.89:1, keyword #B892FF on #100D18 7.86:1,
+ *   string #7FD6B4 on #100D18 11.15:1, number #F0B86A on #100D18 10.77:1,
+ *   comment #8A8594 on #100D18 5.37:1,
+ *   primary button #08060E on #A879FF 6.56:1 (hover #08060E on #CAA5FF 9.91:1),
+ *   secondary button #A879FF on #14111C 6.07:1,
+ *   built badge #7FD6B4 on #102A22 8.85:1, planned badge #F0B86A on #2E200C 8.86:1,
+ *   search text #EFE9DC on #24202F 13.12:1, banner #FFE2BD on #2E200C 12.70:1 (link #FFFFFF 15.81:1)
  */
 
-@font-face {
-  font-family: "Chakra Petch";
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url("../assets/fonts/chakra-petch-600-latin-ext.woff2") format("woff2");
-  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
-@font-face {
-  font-family: "Chakra Petch";
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url("../assets/fonts/chakra-petch-600-latin.woff2") format("woff2");
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-@font-face {
-  font-family: "Chakra Petch";
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url("../assets/fonts/chakra-petch-700-latin-ext.woff2") format("woff2");
-  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
-@font-face {
-  font-family: "Chakra Petch";
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url("../assets/fonts/chakra-petch-700-latin.woff2") format("woff2");
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
 :root {
-  --sw-violet: #7c24fc;
-  --sw-violet-light: #a879ff;
-  --sw-violet-soft: #9b5cff;
-  --sw-ink: #0e0e16;
-  --sw-ink-raised: #181723;
-  --sw-ink-line: #2a2740;
-  --sw-heading-font: "Chakra Petch", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --md-text-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --md-code-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sw-night: #08060e;
+  --sw-tile: #14111c;
+  --sw-steel: #24202f;
+  --sw-line: #373040;
+  --sw-bone: #efe9dc;
+  --sw-muted: #bbb4c5;
+  --sw-amethyst: #a879ff;
+  --sw-amethyst-deep: #7c24fc;
+  --sw-amethyst-hover: #caa5ff;
+  --sw-jade: #7fd6b4;
+  --sw-amber: #f0b86a;
+  --sw-grey: #8a8594;
+  --sw-code-bg: #100d18;
+  --sw-heading-font: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  --md-text-font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --md-code-font: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 [data-md-color-scheme="slate"] {
-  --md-hue: 252;
-  --sw-line: var(--sw-ink-line);
-  --sw-surface: #1d1b2b;
-  --sw-h1: #f1edff;
-  --sw-link-hover: #c6a8ff;
-  --sw-brand-text: var(--sw-violet-light);
-  --md-default-fg-color--light: #a9a5c2;
-  --md-primary-fg-color: var(--sw-ink-raised);
-  --md-primary-fg-color--light: #24223a;
-  --md-primary-fg-color--dark: var(--sw-ink);
-  --md-primary-bg-color: #ece6ff;
-  --md-primary-bg-color--light: #ece6ffb3;
-  --md-accent-fg-color: var(--sw-violet-soft);
-  --md-accent-fg-color--transparent: #9b5cff1f;
-  --md-default-bg-color: var(--sw-ink);
-  --md-typeset-a-color: var(--sw-violet-light);
-  --md-default-fg-color: #e2dff2;
-  --md-typeset-color: #e2dff2;
-  --md-code-bg-color: #16151f;
-  --md-code-fg-color: #ddd8f0;
-  --md-code-hl-keyword-color: #b48cff;
-  --md-code-hl-string-color: #7fd6c2;
-  --md-code-hl-number-color: #ffb86b;
-  --md-code-hl-comment-color: #8a86a3;
-  --md-footer-bg-color: var(--sw-ink-raised);
-  --md-footer-bg-color--dark: var(--sw-ink);
+  --md-hue: 258;
+  --sw-surface: var(--sw-tile);
+  --sw-h1: var(--sw-bone);
+  --sw-link-hover: var(--sw-amethyst-hover);
+  --sw-brand-text: var(--sw-amethyst);
+  --md-default-fg-color--light: var(--sw-muted);
+  --md-primary-fg-color: var(--sw-tile);
+  --md-primary-fg-color--light: var(--sw-steel);
+  --md-primary-fg-color--dark: var(--sw-night);
+  --md-primary-bg-color: var(--sw-bone);
+  --md-primary-bg-color--light: #efe9dcb3;
+  --md-accent-fg-color: var(--sw-amethyst);
+  --md-accent-fg-color--transparent: #a879ff1f;
+  --md-default-bg-color: var(--sw-night);
+  --md-typeset-a-color: var(--sw-amethyst);
+  --md-default-fg-color: var(--sw-bone);
+  --md-typeset-color: var(--sw-bone);
+  --md-code-bg-color: var(--sw-code-bg);
+  --md-code-fg-color: var(--sw-bone);
+  --md-code-hl-keyword-color: #b892ff;
+  --md-code-hl-string-color: var(--sw-jade);
+  --md-code-hl-number-color: var(--sw-amber);
+  --md-code-hl-comment-color: var(--sw-grey);
+  --md-footer-bg-color: var(--sw-tile);
+  --md-footer-bg-color--dark: var(--sw-night);
 
-  /* Mermaid diagrams, in the palette of the SVG diagrams (boxes #1d1b2b, violet lines). The diagram sources
+  /* Mermaid diagrams, in the product palette (Tile boxes, Luminous Amethyst edges). The diagram sources
      carry no colours, so GitHub renders them in its own light or dark theme. */
-  --md-mermaid-font-family: var(--sw-heading-font);
-  --md-mermaid-node-bg-color: #1d1b2b;
-  --md-mermaid-node-fg-color: #f1edff;
-  --md-mermaid-edge-color: var(--sw-violet-light);
-  --md-mermaid-label-bg-color: var(--sw-ink);
-  --md-mermaid-label-fg-color: #c6a8ff;
-  --md-mermaid-sequence-actor-bg-color: #1d1b2b;
-  --md-mermaid-sequence-actor-fg-color: #f1edff;
-  --md-mermaid-sequence-actor-border-color: var(--sw-violet);
-  --md-mermaid-sequence-actor-line-color: #3a3556;
-  --md-mermaid-sequence-message-fg-color: #f1edff;
-  --md-mermaid-sequence-message-line-color: var(--sw-violet-light);
-  --md-mermaid-sequence-note-bg-color: var(--sw-ink-raised);
-  --md-mermaid-sequence-note-fg-color: #f1edff;
-  --md-mermaid-sequence-note-border-color: #3a3556;
+  --md-mermaid-font-family: var(--md-text-font);
+  --md-mermaid-node-bg-color: var(--sw-tile);
+  --md-mermaid-node-fg-color: var(--sw-bone);
+  --md-mermaid-edge-color: var(--sw-amethyst);
+  --md-mermaid-label-bg-color: var(--sw-night);
+  --md-mermaid-label-fg-color: var(--sw-amethyst-hover);
+  --md-mermaid-sequence-actor-bg-color: var(--sw-tile);
+  --md-mermaid-sequence-actor-fg-color: var(--sw-bone);
+  --md-mermaid-sequence-actor-border-color: var(--sw-amethyst-deep);
+  --md-mermaid-sequence-actor-line-color: var(--sw-line);
+  --md-mermaid-sequence-message-fg-color: var(--sw-bone);
+  --md-mermaid-sequence-message-line-color: var(--sw-amethyst);
+  --md-mermaid-sequence-note-bg-color: var(--sw-steel);
+  --md-mermaid-sequence-note-fg-color: var(--sw-bone);
+  --md-mermaid-sequence-note-border-color: var(--sw-line);
   --md-mermaid-sequence-loop-bg-color: transparent;
-  --md-mermaid-sequence-loop-fg-color: #c6a8ff;
-  --md-mermaid-sequence-loop-border-color: #3a3556;
-  --md-mermaid-sequence-label-bg-color: #1d1b2b;
-  --md-mermaid-sequence-label-fg-color: #f1edff;
-  --md-mermaid-sequence-number-bg-color: var(--sw-violet);
-  --md-mermaid-sequence-number-fg-color: #f1edff;
+  --md-mermaid-sequence-loop-fg-color: var(--sw-amethyst-hover);
+  --md-mermaid-sequence-loop-border-color: var(--sw-line);
+  --md-mermaid-sequence-label-bg-color: var(--sw-tile);
+  --md-mermaid-sequence-label-fg-color: var(--sw-bone);
+  --md-mermaid-sequence-number-bg-color: var(--sw-amethyst-deep);
+  --md-mermaid-sequence-number-fg-color: var(--sw-bone);
 }
 
-/* Header: dark bar, larger glowing mark, violet hairline. */
+/* Header: Tile bar, flat glyph with clear space (no glow or drop shadow), subtle border. */
 .md-header {
-  background-color: var(--sw-ink-raised);
-  box-shadow: 0 1px 0 0 #7c24fc66;
+  background-color: var(--sw-tile);
+  box-shadow: 0 1px 0 0 var(--sw-line);
+}
+.md-header__button.md-logo {
+  padding: 0.35rem;
 }
 .md-header__button.md-logo img {
-  height: 1.9rem;
-  filter: drop-shadow(0 0 0.35rem #7c24fc99);
+  height: 1.75rem;
+  width: auto;
+  min-width: 16px;
+  display: block;
 }
 .md-header__title {
   font-family: var(--sw-heading-font);
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-weight: 400;
+  letter-spacing: 0.02em;
 }
 .md-tabs {
-  background-color: var(--sw-ink-raised);
+  background-color: var(--sw-tile);
+  border-bottom: 1px solid var(--sw-line);
 }
 
-/* Headings. */
+/* Headings: local serif stack per the brand specification. */
 .md-typeset h1,
 .md-typeset h2,
 .md-typeset h3 {
   font-family: var(--sw-heading-font);
-  font-weight: 600;
-  letter-spacing: 0.01em;
+  font-weight: 400;
+  letter-spacing: -0.01em;
 }
 .md-typeset h1 {
   color: var(--sw-h1);
-  font-weight: 700;
 }
 .md-typeset h2 {
   padding-bottom: 0.3em;
   border-bottom: 1px solid var(--sw-line);
 }
 
-/* Navigation: violet marker on the active page. */
+/* Navigation: amethyst marker on the active page. */
 .md-nav__link--active {
   color: var(--sw-brand-text);
 }
 .md-sidebar--primary .md-nav__link--active {
-  box-shadow: inset 2px 0 0 var(--sw-violet);
+  box-shadow: inset 2px 0 0 var(--sw-amethyst);
   padding-left: 0.4rem;
 }
 
@@ -170,68 +158,64 @@
 .md-typeset table:not([class]) th {
   background-color: var(--sw-surface);
   color: var(--sw-h1);
-  font-family: var(--sw-heading-font);
+  font-family: var(--md-text-font);
   font-weight: 600;
 }
 .md-typeset table:not([class]) tr:hover {
-  background-color: #7c24fc14;
+  background-color: #a879ff12;
 }
 
 /* Buttons. */
 .md-typeset .md-button {
-  border-color: var(--sw-violet);
-  color: var(--sw-brand-text);
-  font-family: var(--sw-heading-font);
+  border-color: var(--sw-amethyst);
+  color: var(--sw-amethyst);
+  font-family: var(--md-text-font);
   font-weight: 600;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.01em;
 }
 .md-typeset .md-button--primary {
-  background-color: var(--sw-violet);
-  border-color: var(--sw-violet);
-  color: #fff;
+  background-color: var(--sw-amethyst);
+  border-color: var(--sw-amethyst);
+  color: var(--sw-night);
 }
 .md-typeset .md-button:hover,
 .md-typeset .md-button:focus {
-  background-color: var(--sw-violet-soft);
-  border-color: var(--sw-violet-soft);
-  color: #fff;
+  background-color: var(--sw-amethyst-hover);
+  border-color: var(--sw-amethyst-hover);
+  color: var(--sw-night);
 }
 
-/* Home page hero. */
+/* Home page hero: flat Night field with clear space around the full horizontal lockup (no halo or effects). */
 .sw-hero {
-  position: relative;
-  isolation: isolate;
   margin: 0.5rem 0 2.5rem;
-  padding: 2.5rem 1rem 2rem;
+  padding: 2.75rem 1.5rem 2.25rem;
   text-align: center;
-  /* The wordmark is made for a dark ground, so the hero is a dark panel . */
-  background-color: var(--sw-ink);
+  background-color: var(--sw-night);
   border-radius: 0.5rem;
-  color: #e2dff2;
-}
-.sw-hero::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  z-index: -1;
-  background: radial-gradient(ellipse 45% 55% at 50% 38%, #7c24fc40, transparent 70%);
+  color: var(--sw-bone);
 }
 .sw-hero img {
-  width: min(34rem, 90%);
+  display: block;
+  margin: 0 auto;
+  width: min(34rem, 100%);
+  min-width: 120px;
   height: auto;
 }
 .md-typeset .sw-hero .sw-tagline {
   max-width: 38rem;
-  margin: 1.2rem auto 1.6rem;
+  margin: 1.75rem auto 1.85rem;
   font-size: 1.05rem;
-  color: #c9c4e0;
+  color: var(--sw-muted);
 }
 .md-typeset .sw-hero .md-button {
-  color: var(--sw-violet-light);
+  color: var(--sw-amethyst);
 }
 .md-typeset .sw-hero .md-button--primary {
-  color: #fff;
+  color: var(--sw-night);
+}
+.md-typeset .sw-hero .md-button:hover,
+.md-typeset .sw-hero .md-button:focus {
+  color: var(--sw-night);
 }
 .sw-hero .md-button {
   margin: 0.25rem 0.3rem;
@@ -248,15 +232,13 @@
 
 /* Cards on the home page. */
 .md-typeset .grid.cards > ul > li {
+  position: relative;
   border-color: var(--sw-line);
   background-color: var(--sw-surface);
 }
 .md-typeset .grid.cards > ul > li:hover {
-  border-color: var(--sw-violet);
-  box-shadow: 0 0 0 1px #7c24fc55, 0 0.4rem 1.2rem #7c24fc22;
-}
-.md-typeset .grid.cards > ul > li {
-  position: relative;
+  border-color: var(--sw-amethyst);
+  box-shadow: 0 0 0 1px #a879ff44;
 }
 /* The title link stretches over the whole card, so the card is one click target. */
 .md-typeset .grid.cards > ul > li > p:first-child > a::after {
@@ -269,14 +251,14 @@
   outline: none;
 }
 .md-typeset .grid.cards > ul > li > p:first-child > a:focus-visible::after {
-  outline: 2px solid var(--sw-violet);
+  outline: 2px solid var(--sw-amethyst);
   outline-offset: 2px;
 }
 .md-typeset .grid.cards > ul > li > p:first-child > a > strong {
   color: var(--sw-brand-text);
   font-family: var(--sw-heading-font);
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-weight: 400;
+  font-size: 1.05em;
 }
 
 /* Hand-written SVG diagrams have a dark ground: frame them so they read as figures on the page. */
@@ -286,8 +268,8 @@
   height: auto;
   border: 1px solid var(--sw-line);
   border-radius: 0.5rem;
-  background-color: var(--sw-ink);
-  box-shadow: 0 0.2rem 0.8rem #0e0e1626;
+  background-color: var(--sw-night);
+  box-shadow: 0 0.2rem 0.8rem #08060e40;
 }
 
 /* Planned and built markers: one pattern instead of free text. <span class="sw-status sw-built">built</span> */
@@ -301,16 +283,16 @@
   line-height: 1.6;
   white-space: nowrap;
 }
-[data-md-color-scheme="slate"] .sw-built { color: #7fd6c2; background-color: #12302a; }
-[data-md-color-scheme="slate"] .sw-planned { color: #ffb86b; background-color: #35250f; border-style: dashed; }
+[data-md-color-scheme="slate"] .sw-built { color: var(--sw-jade); background-color: #102a22; }
+[data-md-color-scheme="slate"] .sw-planned { color: var(--sw-amber); background-color: #2e200c; border-style: dashed; }
 
 /* Announcement bar (overrides/main.html). */
 .md-banner {
-  background-color: #35250f;
+  background-color: #2e200c;
   color: #ffe2bd;
 }
 .md-banner a {
-  color: #fff;
+  color: #ffffff;
   text-decoration: underline;
 }
 
@@ -322,7 +304,7 @@
 .md-header :focus-visible,
 .md-footer :focus-visible,
 .md-banner :focus-visible {
-  outline-color: #fff;
+  outline-color: var(--sw-bone);
 }
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -338,13 +320,13 @@
 /* Narrow screens. */
 @media (max-width: 44.9375em) {
   .sw-hero {
-    padding: 1.5rem 0.75rem 1.25rem;
+    padding: 1.75rem 1rem 1.5rem;
   }
   .sw-hero img {
     width: 100%;
   }
   .md-header__button.md-logo img {
-    height: 1.6rem;
+    height: 1.5rem;
   }
 }
 
@@ -363,7 +345,8 @@
   color: var(--md-primary-bg-color);
 }
 .md-footer-meta {
-  background-color: var(--sw-ink);
+  background-color: var(--sw-night);
+  border-top: 1px solid var(--sw-line);
 }
 .md-footer__link,
 .md-footer-meta__inner,
@@ -372,16 +355,44 @@
 .md-footer-meta a {
   color: var(--md-primary-bg-color);
 }
+.sw-footer-house {
+  margin: 0.45rem 0 0.35rem;
+}
+.sw-footer-house a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--sw-bone);
+  text-decoration: none;
+}
+.sw-footer-house a:hover,
+.sw-footer-house a:focus-visible {
+  color: var(--sw-amethyst-hover);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+.sw-footer-house img {
+  display: block;
+  width: 1.125rem;
+  height: 1.125rem;
+  flex: none;
+}
 .md-search__form {
-  background-color: #2a2740;
+  background-color: var(--sw-steel);
 }
 .md-search__input,
 .md-search__input::placeholder,
 .md-search__form .md-icon {
-  color: #ece6ff;
+  color: var(--sw-bone);
 }
 .md-typeset .sw-hero .md-button:not(.md-button--primary) {
-  background-color: #24223a;
+  background-color: var(--sw-tile);
+}
+.md-typeset .sw-hero .md-button:not(.md-button--primary):hover,
+.md-typeset .sw-hero .md-button:not(.md-button--primary):focus {
+  background-color: var(--sw-amethyst-hover);
+  border-color: var(--sw-amethyst-hover);
+  color: var(--sw-night);
 }
 [data-md-color-scheme="slate"] .md-sidebar .md-nav__link.md-nav__link--active,
 [data-md-color-scheme="slate"] .md-nav__link--active {
@@ -389,8 +400,8 @@
 }
 
 /*
- * Diagram overlay (docs/javascripts/diagram-zoom.js). Contrast: button text #f1edff on #1d1b2b 14.7,
- * on hover #2a2740 12.5, focus ring #a879ff on the #0e0e16 window 6.3.
+ * Diagram overlay (docs/javascripts/diagram-zoom.js). Contrast: button text #EFE9DC on Tile #14111C 15.41:1,
+ * on hover #24202F 13.12:1, focus ring #A879FF on the #08060E window 6.56:1.
  */
 [data-sw-zoom] {
   cursor: zoom-in;
@@ -407,7 +418,7 @@ html.sw-zoom-open {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(14, 14, 22, 0.6);
+  background: rgba(8, 6, 14, 0.72);
 }
 .sw-zoom__stage {
   position: absolute;
@@ -416,7 +427,7 @@ html.sw-zoom-open {
   border: 1px solid var(--sw-line);
   border-radius: 0.5rem;
   box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.5);
-  background: #ffffff;
+  background: var(--sw-night);
   cursor: grab;
   touch-action: none;
 }
@@ -453,20 +464,13 @@ html.sw-zoom-open {
   border: 1px solid var(--sw-line);
   border-radius: 0.3rem;
   background: var(--sw-surface);
+  color: var(--sw-bone);
   font: inherit;
   font-size: 1rem;
   cursor: pointer;
 }
-[data-md-color-scheme="slate"] .sw-zoom__stage {
-  background: #0e0e16;
-}
-[data-md-color-scheme="slate"] .sw-zoom__btn {
-  color: #f1edff;
-}
-  color: #1b1830;
-}
 .sw-zoom__btn:hover {
-  background: var(--sw-line);
+  background: var(--sw-steel);
 }
 .sw-zoom__btn:focus-visible {
   outline: 2px solid var(--sw-brand-text);

@@ -31,7 +31,7 @@ gh attestation verify "kubectl-shadewright_${VERSION}_${OS}_${ARCH}.tar.gz" \
   --signer-workflow shadewright-labs/shadewright/.github/workflows/release-plugin.yml
 ```
 
-For v0.6.0 and earlier, signed before the project moved to the `shadewright-labs` organisation, write `pkalin` in place of `shadewright-labs` in the identity, `--repo` and `--signer-workflow`.
+For v0.6.0 and earlier, signed before the project moved to the `shadewright-labs` organisation, write `pkalin` in place of `shadewright-labs` in the identity and in `--signer-workflow`, and use `--owner pkalin` in place of `--repo shadewright-labs/shadewright` (GitHub keeps their attestations with the old owner, see [releases from before the move](../upgrade-uninstall.md#releases-from-before-the-move)).
 
 To pin one release, replace `v[0-9].*$` in the regular expression with `vX.Y.Z$`. Each command exits non-zero when the signature, the identity, the checksum or the provenance does not match. Then install:
 

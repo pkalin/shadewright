@@ -280,8 +280,8 @@ func (r *RemediationRequestReconciler) stoppedCheckRefusal(rr, live *remediation
 // the lock or no longer owns the check, so no check is owed. A failed read of the request is a failure of the
 // Kubernetes API, returned for the error backoff with nothing written. A change of the request between the gate's read
 // and the Git host taking the write is not seen: the kill switch's gate, a token fetch and the client's retries run in
-// that time, so it can last seconds (the one limit left, ADR-0046). ctx is the reconcile's, stepCtx the step's bounded one,
-// for naming a failed write (boundErr).
+// that time, so it can last seconds (the one limit left, ADR-0046). stepCtx bounds both the read and the write.
+// boundErr uses the reconcile context ctx to distinguish a cancelled reconcile from a step that ran out of time.
 func (r *RemediationRequestReconciler) writeStoppedCheck(ctx, stepCtx context.Context, git providers.GitProvider,
 	rr *remediationv1alpha1.RemediationRequest, pr *remediationv1alpha1.PullRequestStatus, recordsNow bool,
 	reason string) (bool, error) {
@@ -289,7 +289,7 @@ func (r *RemediationRequestReconciler) writeStoppedCheck(ctx, stepCtx context.Co
 		prNumber(pr), "head", prHead(pr))
 	live := &remediationv1alpha1.RemediationRequest{}
 	cause := ""
-	switch err := r.reader().Get(ctx, client.ObjectKeyFromObject(rr), live); {
+	switch err := r.reader().Get(stepCtx, client.ObjectKeyFromObject(rr), live); {
 	case apierrors.IsNotFound(err):
 		cause = "the request is gone"
 	case err != nil:

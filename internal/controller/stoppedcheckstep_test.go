@@ -161,6 +161,26 @@ func TestStoppedCheckGateReadsAfterTheStepsCalls(t *testing.T) {
 	}
 }
 
+func TestStoppedCheckGateReadUsesStepDeadline(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
+	r.ReviewerHints = true
+	r.APIReader = hangingRequestReader{}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	stepCtx, cancelStep := context.WithTimeout(ctx, 0)
+	defer cancelStep()
+
+	pr := rr.Status.PullRequest
+	wrote, err := r.writeStoppedCheck(ctx, stepCtx, g, rr, pr, false, string(api.PhaseNeedsIntervention))
+	if !isClusterError(err) || !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		t.Fatalf("gate error %v, reconcile context error %v: want the step deadline reported as an API read failure",
+			err, ctx.Err())
+	}
+	if runs := g.CheckRuns(pr.HeadSHA); wrote || len(runs) != 0 {
+		t.Errorf("wrote %v, check runs %+v: want no write", wrote, runs)
+	}
+}
+
 // mainStopWritesCheck is the rule of origin/main (before the gate of #1008) for a stop's failed review check, kept
 // here as the oracle of TestStopPathsWriteTheCheckAsOnMain: the stop wrote it whenever the request it held in memory
 // owned the review check (main's ownsReviewCheck: reviewer hints on, a pull request recorded, no handoff done and no
@@ -242,13 +262,16 @@ func TestStopPathsWriteTheCheckAsOnMain(t *testing.T) {
 				t.Fatalf("stop: %v", err)
 			}
 			runs := g.CheckRuns(head)
-			if got := failedOnly(runs) && len(runs) == 1; got != want {
-				t.Errorf("check runs of the head after the stop's step %+v: want the failed check %v, as on main", runs,
-					want)
+			if !want {
+				if len(runs) != 0 {
+					t.Errorf("check runs of the head after the stop's step %+v: want none", runs)
+				}
+				return
 			}
-			if want {
-				counts[path.name]++
+			if len(runs) != 1 || !failedOnly(runs) {
+				t.Errorf("check runs of the head after the stop's step %+v: want exactly one failed stop check", runs)
 			}
+			counts[path.name]++
 		})
 	}
 	for _, p := range paths {

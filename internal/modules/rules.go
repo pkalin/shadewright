@@ -23,8 +23,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/pkalin/shadewright/internal/incidents/fingerprint"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // Bounds of a [Symptom], checked by [ValidSymptom], and of what a rule is shown.
@@ -283,7 +283,8 @@ func finding(module, rule string, subject ObjectRef, s Symptom) (Finding, bool) 
 
 // BoundValue redacts and normalizes untrusted text as the collector does for a symptom (fingerprint.Value:
 // secrets redacted first, then UIDs, digests, times, IPs and durations replaced by placeholders, but a value
-// that is a milli quantity such as "6500m" kept) and cuts it to [MaxEvidenceValueLength] bytes, redacting
+// that is a milli quantity such as "6500m" kept; a value over 4 KiB is not read and becomes "<long value: N
+// bytes>") and cuts it to [MaxEvidenceValueLength] bytes, redacting
 // again after the cut. The one exception is a value that is, as a whole, a Flux revision
 // ([redact.IsFluxRevision]): it holds only a reference name and a commit and is kept as it is. A revision
 // inside other text is redacted like the rest. If redaction panics, the whole value is withheld as
@@ -314,5 +315,6 @@ func boundValue(s string) string {
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return redact.String(strings.TrimRight(s[:cut], " "))
+	// The cut is at most MaxEvidenceValueLength bytes, a short entry: it never waits for an analysis (#1087).
+	return redact.StringShort(strings.TrimRight(s[:cut], " "))
 }

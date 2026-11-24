@@ -21,7 +21,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/cmdutil/sharedflags"
+	"github.com/shadewright-labs/shadewright/internal/cmdutil/sharedflags"
 )
 
 // TestSharedBoolFlagsMatchBindFlags ties the list kubectl-shadewright reads the analyzer's arguments with to the

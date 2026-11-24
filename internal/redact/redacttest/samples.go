@@ -51,6 +51,8 @@ func Samples() []Sample {
 		{Key: "https://store.example.net/c?sv=2020&sig=", Secret: "AbCdEf123456GhIjKl%3D"},
 		{Key: "token=", Secret: value},
 		{Key: "--client-secret ", Secret: value},
+		{Key: "{value: ", Secret: value, Text: "{value: " + value + ", name: DB_PASSWORD}"},
+		{Key: `["serve", "password:", "`, Secret: value, Text: `["serve", "password:", "` + value + `"]`},
 		{Key: "aws_secret_access_key ", Secret: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
 		{Key: `{"password":"`, Secret: "s3cr3t-Value99", Text: `{"password":"s3cr3t-Value99"}`},
 		{Key: `{"name":"DB_PASSWORD","value":"`, Secret: "s3cr3t-Value99",
@@ -60,10 +62,12 @@ func Samples() []Sample {
 		{Key: "credentials:\n  user: ", Secret: value},
 		{Key: "- name: DB_PASSWORD\n  value: ", Secret: value},
 		{Key: "msg: password: |\n  ", Secret: value},
+		{Key: "password: |\r\u00a0\u00a0", Secret: value},
 		{Secret: "Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0Lz"},
 		{Secret: "jane.doe@example.com"},
 		{Secret: "10.20.30.40"},
 		{Secret: "2001:db8:85a3::8a2e:370:7334"},
+		{Key: "redis-cli -a ", Secret: value},
 	}
 	for i := range s {
 		s[i].Rule = i

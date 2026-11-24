@@ -34,13 +34,13 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/kedaready"
-	"github.com/pkalin/shadewright/internal/policy/freshness"
-	"github.com/pkalin/shadewright/internal/providers"
-	verification "github.com/pkalin/shadewright/internal/verification/clearing"
-	"github.com/pkalin/shadewright/internal/verification/rollout"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/kedaready"
+	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	verification "github.com/shadewright-labs/shadewright/internal/verification/clearing"
+	"github.com/shadewright-labs/shadewright/internal/verification/rollout"
 )
 
 // The phases after the merge (ADR-0030 sections 2, 4 and 6, #681). A Merged request with a merge receipt moves

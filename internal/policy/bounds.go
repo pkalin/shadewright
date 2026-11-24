@@ -21,7 +21,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // Scope is what is known of a request before anything is proposed: the namespace it will be created in, the

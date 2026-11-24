@@ -139,6 +139,7 @@ func TestWriteOrdinaryMainTable(t *testing.T) {
 
 // Every ordinary message comes out byte for byte as main redacts it.
 func TestOrdinaryMessagesRedactAsOnMain(t *testing.T) {
+	parallelUnderRace(t)
 	gen := ordinaryCorpus()
 	failed, whole := 0, 0
 	n := readJSONLines(t, ordinaryMainTable, func(i int, line []byte) {

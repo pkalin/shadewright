@@ -19,6 +19,7 @@ package providers
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -135,6 +136,29 @@ type LogExcerpt struct {
 	// failed (the pod was gone, for example), or the status did not say which instance answers or named an ID
 	// out of bounds. The text may then hold lines of another instance, or of two.
 	InstanceUncertain bool
+}
+
+// LeadingContinuation returns the length of the lines at the start of a log excerpt that may continue an entry
+// whose first line is not in the excerpt: blank lines, lines that start with a space or a tab, and YAML sequence
+// entries ("-" alone or followed by a blank). A reader of an excerpt drops them (incidentcontext.RenderLog), and
+// the log source applies the reading of the release before #845 to what that reader keeps.
+func LeadingContinuation(s string) int {
+	start := 0
+	for start < len(s) {
+		end := strings.IndexByte(s[start:], '\n')
+		if end < 0 {
+			end = len(s)
+		} else {
+			end += start + 1
+		}
+		line := strings.TrimRight(s[start:end], "\r\n")
+		if line != "" && line[0] != ' ' && line[0] != '\t' && line != "-" && !strings.HasPrefix(line, "- ") &&
+			!strings.HasPrefix(line, "-\t") {
+			break
+		}
+		start = end
+	}
+	return start
 }
 
 // ErrLogGone means the node no longer holds the log of the instance asked for: the kubelet removed that

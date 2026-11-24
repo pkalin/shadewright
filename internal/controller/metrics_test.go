@@ -35,10 +35,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/phasegauge"
-	"github.com/pkalin/shadewright/internal/policy"
-	"github.com/pkalin/shadewright/internal/testutil/metricguard"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/phasegauge"
+	"github.com/shadewright-labs/shadewright/internal/policy"
+	"github.com/shadewright-labs/shadewright/internal/testutil/metricguard"
 )
 
 func TestDenialReasonLabel(t *testing.T) {
@@ -190,7 +190,7 @@ func TestExecutorMetricsAreBoundedAndDocumented(t *testing.T) {
 	requestPhases.source.Set(requestsIn(t, remediationv1alpha1.PhasePending, "a phase from the cluster", ""))
 	t.Cleanup(func() { requestPhases.source.Set(nil) })
 
-	metricguard.Check(t, metrics.Registry, executorMetrics())
+	metricguard.Check(t, metrics.Registry, metricguard.WithRedaction(executorMetrics()))
 	metricguard.Documented(t, filepath.Join("..", "..", "docs", "reference", "metrics.md"), executorMetrics())
 }
 

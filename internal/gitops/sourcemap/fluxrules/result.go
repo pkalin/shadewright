@@ -21,7 +21,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // Outcome says whether the mapping found the source or why it stopped.

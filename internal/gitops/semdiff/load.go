@@ -19,9 +19,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/pkalin/shadewright/internal/gitops/repopath"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/gitops/repopath"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // Load reads from git, at commit, every file the kustomization in dir builds from: the kustomization files

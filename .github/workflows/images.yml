@@ -1,7 +1,7 @@
 name: Images
 
 # Builds the executor, analyzer and verifier images for linux/amd64 and linux/arm64 and pushes them to
-# ghcr.io/pkalin/shadewright-{executor,analyzer,verifier} from main and v* tags; only the publish job has packages: write.
+# ghcr.io/shadewright-labs/shadewright-{executor,analyzer,verifier} from main and v* tags; only the publish job has packages: write.
 # The pull request build (amd64 only, no push, no write permission) is images-build.yml, called by ci.yml; it is
 # a separate file because a called workflow may not contain a job that asks for more permissions than its caller
 # grants, and this file's identity is what the signature is verified against. After the push, the same job signs each image index by digest with cosign keyless

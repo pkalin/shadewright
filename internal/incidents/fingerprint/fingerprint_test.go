@@ -17,10 +17,15 @@ limitations under the License.
 package fingerprint
 
 import (
+	"context"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
+
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // crdPattern is the Incident spec.fingerprint pattern.
@@ -463,15 +468,24 @@ func TestNormalizeRedacts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Normalize(Observation{Note: tt.note})
-			if strings.Contains(got, tt.secret) {
-				t.Errorf("secret %q kept in %q", tt.secret, got)
+			o := Observation{Note: tt.note}
+			// A note over redact.MaxShortEntry is not read (#1087): the fingerprint takes "<long note>" and the
+			// shown symptom "<long note: N bytes>", so no part of it is kept.
+			if len(tt.note) > redact.MaxShortEntry {
+				if got := Normalize(o); got != placeholderLongNote {
+					t.Errorf("Normalize of a note of %d bytes = %q, want %q", len(tt.note), got, placeholderLongNote)
+				}
 			}
-			if !strings.Contains(got, placeholderRedacted) {
-				t.Errorf("no redaction placeholder in %q", got)
-			}
-			if unredacted(got) {
-				t.Errorf("output %q still changes when redacted", got)
+			for name, got := range map[string]string{"the fingerprint input": Normalize(o), "the shown symptom": Symptom(o)} {
+				if strings.Contains(got, tt.secret) {
+					t.Errorf("%s: secret %q kept in %q", name, tt.secret, got)
+				}
+				if !strings.HasPrefix(got, "<long note") && !strings.Contains(got, placeholderRedacted) {
+					t.Errorf("%s: no redaction placeholder in %q", name, got)
+				}
+				if unredacted(got) {
+					t.Errorf("%s: output %q still changes when redacted", name, got)
+				}
 			}
 		})
 	}
@@ -549,4 +563,53 @@ func FuzzNormalize(f *testing.F) {
 			}
 		}
 	})
+}
+
+// A note whose redaction is withheld whole (its work ran out of the budget of redaction, #873) stands as a note
+// too long to read: nothing of it reaches the symptom. The redactor has the lowered work budget of redacttest,
+// which withholds OverLowBudget for its work.
+func TestWithheldNoteIsRedacted(t *testing.T) {
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	low := redacttest.LowBudget(red)
+	if got := normalizeWith(low.ReplaceChecked, Observation{Note: redacttest.OverLowBudget}, keepAfterKeyOrWhole); got != placeholderRedacted {
+		t.Fatalf("normalize = %q, want %q", got[:min(len(got), 80)], placeholderRedacted)
+	}
+}
+
+// A fingerprint does not wait for the limit on the heap of the redactions running at once and does not depend on
+// it (#1087, decision of 2026-11-22): with the limit held whole by an analysis's redaction, the fingerprint of an
+// event returns at once with the value it has on an idle analyzer, and its note is never the placeholder.
+func TestFingerprintDoesNotWaitForTheHeapLimit(t *testing.T) {
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := Observation{ClusterID: "c", Namespace: "web", OwnerUID: deploymentUID, Reason: reasonBackOff,
+		Note: `Failed to pull image "registry.example/app:1.2": password=hunter2 rejected`, RegardingKind: kindPod,
+		RegardingName: "app-7d9f8b6c5-x2k4p", Source: SourceEvent}
+	idle, idleNote := Fingerprint(o), Normalize(o)
+	if idleNote == placeholderRedacted {
+		t.Fatalf("on an idle analyzer the note is the placeholder: %q", idleNote)
+	}
+	redacttest.HoldHeapLimit(t, func(block func()) {
+		red.PiecesFitting([]redact.Piece{{Text: "pwd=abcdef", Data: true}}, func([]string) bool { block(); return true })
+	}, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, ok := red.WithContext(ctx).ReplaceChecked(o.Note, rawPlaceholder, sanitize)
+		return !ok
+	})
+	got := make(chan [2]string, 1)
+	go func() { got <- [2]string{Fingerprint(o), Normalize(o)} }()
+	select {
+	case g := <-got:
+		if g[0] != idle || g[1] != idleNote {
+			t.Errorf("with the limit held: fingerprint %s, note %q; on an idle analyzer %s, %q", g[0], g[1], idle, idleNote)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a fingerprint waited for the heap limit")
+	}
 }

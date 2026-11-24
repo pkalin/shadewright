@@ -5,7 +5,7 @@
 
 ## Context
 
-In the lab run of 2026-11-07 the model proposed raising the memory limit of `demo/web` from 48Mi to 96Mi. The policy `demo-memory` (64Mi to 128Mi, an increase of at most 50%) Denied it with `IncreaseTooLarge`, and the incident went to a person although a change within the bounds (64Mi to 72Mi) would have passed. Nothing in the context named the bounds, so the model guessed ([#493](https://github.com/pkalin/shadewright/issues/493)).
+In the lab run of 2026-11-07 the model proposed raising the memory limit of `demo/web` from 48Mi to 96Mi. The policy `demo-memory` (64Mi to 128Mi, an increase of at most 50%) Denied it with `IncreaseTooLarge`, and the incident went to a person although a change within the bounds (64Mi to 72Mi) would have passed. Nothing in the context named the bounds, so the model guessed ([#493](https://github.com/shadewright-labs/shadewright/issues/493)).
 
 [ADR-0023](0023-how-the-analyzer-calls-the-model.md) rejected feeding a policy denial back to the model: a denial shows the shape of the policy one probe at a time and lets the model search for what passes. The question is whether showing the bounds up front is that loop by another route.
 
@@ -29,11 +29,11 @@ Risk: the model aims at the maximum. In the evaluation a reply was first written
 
 1. A prompt rule: the bounds are limits, not a target; propose the smallest change the evidence supports and say in the summary which evidence sets the size.
 2. The pull request body shows the size of the step (an increase of N% of the previous value) beside "within policy", with a note that the policy bounds the step but does not say it is the right size, and where the diagnosis is: the analysis record and the analyzer's log, by the request's name. The size rationale there is unverified model text. The executor has only the request's typed fields, so the body shows the size, never the model's words; carrying the rationale into the body would need a field on the request and is not decided here.
-3. The evaluation scores oversized proposals ([#505](https://github.com/pkalin/shadewright/issues/505), planned).
+3. The evaluation scores oversized proposals ([#505](https://github.com/shadewright-labs/shadewright/issues/505), planned).
 
 ## Alternatives considered
 
-- Deterministic sizing, the strongest alternative: code derives the desired value from the metrics (for a memory limit, the peak working set plus headroom, clamped to the policy's range), and the model picks only the action and the container. The model then cannot steer the size at all. Deferred to [#508](https://github.com/pkalin/shadewright/issues/508), now accepted in [ADR-0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md): it needs a sizing rule per action and metrics the analyzer may not have.
+- Deterministic sizing, the strongest alternative: code derives the desired value from the metrics (for a memory limit, the peak working set plus headroom, clamped to the policy's range), and the model picks only the action and the container. The model then cannot steer the size at all. Deferred to [#508](https://github.com/shadewright-labs/shadewright/issues/508), now accepted in [ADR-0040](0040-code-sizes-a-memory-proposal-from-the-metrics.md): it needs a sizing rule per action and metrics the analyzer may not have.
 - A preflight in the analyzer: run the policy check before creating the request and hand off when it would Deny, without showing the bounds. It needs the same read, the model still guesses, and it is a second decision point to keep in step with the executor.
 - Both the bounds and the preflight: the preflight adds the second decision point for little, since the executor decides anyway.
 - Nothing: every guess outside the bounds goes to a person, as in the lab run.

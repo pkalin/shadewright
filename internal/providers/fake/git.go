@@ -28,7 +28,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 var _ providers.GitProvider = (*Git)(nil)

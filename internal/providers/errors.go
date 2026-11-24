@@ -24,6 +24,10 @@ import (
 
 // Sentinel errors. Adapters wrap them (fmt.Errorf("...: %w", ErrNotFound)) so callers can use errors.Is.
 var (
+	// ErrWithheld means redaction withheld the answer whole: its work ran out of its budget, or the answer was
+	// longer than redaction reads (package redact, budget.go). Nothing of the answer is returned; a caller shows it
+	// as a source that failed.
+	ErrWithheld = errors.New("withheld by redaction")
 	// ErrNotFound means the object asked for does not exist.
 	ErrNotFound = errors.New("not found")
 	// ErrPathNotInTree means the adapter read the tree at the commit asked for and the path is not a regular
@@ -85,6 +89,10 @@ var (
 	// from the status of the HTTP response the adapter received, never from a body or model output: only an
 	// adapter whose host documents the refusal as free marks an error with it ([NotProcessed]).
 	ErrNotProcessed = errors.New("the host refused the request before processing it")
+	// ErrNotChecked marks the error of a write whose last check before sending, the redaction check of the data,
+	// did not run on any attempt: its wait for the limit on the heap of the redactions running at once ended each
+	// time. Nothing was sent, and the data was not found unsafe either: it is not a refusal.
+	ErrNotChecked = errors.New("the redaction check did not run")
 )
 
 // notProcessedError keeps the text and the chain of err and adds ErrNotProcessed to it.
@@ -147,6 +155,9 @@ func (e *RetryableError) Unwrap() error { return e.Err }
 
 // Is reports whether target is ErrRetryable.
 func (e *RetryableError) Is(target error) bool { return target == ErrRetryable }
+
+// IsNotChecked reports whether err is a write whose redaction check never ran ([ErrNotChecked]).
+func IsNotChecked(err error) bool { return errors.Is(err, ErrNotChecked) }
 
 // IsNotFound reports whether err means the object does not exist.
 func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) }

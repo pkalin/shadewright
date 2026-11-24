@@ -23,8 +23,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/tools"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
 // Tracing (#90): each analysis is one trace. Spans carry only IDs, counts, durations, fixed result labels from
@@ -44,7 +44,7 @@ import (
 //	    └── shadewright.tool.call        each tool call the model asked for
 const (
 	// TracerName is the instrumentation scope of the analysis's spans.
-	TracerName = "github.com/pkalin/shadewright/internal/analysis"
+	TracerName = "github.com/shadewright-labs/shadewright/internal/analysis"
 
 	spanAnalysis   = "shadewright.analysis"
 	spanContext    = "shadewright.analysis.context"
@@ -90,6 +90,7 @@ const (
 	attrToolStatus      = attribute.Key("shadewright.tool.status")
 	attrQuotable        = attribute.Key("shadewright.tool.quotable")
 	attrOutside         = attribute.Key("shadewright.tool.outside_attribution")
+	attrHeldControls    = attribute.Key("shadewright.tool.held_controls")
 )
 
 // Fixed result labels of the context, reserve and call spans (attrResult), besides the Reasons.

@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 588" role="img" aria-labelledby="t d" data-diagram="control-plane-planned" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Control plane mode, planned</title>
+  <desc id="d">Planned, not built: ADR-0038 is proposed. A hub cluster and three spoke clusters. Each spoke runs its own analyzer with its own model, and redacts before anything leaves it. Reports travel only outbound, from each spoke to the hub's intake service, which stores typed summaries as reported records. The hub never calls a spoke and holds no kubeconfig for it: that path is drawn crossed out in red. Onboarding happens once: the spoke publishes a registration, a pull request adds its Cluster object to the hub's GitOps repository, and a person merges it; there is no self-registration. The Cluster object of a spoke carries the kill switch: suspended true stops that spoke's reports. Where the Git App and the pull requests live in this mode is an open question and is not drawn. Everything is dashed because nothing is built. With reduced motion set, the picture is still and shows every step at once.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
+    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c24fc" stop-opacity=".35"/><stop offset="1" stop-color="#7c24fc" stop-opacity=".08"/></linearGradient>
+    <style>
+      .lane{fill:#13121c;stroke:#2a2740}
+      .lanet{fill:#7d7999;font-size:13px;font-weight:600;letter-spacing:.14em}
+      .ext{fill:#16222a;stroke:#2f5d63;stroke-width:1.2;stroke-dasharray:5 4}
+      .plan{fill:#1d1b2b;stroke:#5a5478;stroke-width:1.2;stroke-dasharray:5 4}
+      .plank{fill:url(#glow);stroke:#7c24fc;stroke-width:1.6;stroke-dasharray:5 4}
+      .h{fill:#f1edff;font-size:15px;font-weight:650}
+      .s{fill:#a9a4c4;font-size:12.5px}
+      .cap{fill:#7d7999;font-size:12.5px}
+      .lbl{fill:#c6a8ff;font-size:12px}
+      .pn{fill:#8a85a8;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .idt{fill:#a879ff;font-size:12px;font-weight:600;letter-spacing:.06em}
+      .no{fill:#ff8fa3;font-size:13px;font-weight:600}
+      .fp{stroke:#a879ff;stroke-width:1.8;fill:none;stroke-dasharray:5 4}
+      .rr{stroke:#7d7999;stroke-width:1.4;fill:none;stroke-dasharray:4 4}
+      .x{stroke:#7a3348;stroke-width:1.8;fill:none;stroke-dasharray:4 4}
+      .xx{stroke:#ff8fa3;stroke-width:1.8;fill:none}
+      .badge{fill:#1d1b2b;stroke:#a879ff;stroke-width:1.2;stroke-dasharray:5 4}
+      .dot{fill:#a879ff;opacity:0}
+      @media (prefers-reduced-motion:no-preference){
+        .g,.ln{opacity:.28}
+        .gRa{animation:lgRa 14.0s linear infinite}
+        .gRb{animation:lgRb 14.0s linear infinite}
+        .gRc{animation:lgRc 14.0s linear infinite}
+        .gRd{animation:lgRd 14.0s linear infinite}
+        .gC{animation:lgC 14.0s linear infinite}
+        .gSA{animation:lgSA 14.0s linear infinite}
+        .gSB{animation:lgSB 14.0s linear infinite}
+        .gSC{animation:lgSC 14.0s linear infinite}
+        .gI{animation:lgI 14.0s linear infinite}
+        .gR{animation:lgR 14.0s linear infinite}
+        .no1{animation:lno1 14.0s linear infinite}
+        .do1{offset-path:path('M264 488H332');offset-rotate:0deg;animation:mo1 14.0s linear infinite}
+        .no2{animation:lno2 14.0s linear infinite}
+        .do2{offset-path:path('M532 488H600');offset-rotate:0deg;animation:mo2 14.0s linear infinite}
+        .no3{animation:lno3 14.0s linear infinite}
+        .do3{offset-path:path('M800 488H900');offset-rotate:0deg;animation:mo3 14.0s linear infinite}
+        .no4{animation:lno4 14.0s linear infinite}
+        .do4{offset-path:path('M988 456V260');offset-rotate:0deg;animation:mo4 14.0s linear infinite}
+        .nr1{animation:lnr1 14.0s linear infinite}
+        .dr1{offset-path:path('M264 120H640');offset-rotate:0deg;animation:mr1 14.0s linear infinite}
+        .nr2{animation:lnr2 14.0s linear infinite}
+        .dr2{offset-path:path('M264 224H640');offset-rotate:0deg;animation:mr2 14.0s linear infinite}
+        .nr3{animation:lnr3 14.0s linear infinite}
+        .dr3{offset-path:path('M264 328H640');offset-rotate:0deg;animation:mr3 14.0s linear infinite}
+        .ns{animation:lns 14.0s linear infinite}
+        .ds{offset-path:path('M840 116H900');offset-rotate:0deg;animation:ms 14.0s linear infinite}
+        .nk{animation:lnk 14.0s linear infinite}
+      }
+      @media (prefers-reduced-motion:reduce){ .dot{display:none} }
+      @keyframes lgRa{0%,1.25%{opacity:.28}2.5%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes lgRb{0%,10.0%{opacity:.28}11.25%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes lgRc{0%,18.333%{opacity:.28}19.583%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes lgRd{0%,26.667%{opacity:.28}27.917%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes lgC{0%,35.0%{opacity:.28}36.25%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes lgSA{0%,41.667%{opacity:.28}42.917%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes lgSB{0%,54.167%{opacity:.28}55.417%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes lgSC{0%,66.667%{opacity:.28}67.917%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes lgI{0%,51.667%{opacity:.28}52.917%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes lgR{0%,79.167%{opacity:.28}80.417%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes lno1{0%,2.083%{opacity:.28}3.333%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes mo1{0%,2.083%{offset-distance:0%;opacity:0}2.292%{opacity:1}8.333%{offset-distance:100%;opacity:1}9.375%,100%{offset-distance:100%;opacity:0}}
+      @keyframes lno2{0%,10.417%{opacity:.28}11.667%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes mo2{0%,10.417%{offset-distance:0%;opacity:0}10.625%{opacity:1}16.667%{offset-distance:100%;opacity:1}17.708%,100%{offset-distance:100%;opacity:0}}
+      @keyframes lno3{0%,19.167%{opacity:.28}20.417%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes mo3{0%,19.167%{offset-distance:0%;opacity:0}19.375%{opacity:1}25.0%{offset-distance:100%;opacity:1}26.042%,100%{offset-distance:100%;opacity:0}}
+      @keyframes lno4{0%,26.667%{opacity:.28}27.917%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes mo4{0%,26.667%{offset-distance:0%;opacity:0}26.875%{opacity:1}35.0%{offset-distance:100%;opacity:1}36.042%,100%{offset-distance:100%;opacity:0}}
+      @keyframes lnr1{0%,41.667%{opacity:.28}42.917%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes mr1{0%,41.667%{offset-distance:0%;opacity:0}41.875%{opacity:1}51.667%{offset-distance:100%;opacity:1}52.708%,100%{offset-distance:100%;opacity:0}}
+      @keyframes lnr2{0%,54.167%{opacity:.28}55.417%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes mr2{0%,54.167%{offset-distance:0%;opacity:0}54.375%{opacity:1}64.167%{offset-distance:100%;opacity:1}65.208%,100%{offset-distance:100%;opacity:0}}
+      @keyframes lnr3{0%,66.667%{opacity:.28}67.917%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes mr3{0%,66.667%{offset-distance:0%;opacity:0}66.875%{opacity:1}76.667%{offset-distance:100%;opacity:1}77.708%,100%{offset-distance:100%;opacity:0}}
+      @keyframes lns{0%,79.167%{opacity:.28}80.417%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+      @keyframes ms{0%,79.167%{offset-distance:0%;opacity:0}79.375%{opacity:1}85.0%{offset-distance:100%;opacity:1}86.042%,100%{offset-distance:100%;opacity:0}}
+      @keyframes lnk{0%,40.833%{opacity:.28}42.083%,92.5%{opacity:1}97.5%,100%{opacity:.28}}
+    </style>
+  </defs>
+  <rect width="1120" height="588" rx="18" fill="#0e0e16"/>
+  <rect class="lane" x="24" y="24" width="496" height="364" rx="14"/>
+  <text class="lanet" x="44" y="54">SPOKE CLUSTERS</text>
+  <rect class="lane" x="600" y="24" width="496" height="364" rx="14"/>
+  <text class="lanet" x="620" y="54">HUB CLUSTER</text>
+  <rect class="lane" x="24" y="408" width="1072" height="132" rx="14"/>
+  <text class="lanet" x="44" y="438">ONBOARDING, ONCE PER SPOKE</text>
+  <rect class="badge" x="936" y="34" width="140" height="28" rx="14"/>
+  <text class="idt" x="1006" y="53" text-anchor="middle">PLANNED</text>
+
+  <g class="ln no1"><path class="fp" d="M264 488H332" marker-end="url(#a)"/></g>
+  <g class="ln no2"><path class="fp" d="M532 488H600" marker-end="url(#a)"/><text class="lbl" x="566" y="480" text-anchor="middle">merge</text></g>
+  <g class="ln no3"><path class="fp" d="M800 488H900" marker-end="url(#a)"/></g>
+  <g class="ln no4"><path class="fp" d="M988 456V260" marker-end="url(#a)"/><text class="lbl" x="1000" y="380" text-anchor="middle">once merged</text></g>
+  <g class="ln nr1"><path class="fp" d="M264 120H640" marker-end="url(#a)"/><text class="lbl" x="452" y="112" text-anchor="middle">redacted report</text></g>
+  <g class="ln nr2"><path class="fp" d="M264 224H640" marker-end="url(#a)"/><text class="lbl" x="452" y="216" text-anchor="middle">redacted report</text></g>
+  <g class="ln nr3"><path class="fp" d="M264 328H640" marker-end="url(#a)"/><text class="lbl" x="452" y="320" text-anchor="middle">redacted report</text></g>
+  <g class="ln ns"><path class="fp" d="M840 116H900" marker-end="url(#a)"/></g>
+  <g class="ln nk"><path class="rr" d="M900 224H840" marker-end="url(#m)"/><text class="lbl" x="870" y="216" text-anchor="middle">reads</text></g>
+  <g class="g gRa"><rect class="plan" x="44" y="456" width="220" height="64" rx="10"/><text class="h" x="60" y="482">Registration</text><text class="s" x="60" y="503">published by the spoke</text></g>
+  <g class="g gRb"><rect class="ext" x="332" y="456" width="200" height="64" rx="10"/><text class="h" x="348" y="482">Pull request</text><text class="s" x="348" y="503">adds a Cluster object</text></g>
+  <g class="g gRc"><rect class="plan" x="600" y="456" width="200" height="64" rx="10"/><text class="h" x="616" y="482">Person merges</text><text class="s" x="616" y="503">no self-registration</text></g>
+  <g class="g gRd"><rect class="ext" x="900" y="456" width="176" height="64" rx="10"/><text class="h" x="916" y="482">Hub GitOps repo</text><text class="s" x="916" y="503">holds Cluster objects</text></g>
+  <g class="g gC"><rect class="plan" x="900" y="188" width="176" height="72" rx="10"/><text class="h" x="916" y="214">Cluster objects</text><text class="s" x="916" y="235">one per spoke</text><text class="s" x="916" y="252">suspended: true stops it</text></g>
+  <g class="g gSA"><rect class="plan" x="44" y="84" width="220" height="72" rx="10"/><text class="h" x="60" y="110">Spoke A</text><text class="s" x="60" y="131">own analyzer and model</text><text class="s" x="60" y="148">redacts before sending</text></g>
+  <g class="g gSB"><rect class="plan" x="44" y="188" width="220" height="72" rx="10"/><text class="h" x="60" y="214">Spoke B</text><text class="s" x="60" y="235">own analyzer and model</text><text class="s" x="60" y="252">redacts before sending</text></g>
+  <g class="g gSC"><rect class="plan" x="44" y="292" width="220" height="72" rx="10"/><text class="h" x="60" y="318">Spoke C</text><text class="s" x="60" y="339">own analyzer and model</text><text class="s" x="60" y="356">redacts before sending</text></g>
+  <g class="g gI"><rect class="plank" x="640" y="84" width="200" height="280" rx="12"/><text class="h" x="656" y="110">Intake service</text><text class="s" x="656" y="131">checks each report</text><text class="s" x="656" y="148">stores typed summaries</text></g>
+  <g class="g gR"><rect class="plan" x="900" y="84" width="176" height="64" rx="10"/><text class="h" x="916" y="110">Reported records</text><text class="s" x="916" y="131">summaries, no evidence</text></g>
+  <text class="pn" x="900" y="282">KILL SWITCH PER SPOKE</text>
+  <path class="x" d="M640 172H596"/>
+  <path class="xx" d="M584 166l12 12M596 166l-12 12"/>
+  <text class="no" x="632" y="164" text-anchor="end">the hub never calls a spoke</text>
+  <text class="no" x="632" y="190" text-anchor="end">no kubeconfig</text>
+  <text class="cap" x="44" y="568">Planned: ADR-0038 is proposed, nothing here is built. Spoke reports leave the spoke only outbound.</text>
+  <circle class="dot do1" r="4"/>
+  <circle class="dot do2" r="4"/>
+  <circle class="dot do3" r="4"/>
+  <circle class="dot do4" r="4"/>
+  <circle class="dot dr1" r="4"/>
+  <circle class="dot dr2" r="4"/>
+  <circle class="dot dr3" r="4"/>
+  <circle class="dot ds" r="4"/>
+</svg>

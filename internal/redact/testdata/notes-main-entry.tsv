@@ -1,0 +1,722 @@
+# What list_events and get_resource showed of each note of notesCases at main d67e6347 (#845): the value, the first and the second word after the line break, 1 for shown.
+# note (Go-quoted)	list_events	get_resource
+"token: expired\nkeepA0001 keepB0001 in 5s"	011	001
+"token: expired\r\nkeepA0002 keepB0002 in 5s"	011	001
+"token: expired\n  keepA0003 keepB0003 in 5s"	000	000
+"token: expired\n\tkeepA0004 keepB0004 in 5s"	000	000
+"token: invalid\nkeepA0005 keepB0005 in 5s"	011	001
+"token: invalid\r\nkeepA0006 keepB0006 in 5s"	011	001
+"token: invalid\n  keepA0007 keepB0007 in 5s"	000	000
+"token: invalid\n\tkeepA0008 keepB0008 in 5s"	000	000
+"token: hunter2\nkeepA0009 keepB0009 in 5s"	011	001
+"token: hunter2\r\nkeepA0010 keepB0010 in 5s"	011	001
+"token: hunter2\n  keepA0011 keepB0011 in 5s"	000	000
+"token: hunter2\n\tkeepA0012 keepB0012 in 5s"	000	000
+"token: V9qz-1234567890\nkeepA0013 keepB0013 in 5s"	011	001
+"token: V9qz-1234567890\r\nkeepA0014 keepB0014 in 5s"	011	001
+"token: V9qz-1234567890\n  keepA0015 keepB0015 in 5s"	000	000
+"token: V9qz-1234567890\n\tkeepA0016 keepB0016 in 5s"	000	000
+"token: Bearer qz12345xk9walphabeta\nkeepA0017 keepB0017 in 5s"	011	001
+"token: Bearer qz12345xk9walphabeta\r\nkeepA0018 keepB0018 in 5s"	011	001
+"token: Bearer qz12345xk9walphabeta\n  keepA0019 keepB0019 in 5s"	000	000
+"token: Bearer qz12345xk9walphabeta\n\tkeepA0020 keepB0020 in 5s"	000	000
+"token=expired\nkeepA0021 keepB0021 in 5s"	011	001
+"token=expired\r\nkeepA0022 keepB0022 in 5s"	011	001
+"token=expired\n  keepA0023 keepB0023 in 5s"	011	011
+"token=expired\n\tkeepA0024 keepB0024 in 5s"	011	001
+"token=invalid\nkeepA0025 keepB0025 in 5s"	011	001
+"token=invalid\r\nkeepA0026 keepB0026 in 5s"	011	001
+"token=invalid\n  keepA0027 keepB0027 in 5s"	011	011
+"token=invalid\n\tkeepA0028 keepB0028 in 5s"	011	001
+"token=hunter2\nkeepA0029 keepB0029 in 5s"	011	001
+"token=hunter2\r\nkeepA0030 keepB0030 in 5s"	011	001
+"token=hunter2\n  keepA0031 keepB0031 in 5s"	011	011
+"token=hunter2\n\tkeepA0032 keepB0032 in 5s"	011	001
+"token=V9qz-1234567890\nkeepA0033 keepB0033 in 5s"	011	001
+"token=V9qz-1234567890\r\nkeepA0034 keepB0034 in 5s"	011	001
+"token=V9qz-1234567890\n  keepA0035 keepB0035 in 5s"	011	011
+"token=V9qz-1234567890\n\tkeepA0036 keepB0036 in 5s"	011	001
+"token=Bearer qz12345xk9walphabeta\nkeepA0037 keepB0037 in 5s"	011	011
+"token=Bearer qz12345xk9walphabeta\r\nkeepA0038 keepB0038 in 5s"	011	011
+"token=Bearer qz12345xk9walphabeta\n  keepA0039 keepB0039 in 5s"	011	011
+"token=Bearer qz12345xk9walphabeta\n\tkeepA0040 keepB0040 in 5s"	011	011
+"token = expired\nkeepA0041 keepB0041 in 5s"	011	001
+"token = expired\r\nkeepA0042 keepB0042 in 5s"	011	001
+"token = expired\n  keepA0043 keepB0043 in 5s"	011	011
+"token = expired\n\tkeepA0044 keepB0044 in 5s"	011	001
+"token = invalid\nkeepA0045 keepB0045 in 5s"	011	001
+"token = invalid\r\nkeepA0046 keepB0046 in 5s"	011	001
+"token = invalid\n  keepA0047 keepB0047 in 5s"	011	011
+"token = invalid\n\tkeepA0048 keepB0048 in 5s"	011	001
+"token = hunter2\nkeepA0049 keepB0049 in 5s"	011	001
+"token = hunter2\r\nkeepA0050 keepB0050 in 5s"	011	001
+"token = hunter2\n  keepA0051 keepB0051 in 5s"	011	011
+"token = hunter2\n\tkeepA0052 keepB0052 in 5s"	011	001
+"token = V9qz-1234567890\nkeepA0053 keepB0053 in 5s"	011	001
+"token = V9qz-1234567890\r\nkeepA0054 keepB0054 in 5s"	011	001
+"token = V9qz-1234567890\n  keepA0055 keepB0055 in 5s"	011	011
+"token = V9qz-1234567890\n\tkeepA0056 keepB0056 in 5s"	011	001
+"token = Bearer qz12345xk9walphabeta\nkeepA0057 keepB0057 in 5s"	011	011
+"token = Bearer qz12345xk9walphabeta\r\nkeepA0058 keepB0058 in 5s"	011	011
+"token = Bearer qz12345xk9walphabeta\n  keepA0059 keepB0059 in 5s"	011	011
+"token = Bearer qz12345xk9walphabeta\n\tkeepA0060 keepB0060 in 5s"	011	011
+"token:\texpired\nkeepA0061 keepB0061 in 5s"	011	001
+"token:\texpired\r\nkeepA0062 keepB0062 in 5s"	011	001
+"token:\texpired\n  keepA0063 keepB0063 in 5s"	000	000
+"token:\texpired\n\tkeepA0064 keepB0064 in 5s"	000	000
+"token:\tinvalid\nkeepA0065 keepB0065 in 5s"	011	001
+"token:\tinvalid\r\nkeepA0066 keepB0066 in 5s"	011	001
+"token:\tinvalid\n  keepA0067 keepB0067 in 5s"	000	000
+"token:\tinvalid\n\tkeepA0068 keepB0068 in 5s"	000	000
+"token:\thunter2\nkeepA0069 keepB0069 in 5s"	011	001
+"token:\thunter2\r\nkeepA0070 keepB0070 in 5s"	011	001
+"token:\thunter2\n  keepA0071 keepB0071 in 5s"	000	000
+"token:\thunter2\n\tkeepA0072 keepB0072 in 5s"	000	000
+"token:\tV9qz-1234567890\nkeepA0073 keepB0073 in 5s"	011	001
+"token:\tV9qz-1234567890\r\nkeepA0074 keepB0074 in 5s"	011	001
+"token:\tV9qz-1234567890\n  keepA0075 keepB0075 in 5s"	000	000
+"token:\tV9qz-1234567890\n\tkeepA0076 keepB0076 in 5s"	000	000
+"token:\tBearer qz12345xk9walphabeta\nkeepA0077 keepB0077 in 5s"	011	001
+"token:\tBearer qz12345xk9walphabeta\r\nkeepA0078 keepB0078 in 5s"	011	001
+"token:\tBearer qz12345xk9walphabeta\n  keepA0079 keepB0079 in 5s"	000	000
+"token:\tBearer qz12345xk9walphabeta\n\tkeepA0080 keepB0080 in 5s"	000	000
+"password: expired\nkeepA0081 keepB0081 in 5s"	011	001
+"password: expired\r\nkeepA0082 keepB0082 in 5s"	011	001
+"password: expired\n  keepA0083 keepB0083 in 5s"	000	000
+"password: expired\n\tkeepA0084 keepB0084 in 5s"	000	000
+"password: invalid\nkeepA0085 keepB0085 in 5s"	011	001
+"password: invalid\r\nkeepA0086 keepB0086 in 5s"	011	001
+"password: invalid\n  keepA0087 keepB0087 in 5s"	000	000
+"password: invalid\n\tkeepA0088 keepB0088 in 5s"	000	000
+"password: hunter2\nkeepA0089 keepB0089 in 5s"	011	001
+"password: hunter2\r\nkeepA0090 keepB0090 in 5s"	011	001
+"password: hunter2\n  keepA0091 keepB0091 in 5s"	000	000
+"password: hunter2\n\tkeepA0092 keepB0092 in 5s"	000	000
+"password: V9qz-1234567890\nkeepA0093 keepB0093 in 5s"	011	001
+"password: V9qz-1234567890\r\nkeepA0094 keepB0094 in 5s"	011	001
+"password: V9qz-1234567890\n  keepA0095 keepB0095 in 5s"	000	000
+"password: V9qz-1234567890\n\tkeepA0096 keepB0096 in 5s"	000	000
+"password: Bearer qz12345xk9walphabeta\nkeepA0097 keepB0097 in 5s"	011	001
+"password: Bearer qz12345xk9walphabeta\r\nkeepA0098 keepB0098 in 5s"	011	001
+"password: Bearer qz12345xk9walphabeta\n  keepA0099 keepB0099 in 5s"	000	000
+"password: Bearer qz12345xk9walphabeta\n\tkeepA0100 keepB0100 in 5s"	000	000
+"password=expired\nkeepA0101 keepB0101 in 5s"	000	000
+"password=expired\r\nkeepA0102 keepB0102 in 5s"	000	000
+"password=expired\n  keepA0103 keepB0103 in 5s"	000	000
+"password=expired\n\tkeepA0104 keepB0104 in 5s"	000	000
+"password=invalid\nkeepA0105 keepB0105 in 5s"	000	000
+"password=invalid\r\nkeepA0106 keepB0106 in 5s"	000	000
+"password=invalid\n  keepA0107 keepB0107 in 5s"	000	000
+"password=invalid\n\tkeepA0108 keepB0108 in 5s"	000	000
+"password=hunter2\nkeepA0109 keepB0109 in 5s"	000	000
+"password=hunter2\r\nkeepA0110 keepB0110 in 5s"	000	000
+"password=hunter2\n  keepA0111 keepB0111 in 5s"	000	000
+"password=hunter2\n\tkeepA0112 keepB0112 in 5s"	000	000
+"password=V9qz-1234567890\nkeepA0113 keepB0113 in 5s"	000	000
+"password=V9qz-1234567890\r\nkeepA0114 keepB0114 in 5s"	000	000
+"password=V9qz-1234567890\n  keepA0115 keepB0115 in 5s"	000	000
+"password=V9qz-1234567890\n\tkeepA0116 keepB0116 in 5s"	000	000
+"password=Bearer qz12345xk9walphabeta\nkeepA0117 keepB0117 in 5s"	000	000
+"password=Bearer qz12345xk9walphabeta\r\nkeepA0118 keepB0118 in 5s"	000	000
+"password=Bearer qz12345xk9walphabeta\n  keepA0119 keepB0119 in 5s"	000	000
+"password=Bearer qz12345xk9walphabeta\n\tkeepA0120 keepB0120 in 5s"	000	000
+"password = expired\nkeepA0121 keepB0121 in 5s"	000	000
+"password = expired\r\nkeepA0122 keepB0122 in 5s"	000	000
+"password = expired\n  keepA0123 keepB0123 in 5s"	000	000
+"password = expired\n\tkeepA0124 keepB0124 in 5s"	000	000
+"password = invalid\nkeepA0125 keepB0125 in 5s"	000	000
+"password = invalid\r\nkeepA0126 keepB0126 in 5s"	000	000
+"password = invalid\n  keepA0127 keepB0127 in 5s"	000	000
+"password = invalid\n\tkeepA0128 keepB0128 in 5s"	000	000
+"password = hunter2\nkeepA0129 keepB0129 in 5s"	000	000
+"password = hunter2\r\nkeepA0130 keepB0130 in 5s"	000	000
+"password = hunter2\n  keepA0131 keepB0131 in 5s"	000	000
+"password = hunter2\n\tkeepA0132 keepB0132 in 5s"	000	000
+"password = V9qz-1234567890\nkeepA0133 keepB0133 in 5s"	000	000
+"password = V9qz-1234567890\r\nkeepA0134 keepB0134 in 5s"	000	000
+"password = V9qz-1234567890\n  keepA0135 keepB0135 in 5s"	000	000
+"password = V9qz-1234567890\n\tkeepA0136 keepB0136 in 5s"	000	000
+"password = Bearer qz12345xk9walphabeta\nkeepA0137 keepB0137 in 5s"	000	000
+"password = Bearer qz12345xk9walphabeta\r\nkeepA0138 keepB0138 in 5s"	000	000
+"password = Bearer qz12345xk9walphabeta\n  keepA0139 keepB0139 in 5s"	000	000
+"password = Bearer qz12345xk9walphabeta\n\tkeepA0140 keepB0140 in 5s"	000	000
+"password:\texpired\nkeepA0141 keepB0141 in 5s"	011	001
+"password:\texpired\r\nkeepA0142 keepB0142 in 5s"	011	001
+"password:\texpired\n  keepA0143 keepB0143 in 5s"	000	000
+"password:\texpired\n\tkeepA0144 keepB0144 in 5s"	000	000
+"password:\tinvalid\nkeepA0145 keepB0145 in 5s"	011	001
+"password:\tinvalid\r\nkeepA0146 keepB0146 in 5s"	011	001
+"password:\tinvalid\n  keepA0147 keepB0147 in 5s"	000	000
+"password:\tinvalid\n\tkeepA0148 keepB0148 in 5s"	000	000
+"password:\thunter2\nkeepA0149 keepB0149 in 5s"	011	001
+"password:\thunter2\r\nkeepA0150 keepB0150 in 5s"	011	001
+"password:\thunter2\n  keepA0151 keepB0151 in 5s"	000	000
+"password:\thunter2\n\tkeepA0152 keepB0152 in 5s"	000	000
+"password:\tV9qz-1234567890\nkeepA0153 keepB0153 in 5s"	011	001
+"password:\tV9qz-1234567890\r\nkeepA0154 keepB0154 in 5s"	011	001
+"password:\tV9qz-1234567890\n  keepA0155 keepB0155 in 5s"	000	000
+"password:\tV9qz-1234567890\n\tkeepA0156 keepB0156 in 5s"	000	000
+"password:\tBearer qz12345xk9walphabeta\nkeepA0157 keepB0157 in 5s"	011	001
+"password:\tBearer qz12345xk9walphabeta\r\nkeepA0158 keepB0158 in 5s"	011	001
+"password:\tBearer qz12345xk9walphabeta\n  keepA0159 keepB0159 in 5s"	000	000
+"password:\tBearer qz12345xk9walphabeta\n\tkeepA0160 keepB0160 in 5s"	000	000
+"auth: expired\nkeepA0161 keepB0161 in 5s"	111	001
+"auth: expired\r\nkeepA0162 keepB0162 in 5s"	111	001
+"auth: expired\n  keepA0163 keepB0163 in 5s"	111	011
+"auth: expired\n\tkeepA0164 keepB0164 in 5s"	111	001
+"auth: invalid\nkeepA0165 keepB0165 in 5s"	111	001
+"auth: invalid\r\nkeepA0166 keepB0166 in 5s"	111	001
+"auth: invalid\n  keepA0167 keepB0167 in 5s"	111	011
+"auth: invalid\n\tkeepA0168 keepB0168 in 5s"	111	001
+"auth: hunter2\nkeepA0169 keepB0169 in 5s"	111	001
+"auth: hunter2\r\nkeepA0170 keepB0170 in 5s"	111	001
+"auth: hunter2\n  keepA0171 keepB0171 in 5s"	111	011
+"auth: hunter2\n\tkeepA0172 keepB0172 in 5s"	111	001
+"auth: V9qz-1234567890\nkeepA0173 keepB0173 in 5s"	011	001
+"auth: V9qz-1234567890\r\nkeepA0174 keepB0174 in 5s"	011	001
+"auth: V9qz-1234567890\n  keepA0175 keepB0175 in 5s"	011	011
+"auth: V9qz-1234567890\n\tkeepA0176 keepB0176 in 5s"	011	001
+"auth: Bearer qz12345xk9walphabeta\nkeepA0177 keepB0177 in 5s"	011	011
+"auth: Bearer qz12345xk9walphabeta\r\nkeepA0178 keepB0178 in 5s"	011	011
+"auth: Bearer qz12345xk9walphabeta\n  keepA0179 keepB0179 in 5s"	011	011
+"auth: Bearer qz12345xk9walphabeta\n\tkeepA0180 keepB0180 in 5s"	011	011
+"auth=expired\nkeepA0181 keepB0181 in 5s"	011	001
+"auth=expired\r\nkeepA0182 keepB0182 in 5s"	011	001
+"auth=expired\n  keepA0183 keepB0183 in 5s"	011	011
+"auth=expired\n\tkeepA0184 keepB0184 in 5s"	011	001
+"auth=invalid\nkeepA0185 keepB0185 in 5s"	011	001
+"auth=invalid\r\nkeepA0186 keepB0186 in 5s"	011	001
+"auth=invalid\n  keepA0187 keepB0187 in 5s"	011	011
+"auth=invalid\n\tkeepA0188 keepB0188 in 5s"	011	001
+"auth=hunter2\nkeepA0189 keepB0189 in 5s"	011	001
+"auth=hunter2\r\nkeepA0190 keepB0190 in 5s"	011	001
+"auth=hunter2\n  keepA0191 keepB0191 in 5s"	011	011
+"auth=hunter2\n\tkeepA0192 keepB0192 in 5s"	011	001
+"auth=V9qz-1234567890\nkeepA0193 keepB0193 in 5s"	011	001
+"auth=V9qz-1234567890\r\nkeepA0194 keepB0194 in 5s"	011	001
+"auth=V9qz-1234567890\n  keepA0195 keepB0195 in 5s"	011	011
+"auth=V9qz-1234567890\n\tkeepA0196 keepB0196 in 5s"	011	001
+"auth=Bearer qz12345xk9walphabeta\nkeepA0197 keepB0197 in 5s"	011	011
+"auth=Bearer qz12345xk9walphabeta\r\nkeepA0198 keepB0198 in 5s"	011	011
+"auth=Bearer qz12345xk9walphabeta\n  keepA0199 keepB0199 in 5s"	011	011
+"auth=Bearer qz12345xk9walphabeta\n\tkeepA0200 keepB0200 in 5s"	011	011
+"auth = expired\nkeepA0201 keepB0201 in 5s"	011	001
+"auth = expired\r\nkeepA0202 keepB0202 in 5s"	011	001
+"auth = expired\n  keepA0203 keepB0203 in 5s"	011	011
+"auth = expired\n\tkeepA0204 keepB0204 in 5s"	011	001
+"auth = invalid\nkeepA0205 keepB0205 in 5s"	011	001
+"auth = invalid\r\nkeepA0206 keepB0206 in 5s"	011	001
+"auth = invalid\n  keepA0207 keepB0207 in 5s"	011	011
+"auth = invalid\n\tkeepA0208 keepB0208 in 5s"	011	001
+"auth = hunter2\nkeepA0209 keepB0209 in 5s"	011	001
+"auth = hunter2\r\nkeepA0210 keepB0210 in 5s"	011	001
+"auth = hunter2\n  keepA0211 keepB0211 in 5s"	011	011
+"auth = hunter2\n\tkeepA0212 keepB0212 in 5s"	011	001
+"auth = V9qz-1234567890\nkeepA0213 keepB0213 in 5s"	011	001
+"auth = V9qz-1234567890\r\nkeepA0214 keepB0214 in 5s"	011	001
+"auth = V9qz-1234567890\n  keepA0215 keepB0215 in 5s"	011	011
+"auth = V9qz-1234567890\n\tkeepA0216 keepB0216 in 5s"	011	001
+"auth = Bearer qz12345xk9walphabeta\nkeepA0217 keepB0217 in 5s"	011	011
+"auth = Bearer qz12345xk9walphabeta\r\nkeepA0218 keepB0218 in 5s"	011	011
+"auth = Bearer qz12345xk9walphabeta\n  keepA0219 keepB0219 in 5s"	011	011
+"auth = Bearer qz12345xk9walphabeta\n\tkeepA0220 keepB0220 in 5s"	011	011
+"auth:\texpired\nkeepA0221 keepB0221 in 5s"	111	001
+"auth:\texpired\r\nkeepA0222 keepB0222 in 5s"	111	001
+"auth:\texpired\n  keepA0223 keepB0223 in 5s"	111	011
+"auth:\texpired\n\tkeepA0224 keepB0224 in 5s"	111	001
+"auth:\tinvalid\nkeepA0225 keepB0225 in 5s"	111	001
+"auth:\tinvalid\r\nkeepA0226 keepB0226 in 5s"	111	001
+"auth:\tinvalid\n  keepA0227 keepB0227 in 5s"	111	011
+"auth:\tinvalid\n\tkeepA0228 keepB0228 in 5s"	111	001
+"auth:\thunter2\nkeepA0229 keepB0229 in 5s"	111	001
+"auth:\thunter2\r\nkeepA0230 keepB0230 in 5s"	111	001
+"auth:\thunter2\n  keepA0231 keepB0231 in 5s"	111	011
+"auth:\thunter2\n\tkeepA0232 keepB0232 in 5s"	111	001
+"auth:\tV9qz-1234567890\nkeepA0233 keepB0233 in 5s"	011	001
+"auth:\tV9qz-1234567890\r\nkeepA0234 keepB0234 in 5s"	011	001
+"auth:\tV9qz-1234567890\n  keepA0235 keepB0235 in 5s"	011	011
+"auth:\tV9qz-1234567890\n\tkeepA0236 keepB0236 in 5s"	011	001
+"auth:\tBearer qz12345xk9walphabeta\nkeepA0237 keepB0237 in 5s"	011	011
+"auth:\tBearer qz12345xk9walphabeta\r\nkeepA0238 keepB0238 in 5s"	011	011
+"auth:\tBearer qz12345xk9walphabeta\n  keepA0239 keepB0239 in 5s"	011	011
+"auth:\tBearer qz12345xk9walphabeta\n\tkeepA0240 keepB0240 in 5s"	011	011
+"refresh token: expired\nkeepA0241 keepB0241 in 5s"	011	001
+"refresh token: expired\r\nkeepA0242 keepB0242 in 5s"	011	001
+"refresh token: expired\n  keepA0243 keepB0243 in 5s"	011	011
+"refresh token: expired\n\tkeepA0244 keepB0244 in 5s"	011	001
+"refresh token: invalid\nkeepA0245 keepB0245 in 5s"	011	001
+"refresh token: invalid\r\nkeepA0246 keepB0246 in 5s"	011	001
+"refresh token: invalid\n  keepA0247 keepB0247 in 5s"	011	011
+"refresh token: invalid\n\tkeepA0248 keepB0248 in 5s"	011	001
+"refresh token: hunter2\nkeepA0249 keepB0249 in 5s"	011	001
+"refresh token: hunter2\r\nkeepA0250 keepB0250 in 5s"	011	001
+"refresh token: hunter2\n  keepA0251 keepB0251 in 5s"	011	011
+"refresh token: hunter2\n\tkeepA0252 keepB0252 in 5s"	011	001
+"refresh token: V9qz-1234567890\nkeepA0253 keepB0253 in 5s"	011	001
+"refresh token: V9qz-1234567890\r\nkeepA0254 keepB0254 in 5s"	011	001
+"refresh token: V9qz-1234567890\n  keepA0255 keepB0255 in 5s"	011	011
+"refresh token: V9qz-1234567890\n\tkeepA0256 keepB0256 in 5s"	011	001
+"refresh token: Bearer qz12345xk9walphabeta\nkeepA0257 keepB0257 in 5s"	011	011
+"refresh token: Bearer qz12345xk9walphabeta\r\nkeepA0258 keepB0258 in 5s"	011	011
+"refresh token: Bearer qz12345xk9walphabeta\n  keepA0259 keepB0259 in 5s"	011	011
+"refresh token: Bearer qz12345xk9walphabeta\n\tkeepA0260 keepB0260 in 5s"	011	011
+"refresh token=expired\nkeepA0261 keepB0261 in 5s"	011	001
+"refresh token=expired\r\nkeepA0262 keepB0262 in 5s"	011	001
+"refresh token=expired\n  keepA0263 keepB0263 in 5s"	011	011
+"refresh token=expired\n\tkeepA0264 keepB0264 in 5s"	011	001
+"refresh token=invalid\nkeepA0265 keepB0265 in 5s"	011	001
+"refresh token=invalid\r\nkeepA0266 keepB0266 in 5s"	011	001
+"refresh token=invalid\n  keepA0267 keepB0267 in 5s"	011	011
+"refresh token=invalid\n\tkeepA0268 keepB0268 in 5s"	011	001
+"refresh token=hunter2\nkeepA0269 keepB0269 in 5s"	011	001
+"refresh token=hunter2\r\nkeepA0270 keepB0270 in 5s"	011	001
+"refresh token=hunter2\n  keepA0271 keepB0271 in 5s"	011	011
+"refresh token=hunter2\n\tkeepA0272 keepB0272 in 5s"	011	001
+"refresh token=V9qz-1234567890\nkeepA0273 keepB0273 in 5s"	011	001
+"refresh token=V9qz-1234567890\r\nkeepA0274 keepB0274 in 5s"	011	001
+"refresh token=V9qz-1234567890\n  keepA0275 keepB0275 in 5s"	011	011
+"refresh token=V9qz-1234567890\n\tkeepA0276 keepB0276 in 5s"	011	001
+"refresh token=Bearer qz12345xk9walphabeta\nkeepA0277 keepB0277 in 5s"	011	011
+"refresh token=Bearer qz12345xk9walphabeta\r\nkeepA0278 keepB0278 in 5s"	011	011
+"refresh token=Bearer qz12345xk9walphabeta\n  keepA0279 keepB0279 in 5s"	011	011
+"refresh token=Bearer qz12345xk9walphabeta\n\tkeepA0280 keepB0280 in 5s"	011	011
+"refresh token = expired\nkeepA0281 keepB0281 in 5s"	011	001
+"refresh token = expired\r\nkeepA0282 keepB0282 in 5s"	011	001
+"refresh token = expired\n  keepA0283 keepB0283 in 5s"	011	011
+"refresh token = expired\n\tkeepA0284 keepB0284 in 5s"	011	001
+"refresh token = invalid\nkeepA0285 keepB0285 in 5s"	011	001
+"refresh token = invalid\r\nkeepA0286 keepB0286 in 5s"	011	001
+"refresh token = invalid\n  keepA0287 keepB0287 in 5s"	011	011
+"refresh token = invalid\n\tkeepA0288 keepB0288 in 5s"	011	001
+"refresh token = hunter2\nkeepA0289 keepB0289 in 5s"	011	001
+"refresh token = hunter2\r\nkeepA0290 keepB0290 in 5s"	011	001
+"refresh token = hunter2\n  keepA0291 keepB0291 in 5s"	011	011
+"refresh token = hunter2\n\tkeepA0292 keepB0292 in 5s"	011	001
+"refresh token = V9qz-1234567890\nkeepA0293 keepB0293 in 5s"	011	001
+"refresh token = V9qz-1234567890\r\nkeepA0294 keepB0294 in 5s"	011	001
+"refresh token = V9qz-1234567890\n  keepA0295 keepB0295 in 5s"	011	011
+"refresh token = V9qz-1234567890\n\tkeepA0296 keepB0296 in 5s"	011	001
+"refresh token = Bearer qz12345xk9walphabeta\nkeepA0297 keepB0297 in 5s"	011	011
+"refresh token = Bearer qz12345xk9walphabeta\r\nkeepA0298 keepB0298 in 5s"	011	011
+"refresh token = Bearer qz12345xk9walphabeta\n  keepA0299 keepB0299 in 5s"	011	011
+"refresh token = Bearer qz12345xk9walphabeta\n\tkeepA0300 keepB0300 in 5s"	011	011
+"refresh token:\texpired\nkeepA0301 keepB0301 in 5s"	011	001
+"refresh token:\texpired\r\nkeepA0302 keepB0302 in 5s"	011	001
+"refresh token:\texpired\n  keepA0303 keepB0303 in 5s"	011	011
+"refresh token:\texpired\n\tkeepA0304 keepB0304 in 5s"	011	001
+"refresh token:\tinvalid\nkeepA0305 keepB0305 in 5s"	011	001
+"refresh token:\tinvalid\r\nkeepA0306 keepB0306 in 5s"	011	001
+"refresh token:\tinvalid\n  keepA0307 keepB0307 in 5s"	011	011
+"refresh token:\tinvalid\n\tkeepA0308 keepB0308 in 5s"	011	001
+"refresh token:\thunter2\nkeepA0309 keepB0309 in 5s"	011	001
+"refresh token:\thunter2\r\nkeepA0310 keepB0310 in 5s"	011	001
+"refresh token:\thunter2\n  keepA0311 keepB0311 in 5s"	011	011
+"refresh token:\thunter2\n\tkeepA0312 keepB0312 in 5s"	011	001
+"refresh token:\tV9qz-1234567890\nkeepA0313 keepB0313 in 5s"	011	001
+"refresh token:\tV9qz-1234567890\r\nkeepA0314 keepB0314 in 5s"	011	001
+"refresh token:\tV9qz-1234567890\n  keepA0315 keepB0315 in 5s"	011	011
+"refresh token:\tV9qz-1234567890\n\tkeepA0316 keepB0316 in 5s"	011	001
+"refresh token:\tBearer qz12345xk9walphabeta\nkeepA0317 keepB0317 in 5s"	011	011
+"refresh token:\tBearer qz12345xk9walphabeta\r\nkeepA0318 keepB0318 in 5s"	011	011
+"refresh token:\tBearer qz12345xk9walphabeta\n  keepA0319 keepB0319 in 5s"	011	011
+"refresh token:\tBearer qz12345xk9walphabeta\n\tkeepA0320 keepB0320 in 5s"	011	011
+"api_key: expired\nkeepA0321 keepB0321 in 5s"	011	001
+"api_key: expired\r\nkeepA0322 keepB0322 in 5s"	011	001
+"api_key: expired\n  keepA0323 keepB0323 in 5s"	000	000
+"api_key: expired\n\tkeepA0324 keepB0324 in 5s"	000	000
+"api_key: invalid\nkeepA0325 keepB0325 in 5s"	011	001
+"api_key: invalid\r\nkeepA0326 keepB0326 in 5s"	011	001
+"api_key: invalid\n  keepA0327 keepB0327 in 5s"	000	000
+"api_key: invalid\n\tkeepA0328 keepB0328 in 5s"	000	000
+"api_key: hunter2\nkeepA0329 keepB0329 in 5s"	011	001
+"api_key: hunter2\r\nkeepA0330 keepB0330 in 5s"	011	001
+"api_key: hunter2\n  keepA0331 keepB0331 in 5s"	000	000
+"api_key: hunter2\n\tkeepA0332 keepB0332 in 5s"	000	000
+"api_key: V9qz-1234567890\nkeepA0333 keepB0333 in 5s"	011	001
+"api_key: V9qz-1234567890\r\nkeepA0334 keepB0334 in 5s"	011	001
+"api_key: V9qz-1234567890\n  keepA0335 keepB0335 in 5s"	000	000
+"api_key: V9qz-1234567890\n\tkeepA0336 keepB0336 in 5s"	000	000
+"api_key: Bearer qz12345xk9walphabeta\nkeepA0337 keepB0337 in 5s"	011	001
+"api_key: Bearer qz12345xk9walphabeta\r\nkeepA0338 keepB0338 in 5s"	011	001
+"api_key: Bearer qz12345xk9walphabeta\n  keepA0339 keepB0339 in 5s"	000	000
+"api_key: Bearer qz12345xk9walphabeta\n\tkeepA0340 keepB0340 in 5s"	000	000
+"api_key=expired\nkeepA0341 keepB0341 in 5s"	011	001
+"api_key=expired\r\nkeepA0342 keepB0342 in 5s"	011	001
+"api_key=expired\n  keepA0343 keepB0343 in 5s"	011	011
+"api_key=expired\n\tkeepA0344 keepB0344 in 5s"	011	001
+"api_key=invalid\nkeepA0345 keepB0345 in 5s"	011	001
+"api_key=invalid\r\nkeepA0346 keepB0346 in 5s"	011	001
+"api_key=invalid\n  keepA0347 keepB0347 in 5s"	011	011
+"api_key=invalid\n\tkeepA0348 keepB0348 in 5s"	011	001
+"api_key=hunter2\nkeepA0349 keepB0349 in 5s"	011	001
+"api_key=hunter2\r\nkeepA0350 keepB0350 in 5s"	011	001
+"api_key=hunter2\n  keepA0351 keepB0351 in 5s"	011	011
+"api_key=hunter2\n\tkeepA0352 keepB0352 in 5s"	011	001
+"api_key=V9qz-1234567890\nkeepA0353 keepB0353 in 5s"	011	001
+"api_key=V9qz-1234567890\r\nkeepA0354 keepB0354 in 5s"	011	001
+"api_key=V9qz-1234567890\n  keepA0355 keepB0355 in 5s"	011	011
+"api_key=V9qz-1234567890\n\tkeepA0356 keepB0356 in 5s"	011	001
+"api_key=Bearer qz12345xk9walphabeta\nkeepA0357 keepB0357 in 5s"	011	011
+"api_key=Bearer qz12345xk9walphabeta\r\nkeepA0358 keepB0358 in 5s"	011	011
+"api_key=Bearer qz12345xk9walphabeta\n  keepA0359 keepB0359 in 5s"	011	011
+"api_key=Bearer qz12345xk9walphabeta\n\tkeepA0360 keepB0360 in 5s"	011	011
+"api_key = expired\nkeepA0361 keepB0361 in 5s"	011	001
+"api_key = expired\r\nkeepA0362 keepB0362 in 5s"	011	001
+"api_key = expired\n  keepA0363 keepB0363 in 5s"	011	011
+"api_key = expired\n\tkeepA0364 keepB0364 in 5s"	011	001
+"api_key = invalid\nkeepA0365 keepB0365 in 5s"	011	001
+"api_key = invalid\r\nkeepA0366 keepB0366 in 5s"	011	001
+"api_key = invalid\n  keepA0367 keepB0367 in 5s"	011	011
+"api_key = invalid\n\tkeepA0368 keepB0368 in 5s"	011	001
+"api_key = hunter2\nkeepA0369 keepB0369 in 5s"	011	001
+"api_key = hunter2\r\nkeepA0370 keepB0370 in 5s"	011	001
+"api_key = hunter2\n  keepA0371 keepB0371 in 5s"	011	011
+"api_key = hunter2\n\tkeepA0372 keepB0372 in 5s"	011	001
+"api_key = V9qz-1234567890\nkeepA0373 keepB0373 in 5s"	011	001
+"api_key = V9qz-1234567890\r\nkeepA0374 keepB0374 in 5s"	011	001
+"api_key = V9qz-1234567890\n  keepA0375 keepB0375 in 5s"	011	011
+"api_key = V9qz-1234567890\n\tkeepA0376 keepB0376 in 5s"	011	001
+"api_key = Bearer qz12345xk9walphabeta\nkeepA0377 keepB0377 in 5s"	011	011
+"api_key = Bearer qz12345xk9walphabeta\r\nkeepA0378 keepB0378 in 5s"	011	011
+"api_key = Bearer qz12345xk9walphabeta\n  keepA0379 keepB0379 in 5s"	011	011
+"api_key = Bearer qz12345xk9walphabeta\n\tkeepA0380 keepB0380 in 5s"	011	011
+"api_key:\texpired\nkeepA0381 keepB0381 in 5s"	011	001
+"api_key:\texpired\r\nkeepA0382 keepB0382 in 5s"	011	001
+"api_key:\texpired\n  keepA0383 keepB0383 in 5s"	000	000
+"api_key:\texpired\n\tkeepA0384 keepB0384 in 5s"	000	000
+"api_key:\tinvalid\nkeepA0385 keepB0385 in 5s"	011	001
+"api_key:\tinvalid\r\nkeepA0386 keepB0386 in 5s"	011	001
+"api_key:\tinvalid\n  keepA0387 keepB0387 in 5s"	000	000
+"api_key:\tinvalid\n\tkeepA0388 keepB0388 in 5s"	000	000
+"api_key:\thunter2\nkeepA0389 keepB0389 in 5s"	011	001
+"api_key:\thunter2\r\nkeepA0390 keepB0390 in 5s"	011	001
+"api_key:\thunter2\n  keepA0391 keepB0391 in 5s"	000	000
+"api_key:\thunter2\n\tkeepA0392 keepB0392 in 5s"	000	000
+"api_key:\tV9qz-1234567890\nkeepA0393 keepB0393 in 5s"	011	001
+"api_key:\tV9qz-1234567890\r\nkeepA0394 keepB0394 in 5s"	011	001
+"api_key:\tV9qz-1234567890\n  keepA0395 keepB0395 in 5s"	000	000
+"api_key:\tV9qz-1234567890\n\tkeepA0396 keepB0396 in 5s"	000	000
+"api_key:\tBearer qz12345xk9walphabeta\nkeepA0397 keepB0397 in 5s"	011	001
+"api_key:\tBearer qz12345xk9walphabeta\r\nkeepA0398 keepB0398 in 5s"	011	001
+"api_key:\tBearer qz12345xk9walphabeta\n  keepA0399 keepB0399 in 5s"	000	000
+"api_key:\tBearer qz12345xk9walphabeta\n\tkeepA0400 keepB0400 in 5s"	000	000
+"secret: expired\nkeepA0401 keepB0401 in 5s"	011	001
+"secret: expired\r\nkeepA0402 keepB0402 in 5s"	011	001
+"secret: expired\n  keepA0403 keepB0403 in 5s"	000	000
+"secret: expired\n\tkeepA0404 keepB0404 in 5s"	000	000
+"secret: invalid\nkeepA0405 keepB0405 in 5s"	011	001
+"secret: invalid\r\nkeepA0406 keepB0406 in 5s"	011	001
+"secret: invalid\n  keepA0407 keepB0407 in 5s"	000	000
+"secret: invalid\n\tkeepA0408 keepB0408 in 5s"	000	000
+"secret: hunter2\nkeepA0409 keepB0409 in 5s"	011	001
+"secret: hunter2\r\nkeepA0410 keepB0410 in 5s"	011	001
+"secret: hunter2\n  keepA0411 keepB0411 in 5s"	000	000
+"secret: hunter2\n\tkeepA0412 keepB0412 in 5s"	000	000
+"secret: V9qz-1234567890\nkeepA0413 keepB0413 in 5s"	011	001
+"secret: V9qz-1234567890\r\nkeepA0414 keepB0414 in 5s"	011	001
+"secret: V9qz-1234567890\n  keepA0415 keepB0415 in 5s"	000	000
+"secret: V9qz-1234567890\n\tkeepA0416 keepB0416 in 5s"	000	000
+"secret: Bearer qz12345xk9walphabeta\nkeepA0417 keepB0417 in 5s"	011	001
+"secret: Bearer qz12345xk9walphabeta\r\nkeepA0418 keepB0418 in 5s"	011	001
+"secret: Bearer qz12345xk9walphabeta\n  keepA0419 keepB0419 in 5s"	000	000
+"secret: Bearer qz12345xk9walphabeta\n\tkeepA0420 keepB0420 in 5s"	000	000
+"secret=expired\nkeepA0421 keepB0421 in 5s"	011	001
+"secret=expired\r\nkeepA0422 keepB0422 in 5s"	011	001
+"secret=expired\n  keepA0423 keepB0423 in 5s"	011	011
+"secret=expired\n\tkeepA0424 keepB0424 in 5s"	011	001
+"secret=invalid\nkeepA0425 keepB0425 in 5s"	011	001
+"secret=invalid\r\nkeepA0426 keepB0426 in 5s"	011	001
+"secret=invalid\n  keepA0427 keepB0427 in 5s"	011	011
+"secret=invalid\n\tkeepA0428 keepB0428 in 5s"	011	001
+"secret=hunter2\nkeepA0429 keepB0429 in 5s"	011	001
+"secret=hunter2\r\nkeepA0430 keepB0430 in 5s"	011	001
+"secret=hunter2\n  keepA0431 keepB0431 in 5s"	011	011
+"secret=hunter2\n\tkeepA0432 keepB0432 in 5s"	011	001
+"secret=V9qz-1234567890\nkeepA0433 keepB0433 in 5s"	011	001
+"secret=V9qz-1234567890\r\nkeepA0434 keepB0434 in 5s"	011	001
+"secret=V9qz-1234567890\n  keepA0435 keepB0435 in 5s"	011	011
+"secret=V9qz-1234567890\n\tkeepA0436 keepB0436 in 5s"	011	001
+"secret=Bearer qz12345xk9walphabeta\nkeepA0437 keepB0437 in 5s"	011	011
+"secret=Bearer qz12345xk9walphabeta\r\nkeepA0438 keepB0438 in 5s"	011	011
+"secret=Bearer qz12345xk9walphabeta\n  keepA0439 keepB0439 in 5s"	011	011
+"secret=Bearer qz12345xk9walphabeta\n\tkeepA0440 keepB0440 in 5s"	011	011
+"secret = expired\nkeepA0441 keepB0441 in 5s"	011	001
+"secret = expired\r\nkeepA0442 keepB0442 in 5s"	011	001
+"secret = expired\n  keepA0443 keepB0443 in 5s"	011	011
+"secret = expired\n\tkeepA0444 keepB0444 in 5s"	011	001
+"secret = invalid\nkeepA0445 keepB0445 in 5s"	011	001
+"secret = invalid\r\nkeepA0446 keepB0446 in 5s"	011	001
+"secret = invalid\n  keepA0447 keepB0447 in 5s"	011	011
+"secret = invalid\n\tkeepA0448 keepB0448 in 5s"	011	001
+"secret = hunter2\nkeepA0449 keepB0449 in 5s"	011	001
+"secret = hunter2\r\nkeepA0450 keepB0450 in 5s"	011	001
+"secret = hunter2\n  keepA0451 keepB0451 in 5s"	011	011
+"secret = hunter2\n\tkeepA0452 keepB0452 in 5s"	011	001
+"secret = V9qz-1234567890\nkeepA0453 keepB0453 in 5s"	011	001
+"secret = V9qz-1234567890\r\nkeepA0454 keepB0454 in 5s"	011	001
+"secret = V9qz-1234567890\n  keepA0455 keepB0455 in 5s"	011	011
+"secret = V9qz-1234567890\n\tkeepA0456 keepB0456 in 5s"	011	001
+"secret = Bearer qz12345xk9walphabeta\nkeepA0457 keepB0457 in 5s"	011	011
+"secret = Bearer qz12345xk9walphabeta\r\nkeepA0458 keepB0458 in 5s"	011	011
+"secret = Bearer qz12345xk9walphabeta\n  keepA0459 keepB0459 in 5s"	011	011
+"secret = Bearer qz12345xk9walphabeta\n\tkeepA0460 keepB0460 in 5s"	011	011
+"secret:\texpired\nkeepA0461 keepB0461 in 5s"	011	001
+"secret:\texpired\r\nkeepA0462 keepB0462 in 5s"	011	001
+"secret:\texpired\n  keepA0463 keepB0463 in 5s"	000	000
+"secret:\texpired\n\tkeepA0464 keepB0464 in 5s"	000	000
+"secret:\tinvalid\nkeepA0465 keepB0465 in 5s"	011	001
+"secret:\tinvalid\r\nkeepA0466 keepB0466 in 5s"	011	001
+"secret:\tinvalid\n  keepA0467 keepB0467 in 5s"	000	000
+"secret:\tinvalid\n\tkeepA0468 keepB0468 in 5s"	000	000
+"secret:\thunter2\nkeepA0469 keepB0469 in 5s"	011	001
+"secret:\thunter2\r\nkeepA0470 keepB0470 in 5s"	011	001
+"secret:\thunter2\n  keepA0471 keepB0471 in 5s"	000	000
+"secret:\thunter2\n\tkeepA0472 keepB0472 in 5s"	000	000
+"secret:\tV9qz-1234567890\nkeepA0473 keepB0473 in 5s"	011	001
+"secret:\tV9qz-1234567890\r\nkeepA0474 keepB0474 in 5s"	011	001
+"secret:\tV9qz-1234567890\n  keepA0475 keepB0475 in 5s"	000	000
+"secret:\tV9qz-1234567890\n\tkeepA0476 keepB0476 in 5s"	000	000
+"secret:\tBearer qz12345xk9walphabeta\nkeepA0477 keepB0477 in 5s"	011	001
+"secret:\tBearer qz12345xk9walphabeta\r\nkeepA0478 keepB0478 in 5s"	011	001
+"secret:\tBearer qz12345xk9walphabeta\n  keepA0479 keepB0479 in 5s"	000	000
+"secret:\tBearer qz12345xk9walphabeta\n\tkeepA0480 keepB0480 in 5s"	000	000
+"Authorization: expired\nkeepA0481 keepB0481 in 5s"	000	000
+"Authorization: expired\r\nkeepA0482 keepB0482 in 5s"	000	000
+"Authorization: expired\n  keepA0483 keepB0483 in 5s"	000	000
+"Authorization: expired\n\tkeepA0484 keepB0484 in 5s"	000	000
+"Authorization: invalid\nkeepA0485 keepB0485 in 5s"	000	000
+"Authorization: invalid\r\nkeepA0486 keepB0486 in 5s"	000	000
+"Authorization: invalid\n  keepA0487 keepB0487 in 5s"	000	000
+"Authorization: invalid\n\tkeepA0488 keepB0488 in 5s"	000	000
+"Authorization: hunter2\nkeepA0489 keepB0489 in 5s"	000	000
+"Authorization: hunter2\r\nkeepA0490 keepB0490 in 5s"	000	000
+"Authorization: hunter2\n  keepA0491 keepB0491 in 5s"	000	000
+"Authorization: hunter2\n\tkeepA0492 keepB0492 in 5s"	000	000
+"Authorization: V9qz-1234567890\nkeepA0493 keepB0493 in 5s"	000	000
+"Authorization: V9qz-1234567890\r\nkeepA0494 keepB0494 in 5s"	000	000
+"Authorization: V9qz-1234567890\n  keepA0495 keepB0495 in 5s"	000	000
+"Authorization: V9qz-1234567890\n\tkeepA0496 keepB0496 in 5s"	000	000
+"Authorization: Bearer qz12345xk9walphabeta\nkeepA0497 keepB0497 in 5s"	000	000
+"Authorization: Bearer qz12345xk9walphabeta\r\nkeepA0498 keepB0498 in 5s"	000	000
+"Authorization: Bearer qz12345xk9walphabeta\n  keepA0499 keepB0499 in 5s"	000	000
+"Authorization: Bearer qz12345xk9walphabeta\n\tkeepA0500 keepB0500 in 5s"	000	000
+"Authorization=expired\nkeepA0501 keepB0501 in 5s"	000	000
+"Authorization=expired\r\nkeepA0502 keepB0502 in 5s"	000	000
+"Authorization=expired\n  keepA0503 keepB0503 in 5s"	000	000
+"Authorization=expired\n\tkeepA0504 keepB0504 in 5s"	000	000
+"Authorization=invalid\nkeepA0505 keepB0505 in 5s"	000	000
+"Authorization=invalid\r\nkeepA0506 keepB0506 in 5s"	000	000
+"Authorization=invalid\n  keepA0507 keepB0507 in 5s"	000	000
+"Authorization=invalid\n\tkeepA0508 keepB0508 in 5s"	000	000
+"Authorization=hunter2\nkeepA0509 keepB0509 in 5s"	000	000
+"Authorization=hunter2\r\nkeepA0510 keepB0510 in 5s"	000	000
+"Authorization=hunter2\n  keepA0511 keepB0511 in 5s"	000	000
+"Authorization=hunter2\n\tkeepA0512 keepB0512 in 5s"	000	000
+"Authorization=V9qz-1234567890\nkeepA0513 keepB0513 in 5s"	000	000
+"Authorization=V9qz-1234567890\r\nkeepA0514 keepB0514 in 5s"	000	000
+"Authorization=V9qz-1234567890\n  keepA0515 keepB0515 in 5s"	000	000
+"Authorization=V9qz-1234567890\n\tkeepA0516 keepB0516 in 5s"	000	000
+"Authorization=Bearer qz12345xk9walphabeta\nkeepA0517 keepB0517 in 5s"	000	000
+"Authorization=Bearer qz12345xk9walphabeta\r\nkeepA0518 keepB0518 in 5s"	000	000
+"Authorization=Bearer qz12345xk9walphabeta\n  keepA0519 keepB0519 in 5s"	000	000
+"Authorization=Bearer qz12345xk9walphabeta\n\tkeepA0520 keepB0520 in 5s"	000	000
+"Authorization = expired\nkeepA0521 keepB0521 in 5s"	000	000
+"Authorization = expired\r\nkeepA0522 keepB0522 in 5s"	000	000
+"Authorization = expired\n  keepA0523 keepB0523 in 5s"	000	000
+"Authorization = expired\n\tkeepA0524 keepB0524 in 5s"	000	000
+"Authorization = invalid\nkeepA0525 keepB0525 in 5s"	000	000
+"Authorization = invalid\r\nkeepA0526 keepB0526 in 5s"	000	000
+"Authorization = invalid\n  keepA0527 keepB0527 in 5s"	000	000
+"Authorization = invalid\n\tkeepA0528 keepB0528 in 5s"	000	000
+"Authorization = hunter2\nkeepA0529 keepB0529 in 5s"	000	000
+"Authorization = hunter2\r\nkeepA0530 keepB0530 in 5s"	000	000
+"Authorization = hunter2\n  keepA0531 keepB0531 in 5s"	000	000
+"Authorization = hunter2\n\tkeepA0532 keepB0532 in 5s"	000	000
+"Authorization = V9qz-1234567890\nkeepA0533 keepB0533 in 5s"	000	000
+"Authorization = V9qz-1234567890\r\nkeepA0534 keepB0534 in 5s"	000	000
+"Authorization = V9qz-1234567890\n  keepA0535 keepB0535 in 5s"	000	000
+"Authorization = V9qz-1234567890\n\tkeepA0536 keepB0536 in 5s"	000	000
+"Authorization = Bearer qz12345xk9walphabeta\nkeepA0537 keepB0537 in 5s"	000	000
+"Authorization = Bearer qz12345xk9walphabeta\r\nkeepA0538 keepB0538 in 5s"	000	000
+"Authorization = Bearer qz12345xk9walphabeta\n  keepA0539 keepB0539 in 5s"	000	000
+"Authorization = Bearer qz12345xk9walphabeta\n\tkeepA0540 keepB0540 in 5s"	000	000
+"Authorization:\texpired\nkeepA0541 keepB0541 in 5s"	000	000
+"Authorization:\texpired\r\nkeepA0542 keepB0542 in 5s"	000	000
+"Authorization:\texpired\n  keepA0543 keepB0543 in 5s"	000	000
+"Authorization:\texpired\n\tkeepA0544 keepB0544 in 5s"	000	000
+"Authorization:\tinvalid\nkeepA0545 keepB0545 in 5s"	000	000
+"Authorization:\tinvalid\r\nkeepA0546 keepB0546 in 5s"	000	000
+"Authorization:\tinvalid\n  keepA0547 keepB0547 in 5s"	000	000
+"Authorization:\tinvalid\n\tkeepA0548 keepB0548 in 5s"	000	000
+"Authorization:\thunter2\nkeepA0549 keepB0549 in 5s"	000	000
+"Authorization:\thunter2\r\nkeepA0550 keepB0550 in 5s"	000	000
+"Authorization:\thunter2\n  keepA0551 keepB0551 in 5s"	000	000
+"Authorization:\thunter2\n\tkeepA0552 keepB0552 in 5s"	000	000
+"Authorization:\tV9qz-1234567890\nkeepA0553 keepB0553 in 5s"	000	000
+"Authorization:\tV9qz-1234567890\r\nkeepA0554 keepB0554 in 5s"	000	000
+"Authorization:\tV9qz-1234567890\n  keepA0555 keepB0555 in 5s"	000	000
+"Authorization:\tV9qz-1234567890\n\tkeepA0556 keepB0556 in 5s"	000	000
+"Authorization:\tBearer qz12345xk9walphabeta\nkeepA0557 keepB0557 in 5s"	000	000
+"Authorization:\tBearer qz12345xk9walphabeta\r\nkeepA0558 keepB0558 in 5s"	000	000
+"Authorization:\tBearer qz12345xk9walphabeta\n  keepA0559 keepB0559 in 5s"	000	000
+"Authorization:\tBearer qz12345xk9walphabeta\n\tkeepA0560 keepB0560 in 5s"	000	000
+"passwd: expired\nkeepA0561 keepB0561 in 5s"	011	001
+"passwd: expired\r\nkeepA0562 keepB0562 in 5s"	011	001
+"passwd: expired\n  keepA0563 keepB0563 in 5s"	000	000
+"passwd: expired\n\tkeepA0564 keepB0564 in 5s"	000	000
+"passwd: invalid\nkeepA0565 keepB0565 in 5s"	011	001
+"passwd: invalid\r\nkeepA0566 keepB0566 in 5s"	011	001
+"passwd: invalid\n  keepA0567 keepB0567 in 5s"	000	000
+"passwd: invalid\n\tkeepA0568 keepB0568 in 5s"	000	000
+"passwd: hunter2\nkeepA0569 keepB0569 in 5s"	011	001
+"passwd: hunter2\r\nkeepA0570 keepB0570 in 5s"	011	001
+"passwd: hunter2\n  keepA0571 keepB0571 in 5s"	000	000
+"passwd: hunter2\n\tkeepA0572 keepB0572 in 5s"	000	000
+"passwd: V9qz-1234567890\nkeepA0573 keepB0573 in 5s"	011	001
+"passwd: V9qz-1234567890\r\nkeepA0574 keepB0574 in 5s"	011	001
+"passwd: V9qz-1234567890\n  keepA0575 keepB0575 in 5s"	000	000
+"passwd: V9qz-1234567890\n\tkeepA0576 keepB0576 in 5s"	000	000
+"passwd: Bearer qz12345xk9walphabeta\nkeepA0577 keepB0577 in 5s"	011	001
+"passwd: Bearer qz12345xk9walphabeta\r\nkeepA0578 keepB0578 in 5s"	011	001
+"passwd: Bearer qz12345xk9walphabeta\n  keepA0579 keepB0579 in 5s"	000	000
+"passwd: Bearer qz12345xk9walphabeta\n\tkeepA0580 keepB0580 in 5s"	000	000
+"passwd=expired\nkeepA0581 keepB0581 in 5s"	011	001
+"passwd=expired\r\nkeepA0582 keepB0582 in 5s"	011	001
+"passwd=expired\n  keepA0583 keepB0583 in 5s"	011	011
+"passwd=expired\n\tkeepA0584 keepB0584 in 5s"	011	001
+"passwd=invalid\nkeepA0585 keepB0585 in 5s"	011	001
+"passwd=invalid\r\nkeepA0586 keepB0586 in 5s"	011	001
+"passwd=invalid\n  keepA0587 keepB0587 in 5s"	011	011
+"passwd=invalid\n\tkeepA0588 keepB0588 in 5s"	011	001
+"passwd=hunter2\nkeepA0589 keepB0589 in 5s"	011	001
+"passwd=hunter2\r\nkeepA0590 keepB0590 in 5s"	011	001
+"passwd=hunter2\n  keepA0591 keepB0591 in 5s"	011	011
+"passwd=hunter2\n\tkeepA0592 keepB0592 in 5s"	011	001
+"passwd=V9qz-1234567890\nkeepA0593 keepB0593 in 5s"	011	001
+"passwd=V9qz-1234567890\r\nkeepA0594 keepB0594 in 5s"	011	001
+"passwd=V9qz-1234567890\n  keepA0595 keepB0595 in 5s"	011	011
+"passwd=V9qz-1234567890\n\tkeepA0596 keepB0596 in 5s"	011	001
+"passwd=Bearer qz12345xk9walphabeta\nkeepA0597 keepB0597 in 5s"	011	011
+"passwd=Bearer qz12345xk9walphabeta\r\nkeepA0598 keepB0598 in 5s"	011	011
+"passwd=Bearer qz12345xk9walphabeta\n  keepA0599 keepB0599 in 5s"	011	011
+"passwd=Bearer qz12345xk9walphabeta\n\tkeepA0600 keepB0600 in 5s"	011	011
+"passwd = expired\nkeepA0601 keepB0601 in 5s"	011	001
+"passwd = expired\r\nkeepA0602 keepB0602 in 5s"	011	001
+"passwd = expired\n  keepA0603 keepB0603 in 5s"	011	011
+"passwd = expired\n\tkeepA0604 keepB0604 in 5s"	011	001
+"passwd = invalid\nkeepA0605 keepB0605 in 5s"	011	001
+"passwd = invalid\r\nkeepA0606 keepB0606 in 5s"	011	001
+"passwd = invalid\n  keepA0607 keepB0607 in 5s"	011	011
+"passwd = invalid\n\tkeepA0608 keepB0608 in 5s"	011	001
+"passwd = hunter2\nkeepA0609 keepB0609 in 5s"	011	001
+"passwd = hunter2\r\nkeepA0610 keepB0610 in 5s"	011	001
+"passwd = hunter2\n  keepA0611 keepB0611 in 5s"	011	011
+"passwd = hunter2\n\tkeepA0612 keepB0612 in 5s"	011	001
+"passwd = V9qz-1234567890\nkeepA0613 keepB0613 in 5s"	011	001
+"passwd = V9qz-1234567890\r\nkeepA0614 keepB0614 in 5s"	011	001
+"passwd = V9qz-1234567890\n  keepA0615 keepB0615 in 5s"	011	011
+"passwd = V9qz-1234567890\n\tkeepA0616 keepB0616 in 5s"	011	001
+"passwd = Bearer qz12345xk9walphabeta\nkeepA0617 keepB0617 in 5s"	011	011
+"passwd = Bearer qz12345xk9walphabeta\r\nkeepA0618 keepB0618 in 5s"	011	011
+"passwd = Bearer qz12345xk9walphabeta\n  keepA0619 keepB0619 in 5s"	011	011
+"passwd = Bearer qz12345xk9walphabeta\n\tkeepA0620 keepB0620 in 5s"	011	011
+"passwd:\texpired\nkeepA0621 keepB0621 in 5s"	011	001
+"passwd:\texpired\r\nkeepA0622 keepB0622 in 5s"	011	001
+"passwd:\texpired\n  keepA0623 keepB0623 in 5s"	000	000
+"passwd:\texpired\n\tkeepA0624 keepB0624 in 5s"	000	000
+"passwd:\tinvalid\nkeepA0625 keepB0625 in 5s"	011	001
+"passwd:\tinvalid\r\nkeepA0626 keepB0626 in 5s"	011	001
+"passwd:\tinvalid\n  keepA0627 keepB0627 in 5s"	000	000
+"passwd:\tinvalid\n\tkeepA0628 keepB0628 in 5s"	000	000
+"passwd:\thunter2\nkeepA0629 keepB0629 in 5s"	011	001
+"passwd:\thunter2\r\nkeepA0630 keepB0630 in 5s"	011	001
+"passwd:\thunter2\n  keepA0631 keepB0631 in 5s"	000	000
+"passwd:\thunter2\n\tkeepA0632 keepB0632 in 5s"	000	000
+"passwd:\tV9qz-1234567890\nkeepA0633 keepB0633 in 5s"	011	001
+"passwd:\tV9qz-1234567890\r\nkeepA0634 keepB0634 in 5s"	011	001
+"passwd:\tV9qz-1234567890\n  keepA0635 keepB0635 in 5s"	000	000
+"passwd:\tV9qz-1234567890\n\tkeepA0636 keepB0636 in 5s"	000	000
+"passwd:\tBearer qz12345xk9walphabeta\nkeepA0637 keepB0637 in 5s"	011	001
+"passwd:\tBearer qz12345xk9walphabeta\r\nkeepA0638 keepB0638 in 5s"	011	001
+"passwd:\tBearer qz12345xk9walphabeta\n  keepA0639 keepB0639 in 5s"	000	000
+"passwd:\tBearer qz12345xk9walphabeta\n\tkeepA0640 keepB0640 in 5s"	000	000
+"client_secret: expired\nkeepA0641 keepB0641 in 5s"	011	001
+"client_secret: expired\r\nkeepA0642 keepB0642 in 5s"	011	001
+"client_secret: expired\n  keepA0643 keepB0643 in 5s"	000	000
+"client_secret: expired\n\tkeepA0644 keepB0644 in 5s"	000	000
+"client_secret: invalid\nkeepA0645 keepB0645 in 5s"	011	001
+"client_secret: invalid\r\nkeepA0646 keepB0646 in 5s"	011	001
+"client_secret: invalid\n  keepA0647 keepB0647 in 5s"	000	000
+"client_secret: invalid\n\tkeepA0648 keepB0648 in 5s"	000	000
+"client_secret: hunter2\nkeepA0649 keepB0649 in 5s"	011	001
+"client_secret: hunter2\r\nkeepA0650 keepB0650 in 5s"	011	001
+"client_secret: hunter2\n  keepA0651 keepB0651 in 5s"	000	000
+"client_secret: hunter2\n\tkeepA0652 keepB0652 in 5s"	000	000
+"client_secret: V9qz-1234567890\nkeepA0653 keepB0653 in 5s"	011	001
+"client_secret: V9qz-1234567890\r\nkeepA0654 keepB0654 in 5s"	011	001
+"client_secret: V9qz-1234567890\n  keepA0655 keepB0655 in 5s"	000	000
+"client_secret: V9qz-1234567890\n\tkeepA0656 keepB0656 in 5s"	000	000
+"client_secret: Bearer qz12345xk9walphabeta\nkeepA0657 keepB0657 in 5s"	011	001
+"client_secret: Bearer qz12345xk9walphabeta\r\nkeepA0658 keepB0658 in 5s"	011	001
+"client_secret: Bearer qz12345xk9walphabeta\n  keepA0659 keepB0659 in 5s"	000	000
+"client_secret: Bearer qz12345xk9walphabeta\n\tkeepA0660 keepB0660 in 5s"	000	000
+"client_secret=expired\nkeepA0661 keepB0661 in 5s"	011	001
+"client_secret=expired\r\nkeepA0662 keepB0662 in 5s"	011	001
+"client_secret=expired\n  keepA0663 keepB0663 in 5s"	011	011
+"client_secret=expired\n\tkeepA0664 keepB0664 in 5s"	011	001
+"client_secret=invalid\nkeepA0665 keepB0665 in 5s"	011	001
+"client_secret=invalid\r\nkeepA0666 keepB0666 in 5s"	011	001
+"client_secret=invalid\n  keepA0667 keepB0667 in 5s"	011	011
+"client_secret=invalid\n\tkeepA0668 keepB0668 in 5s"	011	001
+"client_secret=hunter2\nkeepA0669 keepB0669 in 5s"	011	001
+"client_secret=hunter2\r\nkeepA0670 keepB0670 in 5s"	011	001
+"client_secret=hunter2\n  keepA0671 keepB0671 in 5s"	011	011
+"client_secret=hunter2\n\tkeepA0672 keepB0672 in 5s"	011	001
+"client_secret=V9qz-1234567890\nkeepA0673 keepB0673 in 5s"	011	001
+"client_secret=V9qz-1234567890\r\nkeepA0674 keepB0674 in 5s"	011	001
+"client_secret=V9qz-1234567890\n  keepA0675 keepB0675 in 5s"	011	011
+"client_secret=V9qz-1234567890\n\tkeepA0676 keepB0676 in 5s"	011	001
+"client_secret=Bearer qz12345xk9walphabeta\nkeepA0677 keepB0677 in 5s"	011	011
+"client_secret=Bearer qz12345xk9walphabeta\r\nkeepA0678 keepB0678 in 5s"	011	011
+"client_secret=Bearer qz12345xk9walphabeta\n  keepA0679 keepB0679 in 5s"	011	011
+"client_secret=Bearer qz12345xk9walphabeta\n\tkeepA0680 keepB0680 in 5s"	011	011
+"client_secret = expired\nkeepA0681 keepB0681 in 5s"	011	001
+"client_secret = expired\r\nkeepA0682 keepB0682 in 5s"	011	001
+"client_secret = expired\n  keepA0683 keepB0683 in 5s"	011	011
+"client_secret = expired\n\tkeepA0684 keepB0684 in 5s"	011	001
+"client_secret = invalid\nkeepA0685 keepB0685 in 5s"	011	001
+"client_secret = invalid\r\nkeepA0686 keepB0686 in 5s"	011	001
+"client_secret = invalid\n  keepA0687 keepB0687 in 5s"	011	011
+"client_secret = invalid\n\tkeepA0688 keepB0688 in 5s"	011	001
+"client_secret = hunter2\nkeepA0689 keepB0689 in 5s"	011	001
+"client_secret = hunter2\r\nkeepA0690 keepB0690 in 5s"	011	001
+"client_secret = hunter2\n  keepA0691 keepB0691 in 5s"	011	011
+"client_secret = hunter2\n\tkeepA0692 keepB0692 in 5s"	011	001
+"client_secret = V9qz-1234567890\nkeepA0693 keepB0693 in 5s"	011	001
+"client_secret = V9qz-1234567890\r\nkeepA0694 keepB0694 in 5s"	011	001
+"client_secret = V9qz-1234567890\n  keepA0695 keepB0695 in 5s"	011	011
+"client_secret = V9qz-1234567890\n\tkeepA0696 keepB0696 in 5s"	011	001
+"client_secret = Bearer qz12345xk9walphabeta\nkeepA0697 keepB0697 in 5s"	011	011
+"client_secret = Bearer qz12345xk9walphabeta\r\nkeepA0698 keepB0698 in 5s"	011	011
+"client_secret = Bearer qz12345xk9walphabeta\n  keepA0699 keepB0699 in 5s"	011	011
+"client_secret = Bearer qz12345xk9walphabeta\n\tkeepA0700 keepB0700 in 5s"	011	011
+"client_secret:\texpired\nkeepA0701 keepB0701 in 5s"	011	001
+"client_secret:\texpired\r\nkeepA0702 keepB0702 in 5s"	011	001
+"client_secret:\texpired\n  keepA0703 keepB0703 in 5s"	000	000
+"client_secret:\texpired\n\tkeepA0704 keepB0704 in 5s"	000	000
+"client_secret:\tinvalid\nkeepA0705 keepB0705 in 5s"	011	001
+"client_secret:\tinvalid\r\nkeepA0706 keepB0706 in 5s"	011	001
+"client_secret:\tinvalid\n  keepA0707 keepB0707 in 5s"	000	000
+"client_secret:\tinvalid\n\tkeepA0708 keepB0708 in 5s"	000	000
+"client_secret:\thunter2\nkeepA0709 keepB0709 in 5s"	011	001
+"client_secret:\thunter2\r\nkeepA0710 keepB0710 in 5s"	011	001
+"client_secret:\thunter2\n  keepA0711 keepB0711 in 5s"	000	000
+"client_secret:\thunter2\n\tkeepA0712 keepB0712 in 5s"	000	000
+"client_secret:\tV9qz-1234567890\nkeepA0713 keepB0713 in 5s"	011	001
+"client_secret:\tV9qz-1234567890\r\nkeepA0714 keepB0714 in 5s"	011	001
+"client_secret:\tV9qz-1234567890\n  keepA0715 keepB0715 in 5s"	000	000
+"client_secret:\tV9qz-1234567890\n\tkeepA0716 keepB0716 in 5s"	000	000
+"client_secret:\tBearer qz12345xk9walphabeta\nkeepA0717 keepB0717 in 5s"	011	001
+"client_secret:\tBearer qz12345xk9walphabeta\r\nkeepA0718 keepB0718 in 5s"	011	001
+"client_secret:\tBearer qz12345xk9walphabeta\n  keepA0719 keepB0719 in 5s"	000	000
+"client_secret:\tBearer qz12345xk9walphabeta\n\tkeepA0720 keepB0720 in 5s"	000	000

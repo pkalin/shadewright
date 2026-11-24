@@ -32,12 +32,32 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/policy"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/policy"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // MaxResultBytes bounds the structured output the loop decodes. The largest valid result is far shorter.
 const MaxResultBytes = 64 << 10
+
+// What a control character in a field of the [Result] does (#852, decided 2026-11-17). Every string field,
+// and every list of strings, of the result's types declares it with its controls tag:
+//
+//   - controlsClean: free text (the summary, the hypotheses, the evidence quotes, the missing data, the
+//     uncertainty and the expected effect). The field is read without its control characters
+//     ([providers.WithoutControls]).
+//   - controlsRefuse: an enum, a pattern or an identifier (the action type, the container, the memory values,
+//     the evidence source, the verification checks). A control in it ends the result as not matching the
+//     schema, as the value with its control did before #852: removing the control could turn a value the
+//     validator refuses into one it accepts, and a request would name what the model never wrote.
+//
+// A field without the tag, or a place the types do not have (an object key), is refused: a field added later
+// is refused until it is declared free text. A test fails for a string field that declares neither.
+const (
+	controlsTag    = "controls"
+	controlsClean  = "clean"
+	controlsRefuse = "refuse"
+)
 
 // Result is the structured output of a model call (design 3.3, ADR-0023 decision 5): the only way a proposal
 // is made. Its JSON schema is generated from these types ([ResponseSchema]), and the loop's decoder
@@ -49,17 +69,17 @@ type Result struct {
 	// it, diagnoses after #498 and #500 spent the summary on why no action was allowed and left out the subject,
 	// the restart count and the metric names (#499). Rule 4 of prompts/system.tmpl adds what the summary says
 	// about the size of a proposal, rule 7 the scope of the failure and the specific cause; keep them consistent.
-	Summary string `json:"summary" bound:"maxLen=1024" desc:"The diagnosis in a few sentences: name the incident's subject as kind namespace/name, the cause, and the observed values it rests on with their field or metric names, such as a restart count or a metric. At most 1024 bytes."`
+	Summary string `json:"summary" controls:"clean" bound:"maxLen=1024" desc:"The diagnosis in a few sentences: name the incident's subject as kind namespace/name, the cause, and the observed values it rests on with their field or metric names, such as a restart count or a metric. At most 1024 bytes."`
 	// Hypotheses are the causes considered.
 	Hypotheses []Hypothesis `json:"hypotheses" bound:"maxItems=5"`
 	// Evidence cites the context blocks and tool results the diagnosis rests on.
 	Evidence []Evidence `json:"evidence" bound:"maxItems=10"`
 	// MissingData says what the model would need and did not have. Non-empty is a hand-off that says what is
 	// missing, never an escalation trigger (ADR-0023 decision 6).
-	MissingData []string `json:"missingData" bound:"maxItems=10,maxLen=256"`
+	MissingData []string `json:"missingData" controls:"clean" bound:"maxItems=10,maxLen=256"`
 	// Uncertainty says what the diagnosis is unsure about, in words; it is never a number and never read as
 	// eligibility.
-	Uncertainty string `json:"uncertainty" bound:"maxLen=512"`
+	Uncertainty string `json:"uncertainty" controls:"clean" bound:"maxLen=512"`
 	// Proposal is the typed change, or null for no proposal.
 	Proposal *Proposal `json:"proposal"`
 }
@@ -67,16 +87,16 @@ type Result struct {
 // Hypothesis is one possible cause.
 type Hypothesis struct {
 	// Description of the cause.
-	Description string `json:"description" bound:"maxLen=512"`
+	Description string `json:"description" controls:"clean" bound:"maxLen=512"`
 }
 
 // Evidence is one quotation from what the model was shown.
 type Evidence struct {
 	// Source is the ID of the block quoted: c1, c2... for the context blocks, t1, t2... for tool results.
-	Source string `json:"source" bound:"maxLen=3" pattern:"^[ct][1-9][0-9]?$" desc:"The ID of the one block the quote is copied from: c1, c2... for the context, t1, t2... for tool results."`
+	Source string `json:"source" controls:"refuse" bound:"maxLen=3" pattern:"^[ct][1-9][0-9]?$" desc:"The ID of the one block the quote is copied from: c1, c2... for the context, t1, t2... for tool results."`
 	// Quote is a verbatim excerpt of one data value of that block. A proposal needs at least one quote found
 	// within one data value of its block (#474: the description says so, since labels are never quotable).
-	Quote string `json:"quote" bound:"maxLen=512" desc:"At least 8 bytes in UTF-8 once spaces at both ends are trimmed (8 characters of plain ASCII), copied exactly, with the same case, spacing and punctuation, from one value the cited block shows (a reason, a message, a name, a log line or a metric line), without its label or the words the block writes around it. Never paraphrased, joined across lines or shortened with an ellipsis."`
+	Quote string `json:"quote" controls:"clean" bound:"maxLen=512" desc:"At least 8 bytes in UTF-8 once spaces at both ends are trimmed (8 characters of plain ASCII), copied exactly, with the same case, spacing and punctuation, from one value the cited block shows (a reason, a message, a name, a log line or a metric line), without its label or the words the block writes around it. Never paraphrased, joined across lines or shortened with an ellipsis."`
 }
 
 // Proposal is a typed change from the closed catalog (invariant 2). Its target is always the Incident's
@@ -85,16 +105,16 @@ type Proposal struct {
 	// Action is the change.
 	Action ProposedAction `json:"action"`
 	// ExpectedEffect says what the change should do.
-	ExpectedEffect string `json:"expectedEffect" bound:"maxLen=512"`
+	ExpectedEffect string `json:"expectedEffect" controls:"clean" bound:"maxLen=512"`
 	// VerificationChecks are checks to run besides those the action always needs.
-	VerificationChecks []remediationv1alpha1.VerificationCheck `json:"verificationChecks" bound:"maxItems=5"`
+	VerificationChecks []remediationv1alpha1.VerificationCheck `json:"verificationChecks" controls:"refuse" bound:"maxItems=5"`
 }
 
 // ProposedAction mirrors [remediationv1alpha1.Action] in a form a strict schema can express: one member per
 // action type, named as in the API, and null for the others. A test keeps the two in step.
 type ProposedAction struct {
 	// Type selects the action; its schema is the enum of [remediationv1alpha1.ActionTypes].
-	Type remediationv1alpha1.ActionType `json:"type"`
+	Type remediationv1alpha1.ActionType `json:"type" controls:"refuse"`
 	// AdjustKedaMaxReplicas holds the parameters of AdjustKedaMaxReplicas.
 	AdjustKedaMaxReplicas *KedaMaxReplicasChange `json:"adjustKedaMaxReplicas"`
 	// SetContainerMemoryLimit holds the parameters of SetContainerMemoryLimit.
@@ -113,13 +133,13 @@ type KedaMaxReplicasChange struct {
 // optional binary suffix, such as 256Mi.
 type MemoryLimitChange struct {
 	// Container is the container name in the pod template.
-	Container string `json:"container" bound:"maxLen=63" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"`
+	Container string `json:"container" controls:"refuse" bound:"maxLen=63" pattern:"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"`
 	// Previous is the limit the plan was made against: the pod template's, as it is now. The loop replaces it
 	// with the value the context builder read from the template (#494), so its pattern also takes the decimal
 	// suffixes a template may use (50M); desired keeps the binary ones.
-	Previous string `json:"previous" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti|k|M|G|T)?$" desc:"The memory limit the workload's pod template sets for the container now, in Kubernetes' canonical form (for example 48Mi or 50M), as the context's pod template line shows it. Not a running pod's own limit, which may still be an older value during a rollout, and not a byte count from a metric."`
+	Previous string `json:"previous" controls:"refuse" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti|k|M|G|T)?$" desc:"The memory limit the workload's pod template sets for the container now, in Kubernetes' canonical form (for example 48Mi or 50M), as the context's pod template line shows it. Not a running pod's own limit, which may still be an older value during a rollout, and not a byte count from a metric."`
 	// Desired is the new limit.
-	Desired string `json:"desired" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti)?$"`
+	Desired string `json:"desired" controls:"refuse" bound:"maxLen=24" pattern:"^[1-9][0-9]{0,15}(Ki|Mi|Gi|Ti)?$"`
 }
 
 // keyType is the JSON schema keyword for a type.
@@ -336,6 +356,59 @@ func decodeResult(content string) (*Result, *remediationv1alpha1.Action, error) 
 		return nil, nil, err
 	}
 	return &r, &action, nil
+}
+
+// controlsRefused reports whether a control character the reply held, where [providers.WithoutControls]
+// placed it, refuses the result: any place but the value of a field declared free text (controlsClean), an
+// object key included.
+func controlsRefused(places []providers.ControlPath) bool {
+	for _, p := range places {
+		if p.Key || !freeTextAt(reflect.TypeFor[Result](), p.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+// freeTextAt reports whether path leads from a value of type t to a string, or an element of a list of
+// strings, of a field whose controls tag is controlsClean.
+func freeTextAt(t reflect.Type, path []string) bool {
+	clean := false
+	for {
+		if t.Kind() == reflect.Pointer {
+			t = t.Elem()
+			continue
+		}
+		if len(path) == 0 {
+			return clean && t.Kind() == reflect.String
+		}
+		switch t.Kind() {
+		case reflect.Struct:
+			f, ok := fieldByJSONName(t, path[0])
+			if !ok {
+				return false
+			}
+			clean, t = f.Tag.Get(controlsTag) == controlsClean, f.Type
+		case reflect.Slice:
+			if _, err := strconv.ParseUint(path[0], 10, 32); err != nil {
+				return false
+			}
+			t = t.Elem()
+		default:
+			return false
+		}
+		path = path[1:]
+	}
+}
+
+// fieldByJSONName returns the field of the struct type t whose JSON name is name, in its exact case.
+func fieldByJSONName(t reflect.Type, name string) (reflect.StructField, bool) {
+	for f := range t.Fields() {
+		if jsonName(f) == name {
+			return f, true
+		}
+	}
+	return reflect.StructField{}, false
 }
 
 // exactShape reports whether the generic JSON value v has the shape the schema of t requires: an object with

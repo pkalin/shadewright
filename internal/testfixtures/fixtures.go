@@ -22,7 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // Names shared by the fixtures, so a request, its policy and the settings refer to each other.

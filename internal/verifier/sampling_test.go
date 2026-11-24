@@ -34,9 +34,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	v1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/testfixtures"
-	"github.com/pkalin/shadewright/internal/verification/clearing"
+	v1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/testfixtures"
+	"github.com/shadewright-labs/shadewright/internal/verification/clearing"
 )
 
 // TestRequestSampledOnceTheRolloutIsRecorded: the executor sets Verifying first and records the template

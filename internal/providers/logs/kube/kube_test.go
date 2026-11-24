@@ -42,8 +42,9 @@ import (
 	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 const (
@@ -308,6 +309,7 @@ func TestSmallLogIsReturnedWhole(t *testing.T) {
 
 // A log larger than the excerpt keeps its newest whole lines.
 func TestExcerptKeepsTheNewestWholeLines(t *testing.T) {
+	largeLog(t)
 	const width = 100
 	text := numbered(2000, width) // 200,000 bytes, under MaxReadBytes
 	for _, maxBytes := range []int64{0, 4096, MaxBytes} {
@@ -352,6 +354,7 @@ func TestExcerptKeepsTheNewestWholeLines(t *testing.T) {
 // TailLines lines that hold more than MaxReadBytes come back cut from their start (LimitBytes); a second
 // request with fewer lines gets the newest ones.
 func TestNewestLinesAreReadWhenTheWindowIsLarge(t *testing.T) {
+	largeLog(t)
 	const width = 1000
 	text := numbered(TailLines, width) // 2 MB in TailLines lines
 	l := newLogServer(text)
@@ -373,6 +376,7 @@ func TestNewestLinesAreReadWhenTheWindowIsLarge(t *testing.T) {
 // The second request asks for fewer lines than the mean length would fit, so newest lines somewhat longer
 // than the mean still fit.
 func TestMarginCoversLongerNewestLines(t *testing.T) {
+	largeLog(t)
 	text := numbered(1500, 600) + numbered(500, 1000)
 	l := newLogServer(text)
 	got, err := l.source(t).Logs(context.Background(), query())
@@ -387,6 +391,7 @@ func TestMarginCoversLongerNewestLines(t *testing.T) {
 // When the newest lines are much longer than the others, the second request is cut too: the excerpt ends
 // at the last whole line read and says that its end is missing.
 func TestEndMissingWhenTheNewestLinesAreLong(t *testing.T) {
+	largeLog(t)
 	text := numbered(TailLines-10, 100) + numbered(10, 200<<10)
 	l := newLogServer(text)
 	q := query()
@@ -405,6 +410,7 @@ func TestEndMissingWhenTheNewestLinesAreLong(t *testing.T) {
 
 // A server that ignores LimitBytes is read no further than MaxReadBytes, and the cut last line is dropped.
 func TestOversizedStreamIsCut(t *testing.T) {
+	largeLog(t)
 	const width = 1000
 	text := numbered(3*MaxReadBytes/width, width) + "the end\n"
 	l := newLogServer(text)
@@ -434,6 +440,7 @@ func TestOversizedStreamIsCut(t *testing.T) {
 
 // A log of exactly MaxReadBytes is read whole in one request: its end is not missing.
 func TestLogOfExactlyMaxReadBytes(t *testing.T) {
+	largeLog(t)
 	text := numbered(MaxReadBytes/1024, 1024)
 	l := newLogServer(text)
 	got, err := l.source(t).Logs(context.Background(), query())
@@ -448,6 +455,7 @@ func TestLogOfExactlyMaxReadBytes(t *testing.T) {
 
 // A line longer than the excerpt is never returned in part.
 func TestOneHugeLineGivesAnEmptyExcerpt(t *testing.T) {
+	largeLog(t)
 	for name, n := range map[string]int{"longer than the excerpt": DefaultBytes, "longer than a read": MaxReadBytes} {
 		l := newLogServer("token " + strings.Repeat("a1", n) + "\n")
 		got, err := l.source(t).Logs(context.Background(), query())
@@ -618,6 +626,37 @@ func TestExcerptIsRedacted(t *testing.T) {
 	}
 	if strings.Contains(got.Text, "4711") {
 		t.Errorf("operator pattern not applied: %q", got.Text)
+	}
+}
+
+// A log whose redaction is withheld whole returns no excerpt and providers.ErrWithheld, which the callers show as a
+// read that failed (#873, decision of 2026-11-20). The source's redactor has the lowered work budget of
+// redacttest, which withholds OverLowBudget for its work.
+func TestWithheldExcerptIsAnError(t *testing.T) {
+	red, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := newLogServer(redacttest.OverLowBudget + "\n")
+	src, err := New(Config{Pods: fakePods(t, l.cs), Namespaces: []string{testNS}, Redactor: redacttest.LowBudget(red)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := src.Logs(context.Background(), query())
+	if !errors.Is(err, providers.ErrWithheld) || got.Text != "" {
+		t.Fatalf("Logs = %q, %v; want no text and ErrWithheld", got.Text[:min(len(got.Text), 80)], err)
+	}
+}
+
+// A log that spells the withheld marker is ordinary text, not an excerpt redaction withheld: withheld is told by
+// a flag of the redactor, never by the text (#873, decision of 2026-11-20), so a writable log line cannot fail
+// the read by spelling the marker.
+func TestALogThatSpellsTheMarkerIsText(t *testing.T) {
+	for _, text := range []string{redact.Withheld, redact.Withheld + "\n"} {
+		got, err := newLogServer(text).source(t).Logs(context.Background(), query())
+		if err != nil || got.Text != text {
+			t.Errorf("Logs(%q) = %q, %v; want the text and no error", text, got.Text, err)
+		}
 	}
 }
 
@@ -974,6 +1013,7 @@ func TestStatefulSetPodRecreatedUnderTheSameName(t *testing.T) {
 // is). The first read the old instance, the second the new one (or, for Previous, which is relative, the
 // instance the first read as current): uncertain.
 func TestRestartBetweenTheTwoRequests(t *testing.T) {
+	largeLog(t)
 	for name, previous := range map[string]bool{"current": false, "previous": true} {
 		t.Run(name, func(t *testing.T) {
 			text := numbered(TailLines, 1000) // over MaxReadBytes: two requests
@@ -1168,9 +1208,9 @@ func TestExcerptRedactsBeforeTheCut(t *testing.T) {
 		first := strings.IndexByte(in, '\n')
 		second := first + 1 + strings.IndexByte(in[first+1:], '\n')
 		keep := len(in) - second - 1
-		got, truncated := Excerpt(r, []byte(in), false, keep)
-		if strings.Contains(got, "Qz1000") || !truncated || len(got) > keep || !strings.HasSuffix(got, "ready\n") {
-			t.Errorf("%s: Excerpt(keep %d) = %q, truncated %v", name, keep, got, truncated)
+		got, truncated, err := Excerpt(r, []byte(in), false, keep)
+		if err != nil || strings.Contains(got, "Qz1000") || !truncated || len(got) > keep || !strings.HasSuffix(got, "ready\n") {
+			t.Errorf("%s: Excerpt(keep %d) = %q, truncated %v, %v", name, keep, got, truncated, err)
 		}
 	}
 }

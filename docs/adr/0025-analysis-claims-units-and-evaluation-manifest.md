@@ -5,12 +5,12 @@
 
 ## Context
 
-The analysis loop ([#76](https://github.com/pkalin/shadewright/issues/76), PR #415) is about to call a model, and four contracts around it are still unwritten ([#249](https://github.com/pkalin/shadewright/issues/249)):
+The analysis loop ([#76](https://github.com/shadewright-labs/shadewright/issues/76), PR #415) is about to call a model, and four contracts around it are still unwritten ([#249](https://github.com/shadewright-labs/shadewright/issues/249)):
 
 - **Ownership.** `AnalysisDue` is a scheduling hint, not ownership. The loop claims an Incident by writing the phase `Analyzing` and `lastAnalysisTime` in one status update with the resourceVersion it read, so two runs never claim the same round. What is not written down is how a run proves, before it creates a `RemediationRequest`, that it still owns the Incident after a stall, a restart or a takeover, how long the whole run may take against the claim, and what happens to a request whose outcome write is lost.
-- **Counting.** `ReserveAnalysis` adds one to the day's count, and [ADR-0023](0023-how-the-analyzer-calls-the-model.md) does not say what one unit is: an incident, an attempt or a call. Spend is a separate count of tokens ([#68](https://github.com/pkalin/shadewright/issues/68), [#208](https://github.com/pkalin/shadewright/issues/208)).
+- **Counting.** `ReserveAnalysis` adds one to the day's count, and [ADR-0023](0023-how-the-analyzer-calls-the-model.md) does not say what one unit is: an incident, an attempt or a call. Spend is a separate count of tokens ([#68](https://github.com/shadewright-labs/shadewright/issues/68), [#208](https://github.com/shadewright-labs/shadewright/issues/208)).
 - **Evaluation identity.** ADR-0023 decision 8 keys a passing evaluation on (model, prompt hash). Other inputs change what the model sees or how a result is judged: the tools offered, the context builder, the redaction patterns, the rubric.
-- **Durability.** Between "the analyzer accepted an observation" and "a record is stored" there are several states, and nothing says whether a failed record write stops a proposal ([ADR-0015](0015-analysis-records-outlive-the-lab.md), [#77](https://github.com/pkalin/shadewright/issues/77)).
+- **Durability.** Between "the analyzer accepted an observation" and "a record is stored" there are several states, and nothing says whether a failed record write stops a proposal ([ADR-0015](0015-analysis-records-outlive-the-lab.md), [#77](https://github.com/shadewright-labs/shadewright/issues/77)).
 
 These contracts must exist before the analyzer binary starts the loop. Design 3.2, 3.3, 11 and 12.3 link here.
 
@@ -35,7 +35,7 @@ These contracts must exist before the analyzer binary starts the loop. Design 3.
    - The embedded list of passing evaluations is keyed by the digest of that manifest, not by (model, prompt hash). A change to any field gives a different digest, so it invalidates the pass until a new evaluation is recorded.
    - At run time the analyzer computes the digest of what it is configured to use and refuses automatic analysis, with the reason in status and metrics, when no passing record has it. Fields only the harness knows (rubric, thresholds, repeats) are part of the stored result and checked when the list is built in CI, not at run time. Operator redaction patterns change the run-time digest, so an admin who changes them stops automatic analysis until the combination is evaluated. That is intended.
    - The check of `Completion.Model` in a reply against the manifest stays as in ADR-0023 decision 8; the run-time digest covers what is known before the call.
-   - This amends ADR-0023 decision 8 once this ADR is accepted ([ADR-0021](0021-amending-accepted-adrs.md)). The harness is [#78](https://github.com/pkalin/shadewright/issues/78).
+   - This amends ADR-0023 decision 8 once this ADR is accepted ([ADR-0021](0021-amending-accepted-adrs.md)). The harness is [#78](https://github.com/shadewright-labs/shadewright/issues/78).
 
 4. **Durability steps, and whether a record gates the proposal.**
    - The steps, in order: (a) **accepted in memory**: the collector or controller holds the observation in a batch, and a crash loses it. (b) **Persisted Incident**: the status write has succeeded and a restart finds it. (c) **Claimed snapshot**: the claim update has succeeded, and the context is built from the Incident as claimed (UID, generation, subject); only this step lets a run call the model. (d) **Stored record**: the redacted record is in the `AnalysisStore` ([ADR-0015](0015-analysis-records-outlive-the-lab.md)).
@@ -48,7 +48,7 @@ These contracts must exist before the analyzer binary starts the loop. Design 3.
 
 6. **A request whose outcome was dropped.** A run may create a request and then lose the outcome write (a stop, a lost leadership, a failed recheck). Requests carry a label with the Incident's UID, so the next claim of that Incident, or the trigger, lists the requests with that label and records any not yet in `status.remediationRequests` before it analyses, so none is orphaned. Only a request created within the claim window of the Incident's `lastAnalysisTime` (from it to its expiry) is recorded, at most one per run, and only with the form an analysis gives it (the name derived from the Incident's UID and the spec, approval required, the policy configured for its action type), so a name the status dropped at its bound never comes back. Built in #415: the deterministic name and the identity-checked outcome update; in #421: the label on create and the record step.
 
-7. **PR #415 and the evaluation gate.** #415 already claims with phase and `lastAnalysisTime`, reserves one unit before the first model call and names requests from the Incident UID and plan. The follow-up covers the live recheck, the create and outcome timeouts, the label and the manifest digest in the run-time gate. The evaluation harness ([#78](https://github.com/pkalin/shadewright/issues/78)) is a precondition for any release that starts the loop. Until it exists, the first real-model run in the lab is an evaluation run on demand, not production use.
+7. **PR #415 and the evaluation gate.** #415 already claims with phase and `lastAnalysisTime`, reserves one unit before the first model call and names requests from the Incident UID and plan. The follow-up covers the live recheck, the create and outcome timeouts, the label and the manifest digest in the run-time gate. The evaluation harness ([#78](https://github.com/shadewright-labs/shadewright/issues/78)) is a precondition for any release that starts the loop. Until it exists, the first real-model run in the lab is an evaluation run on demand, not production use.
 
 ## Consequences
 
@@ -74,4 +74,4 @@ These contracts must exist before the analyzer binary starts the loop. Design 3.
 
 ## Amendments
 
-- 2026-11-05: decision 6 is built by [#421](https://github.com/pkalin/shadewright/pull/421) (the label on create and the record step), with the window rule added: only a request created within the claim window of the Incident's `lastAnalysisTime`, at most one per run and with the form an analysis gives it, is recorded. Why: with more than 20 requests a name the status dropped at its bound would otherwise come back on every write, and the label and spec are written by whoever creates the request. The rule narrows what is recorded and grants nothing.
+- 2026-11-05: decision 6 is built by [#421](https://github.com/shadewright-labs/shadewright/pull/421) (the label on create and the record step), with the window rule added: only a request created within the claim window of the Incident's `lastAnalysisTime`, at most one per run and with the form an analysis gives it, is recorded. Why: with more than 20 requests a name the status dropped at its bound would otherwise come back on every write, and the label and spec are written by whoever creates the request. The rule narrows what is recorded and grants nothing.

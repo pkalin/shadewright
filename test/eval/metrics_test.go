@@ -27,8 +27,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/validation"
 
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/providers/metrics/prometheus"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/metrics/prometheus"
 )
 
 // metricsFile is the optional file of a scenario that records what its Prometheus holds. A scenario without

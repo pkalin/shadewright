@@ -34,23 +34,23 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/analyzer"
-	"github.com/pkalin/shadewright/internal/analyzer/collector"
-	"github.com/pkalin/shadewright/internal/analyzer/detection"
-	"github.com/pkalin/shadewright/internal/cmdutil"
-	"github.com/pkalin/shadewright/internal/incidentcontext"
-	"github.com/pkalin/shadewright/internal/incidents"
-	"github.com/pkalin/shadewright/internal/modules"
-	"github.com/pkalin/shadewright/internal/modules/aks"
-	"github.com/pkalin/shadewright/internal/modules/cloudflared"
-	"github.com/pkalin/shadewright/internal/modules/eks"
-	"github.com/pkalin/shadewright/internal/modules/flux"
-	"github.com/pkalin/shadewright/internal/modules/gke"
-	"github.com/pkalin/shadewright/internal/modules/keda"
-	"github.com/pkalin/shadewright/internal/modules/kyverno"
-	"github.com/pkalin/shadewright/internal/modules/secretsstore"
-	"github.com/pkalin/shadewright/internal/redact"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/analyzer"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/collector"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/detection"
+	"github.com/shadewright-labs/shadewright/internal/cmdutil"
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/incidents"
+	"github.com/shadewright-labs/shadewright/internal/modules"
+	"github.com/shadewright-labs/shadewright/internal/modules/aks"
+	"github.com/shadewright-labs/shadewright/internal/modules/cloudflared"
+	"github.com/shadewright-labs/shadewright/internal/modules/eks"
+	"github.com/shadewright-labs/shadewright/internal/modules/flux"
+	"github.com/shadewright-labs/shadewright/internal/modules/gke"
+	"github.com/shadewright-labs/shadewright/internal/modules/keda"
+	"github.com/shadewright-labs/shadewright/internal/modules/kyverno"
+	"github.com/shadewright-labs/shadewright/internal/modules/secretsstore"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 var (
@@ -127,6 +127,8 @@ func main() {
 		setupLog.Error(nil, "Invalid --max-incidents: it must be at least 1", "value", maxIncidents)
 		os.Exit(1)
 	}
+	// A memory limit under the one redaction's heap limit was measured for: one warning, no other change.
+	redact.WarnIfMemoryUnderMeasured(setupLog)
 	analyzer.SetWatchedNamespaces(len(watched))
 	if len(watched) == 0 {
 		setupLog.Info("Watching no namespaces: no events or pods are read and no Incident is recorded; "+

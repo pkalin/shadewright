@@ -33,7 +33,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 var now = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)

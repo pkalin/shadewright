@@ -27,7 +27,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 const absorbedHeader = "consequences counted on this cause, not in its occurrences:"
@@ -144,7 +144,7 @@ func TestAbsorbedTallyShowsOnlyTheFixedReasons(t *testing.T) {
 // for each fixed reason the tally holds and no other, in the table's order, with the count and time of its
 // first entry; at most len(absorbedReasons) lines, and the same text for every order of the same entries
 // (the context and its digest are deterministic). The lines around the tally are those of the Incident
-// without it.
+// without it. Under -race it checks a seeded sample of the cases (racesample_test.go), without it all of them.
 func TestAbsorbedTallyGenerated(t *testing.T) {
 	b := newBuilder(t, reader(t), sources{}, nil)
 	plain := one(t, build(t, b, cause()), SectionSummary).Text
@@ -157,6 +157,9 @@ func TestAbsorbedTallyGenerated(t *testing.T) {
 		for range size {
 			tally = append(tally, absorbed(pool[rng.IntN(len(pool))], rng.Int64N(1_000_001),
 				testNow.Add(-time.Duration(rng.IntN(3600))*time.Second)))
+		}
+		if !raceKeeps(t.Name(), n) {
+			continue
 		}
 		var want []string
 		for _, r := range absorbedReasons {

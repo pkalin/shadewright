@@ -1,0 +1,29 @@
+# confusables.txt
+# Date: 2026-08-06, 01:05:35 GMT
+# © 2026 Unicode®, Inc.
+# Unicode and the Unicode Logo are registered trademarks of Unicode, Inc. in the U.S. and other countries.
+# For terms of use and license, see https://www.unicode.org/terms_of_use.html
+#
+# Unicode Security Mechanisms for UTS #39
+# Version: 18.0.0
+#
+# For documentation and usage, see https://www.unicode.org/reports/tr39
+#
+# The lines of the file above whose target is one or more U+003D EQUALS SIGN, or U+2192 RIGHTWARDS ARROW or
+# U+21D2 RIGHTWARDS DOUBLE ARROW, for TestFoldMarksAreTheConfusablesOfEqualsAndArrows, taken from
+# https://www.unicode.org/Public/18.0.0/security/confusables.txt with:
+#   grep -E '^[0-9A-F]+ ;\s+((003D ?)+|2192 |21D2 );' confusables.txt
+#
+FFEB ;	2192 ;	MA	#* ( ￫ → → ) HALFWIDTH RIGHTWARDS ARROW → RIGHTWARDS ARROW	# 
+1400 ;	003D ;	MA	#* ( ᐀ → = ) CANADIAN SYLLABICS HYPHEN → EQUALS SIGN	# 
+2E40 ;	003D ;	MA	#* ( ⹀ → = ) DOUBLE HYPHEN → EQUALS SIGN	# 
+30A0 ;	003D ;	MA	#* ( ゠ → = ) KATAKANA-HIRAGANA DOUBLE HYPHEN → EQUALS SIGN	# 
+A4FF ;	003D ;	MA	#* ( ꓿ → = ) LISU PUNCTUATION FULL STOP → EQUALS SIGN	# 
+A78A ;	003D ;	MA	#* ( ꞊ → = ) MODIFIER LETTER SHORT EQUALS SIGN → EQUALS SIGN	# 
+FF1D ;	003D ;	MA	#* ( ＝ → = ) FULLWIDTH EQUALS SIGN → EQUALS SIGN	# 
+FE66 ;	003D ;	MA	#* ( ﹦ → = ) SMALL EQUALS SIGN → EQUALS SIGN	# 
+10190 ;	003D ;	MA	#* ( 𐆐 → = ) ROMAN SEXTANS SIGN → EQUALS SIGN	# 
+11053 ;	003D ;	MA	#* ( 𑁓 → = ) BRAHMI NUMBER TWO → EQUALS SIGN	# 
+A60C ;	003D ;	MA	# ( ꘌ → = ) VAI SYLLABLE LENGTHENER → EQUALS SIGN	# 
+2A75 ;	003D 003D ;	MA	#* ( ⩵ → == ) TWO CONSECUTIVE EQUALS SIGNS → EQUALS SIGN, EQUALS SIGN	# 
+2A76 ;	003D 003D 003D ;	MA	#* ( ⩶ → === ) THREE CONSECUTIVE EQUALS SIGNS → EQUALS SIGN, EQUALS SIGN, EQUALS SIGN	# 

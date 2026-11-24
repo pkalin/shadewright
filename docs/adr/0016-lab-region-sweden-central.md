@@ -30,4 +30,4 @@ Run the whole lab in Sweden Central, so cluster, identities, storage and model a
 
 ## Amendments
 
-- 2026-11-04: the Decision is unchanged. The claim that the node price is the lowest is narrowed to the EU candidates compared (Sweden Central and North Europe); East US 2 was cheaper ([#245](https://github.com/pkalin/shadewright/issues/245)).
+- 2026-11-04: the Decision is unchanged. The claim that the node price is the lowest is narrowed to the EU candidates compared (Sweden Central and North Europe); East US 2 was cheaper ([#245](https://github.com/shadewright-labs/shadewright/issues/245)).

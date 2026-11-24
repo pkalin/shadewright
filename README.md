@@ -7,12 +7,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/pkalin/shadewright/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/pkalin/shadewright/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status on main"></a>
-  <a href="https://codecov.io/github/pkalin/shadewright"><img src="https://codecov.io/github/pkalin/shadewright/graph/badge.svg" alt="Test coverage on Codecov"></a>
-  <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/pkalin/shadewright" alt="Go version"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/pkalin/shadewright" alt="License: Apache-2.0"></a>
+  <a href="https://github.com/shadewright-labs/shadewright/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/shadewright-labs/shadewright/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status on main"></a>
+  <a href="https://codecov.io/github/shadewright-labs/shadewright"><img src="https://codecov.io/github/shadewright-labs/shadewright/graph/badge.svg" alt="Test coverage on Codecov"></a>
+  <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/shadewright-labs/shadewright" alt="Go version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/shadewright-labs/shadewright" alt="License: Apache-2.0"></a>
   <a href="https://artifacthub.io/packages/search?repo=shadewright"><img src="https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/shadewright" alt="Artifact Hub"></a>
-  <a href="https://scorecard.dev/viewer/?uri=github.com/pkalin/shadewright"><img src="https://api.scorecard.dev/projects/github.com/pkalin/shadewright/badge" alt="OpenSSF Scorecard"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/shadewright-labs/shadewright"><img src="https://api.scorecard.dev/projects/github.com/shadewright-labs/shadewright/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://www.bestpractices.dev/projects/16344"><img src="https://www.bestpractices.dev/projects/16344/badge" alt="OpenSSF Best Practices"></a>
   <a href="https://shadewright.io/upgrade-uninstall/#verify-a-release"><img src="https://slsa.dev/images/gh-badge-level2.svg" alt="SLSA Build Level 2"></a>
 </p>
@@ -33,12 +33,12 @@ It never changes your workloads or any other object it watches: it writes only i
 ## Install
 
 ```bash
-helm install shadewright oci://ghcr.io/pkalin/charts/shadewright --version <version> \
+helm install shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --version <version> \
   --namespace shadewright-system --create-namespace \
   --set 'analyzer.watchNamespaces={default}'
 ```
 
-Pick the version on the [releases page](https://github.com/pkalin/shadewright/releases) (a pre-release needs `--version`) and [verify the release](https://shadewright.io/upgrade-uninstall/#verify-a-release) first. [Getting started](https://shadewright.io/getting-started/) has the details.
+Pick the version on the [releases page](https://github.com/shadewright-labs/shadewright/releases) (a pre-release needs `--version`) and [verify the release](https://shadewright.io/upgrade-uninstall/#verify-a-release) first. [Getting started](https://shadewright.io/getting-started/) has the details.
 
 ## Guides
 
@@ -55,9 +55,9 @@ Pick the version on the [releases page](https://github.com/pkalin/shadewright/re
 
 | Repository | Contents |
 | --- | --- |
-| [shadewright](https://github.com/pkalin/shadewright) | The operator (Go, Kubebuilder) and the docs at [shadewright.io](https://shadewright.io) |
-| [shadewright-azure](https://github.com/pkalin/shadewright-azure) | Terraform for a disposable reference lab in Azure |
-| [shadewright-fleet](https://github.com/pkalin/shadewright-fleet) | The lab's GitOps repository and incident scenarios |
+| [shadewright](https://github.com/shadewright-labs/shadewright) | The operator (Go, Kubebuilder) and the docs at [shadewright.io](https://shadewright.io) |
+| [shadewright-azure](https://github.com/shadewright-labs/shadewright-azure) | Terraform for a disposable reference lab in Azure |
+| [shadewright-fleet](https://github.com/shadewright-labs/shadewright-fleet) | The lab's GitOps repository and incident scenarios |
 
 ## Development
 
@@ -69,7 +69,7 @@ make run                  # against the current kubeconfig context
 make docker-build-images  # executor, analyzer and verifier images for the host platform
 ```
 
-Images (distroless, non-root, linux/amd64 and linux/arm64) are published from `main` and release tags to `ghcr.io/pkalin/shadewright-executor`, `ghcr.io/pkalin/shadewright-analyzer` and `ghcr.io/pkalin/shadewright-verifier`.
+Images (distroless, non-root, linux/amd64 and linux/arm64) are published from `main` and release tags to `ghcr.io/shadewright-labs/shadewright-executor`, `ghcr.io/shadewright-labs/shadewright-analyzer` and `ghcr.io/shadewright-labs/shadewright-verifier`.
 
 Contributor and coding-agent guide: [AGENTS.md](AGENTS.md).
 

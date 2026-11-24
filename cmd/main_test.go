@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pkalin/shadewright/internal/controller"
+	"github.com/shadewright-labs/shadewright/internal/controller"
 )
 
 // TestExecutorFlagsConfigureTheReconciler: --reviewer-hints and --verify-outcomes are off unless given, and the

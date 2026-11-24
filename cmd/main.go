@@ -36,15 +36,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/cmdutil"
-	"github.com/pkalin/shadewright/internal/controller"
-	"github.com/pkalin/shadewright/internal/gitops/semdiff"
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
-	"github.com/pkalin/shadewright/internal/policy/freshness"
-	"github.com/pkalin/shadewright/internal/providers"
-	fluxdelivery "github.com/pkalin/shadewright/internal/providers/delivery/flux"
-	"github.com/pkalin/shadewright/internal/providers/registry"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/cmdutil"
+	"github.com/shadewright-labs/shadewright/internal/controller"
+	"github.com/shadewright-labs/shadewright/internal/gitops/semdiff"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	fluxdelivery "github.com/shadewright-labs/shadewright/internal/providers/delivery/flux"
+	"github.com/shadewright-labs/shadewright/internal/providers/registry"
 	// +kubebuilder:scaffold:imports
 )
 

@@ -37,4 +37,4 @@ Options in the ecosystem:
 
 ## Amendments
 
-- 2026-11-03: "registered at start-up" means the binary builds one immutable registry from an explicit list of compiled-in modules. There is no global registry and no `init()` registration, so a duplicate name is an error from the constructor instead of a panic at load, and tests can build registries freely ([#214](https://github.com/pkalin/shadewright/pull/214), design 2.4). The decision is unchanged.
+- 2026-11-03: "registered at start-up" means the binary builds one immutable registry from an explicit list of compiled-in modules. There is no global registry and no `init()` registration, so a duplicate name is an error from the constructor instead of a panic at load, and tests can build registries freely ([#214](https://github.com/shadewright-labs/shadewright/pull/214), design 2.4). The decision is unchanged.

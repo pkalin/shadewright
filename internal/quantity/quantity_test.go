@@ -25,8 +25,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/pkalin/shadewright/internal/quantity"
-	"github.com/pkalin/shadewright/internal/testutil/deadline"
+	"github.com/shadewright-labs/shadewright/internal/quantity"
+	"github.com/shadewright-labs/shadewright/internal/testutil/deadline"
 )
 
 // decode reads a quantity as the API types do, from JSON, without the bounds of Parse.

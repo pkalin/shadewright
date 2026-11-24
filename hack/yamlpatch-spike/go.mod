@@ -1,4 +1,4 @@
-module github.com/pkalin/shadewright/hack/yamlpatch-spike
+module github.com/shadewright-labs/shadewright/hack/yamlpatch-spike
 
 go 1.26.0
 

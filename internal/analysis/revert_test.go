@@ -30,9 +30,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	kfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	fx "github.com/pkalin/shadewright/internal/testfixtures"
-	"github.com/pkalin/shadewright/internal/testutil/importguard"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	fx "github.com/shadewright-labs/shadewright/internal/testfixtures"
+	"github.com/shadewright-labs/shadewright/internal/testutil/importguard"
 )
 
 // TestModelCannotProposeARevert: a model proposal has no way to set spec.reverts (ADR-0030 section 8). The

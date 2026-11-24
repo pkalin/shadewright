@@ -23,7 +23,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pkalin/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // Through every entry point, no secret part of a connection string that origin/main kept out of an output
@@ -34,6 +34,7 @@ import (
 // -race each entry point gets a seeded sample of the inputs (redact.RaceKeeps), and make test runs them all
 // without it.
 func TestConnStringsThroughEveryEntryPointAgainstMain(t *testing.T) {
+	redact.ParallelUnderRace(t)
 	gen := connStringCorpus(connStringCorpusSize)
 	eps := connEntryPoints()
 	eps["kube.Excerpt"] = entryPoints["kube.Excerpt"]
@@ -229,6 +230,12 @@ func TestConnStringWiderUserInfoKeepsItsNeighbours(t *testing.T) {
 		"postgres://app:Hunter<2Secret@db/x>mysql://app:Q>2Secret@e" + ".prod": m + ">" + m,
 		"--dsn=postgres://app:Hunter<2Secret@db:5432/x":                        "--dsn=" + m,
 		"<url>redis://:Hunter<2Secret@cache:6379/0</url>":                      "<url>" + m + "</url>",
+		// The two cases of the review of #842 (#845): a list of links in angle brackets is one match up to the
+		// "@" of the second, as on main (sixth decision of 2026-11-18, point 4; showing it is #860); a tag inside
+		// the user info cannot be told from a password such as "Hun<ter>2Sec<ret" (connByConstruction), so it
+		// stays redacted, a known over-redaction.
+		"<https://example.com>,<mailto:ops@example.com>": "<" + m + ">",
+		"http://host:8080<b>user@example.com</b>":        m + "</b>",
 	} {
 		if got := redact.String(in); got != want {
 			t.Errorf("String(%q) = %q, want %q", in, got, want)

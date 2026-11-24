@@ -36,10 +36,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	remediationv1alpha1 "github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/policy/freshness"
-	"github.com/pkalin/shadewright/internal/providers"
-	"github.com/pkalin/shadewright/internal/redact"
+	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // Reviewer hints, the executor's side (ADR-0028 sections 2 and 3, #538). On each look at a pull request that
@@ -127,6 +127,10 @@ var hintLoginPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 // hintClean checks redacted hint text. The redactor's own output is clean, so it refuses only when the
 // redactor misbehaves; tests replace it to prove the refusal.
 var hintClean = func(s string) bool { return redact.Clean(s) }
+
+// hintRedact redacts hint text, with the flag false when redaction withheld it whole (redact.StringChecked); a
+// test replaces it with a redactor on a lowered work budget to prove the refusal of a withheld hint (#962).
+var hintRedact = redact.StringChecked
 
 // maxCursorPage is the largest page status.commentCursor holds (its schema's maximum).
 const maxCursorPage = 100000
@@ -473,9 +477,12 @@ func (r *RemediationRequestReconciler) takeComments(ctx context.Context, fs prov
 			refuse(remediationv1alpha1.HintRefusalCapReached)
 			continue
 		}
-		stored := redact.String(text)
+		// Withheld is told by the flag, never by the text: a hint that spells the marker is a hint like any other.
+		// NotRedactable is decided before TooLong, as HintRefusal says: a long hint whose redaction runs out of its
+		// budget has no redacted length to compare, so it is refused as NotRedactable.
+		stored, decided := hintRedact(text)
 		switch {
-		case !hintClean(stored):
+		case !decided || !hintClean(stored):
 			refuse(remediationv1alpha1.HintRefusalNotRedactable)
 			continue
 		case len(stored) > remediationv1alpha1.MaxHintTextBytes:

@@ -24,8 +24,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/pkalin/shadewright/api/v1alpha1"
-	"github.com/pkalin/shadewright/internal/groupversion"
+	"github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/groupversion"
 )
 
 // NamePattern is the form of a module name: a DNS label that starts with a letter, at most 63 characters, so

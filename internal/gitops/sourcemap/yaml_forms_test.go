@@ -22,7 +22,7 @@ import (
 
 	"sigs.k8s.io/yaml"
 
-	"github.com/pkalin/shadewright/internal/gitops/sourcemap"
+	"github.com/shadewright-labs/shadewright/internal/gitops/sourcemap"
 )
 
 // A bare CR ends a line for the YAML parsers but not for kustomize's split, which drops the rest of a

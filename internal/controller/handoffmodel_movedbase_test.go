@@ -21,7 +21,7 @@ import (
 
 	"k8s.io/utils/ptr"
 
-	api "github.com/pkalin/shadewright/api/v1alpha1"
+	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
 )
 
 // Where the live copies of a handoff (decision of 2026-11-19 on #786) meet the verdicts of a pull request read by its

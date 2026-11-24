@@ -27,6 +27,8 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 // Prefix is the name prefix of Shadewright's own metrics.
@@ -35,6 +37,16 @@ const Prefix = "shadewright_"
 // Labels are the labels a metric may have, each with the values it may take. A metric without labels has an
 // empty Labels.
 type Labels map[string][]string
+
+// WithRedaction returns want with the metrics of package redact added, which every component that redacts
+// registers in controller-runtime's registry (#873, #1087): a test that checks that registry adds them to its own
+// table.
+func WithRedaction(want map[string]Labels) map[string]Labels {
+	all := maps.Clone(want)
+	all["shadewright_redaction_withheld_total"] = Labels{"reason": {redact.ReasonWork, redact.ReasonSize, redact.ReasonHeap, redact.ReasonWait}}
+	all["shadewright_redaction_heap_waits_total"] = Labels{}
+	return all
+}
 
 // Check gathers g and reports on t every metric family named with [Prefix] that is not in want, every family
 // in want that g does not have, every label of a metric that its entry in want does not name, and every label

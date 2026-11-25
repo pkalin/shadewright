@@ -440,7 +440,13 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 		// A reply may echo the bearer token: it is never reported as the model.
 		done := func(c providers.Completion, attempts int, err error) (providers.Completion, int, error) {
 			if tok != "" && strings.Contains(c.Model, tok) {
-				c.Model = ""
+				if err == nil {
+					// A success without a model identity is not a success: keep the usage only.
+					c = providers.Completion{Usage: c.Usage, UsageUnknown: c.UsageUnknown}
+					err = fmt.Errorf("vertexai: the reply names no usable model: %w", providers.ErrMalformedOutput)
+				} else {
+					c.Model = ""
+				}
 			}
 			return finish(c, attempts, err)
 		}
@@ -484,7 +490,8 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 
 // once makes one attempt and returns the body of a 200 reply. Every other outcome is a classified error with
 // fixed text. billed is true once a 200 arrived before the attempt's deadline, error or not. A response that
-// net/http returns after the attempt's context ended is the timeout whatever its status, and not billed. With
+// net/http returns after the attempt's context ended is the timeout whatever its status, and is billed when its
+// status is 200, without its body being read. With
 // an error, data is the body when it was read whole within the bound, so that its usage can still be read,
 // and nil otherwise. sent is false only when the attempt ended before the request was handed to the HTTP
 // client.
@@ -524,7 +531,8 @@ func (p *Provider) once(ctx context.Context, body []byte, tokOut *string) (data 
 	if actx.Err() != nil {
 		// A response that raced the end of the attempt's context: the deadline (or the caller's cancellation)
 		// came first, so nothing of it is read.
-		return nil, false, true, transportError(ctx, context.DeadlineExceeded)
+		// It was a 200 after all if that is its status, so it was billed.
+		return nil, resp.StatusCode == http.StatusOK, true, transportError(ctx, context.DeadlineExceeded)
 	}
 	if resp.StatusCode != http.StatusOK {
 		// The body of an error may quote the request: it is drained, never read into an error.

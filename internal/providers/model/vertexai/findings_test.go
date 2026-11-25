@@ -159,3 +159,33 @@ func TestToolsWithSchemaAcceptPlainText(t *testing.T) {
 		t.Errorf("err = %v, content %q", err, c.Content)
 	}
 }
+
+// When scrubbing an echoed token empties the model of an otherwise successful reply, the call is malformed
+// output: it keeps its usage only, with no content, call or model.
+func TestScrubbedModelInvalidatesSuccess(t *testing.T) {
+	body := strings.Replace(replyJSON(`[{"text":"{}"}]`), `"modelVersion":"`+testModel+`"`, `"modelVersion":"`+tokenMark+`"`, 1)
+	h := newHarness(t, func(w http.ResponseWriter, _ *http.Request) { reply(w, body) }, nil)
+	c, err := h.p.Complete(t.Context(), structuredRequest())
+	if !providers.IsMalformedOutput(err) || c.Usage != wantUsage || c.Model != "" || c.Content != "" ||
+		len(c.ToolCalls) != 0 || c.UsageUnknown {
+		t.Errorf("err = %v, completion %+v", err, c)
+	}
+}
+
+// A 200 that arrives after the attempt's deadline was billed, so a successful retry reports that its own
+// usage is not the whole bill.
+func TestLateOKThenRetrySuccessMarksUsageUnknown(t *testing.T) {
+	var n atomic.Int32
+	p := newProviderWith(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if n.Add(1) == 1 {
+			<-r.Context().Done()
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: jsonHeader(),
+			Body: io.NopCloser(strings.NewReader(replyJSON(`[{"text":"{}"}]`))), Request: r}, nil
+	}), func(c *Config) { c.AttemptTimeout = 20 * time.Millisecond; c.MaxAttempts = 2 })
+	c, err := p.Complete(t.Context(), structuredRequest())
+	if err != nil || c.Usage != wantUsage || !c.UsageUnknown {
+		t.Errorf("err = %v, completion %+v, want its usage with UsageUnknown", err, c)
+	}
+}

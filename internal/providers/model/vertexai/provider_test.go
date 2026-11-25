@@ -744,7 +744,7 @@ func newProviderWith(t *testing.T, tr http.RoundTripper, mod func(*Config)) *Pro
 }
 
 // A response that arrives after the attempt's deadline, or after the caller canceled, is never read: the
-// call is the timeout (retryable) or the cancellation (not retryable), carries no usage, and was sent.
+// call is the timeout (retryable) or the cancellation (not retryable), carries no usage but is marked unknown (a late 200 was billed), and was sent.
 func TestLateResponseIsNotRead(t *testing.T) {
 	late := func(r *http.Request) (*http.Response, error) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -756,7 +756,7 @@ func TestLateResponseIsNotRead(t *testing.T) {
 		p := newProviderWith(t, roundTripFunc(late), func(c *Config) { c.AttemptTimeout = 20 * time.Millisecond })
 		c, err := p.Complete(t.Context(), structuredRequest())
 		if !providers.IsRetryable(err) || !strings.Contains(err.Error(), "timed out") || providers.IsNotSent(err) ||
-			!reflect.DeepEqual(c, providers.Completion{}) {
+			!reflect.DeepEqual(c, providers.Completion{UsageUnknown: true}) {
 			t.Errorf("err = %v, completion %+v", err, c)
 		}
 	})
@@ -768,7 +768,7 @@ func TestLateResponseIsNotRead(t *testing.T) {
 		}), nil)
 		c, err := p.Complete(ctx, structuredRequest())
 		if !errors.Is(err, context.Canceled) || providers.IsRetryable(err) || providers.IsNotSent(err) ||
-			!reflect.DeepEqual(c, providers.Completion{}) {
+			!reflect.DeepEqual(c, providers.Completion{UsageUnknown: true}) {
 			t.Errorf("err = %v, completion %+v", err, c)
 		}
 	})

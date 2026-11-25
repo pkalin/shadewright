@@ -66,7 +66,6 @@ type tally struct {
 // consequences by the collector (status.consequence, ADR-0039 point 12 amended 2026-11-21), and containers
 // are the container names its observations named, already checked to be DNS labels.
 type batch struct {
-	continuedPull  string
 	spec           remediationv1alpha1.IncidentSpec
 	count          int64
 	first, last    time.Time
@@ -105,9 +104,6 @@ func (b *batch) occurrenceOf(id string) (counted, bool) {
 // source: the same occurrence always comes from the same namespace, and keeping the first one keeps the
 // namespace it was charged to.
 func (b *batch) add(other *batch) {
-	if other.continuedPull != "" {
-		b.continuedPull = other.continuedPull
-	}
 	b.count += other.count
 	b.first = earliest(b.first, other.first)
 	b.last = latest(b.last, other.last)
@@ -225,9 +221,6 @@ func applied(status *remediationv1alpha1.IncidentStatus, b *batch) bool {
 // 16). A batch that counted a cause sets status.cause, which is never cleared. Container names are added by
 // [addContainers].
 func merge(status *remediationv1alpha1.IncidentStatus, b *batch) (dropped []string) {
-	if b.continuedPull != "" && status.ContinuedPullFingerprint == "" {
-		status.ContinuedPullFingerprint = b.continuedPull
-	}
 	if status.Phase == "" {
 		status.Phase = remediationv1alpha1.IncidentOpen
 	}

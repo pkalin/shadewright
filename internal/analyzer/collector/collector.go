@@ -72,19 +72,9 @@ const MaxCount = 1000
 // dropped to stay within its bounds: everything in it counts as counted, so a bound never counts twice.
 const AllHandled int64 = math.MaxInt64
 
-// PreviousPullWait identifies a waiting occurrence written before fingerprints included the spec image.
-type PreviousPullWait struct {
-	// Fingerprint groups the waiting reason on this workload.
-	Fingerprint string
-	// Occurrence identifies the pod, container, reason and restart count.
-	Occurrence string
-}
-
 // Observation is one symptom ready for the Incident controller: the fingerprint and the normalized,
 // redacted symptom are computed here, so no raw event or status text ever leaves the collector.
 type Observation struct {
-	// PreviousPullWaits identifies this wait in each pull phase an older analyzer could count.
-	PreviousPullWaits [2]PreviousPullWait
 	// Fingerprint identifies the incident (package fingerprint).
 	Fingerprint string
 	// Subject is the object the symptom is correlated to: the owning workload when the owner chain could be

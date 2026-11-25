@@ -731,7 +731,7 @@ func (c *Controller) handled(o collector.Observation) (int64, bool) {
 	}
 	marks := []time.Time{c.droppedThrough}
 	if o.Class == collector.ClassConsequence && o.CauseFingerprint != "" {
-		marks = append(marks, c.absorbedDroppedThrough[c.pullDestination(o, o.CauseFingerprint)])
+		marks = append(marks, c.absorbedDroppedThrough[o.CauseFingerprint])
 	}
 	for _, mark := range marks {
 		if !mark.IsZero() && !began.After(mark) {
@@ -772,14 +772,12 @@ func (c *Controller) consume(ctx context.Context, o collector.Observation) bool 
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	scoped := o.Fingerprint
-	c.continuePull(&o)
 	due := c.consumeLocked(ctx, o)
 	if isCause(o) {
 		// The cause's Incident may have opened just now, or exist already, while first sightings of its
 		// consequences are held from before it did: they are counted there now, whether or not the consequence
 		// is seen again (ADR-0039 point 6, #820).
-		due = c.absorbHeldFor(ctx, scoped, o.Fingerprint) || due
+		due = c.absorbHeldFor(ctx, o.Fingerprint) || due
 	}
 	return due
 }

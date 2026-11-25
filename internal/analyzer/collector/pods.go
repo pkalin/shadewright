@@ -129,7 +129,7 @@ func containerWaits(spec []corev1.Container, statuses []corev1.ContainerStatus) 
 					images[c.Name] = c.Image
 				}
 			}
-			t.image = pullIdentity(images[st.Name])
+			t.image = images[st.Name]
 			if t.image != "" {
 				reason = pullWaitReason(reason)
 			}
@@ -439,7 +439,7 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		input := r.c.podStatusInput(&pod, owner, t.reason, note)
 		obs := r.c.observation(input, subject, pod.Namespace, at)
 		if t.image != "" {
-			obs.Fingerprint, obs.PreviousPullWaits = waitingFingerprint(input, t.termination)
+			obs.Fingerprint = waitingFingerprint(input, t.container, t.image)
 		}
 		obs.Occurrence, obs.Began, obs.Total, obs.MayRepeat = t.occurrence(pod.UID), t.finished, 1, t.mayRepeat
 		// A waiting reason is never in immediateTerminationReasons: a wait is often short while an image is

@@ -325,7 +325,7 @@ func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observat
 	obs.Class = eventClass(ev, pod, obs.Container, init)
 	if obs.Class == ClassConsequence {
 		at, ok := kubeletTime(ev)
-		obs.CauseFingerprint, obs.exitCause, obs.PreviousPullWaits = c.causeFingerprint(pod, owner, obs.Container, init, at, ok, ev.Reason)
+		obs.CauseFingerprint, obs.exitCause = c.causeFingerprint(pod, owner, obs.Container, init, at, ok, ev.Reason)
 	}
 	return obs, pod, subjectUsable, nil
 }

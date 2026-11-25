@@ -34,8 +34,11 @@ type IncidentSpec struct {
 	// +required
 	Fingerprint string `json:"fingerprint"`
 
-	// pullCauseFingerprint identifies the verified container and image of a kubelet Failed event.
-	// The analyzer folds this Incident only into a cause with this fingerprint.
+	// pullCauseFingerprint identifies the pull cause for a kubelet Failed event on a verified container
+	// currently in an image-pull wait. Only the exact notes "Error: ErrImagePull", "Error: ImagePullBackOff"
+	// and "Error: InvalidImageName" qualify. The cause key uses the image from the pod spec byte for byte.
+	// The analyzer folds this Incident only into a cause with this fingerprint. Detailed "Failed to pull image"
+	// events have no link and stay separate.
 	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
 	// +kubebuilder:validation:MaxLength=71
 	// +optional
@@ -163,7 +166,8 @@ const (
 	AbsorbedBackOff AbsorbedReason = "BackOff"
 	// AbsorbedUnhealthy is a kubelet probe failure of a container whose pod status shows a cause.
 	AbsorbedUnhealthy AbsorbedReason = "Unhealthy"
-	// AbsorbedFailed is a kubelet image-pull Failed event of a container whose pod status shows an image-pull cause.
+	// AbsorbedFailed counts kubelet Failed events with a short pull error on a verified container in a current
+	// image-pull wait. See IncidentSpec.PullCauseFingerprint for the exact notes.
 	AbsorbedFailed AbsorbedReason = "Failed"
 )
 
@@ -200,13 +204,6 @@ type AbsorbedTally struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.foldedInto) || has(self.foldedInto) || (has(self.phase) && self.phase != 'Resolved')",message="foldedInto is cleared only together with a move to a phase other than Resolved"
 // +kubebuilder:validation:XValidation:rule="!(has(oldSelf.folded) && oldSelf.folded) || (has(self.folded) && self.folded)",message="folded cannot change from true to false"
 type IncidentStatus struct {
-	// continuedPullFingerprint identifies the container and spec image of a pull that continued
-	// across an analyzer upgrade. The analyzer sets it when a stored waiting occurrence matches.
-	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
-	// +kubebuilder:validation:MaxLength=71
-	// +optional
-	ContinuedPullFingerprint string `json:"continuedPullFingerprint,omitempty"`
-
 	// phase summarizes the incident.
 	// +optional
 	Phase IncidentPhase `json:"phase,omitempty"`
@@ -256,7 +253,7 @@ type IncidentStatus struct {
 	// narrowed 2026-11-21). Only such an Incident takes the evidence of a consequence or folds a consequence
 	// Incident: a non-zero exit's takes BackOff only, an OOM kill's or a configuration wait's BackOff and Unhealthy,
 	// and an image-pull wait's (ImagePullBackOff, ErrImagePull, InvalidImageName) BackOff, Unhealthy and
-	// image-pull Failed events (point 12 amended 2026-11-21). An Event never sets it. Once true it stays true,
+	// qualifying Failed events (point 12). An Event never sets it. Once true it stays true,
 	// and the status cannot be removed while it is.
 	// +optional
 	Cause bool `json:"cause,omitempty"`

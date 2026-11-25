@@ -313,7 +313,7 @@ func TestExitCausePrefersCurrentTerminationOnTie(t *testing.T) {
 					t0.Add(tc.currentOffset))
 			})
 			owner := ownerOf(t, h)
-			_, got, _ := h.c.causeFingerprint(pod, owner, containerApp, false, t0, true, reasonBackOff)
+			_, got := h.c.causeFingerprint(pod, owner, containerApp, false, t0, true, reasonBackOff)
 			want := fingerprint.Fingerprint(h.c.podStatusInput(pod, owner, reasonError,
 				terminationNote(containerApp, tc.wantExit)))
 			if got != want {

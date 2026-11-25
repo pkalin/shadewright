@@ -109,8 +109,11 @@ spec:
                 type: string
               pullCauseFingerprint:
                 description: |-
-                  pullCauseFingerprint identifies the verified container and image of a kubelet Failed event.
-                  The analyzer folds this Incident only into a cause with this fingerprint.
+                  pullCauseFingerprint identifies the pull cause for a kubelet Failed event on a verified container
+                  currently in an image-pull wait. Only the exact notes "Error: ErrImagePull", "Error: ImagePullBackOff"
+                  and "Error: InvalidImageName" qualify. The cause key uses the image from the pod spec byte for byte.
+                  The analyzer folds this Incident only into a cause with this fingerprint. Detailed "Failed to pull image"
+                  events have no link and stay separate.
                 maxLength: 71
                 pattern: ^sha256:[0-9a-f]{64}$
                 type: string
@@ -307,7 +310,7 @@ spec:
                   narrowed 2026-11-21). Only such an Incident takes the evidence of a consequence or folds a consequence
                   Incident: a non-zero exit's takes BackOff only, an OOM kill's or a configuration wait's BackOff and Unhealthy,
                   and an image-pull wait's (ImagePullBackOff, ErrImagePull, InvalidImageName) BackOff, Unhealthy and
-                  image-pull Failed events (point 12 amended 2026-11-21). An Event never sets it. Once true it stays true,
+                  qualifying Failed events (point 12). An Event never sets it. Once true it stays true,
                   and the status cannot be removed while it is.
                 type: boolean
               conditions:
@@ -391,13 +394,6 @@ spec:
                 maxItems: 8
                 type: array
                 x-kubernetes-list-type: set
-              continuedPullFingerprint:
-                description: |-
-                  continuedPullFingerprint identifies the container and spec image of a pull that continued
-                  across an analyzer upgrade. The analyzer sets it when a stored waiting occurrence matches.
-                maxLength: 71
-                pattern: ^sha256:[0-9a-f]{64}$
-                type: string
               count:
                 description: |-
                   count is the number of occurrences counted, counting event series increments, not totals. It

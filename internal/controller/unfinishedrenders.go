@@ -212,8 +212,8 @@ var skipOwnMarks = predicate.Funcs{UpdateFunc: func(e crevent.UpdateEvent) bool 
 }}
 
 // onlyOwnMarksChanged ignores executor bookkeeping and retry-only updates: render marks, merge-read clocks,
-// PullRequestNotClosed, PullRequestUnreadable, GitReadRetry, ReviewCheckNotFailed, and Approved set to or back from
-// reason ReviewCheckLiveReadFailed (liveReadNote). They must not shorten a scheduled retry.
+// PullRequestNotClosed, PullRequestUnreadable, GitReadRetry, ReviewCheckNotFailed, the record of state Stale on the
+// recorded head (staleCheckRecorded), and Approved set to or back from reason ReviewCheckLiveReadFailed (liveReadNote). They must not shorten a scheduled retry.
 // Phase, lock, plan and external changes still wake the request.
 func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	o, ok1 := oldObj.(*remediationv1alpha1.RemediationRequest)
@@ -250,12 +250,33 @@ func onlyOwnMarksChanged(oldObj, newObj client.Object) bool {
 	for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 		meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionReviewCheckNotFailed)
 	}
+	if staleCheckRecorded(o, n) {
+		// Every write that records state Stale and nothing else on the review check: the exit of a stopped holder's
+		// look (checkHeld, afterLook, #1008), and the standalone write of failCheck (recordStaleCheck) for a stale plan
+		// (failStaleCheck, before the close of cleanUpStale or endStaleClosed) and a cancel (failCancelCheck). None
+		// waits for this event: each writer goes on in the same reconcile with the record in memory and returns its own
+		// delay (a refused close tried again at heldRecheckInterval, a close a second later, the poll interval). A
+		// change of Approved that recordStaleCheck makes in the same write is not dropped here and still wakes it.
+		n.Status.PullRequest.ReviewCheck = o.Status.PullRequest.ReviewCheck
+	}
 	if deliveryPending(o) && deliveryPending(n) {
 		for _, rr := range []*remediationv1alpha1.RemediationRequest{o, n} {
 			meta.RemoveStatusCondition(&rr.Status.Conditions, remediationv1alpha1.ConditionDelivered)
 		}
 	}
 	return equality.Semantic.DeepEqual(o, n)
+}
+
+// staleCheckRecorded reports whether n records state Stale for the review check of the head of the pull request o records
+// too, where o records another state or none: the record of a failed review check (failStoppedCheck, failCheck).
+func staleCheckRecorded(o, n *remediationv1alpha1.RemediationRequest) bool {
+	op, np := o.Status.PullRequest, n.Status.PullRequest
+	if op == nil || np == nil || op.Number != np.Number || op.HeadSHA != np.HeadSHA {
+		return false
+	}
+	rc := np.ReviewCheck
+	return rc != nil && rc.Head == np.HeadSHA && rc.State == remediationv1alpha1.ReviewCheckStale &&
+		!equality.Semantic.DeepEqual(op.ReviewCheck, rc)
 }
 
 // closedRecorded reports whether n is recordStaleClosed's write over o: PullRequestNotClosed True in o and gone in

@@ -354,8 +354,8 @@ no trailing slash, and no `apiVersion` or `inferenceAPI`.
   `VertexAI` (ADR-0050 decision 3). An existing stored settings object that uses
   `provider: OpenAICompatible` with a `googleapis.com` endpoint, for example
   `https://generativelanguage.googleapis.com/v1beta/openai`, is not rewritten by
-  upgrade, but CEL refuses the next edit of that deployment, and the analyzer
-  refuses calls to it. Move that deployment to another compatible endpoint or to
+  upgrade and calls to it go on as before, but CEL refuses the next edit of that
+  deployment. Move that deployment to another compatible endpoint or to
   `provider: VertexAI` with a regional endpoint before editing it.
 
 ## OpenAI-compatible provider (#834)

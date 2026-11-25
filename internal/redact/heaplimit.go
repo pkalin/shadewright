@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/semaphore"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -106,27 +105,6 @@ func (l *heapLimiter) size() {
 		}
 		l.sem, l.maxWait = semaphore.NewWeighted(l.limit), maxHeapWait
 	})
-}
-
-// MeasuredGoMemoryLimit is the Go memory limit the room next to the heap limit was measured for: 90 percent of
-// the analyzer's 256 Mi, as both install paths set it.
-const MeasuredGoMemoryLimit = 256 << 20 * 9 / 10
-
-// WarnIfMemoryUnderMeasured logs one warning on log, and returns true, when the process has a Go memory limit
-// under MeasuredGoMemoryLimit: the analyzer's memory limit was set under 256 Mi. Nothing else changes: the heap
-// limit is still half of the Go memory limit, and an entry heavier than it still runs alone, holding up to the
-// tests' line (about 117 MiB for the largest object), which a smaller memory limit may not hold; the risk
-// is an out-of-memory kill, not a longer wait. The analyzer calls it once at start.
-func WarnIfMemoryUnderMeasured(log logr.Logger) bool {
-	gomem := debug.SetMemoryLimit(-1)
-	if gomem <= 0 || gomem == math.MaxInt64 || gomem >= MeasuredGoMemoryLimit {
-		return false
-	}
-	log.Info("Warning: the Go memory limit (GOMEMLIMIT) is under the size redaction's heap limit was measured for; "+
-		"one large entry can still hold up to about 117 MiB and the analyzer may be killed for its memory. Set the "+
-		"analyzer's memory limit to at least 256Mi",
-		"goMemoryLimitBytes", gomem, "measuredForBytes", int64(MeasuredGoMemoryLimit))
-	return true
 }
 
 // heapWeight is the share of the limit an entry of size bytes takes.

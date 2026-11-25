@@ -26,7 +26,6 @@ import (
 	"testing"
 
 	"github.com/shadewright-labs/shadewright/internal/modules"
-	"github.com/shadewright-labs/shadewright/internal/redact"
 	"github.com/shadewright-labs/shadewright/internal/testutil/importguard"
 )
 
@@ -185,10 +184,9 @@ func TestInvalidManifestScenario(t *testing.T) {
 	if ev[fieldApplied] != "cluster/kind@sha1:"+revOld {
 		t.Errorf("applied revision %q", ev[fieldApplied])
 	}
-	// The revisions must be whole Flux revisions, so the evaluator may keep them unredacted (redact.IsFluxRevision);
-	// inside text, redaction still removes the commit.
+	// The evaluator can keep these whole revisions without redacting their hashes.
 	for _, f := range []string{fieldAttempted, fieldApplied} {
-		if !redact.IsFluxRevision(ev[f]) {
+		if !modules.IsFluxRevision(ev[f]) {
 			t.Errorf("the revision %q is not a whole Flux revision", ev[f])
 		}
 	}

@@ -18,6 +18,7 @@ limitations under the License.
 package modules
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -177,6 +178,39 @@ func TestSubjectIsSanitized(t *testing.T) {
 	fs := evaluateNode("m", []DiagnosisRule{n}, NodeState{Name: "Node One"})
 	if len(fs) != 1 || fs[0].Subject.Name != "" || fs[0].Subject.Kind != "Node" {
 		t.Errorf("node subject = %+v, want the name dropped", fs)
+	}
+}
+
+func TestIsFluxRevision(t *testing.T) {
+	const commit = "1f3c5e7a9b2d4f6081a3c5e7f9b1d3f5a7c9e1b3"
+	for _, in := range []string{
+		"main@sha1:" + commit,
+		"refs/heads/main@sha1:" + commit,
+		"cluster/kind@sha1:" + commit,
+		"sha1:" + commit,
+	} {
+		if !IsFluxRevision(in) {
+			t.Errorf("IsFluxRevision(%q) = false", in)
+		}
+	}
+	randomToken := base64.RawURLEncoding.EncodeToString([]byte("synthetic-random-token-0123456789"))
+	for _, in := range []string{
+		"",
+		commit,
+		"main@sha1:" + commit + "a",
+		"main@sha1:" + strings.ToUpper(commit),
+		"main@sha1:" + commit + " failed",
+		"token main@sha1:" + commit,
+		"main@sha1:" + commit + "-" + randomToken,
+		"main@sha1:" + commit + "\n",
+		"ma in@sha1:" + commit,
+		"main@@sha1:" + commit,
+		"main@sha256:" + commit,
+		strings.Repeat("a", 256) + "@sha1:" + commit,
+	} {
+		if IsFluxRevision(in) {
+			t.Errorf("IsFluxRevision(%q) = true", in)
+		}
 	}
 }
 

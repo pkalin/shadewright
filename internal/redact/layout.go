@@ -176,7 +176,7 @@ func (r *Redactor) PiecesFitting(ps []Piece, fits func(out []string) bool) (out 
 // ok is false when the answer is withheld.
 func (r *Redactor) meteredPieces(ps []Piece, f func(wm *meter.Meter) []string) (out []string, ok bool) {
 	size := PiecesSize(ps)
-	if size <= MaxEntry && tooManyParts(len(ps), size, PieceBytes) {
+	if size <= MaxEntry && r.tooManyParts(len(ps), size, PieceBytes) {
 		return withheldStrings(len(ps)), false
 	}
 	if out, ok := metered(r, size, f); ok {

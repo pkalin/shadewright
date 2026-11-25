@@ -2295,6 +2295,18 @@ var _ = Describe("RemediationSettings", func() {
 				Entry(nil, v1alpha1.InferenceAPIResponses), Entry(nil, v1alpha1.InferenceAPIChatCompletions),
 			)
 
+			DescribeTable("accepts every EU region named in ADR-0050",
+				func(region string) {
+					expectAccepted(withModel(func(m *v1alpha1.ModelDeployment) {
+						vertex(m)
+						m.Endpoint = "https://" + region + "-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/" + region
+					}))
+				},
+				Entry(nil, "europe-west1"), Entry(nil, "europe-west4"), Entry(nil, "europe-west8"),
+				Entry(nil, "europe-west9"), Entry(nil, "europe-north1"), Entry(nil, "europe-central2"),
+				Entry(nil, "europe-southwest1"),
+			)
+
 			DescribeTable("refuses an endpoint that is not an EU regional Vertex base",
 				func(endpoint string) {
 					expectRefused(withModel(func(m *v1alpha1.ModelDeployment) {
@@ -2308,7 +2320,13 @@ var _ = Describe("RemediationSettings", func() {
 				Entry("non-EU location",
 					"https://us-central1-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/us-central1"),
 				Entry("London, outside the EU",
-					"https://europe-west2-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/europe-west2/"),
+					"https://europe-west2-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/europe-west2"),
+				Entry("Zurich, outside the EU",
+					"https://europe-west6-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/europe-west6"),
+				Entry("malformed europe label",
+					"https://europe---aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/europe--"),
+				Entry("trailing slash on an EU region",
+					"https://europe-west4-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/europe-west4/"),
 				Entry("path location differs from host",
 					"https://europe-west4-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/europe-west1"),
 				Entry("path location is not EU",

@@ -324,7 +324,10 @@ const AnthropicEndpoint = "https://api.anthropic.com"
 //
 // apiVersion is required for Foundry, optional for Anthropic and forbidden for OpenAICompatible and VertexAI.
 // The rules that name googleapis.com and VertexAI only refuse new values of a provider that did not exist
-// before, or a host no Foundry or compatible deployment is expected to use (ADR-0050 decision 1).
+// before, or a host no Foundry or compatible deployment is expected to use (ADR-0050 decision 1). The
+// googleapis.com rule is not a transition rule, so an object stored earlier with provider OpenAICompatible and
+// a googleapis.com endpoint is refused on its next edit until the endpoint is changed; docs/upgrade-uninstall.md
+// says so.
 
 // ModelDeployment is one model deployment behind an inference endpoint, for example in Microsoft Foundry
 // (ADR-0016), or a model of the Anthropic API (ADR-0037). It holds no key, token or other credential.
@@ -337,7 +340,7 @@ const AnthropicEndpoint = "https://api.anthropic.com"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'OpenAICompatible' || !isURL(self.endpoint) || !['openai.azure.com', 'cognitiveservices.azure.com', 'services.ai.azure.com'].exists(s, url(self.endpoint).getHostname() == s || url(self.endpoint).getHostname().endsWith('.' + s))",message="OpenAICompatible does not allow Azure model hosts"
 // +kubebuilder:validation:XValidation:rule="(has(self.provider) && self.provider != 'Foundry') || !isURL(self.endpoint) || url(self.endpoint).getHostname() != 'api.openai.com'",message="the host api.openai.com needs provider OpenAICompatible"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'VertexAI' || (!has(self.apiVersion) && !has(self.inferenceAPI))",message="VertexAI does not allow apiVersion or inferenceAPI"
-// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'VertexAI' || (self.endpoint.matches('^https://europe-[a-z0-9-]+-aiplatform[.]googleapis[.]com/v1/projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/europe-[a-z0-9-]+$') && self.endpoint.endsWith('/locations/' + self.endpoint.split('/')[2].replace('-aiplatform.googleapis.com', ”)))",message="a deployment with provider VertexAI must have an EU regional endpoint https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region> with the same location in host and path"
+// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'VertexAI' || (self.endpoint.matches('^https://europe-(west1|west4|west8|west9|north1|central2|southwest1)-aiplatform[.]googleapis[.]com/v1/projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/europe-(west1|west4|west8|west9|north1|central2|southwest1)$') && self.endpoint.endsWith('/locations/' + self.endpoint.split('/')[2].split('-aiplatform')[0]))",message="a deployment with provider VertexAI must have an EU regional endpoint https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region>, where the region is one of europe-west1, europe-west4, europe-west8, europe-west9, europe-north1, europe-central2 and europe-southwest1 (ADR-0050), with the same location in host and path"
 // +kubebuilder:validation:XValidation:rule="(has(self.provider) && self.provider == 'VertexAI') || !isURL(self.endpoint) || !(url(self.endpoint).getHostname() == 'googleapis.com' || url(self.endpoint).getHostname().endsWith('.googleapis.com'))",message="googleapis.com hosts are only for a deployment with provider VertexAI"
 type ModelDeployment struct {
 	// provider is the API the analyzer's adapter speaks to this deployment: Foundry (the default),

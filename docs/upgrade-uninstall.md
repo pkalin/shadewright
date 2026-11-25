@@ -314,6 +314,23 @@ A new `helm install` with `settings.create=true` over a leftover object keeps th
 
 - Rolling back after a merged pull request: merging is outside Shadewright's control, and undoing it is a revert pull request. After a request ends `Failed` with `Verified` False the analyzer proposes one revert request for it ([#96](https://github.com/shadewright-labs/shadewright/issues/96)), which a person approves like any other; for anything else, revert in Git by hand. On the first start after an upgrade to a version with the proposer, only a request that ended that way at most 24 hours before (by its `Verified` condition) gets its revert proposed; older ones are left to you.
 
+## Vertex AI provider (#1165)
+
+Apply the new CRDs before selecting `provider: VertexAI`. A Vertex deployment
+needs an endpoint of the form
+`https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region>`
+with one of the regions `europe-west1`, `europe-west4`, `europe-west8`,
+`europe-west9`, `europe-north1`, `europe-central2` and `europe-southwest1` (ADR-0050),
+no trailing slash, and no `apiVersion` or `inferenceAPI`.
+
+- This release refuses every `googleapis.com` host for a provider other than
+  `VertexAI` (ADR-0050 decision 3). An existing stored settings object that uses
+  `provider: OpenAICompatible` with a `googleapis.com` endpoint, for example
+  `https://generativelanguage.googleapis.com/v1beta/openai`, is not rewritten by
+  upgrade, but CEL refuses the next edit of that deployment, and the analyzer
+  refuses calls to it. Move that deployment to another compatible endpoint or to
+  `provider: VertexAI` with a regional endpoint before editing it.
+
 ## OpenAI-compatible provider (#834)
 
 Apply the new CRDs before selecting `provider: OpenAICompatible`. Compatible

@@ -268,12 +268,14 @@ spec:
                           rule: '!has(self.provider) || self.provider != ''VertexAI''
                             || (!has(self.apiVersion) && !has(self.inferenceAPI))'
                         - message: a deployment with provider VertexAI must have an
-                            EU regional endpoint https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region>
-                            with the same location in host and path
+                            EU regional endpoint https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region>,
+                            where the region is one of europe-west1, europe-west4,
+                            europe-west8, europe-west9, europe-north1, europe-central2
+                            and europe-southwest1 (ADR-0050), with the same location
+                            in host and path
                           rule: '!has(self.provider) || self.provider != ''VertexAI''
-                            || (self.endpoint.matches(''^https://europe-[a-z0-9-]+-aiplatform[.]googleapis[.]com/v1/projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/europe-[a-z0-9-]+$'')
-                            && self.endpoint.endsWith(''/locations/'' + self.endpoint.split(''/'')[2].replace(''-aiplatform.googleapis.com'',
-                            ”)))'
+                            || (self.endpoint.matches(''^https://europe-(west1|west4|west8|west9|north1|central2|southwest1)-aiplatform[.]googleapis[.]com/v1/projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/europe-(west1|west4|west8|west9|north1|central2|southwest1)$'')
+                            && self.endpoint.endsWith(''/locations/'' + self.endpoint.split(''/'')[2].split(''-aiplatform'')[0]))'
                         - message: googleapis.com hosts are only for a deployment
                             with provider VertexAI
                           rule: (has(self.provider) && self.provider == 'VertexAI')
@@ -427,12 +429,14 @@ spec:
                           rule: '!has(self.provider) || self.provider != ''VertexAI''
                             || (!has(self.apiVersion) && !has(self.inferenceAPI))'
                         - message: a deployment with provider VertexAI must have an
-                            EU regional endpoint https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region>
-                            with the same location in host and path
+                            EU regional endpoint https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region>,
+                            where the region is one of europe-west1, europe-west4,
+                            europe-west8, europe-west9, europe-north1, europe-central2
+                            and europe-southwest1 (ADR-0050), with the same location
+                            in host and path
                           rule: '!has(self.provider) || self.provider != ''VertexAI''
-                            || (self.endpoint.matches(''^https://europe-[a-z0-9-]+-aiplatform[.]googleapis[.]com/v1/projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/europe-[a-z0-9-]+$'')
-                            && self.endpoint.endsWith(''/locations/'' + self.endpoint.split(''/'')[2].replace(''-aiplatform.googleapis.com'',
-                            ”)))'
+                            || (self.endpoint.matches(''^https://europe-(west1|west4|west8|west9|north1|central2|southwest1)-aiplatform[.]googleapis[.]com/v1/projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/europe-(west1|west4|west8|west9|north1|central2|southwest1)$'')
+                            && self.endpoint.endsWith(''/locations/'' + self.endpoint.split(''/'')[2].split(''-aiplatform'')[0]))'
                         - message: googleapis.com hosts are only for a deployment
                             with provider VertexAI
                           rule: (has(self.provider) && self.provider == 'VertexAI')

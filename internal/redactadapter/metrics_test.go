@@ -124,7 +124,7 @@ func TestDecisionCounterDeltas(t *testing.T) {
 
 func TestWaitCounterDeltas(t *testing.T) {
 	if os.Getenv(memoryLimitChild) == "" {
-		runWithMemoryLimit(t, t.Name(), "64MiB")
+		runWithMemoryLimit(t, t.Name(), "8MiB")
 		return
 	}
 
@@ -142,14 +142,13 @@ func TestWaitCounterDeltas(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				// A full-weight entry holds the limiter while the second entry tries to acquire it.
+				// An empty piece takes HeapFixed (4 MiB), the child's entire redaction heap limit.
 				held := make(chan struct{})
 				release := make(chan struct{})
 				done := make(chan struct{})
 				go func() {
 					defer close(done)
-					ps := []redact.Piece{{Text: strings.Repeat("a", 320<<10)}}
-					r.PiecesFitting(ps, func([]string) bool {
+					r.PiecesFitting([]redact.Piece{{}}, func([]string) bool {
 						close(held)
 						<-release
 						return true

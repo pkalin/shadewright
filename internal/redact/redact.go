@@ -223,12 +223,14 @@ type Redactor struct {
 var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // New returns a redactor with the built-in rules, plus any extra Pattern options and decision Hooks.
-// It fails if a pattern has an invalid kind or expression.
+// It skips nil options and fails if a pattern has an invalid kind or expression.
 func New(opts ...Option) (*Redactor, error) {
 	var cfg options
 	for _, opt := range opts {
 		tick(nil, 1)
-		opt.apply(&cfg)
+		if opt != nil {
+			opt.apply(&cfg)
+		}
 	}
 	extra := cfg.patterns
 	rules := builtinRules(nil)

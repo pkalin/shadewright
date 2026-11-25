@@ -377,8 +377,8 @@ func (r *RemediationRequestReconciler) refusedEvent(rr *remediationv1alpha1.Reme
 }
 
 // cleanupFailingCondition is condition CleanupFailing for err, a failure of a deleted request's cleanup. The reason
-// is the refusal's (GitForbidden, GitRejected), RecordedMissingOtherListed for that read, RepositoryUnusable for a
-// settings entry that cannot be used, SettingsNotFound for a missing RemediationSettings object, or CleanupFailed. The message names the step and the recorded pull request,
+// is the refusal's (GitForbidden, GitRejected), RecordedMissingOtherListed for that read, RepositoryUnavailable for a
+// repository that left the settings (#877), RepositoryUnusable for a settings entry that cannot be used, SettingsNotFound for a missing RemediationSettings object, or CleanupFailed. The message names the step and the recorded pull request,
 // never the Git host's answer.
 func cleanupFailingCondition(rr *remediationv1alpha1.RemediationRequest, err error) metav1.Condition {
 	reason, _, ok := refusal(err)
@@ -389,6 +389,9 @@ func cleanupFailingCondition(rr *remediationv1alpha1.RemediationRequest, err err
 		}
 		if errors.Is(err, freshness.ErrRepositoryUnusable) {
 			reason = reasonRepositoryUnusable
+		}
+		if errors.Is(err, errRepositoryGone) {
+			reason = reasonRepositoryUnavailable
 		}
 		if errors.Is(err, errNoSettings) {
 			reason = ReasonSettingsNotFound
@@ -407,10 +410,12 @@ func cleanupFailingCondition(rr *remediationv1alpha1.RemediationRequest, err err
 
 // cleanupRelease is why the finalizer lets a deleted request go although its cleanup did not finish: step is the
 // failed step, refused is true when the Git host refused it past closeRefusedGrace (CleanupRefused), false when
-// the cleanup kept failing for cleanupFailingBound (CleanupFailing).
+// the cleanup kept failing for cleanupFailingBound (CleanupFailing). settingsRemoved is true when the close was not
+// tried because RemediationSettings is being deleted or is gone (an uninstall, #877).
 type cleanupRelease struct {
-	step    refusedStep
-	refused bool
+	step            refusedStep
+	refused         bool
+	settingsRemoved bool
 }
 
 // cleanupFailedOnDelete handles err, a failure of the finalizer's cleanup of a deleted request other than paused
@@ -530,9 +535,13 @@ func (r *RemediationRequestReconciler) clearCleanupConditions(ctx context.Contex
 }
 
 // reportRelease reports a deleted request that the finalizer lets go although its cleanup did not finish (leftOpen for a
-// refusal past closeRefusedGrace, gaveUp for failures past cleanupFailingBound).
+// refusal past closeRefusedGrace, gaveUp for failures past cleanupFailingBound, settingsRemoved for an uninstall).
 func (r *RemediationRequestReconciler) reportRelease(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	c cleanupRelease) {
+	if c.settingsRemoved {
+		r.settingsRemoved(ctx, rr)
+		return
+	}
 	if c.refused {
 		r.leftOpen(ctx, rr, c.step)
 		return
@@ -609,4 +618,23 @@ func (r *RemediationRequestReconciler) leftUnreachable(ctx context.Context, rr *
 	}
 	logf.FromContext(ctx).Info("Let a deleted RemediationRequest go without a cleanup: its repository is not in "+
 		"the settings", "remediationRequest", client.ObjectKeyFromObject(rr))
+}
+
+// settingsRemoved reports a deleted request that the finalizer lets go without trying its close because
+// RemediationSettings is being deleted or is gone (an uninstall, #877): a Warning Event PullRequestLeftOpen and a log
+// line saying that the state of the recorded pull request, or of any pull request of its branch, is not known and that
+// it may be open.
+func (r *RemediationRequestReconciler) settingsRemoved(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) {
+	which := "any pull request of branch " + freshness.BranchName(rr)
+	if pr := rr.Status.PullRequest; pr != nil {
+		which = "pull request " + pullRequestName(pr.Number, pr.URL)
+	}
+	message := fmt.Sprintf("RemediationSettings %s is being deleted or is gone, so nothing was read or closed; the "+
+		"deleted request was let go: the state of %s is not known and it may be open, check it and close it by hand",
+		remediationv1alpha1.SettingsName, which)
+	if r.Recorder != nil {
+		r.Recorder.Event(rr, corev1.EventTypeWarning, EventPullRequestLeftOpen, message)
+	}
+	logf.FromContext(ctx).Info("Let a deleted RemediationRequest go without a cleanup: RemediationSettings is being "+
+		"deleted or is gone", "remediationRequest", client.ObjectKeyFromObject(rr))
 }

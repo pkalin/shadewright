@@ -435,13 +435,14 @@ const (
 	ConditionCleanupRefused = "CleanupRefused"
 	// ConditionCleanupFailing is True once a step of the cleanup of a deleted request failed, whatever the class of
 	// the failure (a refusal, a failure worth a retry, a token the Git App cannot get, a signer that cannot sign, a
-	// 404). The reason is GitForbidden or GitRejected for a refusal, RecordedMissingOtherListed for that read and
-	// CleanupFailed for anything else; the message names the step and the recorded pull request, if any, never the
-	// Git host's answer. It is set while the request is being deleted, so its lastTransitionTime is the first
-	// failure after the deletion began, on the executor's clock, and it is kept while failures go on; it is removed
-	// only when the cleanup finishes. 24 hours after lastTransitionTime the finalizer lets the request go with a
-	// Warning Event PullRequestLeftOpen saying that the cleanup could not be finished, that the state of the pull
-	// request is not known and that it may be open. An Expired request sets it too (reason CleanupFailed) when the
+	// 404, a repository missing from the settings). The reason is GitForbidden or GitRejected for a refusal,
+	// RecordedMissingOtherListed for that read, RepositoryUnavailable for a repository missing from the settings (a
+	// request outside a handoff, #877) and CleanupFailed for anything else; the message names the step and the
+	// recorded pull request, if any, never the Git host's answer. It is set while the request is being deleted, so
+	// its lastTransitionTime is the first failure after the deletion began, on the executor's clock, and it is kept
+	// while failures go on; it is removed only when the cleanup finishes. 24 hours after lastTransitionTime the
+	// finalizer lets the request go with a Warning Event PullRequestLeftOpen saying that the cleanup could not be
+	// finished, that the state of the pull request is not known and that it may be open. An Expired request sets it too (reason CleanupFailed) when the
 	// close of a pull request it opened while the write that would record it was lost fails for a reason worth a
 	// retry: 24 hours after lastTransitionTime the cleanup ends with reason PullRequestDeadlineCleanupFailed, decided
 	// before any read of the Git host, and the condition goes then, when the close works, or when the look-up finds

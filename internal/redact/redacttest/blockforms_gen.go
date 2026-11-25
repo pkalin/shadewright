@@ -22,14 +22,12 @@ import (
 )
 
 // The block-indicator forms of #840 (decision of 2026-11-17): a secret key and a YAML block scalar indicator
-// in the places the first corpus (blockvalue_corpus_test.go) did not reach. The key inside a JSON or logfmt
+// in places the block value corpus does not cover. The key inside a JSON or logfmt
 // string value, after an unbalanced "[" or "{" in prose, with no blank between the colon and the indicator,
 // with a no-break or other Unicode space around the colon, with one blank before a value flattened onto the
 // line, with a block less indented than the key's line, after a "---" line, with the head of a value a cut
-// note follows, and inside the block of a bare short key that refuses its own value. The generator places
-// every secret and every word that must survive at a known offset, without reading any rule, so the answer
-// is known by construction. This file uses only String and the redactor's spans, so it runs unchanged
-// against an older commit to count what that commit leaks.
+// note follows, and inside the block of a bare short key that refuses its own value. The generator records
+// the byte ranges of secrets and text that must survive as it writes each case.
 
 // FormCase is one input of the forms corpus with the byte ranges of its secrets and of the text that must
 // survive.

@@ -20,8 +20,8 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
-var canonGlyphKeys = redacttest.CanonGlyphKeys
-var canonInvisibles = redacttest.CanonInvisibles
-var canonSepFound = redacttest.CanonSepFound
-var canonSepKeys = redacttest.CanonSepKeys
+var canonGlyphKeys = redacttest.CanonGlyphKeys()
+var canonInvisibles = redacttest.CanonInvisibles()
+var canonSepFound = redacttest.CanonSepFound()
+var canonSepKeys = redacttest.CanonSepKeys()
 var sepRunPlain = redacttest.CanonSeparatorPlain

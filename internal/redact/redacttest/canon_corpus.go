@@ -22,7 +22,7 @@ import (
 	"testing"
 )
 
-// CanonCase is one input of the canonical view corpus of #845 (canonical_gen_test.go), with the pieces of
+// CanonCase is one input of the canonical view corpus generated in canonical_gen.go, with the pieces of
 // secret the generator placed in it and the pieces of text that must survive. Args, for a key and its value in
 // two strings of a sequence, holds the strings as a container's arguments hold them; In is then one rendering
 // of the sequence. Labels, for a metric series, holds its labels as query_metrics reads them. Masked is In, and

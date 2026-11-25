@@ -96,9 +96,9 @@ func canonCorpus() []canonCase {
 }
 func canonHash(c canonCase) string { return redacttest.CanonHash(canonSourceFrom(c)) }
 
-var canonForms = redacttest.CanonForms
-var canonPhraseWords = redacttest.CanonPhraseWords
-var canonFlagKeys = redacttest.CanonFlagKeys
+var canonForms = redacttest.CanonForms()
+var canonPhraseWords = redacttest.CanonPhraseWords()
+var canonFlagKeys = redacttest.CanonFlagKeys()
 
 const canonPartialMin = redacttest.CanonPartialMin
 const canonTokenKey = "token"

@@ -18,6 +18,7 @@ package redacttest
 
 import (
 	"math/rand/v2"
+	"slices"
 )
 
 // BlockCorpus returns block cases with their generator-owned byte ranges.
@@ -26,13 +27,13 @@ var BlockCorpus = blockCorpus
 // FormCorpus returns block form cases with their generator-owned byte ranges.
 var FormCorpus = formCorpus
 
-// BlockSecretKeys are the secret keys placed by the block generator.
-var BlockSecretKeys = blockSecretKeys
+// BlockSecretKeys returns a copy of the secret keys placed by the block generator.
+func BlockSecretKeys() []string { return slices.Clone(blockSecretKeys) }
 
-// BlockInnocentKeys are the innocent keys placed by the block generator.
-var BlockInnocentKeys = blockInnocentKeys
+// BlockInnocentKeys returns a copy of the innocent keys placed by the block generator.
+func BlockInnocentKeys() []string { return slices.Clone(blockInnocentKeys) }
 
-// BlockBareKey reports the bare short keys in the fixed block corpus.
+// BlockBareKey reports whether the block generator treats key as a bare short key.
 var BlockBareKey = isBareShortCorpusKey
 
 // FullCanonCorpus returns all canonical cases, without sampling.
@@ -47,26 +48,26 @@ var SampleCanon = canonSample
 // CanonIndexOf indexes canonical cases by their fixture hashes.
 var CanonIndexOf = canonIndexOf
 
-// CanonForms lists the canonical forms in generator order.
-var CanonForms = canonForms
+// CanonForms returns a copy of the canonical forms in generator order.
+func CanonForms() []string { return slices.Clone(canonForms) }
 
-// CanonPhraseWords are the synthetic words placed in phrase secrets.
-var CanonPhraseWords = canonPhraseWords
+// CanonPhraseWords returns a copy of the synthetic words placed in phrase secrets.
+func CanonPhraseWords() []string { return slices.Clone(canonPhraseWords) }
 
-// CanonFlagKeys are the keys placed in flag forms.
-var CanonFlagKeys = canonFlagKeys
+// CanonFlagKeys returns a copy of the keys placed in flag forms.
+func CanonFlagKeys() []string { return slices.Clone(canonFlagKeys) }
 
-// CanonGlyphKeys are the keys placed in folded forms.
-var CanonGlyphKeys = canonGlyphKeys
+// CanonGlyphKeys returns a copy of the keys placed in folded forms.
+func CanonGlyphKeys() []string { return slices.Clone(canonGlyphKeys) }
 
-// CanonInvisibles are the invisible characters placed in folded forms.
-var CanonInvisibles = canonInvisibles
+// CanonInvisibles returns a copy of the invisible characters placed in folded forms.
+func CanonInvisibles() []string { return slices.Clone(canonInvisibles) }
 
-// CanonSepFound are the stored separators included in the corpus.
-var CanonSepFound = canonSepFound
+// CanonSepFound returns a copy of the stored separators included in the corpus.
+func CanonSepFound() []string { return slices.Clone(canonSepFound) }
 
-// CanonSepKeys are the keys placed in separator forms.
-var CanonSepKeys = canonSepKeys
+// CanonSepKeys returns a copy of the keys placed in separator forms.
+func CanonSepKeys() []string { return slices.Clone(canonSepKeys) }
 
 // CanonPartialMin is the minimum prefix or suffix checked for a partial leak.
 const CanonPartialMin = canonPartialMin
@@ -91,11 +92,11 @@ const canonCheckSecret = "secret"
 
 const nlDash = "\n- "
 
-// FormKeys are the keys placed by the block form generator.
-var FormKeys = formKeys
+// FormKeys returns a copy of the keys placed by the block form generator.
+func FormKeys() []string { return slices.Clone(formKeys) }
 
-// FormIndicators are the block headers placed by the form generator.
-var FormIndicators = formIndicators
+// FormIndicators returns a copy of the block headers placed by the form generator.
+func FormIndicators() []string { return slices.Clone(formIndicators) }
 
 const (
 	quotedPasswordKey = `"password"`

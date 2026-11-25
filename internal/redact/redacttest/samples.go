@@ -14,10 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package redacttest holds, for tests only, one sample secret per built-in rule of package redact, in rule
-// order. Tests of other packages that place secrets around their own text (the context builder's cut of a
-// value, #796) take them from here, so a new rule reaches them without a hand-picked list. Package redact's
-// own test fails when a rule has no sample here, or when a sample is not redacted by its rule alone.
+// Package redacttest provides synthetic secrets, generated corpora and measurement helpers for redaction tests.
+// [Samples] returns one secret per built-in rule in rule order. Package redact tests that each rule
+// has a sample and redacts it on its own.
+//
+// [EntryCorpus], [CanonCorpus] and [CanonIndex] give consumer tests access to the same cases and
+// fixture hashes as the redactor's own tests. [RaceKeeps] selects a fixed sample under the race
+// detector, and [ParallelUnderRace] lets tests run in parallel in that build.
 package redacttest
 
 // Sample is a text that one built-in rule redacts.

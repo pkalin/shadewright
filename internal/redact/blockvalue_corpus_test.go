@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -62,8 +63,8 @@ func blockCorpus(keys []string, secret bool) []blockCase {
 	return out
 }
 
-var blockSecretKeys = redacttest.BlockSecretKeys
-var blockInnocentKeys = redacttest.BlockInnocentKeys
+var blockSecretKeys = redacttest.BlockSecretKeys()
+var blockInnocentKeys = redacttest.BlockInnocentKeys()
 
 const (
 	dbPasswordKey = "DB_PASSWORD"
@@ -71,9 +72,14 @@ const (
 	userKey       = "user"
 )
 
-// The shared corpus classifies its fixed key set without importing the redactor.
+// The shared generator classifies both its fixed keys and caller-supplied keys.
 func TestBlockCorpusKeyClasses(t *testing.T) {
-	for _, key := range append(append([]string{}, blockSecretKeys...), blockInnocentKeys...) {
+	keys := slices.Concat(blockSecretKeys, blockInnocentKeys, []string{
+		sasKeyName, "SAS", "AuTh", "PASS", "SIG",
+		"pre-auth", "post-sas", "re-pass", "two-pass", "multi-sig", "single-auth",
+		"Pre-Auth", "Pre-auth", "pre-AUTH", "pre-x-auth", "db-pass", "proxy-auth",
+	})
+	for _, key := range keys {
 		if got := redacttest.BlockBareKey(key); got != isBareShortKey(nil, key) {
 			t.Errorf("key %q: shared class %v differs from redactor", key, got)
 		}

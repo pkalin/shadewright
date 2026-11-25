@@ -18,5 +18,5 @@ limitations under the License.
 
 package redacttest
 
-// RaceDetector is false: the tests run without -race (see race_test.go).
+// RaceDetector is false in builds without the race detector.
 const RaceDetector = false

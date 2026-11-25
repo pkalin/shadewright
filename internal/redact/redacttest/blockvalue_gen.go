@@ -259,8 +259,18 @@ var blockInnocentKeys = []string{
 	"passing", "authority",
 }
 
+var blockShortKeys = []string{authKey, passKey, sigKey, "sas"}
+var blockProsePrefixes = []string{"pre", "post", "re", "two", "multi", "single"}
+
 // isBareShortCorpusKey reports whether the corpus key counts only with a value that looks like a secret.
-func isBareShortCorpusKey(key string) bool { return slices.Contains(formBareKeys, key) }
+// TestBlockCorpusKeyClasses checks this classification against the redactor.
+func isBareShortCorpusKey(key string) bool {
+	if slices.Contains(blockShortKeys, strings.ToLower(key)) {
+		return true
+	}
+	prefix, short, ok := strings.Cut(key, "-")
+	return ok && slices.Contains(blockShortKeys, short) && slices.Contains(blockProsePrefixes, prefix)
+}
 
 // blockCorpus returns the corpus over keys; with secret, the values are secrets (opaque tokens, and
 // passphrases where the key counts them), otherwise innocent words.

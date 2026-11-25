@@ -241,8 +241,8 @@ func TestBlockFormsStillRedactWhatMainRedacted(t *testing.T) {
 	}
 }
 
-var formKeys = redacttest.FormKeys
-var formIndicators = redacttest.FormIndicators
+var formKeys = redacttest.FormKeys()
+var formIndicators = redacttest.FormIndicators()
 
 // formWriter delegates the small builders used by the flow marker tests.
 type formWriter struct {

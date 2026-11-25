@@ -98,3 +98,35 @@ func TestCorpusDigestPreservesInvalidBytes(t *testing.T) {
 		t.Fatal("different invalid bytes have the same corpus digest")
 	}
 }
+
+func TestCorpusTablesReturnCopies(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		load func() []string
+	}{
+		{"BlockSecretKeys", redacttest.BlockSecretKeys},
+		{"BlockInnocentKeys", redacttest.BlockInnocentKeys},
+		{"CanonForms", redacttest.CanonForms},
+		{"CanonPhraseWords", redacttest.CanonPhraseWords},
+		{"CanonFlagKeys", redacttest.CanonFlagKeys},
+		{"CanonGlyphKeys", redacttest.CanonGlyphKeys},
+		{"CanonInvisibles", redacttest.CanonInvisibles},
+		{"CanonSepFound", redacttest.CanonSepFound},
+		{"CanonSepKeys", redacttest.CanonSepKeys},
+		{"FormKeys", redacttest.FormKeys},
+		{"FormIndicators", redacttest.FormIndicators},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			first := tt.load()
+			if len(first) == 0 {
+				t.Fatal("empty corpus table")
+			}
+			original := first[0]
+			defer func() { first[0] = original }()
+			first[0] += " changed"
+			if got := tt.load()[0]; got != original {
+				t.Errorf("a caller changed the next result to %q", got)
+			}
+		})
+	}
+}

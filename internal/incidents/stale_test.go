@@ -131,7 +131,7 @@ func TestOccurrenceOfACauseIncidentIsNotMoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	cause := Name(fp(1))
-	c.names[cause] = struct{}{}
+	c.names[cause] = false
 	c.causes[cause] = causeIncident{}
 	c.setRecord(eventID(1), record{counted: counted{total: 5}, incident: cause})
 	o := failedMountOf(2, 1, 9, time.Now())
@@ -160,7 +160,7 @@ func TestOccurrenceIncidentGuards(t *testing.T) {
 			t.Fatal(err)
 		}
 		name := Name(fp(1))
-		c.names[name] = struct{}{}
+		c.names[name] = false
 		c.setRecord(eventID(1), record{counted: counted{total: 5}, incident: name})
 		o := failedMountOf(2, 1, 9, now)
 		if got, ok := c.occurrenceIncident(o); !ok || got != fp(1) {

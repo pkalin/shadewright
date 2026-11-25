@@ -769,7 +769,7 @@ func TestCapNearWarnsOncePerCrossing(t *testing.T) {
 		c.mu.Lock()
 		clear(c.names)
 		for i := range n {
-			c.names[Name(fp(i))] = struct{}{}
+			c.names[Name(fp(i))] = false
 		}
 		c.mu.Unlock()
 		c.reportCap(t.Context())

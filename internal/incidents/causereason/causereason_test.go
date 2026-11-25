@@ -23,7 +23,7 @@ import (
 
 // A reader that changes the list it was given changes no other reader's list.
 func TestListsAreCopies(t *testing.T) {
-	for name, list := range map[string]func() []string{"Waiting": Waiting, "Tallied": Tallied} {
+	for name, list := range map[string]func() []string{"ImagePull": ImagePull, "Waiting": Waiting, "Tallied": Tallied} {
 		want := slices.Clone(list())
 		got := list()
 		got[0] = "Changed"
@@ -38,13 +38,25 @@ func TestPredicatesMatchTheLists(t *testing.T) {
 	if want := append([]string{OOMKilled}, Waiting()...); !slices.Equal(Tallied(), want) {
 		t.Fatalf("Tallied is %v, want %v", Tallied(), want)
 	}
+	for _, r := range ImagePull() {
+		if !IsWaiting(r) {
+			t.Errorf("ImagePull reason %q is not in Waiting", r)
+		}
+	}
 	for _, r := range append(Tallied(), "Error", "CrashLoopBackOff", "", "oomkilled") {
-		if IsWaiting(r) != slices.Contains(Waiting(), r) || ShowsTally(r) != slices.Contains(Tallied(), r) {
-			t.Errorf("%q: IsWaiting %v, ShowsTally %v disagree with the lists", r, IsWaiting(r), ShowsTally(r))
+		if IsImagePull(r) != slices.Contains(ImagePull(), r) ||
+			IsWaiting(r) != slices.Contains(Waiting(), r) || ShowsTally(r) != slices.Contains(Tallied(), r) {
+			t.Errorf("%q: IsImagePull %v, IsWaiting %v, ShowsTally %v disagree with the lists",
+				r, IsImagePull(r), IsWaiting(r), ShowsTally(r))
 		}
 		// A non-zero exit (Error, or any other termination reason) is a cause of BackOff only (2026-11-21).
 		if want := r == OOMKilled || slices.Contains(Waiting(), r); CausesUnhealthy(r) != want {
 			t.Errorf("%q: CausesUnhealthy %v, want %v", r, CausesUnhealthy(r), want)
+		}
+	}
+	for _, r := range []string{"CreateContainerConfigError", "CreateContainerError", OOMKilled, "Error"} {
+		if IsImagePull(r) {
+			t.Errorf("IsImagePull(%q) = true, want false", r)
 		}
 	}
 }

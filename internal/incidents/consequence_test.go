@@ -769,7 +769,7 @@ func TestAbsorbedDropMarkGoesWithItsIncident(t *testing.T) {
 			AbsorbedOccurrencesDroppedThrough: &mark},
 	}
 	c.mu.Lock()
-	c.names[cause.Name] = struct{}{}
+	c.names[cause.Name] = false
 	c.remember(fp(1), cause.Name, &cause.Status)
 	c.mu.Unlock()
 	replay := consequenceOf(2, 1, "web", reasonBackOff, 9, 0, at)
@@ -959,7 +959,7 @@ func TestHeldConsequenceIsAbsorbedWhenAWaitingCauseOpens(t *testing.T) {
 // cause reported again for that Incident makes it a cause and counts the held consequence there.
 func TestHeldConsequenceIsAbsorbedWhenAnIncidentBecomesACause(t *testing.T) {
 	c, _ := newAt(t)
-	c.names[Name(fp(1))] = struct{}{}
+	c.names[Name(fp(1))] = false
 	c.consume(t.Context(), heldOnce(1, 4, t0))
 	if !c.sightings.holds(fp(2)) {
 		t.Fatal("the consequence is not held, so the test proves nothing")
@@ -1037,7 +1037,7 @@ func TestHeldConsequenceStaysHeldWithoutItsCause(t *testing.T) {
 	}, {
 		name: "Incident of another fingerprint",
 		setup: func(c *Controller, _ *fakeClock) {
-			c.names[Name(fp(heldCauseF))] = struct{}{}
+			c.names[Name(fp(heldCauseF))] = false
 			c.causes[Name(fp(heldCauseF))] = causeIncident{spec: specOf(causeOf(heldCauseF+1, t0))}
 		},
 		consequence: func() collector.Observation { return heldOnce(heldCauseF, 1, t0) },
@@ -1047,7 +1047,7 @@ func TestHeldConsequenceStaysHeldWithoutItsCause(t *testing.T) {
 		// not roll), but the consequence, seen more than RecurrenceWindow after the Incident was Resolved, is not.
 		name: "Resolved more than RecurrenceWindow before the consequence",
 		setup: func(c *Controller, clock *fakeClock) {
-			c.names[Name(fp(heldCauseF))] = struct{}{}
+			c.names[Name(fp(heldCauseF))] = false
 			c.causes[Name(fp(heldCauseF))] = causeIncident{spec: specOf(causeOf(heldCauseF, t0))}
 			c.resolvedAt[Name(fp(heldCauseF))] = t0
 			clock.set(t0.Add(RecurrenceWindow + time.Hour))
@@ -1080,7 +1080,7 @@ func TestHeldConsequenceStaysHeldWithoutItsCause(t *testing.T) {
 		},
 		setup: func(c *Controller, _ *fakeClock) {
 			c.cfg.MaxIncidents = 1
-			c.names[Name(fp(9))] = struct{}{}
+			c.names[Name(fp(9))] = false
 		},
 		consequence: func() collector.Observation { return heldOnce(heldCauseF, 1, t0) },
 		cause:       func() collector.Observation { return causeOf(heldCauseF, t0.Add(time.Second)) },
@@ -1127,7 +1127,7 @@ func TestHeldConsequenceStaysHeldWithoutItsCause(t *testing.T) {
 func TestHeldConsequenceGoesToTheNewOccurrence(t *testing.T) {
 	c, clock := newAt(t)
 	old := Name(fp(heldCauseF))
-	c.names[old] = struct{}{}
+	c.names[old] = false
 	c.causes[old] = causeIncident{spec: specOf(causeOf(heldCauseF, t0))}
 	c.resolvedAt[old] = t0
 	at := t0.Add(RecurrenceWindow + time.Hour)

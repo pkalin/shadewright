@@ -38,6 +38,7 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/redact"
 	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redactadapter/redactadaptertest"
 )
 
 const testToken = "test-access-token-value"
@@ -847,5 +848,37 @@ func TestPutNotCheckedWhenEveryTryWaited(t *testing.T) {
 	}
 	if len(*waits) != maxTries-1 || len(srv.requests()) != 0 {
 		t.Fatalf("%d waits and %d requests, want %d waits and none", len(*waits), len(srv.requests()), maxTries-1)
+	}
+}
+
+func TestFallbackRedactorReportsDecisions(t *testing.T) {
+	plain, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("a", redact.MaxShortEntry+1)
+	for _, c := range []struct {
+		name     string
+		redactor *redact.Redactor
+		want     float64
+	}{
+		{"built-in", nil, 1},
+		{"supplied without hooks", plain, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{Account: testAccount, Container: testContainer}
+			st, err := New(cfg, Options{Credential: &staticCredential{}, Redactor: c.redactor})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := st.redactor
+			before := redactadaptertest.WithheldCount(t, redact.ReasonSize)
+			if out := r.StringShort(long); out != redact.Withheld {
+				t.Error("oversized short entry was released")
+			}
+			if got := redactadaptertest.WithheldCount(t, redact.ReasonSize) - before; got != c.want {
+				t.Errorf("size counter increased by %v, want %v", got, c.want)
+			}
+		})
 	}
 }

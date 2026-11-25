@@ -45,6 +45,7 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	fluxdelivery "github.com/shadewright-labs/shadewright/internal/providers/delivery/flux"
 	"github.com/shadewright-labs/shadewright/internal/providers/registry"
+	_ "github.com/shadewright-labs/shadewright/internal/redactadapter" // register metrics for package-level redaction
 	// +kubebuilder:scaffold:imports
 )
 

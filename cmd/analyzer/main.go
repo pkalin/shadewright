@@ -50,7 +50,6 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/modules/keda"
 	"github.com/shadewright-labs/shadewright/internal/modules/kyverno"
 	"github.com/shadewright-labs/shadewright/internal/modules/secretsstore"
-	"github.com/shadewright-labs/shadewright/internal/redact"
 	"github.com/shadewright-labs/shadewright/internal/redactadapter"
 )
 
@@ -236,7 +235,7 @@ func main() {
 	// other before a request; with none, NewSources builds no source and no cluster check. Pod logs are read with the
 	// analyzer's own identity, through the pods/log grant of the watch role, and redacted with the builder's
 	// redactor, so that both passes apply one rule set.
-	redactor, err := redact.New()
+	redactor, err := redactadapter.New()
 	if err != nil {
 		setupLog.Error(err, "Failed to create the redactor")
 		os.Exit(1)

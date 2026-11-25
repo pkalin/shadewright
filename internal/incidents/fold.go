@@ -47,12 +47,21 @@ const kubeletController = "kubelet"
 // errSelfFold is a fold of an Incident into itself. The schema cannot refuse it, so the controller does.
 var errSelfFold = errors.New("an Incident is never folded into itself")
 
-// consequenceIncident reports whether inc is itself a consequence (ADR-0039 point 12): its reason is BackOff
-// or Unhealthy and the kubelet reported it. An Incident of a non-zero exit termination read from pod status,
-// or of a Failed Event, is a symptom of its own and never folds.
+// consequenceIncident reports whether inc is itself a consequence (ADR-0039 point 12, amended 2026-11-21 on
+// #1066): reported by the kubelet with reason BackOff or Unhealthy, or reason Failed marked with
+// status.consequence (an image-pull Failed event classified by the collector). An Incident of a non-zero exit
+// termination read from pod status, or of any other Failed Event, is a symptom of its own and never folds.
 func consequenceIncident(inc *remediationv1alpha1.Incident) bool {
-	_, ok := absorbedReason(inc.Spec.Reason)
-	return ok && inc.Spec.ReportingController == kubeletController
+	if inc.Spec.ReportingController != kubeletController {
+		return false
+	}
+	switch remediationv1alpha1.AbsorbedReason(inc.Spec.Reason) {
+	case remediationv1alpha1.AbsorbedBackOff, remediationv1alpha1.AbsorbedUnhealthy:
+		return true
+	case remediationv1alpha1.AbsorbedFailed:
+		return inc.Status.Consequence
+	}
+	return false
 }
 
 // reachedPullRequest reports whether rr has reached a pull request: the condition PullRequestOpened True, a
@@ -149,10 +158,19 @@ func escalatesInc(inc *remediationv1alpha1.Incident, requests []remediationv1alp
 
 // causeTakes is the one place that decides whether a cause Incident of reason causeReason takes a consequence of
 // reason consequence, whether counted as evidence ([Controller.causeFor]) or folded ([foldable]): a BackOff always,
-// an Unhealthy only for an OOM kill or a wait. A non-zero exit takes BackOff only (decided 2026-11-21 on #432): a
-// liveness probe failure makes the kubelet kill the container, so the exit follows the probe failure.
+// an Unhealthy for an OOM kill or a wait (causereason.CausesUnhealthy; a non-zero exit takes BackOff only, decided
+// 2026-11-21 on #432), and an image-pull Failed event only for an image-pull wait (causereason.IsImagePull:
+// ImagePullBackOff, ErrImagePull or InvalidImageName; ADR-0039 point 12, amended 2026-11-21 on #1066).
 func causeTakes(causeReason, consequence string) bool {
-	return consequence == string(remediationv1alpha1.AbsorbedBackOff) || causereason.CausesUnhealthy(causeReason)
+	switch remediationv1alpha1.AbsorbedReason(consequence) {
+	case remediationv1alpha1.AbsorbedBackOff:
+		return true
+	case remediationv1alpha1.AbsorbedUnhealthy:
+		return causereason.CausesUnhealthy(causeReason)
+	case remediationv1alpha1.AbsorbedFailed:
+		return causereason.IsImagePull(causeReason)
+	}
+	return false
 }
 
 // foldCandidate reports whether inc may still be folded into some cause: a consequence ([consequenceIncident])

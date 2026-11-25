@@ -793,7 +793,7 @@ func (c *Collector) askHeld(ctx context.Context, s *consequenceHold) (bool, erro
 // its own.
 func (c *Collector) endOfHold(ctx context.Context, key types.NamespacedName, s consequenceHold, obs *Observation,
 	failing bool) (holdVerdict, time.Duration, error) {
-	keptFailing := s.failing >= minHoldSamples && (failing || s.restarted >= minHoldRestarts)
+	keptFailing := s.failing >= minHoldSamples && (failing || (s.reason != reasonFailed && s.restarted >= minHoldRestarts))
 	hadCause := s.hasCause()
 	if err := c.judgeExits(ctx, &s); err != nil {
 		return holdEmit, 0, err
@@ -880,12 +880,18 @@ func (c *Collector) causeOutcome(ctx context.Context, s consequenceHold) string 
 	return holdCauseUnseen
 }
 
-// failingNow reports whether the held container fails in st (ADR-0039 point 19, amended 2026-11-16): its restart
-// count went up since the previous sample of the hold, or it is not ready (Unhealthy) or waiting in a back-off
-// or in a reason of WaitingCauseReasons (BackOff; ErrImagePull is a failing pull, decided 2026-11-17, fifth, on
-// #828). A container that restarted once and then runs fine is failing at that one sample only, and a
-// liveness loop with no readiness probe, ready at each sample, is failing by its restarts.
+// failingNow reports whether the held container fails in st (ADR-0039 point 19, amended 2026-11-16): for an
+// image-pull Failed event, only while it waits in an image-pull reason (causereason.IsImagePull; restarts mean
+// the image pulled); for BackOff and Unhealthy, its restart count went up since the previous sample of the hold,
+// or it is not ready (Unhealthy) or waiting in a back-off or in a reason of WaitingCauseReasons (BackOff;
+// ErrImagePull is a failing pull, decided 2026-11-17, fifth, on #828). A container that restarted once and then
+// runs fine is failing at that one sample only, and a liveness loop with no readiness probe, ready at each
+// sample, is failing by its restarts.
 func (s consequenceHold) failingNow(st corev1.ContainerStatus) bool {
+	if s.reason == reasonFailed {
+		w := st.State.Waiting
+		return w != nil && causereason.IsImagePull(w.Reason)
+	}
 	if st.RestartCount > s.restarts {
 		return true
 	}

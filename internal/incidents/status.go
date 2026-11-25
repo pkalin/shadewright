@@ -61,16 +61,20 @@ type tally struct {
 
 // batch is what one Incident has gained since its last status write. count, first and last are its own
 // observations only; absorbed holds the consequences counted as evidence of its cause, which change neither
-// (ADR-0039 point 16). cause says a pod-status observation of class cause was counted (status.cause), and
-// containers are the container names its observations named, already checked to be DNS labels.
+// (ADR-0039 point 16). cause says a pod-status observation of class cause was counted (status.cause),
+// consequence and nonConsequence track whether own observations counted on this Incident were classified as
+// consequences by the collector (status.consequence, ADR-0039 point 12 amended 2026-11-21), and containers
+// are the container names its observations named, already checked to be DNS labels.
 type batch struct {
-	spec        remediationv1alpha1.IncidentSpec
-	count       int64
-	first, last time.Time
-	occurrences map[string]heldOccurrence
-	absorbed    map[remediationv1alpha1.AbsorbedReason]tally
-	cause       bool
-	containers  []string
+	spec           remediationv1alpha1.IncidentSpec
+	count          int64
+	first, last    time.Time
+	occurrences    map[string]heldOccurrence
+	absorbed       map[remediationv1alpha1.AbsorbedReason]tally
+	cause          bool
+	consequence    bool
+	nonConsequence bool
+	containers     []string
 }
 
 // own reports whether b holds anything of the Incident's own: a count, a time seen or an occurrence that is
@@ -104,6 +108,8 @@ func (b *batch) add(other *batch) {
 	b.first = earliest(b.first, other.first)
 	b.last = latest(b.last, other.last)
 	b.cause = b.cause || other.cause
+	b.consequence = b.consequence || other.consequence
+	b.nonConsequence = b.nonConsequence || other.nonConsequence
 	for _, name := range other.containers {
 		if !slices.Contains(b.containers, name) {
 			b.containers = append(b.containers, name)
@@ -218,6 +224,11 @@ func merge(status *remediationv1alpha1.IncidentStatus, b *batch) (dropped []stri
 	if status.Phase == "" {
 		status.Phase = remediationv1alpha1.IncidentOpen
 	}
+	if b.nonConsequence || b.cause || status.Cause {
+		status.Consequence = false
+	} else if b.consequence && status.Count == 0 {
+		status.Consequence = true
+	}
 	status.Count = min(status.Count+b.count, remediationv1alpha1.MaxIncidentCount)
 	status.FirstSeen = timeOf(earliest(timeFrom(status.FirstSeen), b.first))
 	status.LastSeen = timeOf(latest(timeFrom(status.LastSeen), b.last))
@@ -248,7 +259,7 @@ func merge(status *remediationv1alpha1.IncidentStatus, b *batch) (dropped []stri
 
 // mergeAbsorbed adds a batch's tallies to status.absorbed: each count saturates at MaxIncidentCount and each
 // lastSeen only moves forward. Entries stay sorted by reason; a reason past MaxAbsorbedReasons is left out
-// (the enum has two values, so it cannot happen while the schema holds).
+// (the enum has three values, so it cannot happen while the schema holds).
 func mergeAbsorbed(status *remediationv1alpha1.IncidentStatus, add map[remediationv1alpha1.AbsorbedReason]tally) {
 	for reason, t := range add {
 		i := slices.IndexFunc(status.Absorbed, func(a remediationv1alpha1.AbsorbedTally) bool { return a.Reason == reason })

@@ -48,6 +48,8 @@ func absorbedReason(reason string) (remediationv1alpha1.AbsorbedReason, bool) {
 		return remediationv1alpha1.AbsorbedBackOff, true
 	case remediationv1alpha1.AbsorbedUnhealthy:
 		return remediationv1alpha1.AbsorbedUnhealthy, true
+	case remediationv1alpha1.AbsorbedFailed:
+		return remediationv1alpha1.AbsorbedFailed, true
 	}
 	return "", false
 }

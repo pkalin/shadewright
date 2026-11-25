@@ -970,15 +970,20 @@ func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
 	_, scheduled := c.nextWrite[o.Fingerprint]
 	if _, ok := b.occurrences[o.Occurrence]; !ok {
 		if c.full(o.Fingerprint, o.Source) {
-			b.add(&batch{first: at, last: at})
+			b.add(&batch{first: at, last: at, nonConsequence: o.Class != collector.ClassConsequence})
 			c.overflow(ctx, o.Fingerprint, o.Source)
 			return !scheduled
 		}
 		c.hold(o.Fingerprint, o.Source)
 	}
-	add := &batch{count: n, first: at, last: at, occurrences: map[string]heldOccurrence{
-		o.Occurrence: {counted: counted{total: o.Total, began: o.Began}, source: o.Source},
-	}}
+	add := &batch{
+		count: n, first: at, last: at,
+		consequence:    o.Class == collector.ClassConsequence,
+		nonConsequence: o.Class != collector.ClassConsequence,
+		occurrences: map[string]heldOccurrence{
+			o.Occurrence: {counted: counted{total: o.Total, began: o.Began}, source: o.Source},
+		},
+	}
 	if o.Container != "" {
 		add.containers = []string{o.Container}
 	}

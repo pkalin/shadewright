@@ -157,7 +157,7 @@ helm upgrade shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --ver
   --namespace shadewright-system -f my-values.yaml --wait --timeout 10m
 ```
 
-For Flux installations that use an OCI chart source, update the source URL to `oci://ghcr.io/shadewright-labs/charts/shadewright` and pin the chart to tag `0.7.0`. The reference lab vendors `config/default`, so upgrade it by regenerating the vendored copy and opening a pull request, as described in [Flux delivers the install](#flux-delivers-the-install).
+For Flux installations that use an OCI chart source, update the source URL to `oci://ghcr.io/shadewright-labs/charts/shadewright` and pin the chart to tag `0.7.0`. The reference lab vendors `config/default`, so upgrade it by regenerating the vendored copy and opening a pull request, as described under [Upgrade](#upgrade).
 
 Verify v0.7.0 images and chart with the commands in [Verify a release](#verify-a-release). Their cosign identities and GitHub provenance name `shadewright-labs/shadewright` and the `images.yml` or `chart.yml` workflow. The `kubectl-shadewright` archives are attached to the release in `shadewright-labs/shadewright`; download and verify them as described in [Install the kubectl plugin](how-to/check-status.md#install), which uses the `release-plugin.yml` signer identity. The Homebrew tap is now `shadewright-labs/homebrew-tap`.
 

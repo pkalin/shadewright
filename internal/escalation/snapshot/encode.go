@@ -39,7 +39,11 @@ type Encoder struct {
 
 // NewEncoder compiles the built-in redaction rules and any installation-specific patterns.
 func NewEncoder(extra ...redact.Pattern) (*Encoder, error) {
-	r, err := redact.New(extra...)
+	options := make([]redact.Option, len(extra))
+	for i, pattern := range extra {
+		options[i] = pattern
+	}
+	r, err := redact.New(options...)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot redactor: %w", err)
 	}

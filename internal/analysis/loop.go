@@ -122,7 +122,7 @@ const (
 	ReasonModelNotFound Reason = "ModelNotFound"
 	// ReasonModelForbidden: the endpoint refused the analyzer's identity.
 	ReasonModelForbidden Reason = "ModelForbidden"
-	// ReasonModelError: any other failure of the model call, or of building its provider.
+	// ReasonModelError: any other failure of preparing or making the model call.
 	ReasonModelError Reason = "ModelError"
 	// ReasonUnexpectedModel: a reply named another model than the one configured for its deployment's role
 	// (ADR-0023 decision 8), or none; it is not used.
@@ -325,8 +325,8 @@ type Limits struct {
 	MaxToolSteps int
 	// MaxOutputTokens is sent with every call.
 	MaxOutputTokens int
-	// MaxContextBytes bounds the rendered context message the builder makes (maxContextBytes, #981, #1054);
-	// zero means the builder's configured total.
+	// MaxContextBytes bounds the first user message sent to the model (maxContextBytes, #981, #1054).
+	// Zero uses the builder's configured total.
 	MaxContextBytes int
 	// Triage and Escalation are the deployments; nil means not configured.
 	Triage, Escalation *remediationv1alpha1.ModelDeployment
@@ -432,26 +432,16 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 	r := &run{a: a, parent: ctx, ctx: actx, inc: inc, limits: limits, out: &out, spent: map[string]int64{},
 		maxCalls: 3 + max(limits.MaxToolSteps, 0)}
 
-	c, err := r.build()
+	c, err := r.build(hint)
 	if err != nil {
 		if ctx.Err() != nil {
 			return out, fmt.Errorf("analysis: %w", ctx.Err())
 		}
+		if errors.Is(err, errContextTooLarge) {
+			return r.handOff(ReasonModelError)
+		}
 		return r.handOff(ReasonDeadlineExceeded)
 	}
-	r.pods = c.Pods
-	r.template = c.Template
-	r.scaledObject = c.ScaledObject
-	r.scalerNotReady = scalerNotReady(c.ScaledObject)
-	var shownContext string
-	shownContext, r.shown = contextMessage(c)
-	if r.scalerNotReady {
-		shownContext += scalerNotReadyNotice
-	}
-	if hint != "" {
-		shownContext += hintMessage(r.redact(hint))
-	}
-	r.contextText = shownContext
 
 	// The first model call is known before the budget is touched: a unit is reserved only when a provider for
 	// it is configured and could be built, so a hand-off that makes no call spends nothing.
@@ -509,8 +499,10 @@ func (a *Analyzer) analyze(ctx context.Context, inc *remediationv1alpha1.Inciden
 	return r.finish(res, action)
 }
 
-// build runs the context builder in its span.
-func (r *run) build() (*incidentcontext.Context, error) {
+var errContextTooLarge = errors.New("required context exceeds the message bound")
+
+// build builds and fits the first user message in its span.
+func (r *run) build(hint string) (*incidentcontext.Context, error) {
 	ctx, span := r.a.tracer.Start(r.ctx, spanContext)
 	defer span.End()
 	c, err := r.a.cfg.Builder.BuildWithin(ctx, r.inc, r.limits.MaxContextBytes)
@@ -523,7 +515,28 @@ func (r *run) build() (*incidentcontext.Context, error) {
 		span.SetStatus(codes.Error, "the context could not be built")
 		return nil, err
 	}
-	span.SetAttributes(attrResult.String(resultOK), attrBlocks.Int(len(c.Blocks)), attrContextBytes.Int(c.Size()),
+	r.pods, r.template, r.scaledObject = c.Pods, c.Template, c.ScaledObject
+	r.scalerNotReady = scalerNotReady(c.ScaledObject)
+	var notice, hintBody, renderedHint string
+	if r.scalerNotReady {
+		notice = scalerNotReadyNotice
+	}
+	if hint != "" {
+		hintBody = neutralise(strings.ToValidUTF8(r.redact(hint), "?"))
+		renderedHint = hintMessage(hintBody, false)
+	}
+	room := c.ReserveMessageBytes(r.limits.MaxContextBytes, len(notice), len(renderedHint))
+	if room < 0 {
+		span.SetAttributes(attrResult.String(resultFailed))
+		span.SetStatus(codes.Error, errContextTooLarge.Error())
+		return nil, errContextTooLarge
+	}
+	if room < len(renderedHint) {
+		renderedHint = fitHintMessage(hintBody, room)
+	}
+	r.contextText, r.shown = contextMessage(c)
+	r.contextText += notice + renderedHint
+	span.SetAttributes(attrResult.String(resultOK), attrBlocks.Int(len(c.Blocks)), attrContextBytes.Int(len(r.contextText)),
 		attrTruncated.Bool(c.Truncated), attrFailedSources.Int(len(c.FailedSources)), attrPods.Int(len(c.Pods)))
 	return c, nil
 }

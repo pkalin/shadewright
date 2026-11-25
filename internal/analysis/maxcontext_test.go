@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -210,6 +211,82 @@ func TestMaxContextBytesBoundsRenderedMessage(t *testing.T) {
 			}
 			if !strings.Contains(userMsg, "last-line\n") {
 				t.Errorf("log tail lost the newest line")
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		hint     string
+		notReady bool
+	}{
+		{name: "oversized reviewer hint", hint: strings.Repeat("<", 2<<10)},
+		{name: "readiness notice", notReady: true},
+		{name: "hint and readiness notice", hint: strings.Repeat("<", 2<<10), notReady: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture()
+			inc := incident()
+			limit := incidentcontext.MinTotalBytes
+			if tc.notReady {
+				obj := &unstructured.Unstructured{Object: scaledObject(kedaTriggerError())}
+				reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(obj).Build()
+				b, err := incidentcontext.New(incidentcontext.Config{
+					Pods: reader, Objects: reader, Namespaces: []string{subjectNS}, Redactor: red,
+					Now: func() time.Time { return now },
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				inc = kedaIncident()
+				before, err := b.BuildWithin(t.Context(), inc, limit)
+				if err != nil {
+					t.Fatal(err)
+				}
+				inc.Spec.Symptom += strings.Repeat("<", (limit-before.Size())/4)
+				before, err = b.BuildWithin(t.Context(), inc, limit)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if before.Escalate() || before.Size()+len(scalerNotReadyNotice) <= limit {
+					t.Fatalf("expected context to fit before the readiness notice, got %d bytes, escalation %t",
+						before.Size(), before.Escalate())
+				}
+				f.cfg.Builder = b
+			}
+			f.triage.steps = []step{reply(noProposal)}
+			f.escalation.steps = []step{reply(noProposal)}
+			a, err := New(f.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lim := testLimits()
+			lim.MaxContextBytes = limit
+			out, err := a.AnalyzeWithHint(t.Context(), inc, lim, tc.hint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reqs := append(f.triage.reqs(), f.escalation.reqs()...)
+			if len(reqs) != 1 || len(reqs[0].Messages) < 2 || reqs[0].Messages[1].Role != providers.RoleUser {
+				t.Fatalf("expected one provider request with a first user message, got %d requests", len(reqs))
+			}
+			msg := reqs[0].Messages[1].Content
+			if len(msg) > limit {
+				t.Errorf("sent context message is %d bytes, over maxContextBytes %d", len(msg), limit)
+			}
+			if !out.Escalated || f.triage.calls() != 0 {
+				t.Error("expected direct escalation on context truncated for the appended text")
+			}
+			if tc.notReady && strings.Count(msg, scalerNotReadyNotice) != 1 {
+				t.Error("expected one complete readiness notice")
+			}
+			if tc.hint != "" {
+				_, hint, shown := strings.Cut(msg, hintNotice)
+				body, closed := strings.CutSuffix(hint, "\n</context-block>\n")
+				if !shown || !closed || body == "" || strings.ReplaceAll(body, "&lt;", "") != "" ||
+					!strings.Contains(msg, string(incidentcontext.LabelContextCut)) {
+					t.Error("expected a marked, truncated reviewer hint with complete escapes and closing tag")
+				}
 			}
 		})
 	}

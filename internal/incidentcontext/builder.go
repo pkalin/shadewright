@@ -206,7 +206,8 @@ func (b *Builder) Build(ctx context.Context, inc *remediationv1alpha1.Incident) 
 // [Limits.Total]: the analysis passes maxContextBytes of RemediationSettings (#981), which LimitsOf never
 // leaves at zero. Zero keeps the configured total: [Builder.Build] passes it, and so do callers that set
 // the total in the builder's own [Limits] (the evaluation harness, whose analysis.Limits leave it unset).
-// The section bounds stay as configured, so a total above their sum adds no context. A total outside
+// The section text bounds stay as configured. Wrapping and escaping can take the rendered message above
+// their sum, so a higher total can retain more of that text. A nonzero total outside
 // [MinTotalBytes] to [MaxLimitBytes] is an error, before any read.
 func (b *Builder) BuildWithin(ctx context.Context, inc *remediationv1alpha1.Incident, total int) (*Context, error) {
 	if total == 0 || total == b.limits.Total {
@@ -395,6 +396,7 @@ const withheldText = "could not fetch: withheld by redaction\n"
 // withholdBlock makes blk a block redaction withheld whole: could not fetch, a fixed text, no values.
 func withholdBlock(blk *Block) {
 	blk.Availability, blk.Text, blk.Values, blk.headLen = CouldNotFetch, withheldText, nil, 0
+	blk.requiredText = withheldText
 	blk.addLabel(LabelWithheld)
 }
 
@@ -402,35 +404,73 @@ func withholdBlock(blk *Block) {
 // summary last.
 var cutOrder = []Section{SectionLogs, SectionMetrics, SectionStatus, SectionGit, SectionPolicy, SectionSummary}
 
-// fitTotal cuts the context so that its rendered message ([Context.Size]: preamble, tags, notices and escaped
-// text) fits within the total bound, latest block of a section first, and marks it truncated when it had to
-// (#1054). A log block keeps its header and the tail of its excerpt; other blocks keep their head.
 func (b *Builder) fitTotal(c *Context) {
+	c.totalLimit = b.limits.Total
+	c.fitTotal(b.limits.Total)
+}
+
+// ReserveMessageBytes fits the context within the total bound after reserving room for fixedBytes and up to
+// optionalBytes of appended text. It returns the optional bytes reserved, or -1 if the required text alone
+// cannot fit. Zero uses the total from the build. Cutting the context or the optional text marks it truncated.
+func (c *Context) ReserveMessageBytes(total, fixedBytes, optionalBytes int) int {
+	if total == 0 {
+		total = c.totalLimit
+		if total == 0 {
+			total = DefaultTotalBytes
+		}
+	}
+	if c.Size()+fixedBytes+optionalBytes <= total {
+		return optionalBytes
+	}
+	// Allow for the cut labels as well as the text that must survive a cut.
+	minimum := len(ContextPreamble)
+	for i, blk := range c.Blocks {
+		if blk.Text == blk.requiredText {
+			minimum += renderedBlockLen(i, blk)
+		} else {
+			minimum += blockWrapperLenWithCutLabel(i, blk) + len(renderBody(blk.requiredText))
+		}
+	}
+	room := total - fixedBytes - minimum
+	if room < 0 {
+		return -1
+	}
+	reserved := min(optionalBytes, room)
+	if !c.fitTotal(total - fixedBytes - reserved) {
+		return -1
+	}
+	c.Truncated = true
+	return reserved
+}
+
+// fitTotal cuts the rendered message in section order, latest block first, keeping any redaction notice.
+// A log block keeps its header and the tail of its excerpt when they fit. Other sections keep their head.
+func (c *Context) fitTotal(limit int) bool {
 	rendered := make([]int, len(c.Blocks))
 	total := len(ContextPreamble)
 	for i, blk := range c.Blocks {
 		rendered[i] = renderedBlockLen(i, blk)
 		total += rendered[i]
 	}
-	if total <= b.limits.Total {
-		return
+	if total <= limit {
+		return true
 	}
 	c.Truncated = true
 	for _, sec := range cutOrder {
-		for i := len(c.Blocks) - 1; i >= 0 && total > b.limits.Total; i-- {
+		for i := len(c.Blocks) - 1; i >= 0 && total > limit; i-- {
 			blk := &c.Blocks[i]
-			if blk.Section != sec || blk.Text == "" {
+			if blk.Section != sec || blk.Text == blk.requiredText {
 				continue
 			}
 			before := len(blk.Text)
 			others := total - rendered[i]
 			wrapper := blockWrapperLenWithCutLabel(i, *blk)
-			budget := b.limits.Total - others - wrapper
+			budget := limit - others - wrapper
 			if sec == SectionLogs {
 				head := blk.Text[:blk.headLen]
 				if budget <= 0 || len(renderBody(head)) > budget {
-					blk.Text = ""
-					blk.headLen = 0
+					blk.Text = blk.requiredText
+					blk.headLen = len(blk.Text)
 				} else {
 					body := keepTailRendered(head, blk.Text[blk.headLen:], budget)
 					blk.Text = head + body
@@ -438,8 +478,7 @@ func (b *Builder) fitTotal(c *Context) {
 				}
 			} else {
 				blk.Text = keepHeadRendered(blk.Text, budget)
-				// A cut that leaves part of the unit at the end removes all of it. The total bound cuts the
-				// summary only when it is configured below a summary with values beyond the schema's limits.
+				// A cut that leaves part of the unit at the end removes all of it.
 				if blk.unitAt > 0 && len(blk.Text) > blk.unitAt && len(blk.Text) < before {
 					blk.Text = blk.Text[:blk.unitAt]
 					if len(renderBody(blk.Text)) > budget {
@@ -456,6 +495,7 @@ func (b *Builder) fitTotal(c *Context) {
 			rendered[i] = next
 		}
 	}
+	return total <= limit
 }
 
 // tallyShown reports whether the summary of an Incident of reason shows its absorbed tally (ADR-0039 point 18,

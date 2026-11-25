@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"text/template"
+	"unicode/utf8"
 
 	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
@@ -147,21 +148,42 @@ const (
 	hintBlockProvenance = "reviewer-hint"
 )
 
-// hintMessage renders a reviewer hint as one more delimited block, after the context blocks and below the
-// system prompt's instructions, neutralised like every block so that its text can neither close it nor open
-// another. Nothing of it is quotable for the evidence check.
-func hintMessage(text string) string {
+// hintMessage wraps an already neutralised reviewer hint. Nothing in it is quotable for the evidence check.
+func hintMessage(text string, cut bool) string {
+	var label incidentcontext.Label
+	if cut {
+		label = incidentcontext.LabelContextCut
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "<%s id=%q section=%q provenance=%q availability=%q labels=%q>\n", blockDelimiter, hintBlockID,
-		hintBlockSection, hintBlockProvenance, incidentcontext.Available, "")
+		hintBlockSection, hintBlockProvenance, incidentcontext.Available, label)
 	b.WriteString(hintNotice)
-	text = neutralise(text)
 	b.WriteString(text)
 	if text != "" && !strings.HasSuffix(text, "\n") {
 		b.WriteByte('\n')
 	}
 	fmt.Fprintf(&b, "</%s>\n", blockDelimiter)
 	return b.String()
+}
+
+// fitHintMessage keeps a prefix of the neutralised hint, with room for its wrapper, marker and final newline.
+func fitHintMessage(text string, budget int) string {
+	frame := len(hintMessage("", true))
+	if budget < frame {
+		return ""
+	}
+	end := min(len(text), max(0, budget-frame-1))
+	for end < len(text) && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	lookback := max(0, end-len("&lt;")+1)
+	if i := strings.LastIndexByte(text[lookback:end], '&'); i >= 0 {
+		start := lookback + i
+		if strings.HasPrefix(text[start:], "&lt;") || strings.HasPrefix(text[start:], "&gt;") {
+			end = start
+		}
+	}
+	return hintMessage(text[:end], true)
 }
 
 // blockDelimiter is the tag of a context block; no text from the cluster can hold it.

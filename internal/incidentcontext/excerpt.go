@@ -166,7 +166,7 @@ type LogView struct {
 //
 // An excerpt that redaction withholds (package redact, budget.go: the body, the header, or a value of the instance
 // in it) is shown as a read withheld at the source: LogReadWithheld, a header that says so, and nothing of the
-// answer (#873).
+// answer (#873). The context builder gets the whole withheld header so it can make room for it.
 func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, err error, asked, budget int) LogView {
 	var v LogView
 	var h lines
@@ -184,7 +184,7 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		h.add("no logs: the source refused the request (no such container, it has not started, or it has no previous instance)")
 	case errors.Is(err, providers.ErrWithheld):
 		v.Read = LogReadWithheld
-		h.add("could not fetch: withheld by redaction")
+		h.add("%s", strings.TrimSuffix(withheldText, "\n"))
 	case errors.Is(err, providers.ErrForbidden):
 		v.Read = LogReadFailed
 		h.add(logForbidden)
@@ -222,6 +222,13 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 			return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 		}
 		header, redacted = strings.ToValidUTF8(header, "?"), strings.ToValidUTF8(redacted, "?")
+		if v.Read == LogReadWithheld && !refit {
+			if !okHeader {
+				header = "pod and container identity withheld\n" + withheldText
+			}
+			v.Text, v.HeadLen = header, len(header)
+			return v
+		}
 		head, _ := keepHead(header, budget)
 		tail, cut := keepTail(redacted, min(asked, budget-len(head)))
 		v.Text, v.HeadLen, v.Cut = head+tail, len(head), cut

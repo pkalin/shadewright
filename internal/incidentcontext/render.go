@@ -40,9 +40,16 @@ const BlockDelimiter = "context-block"
 
 const blockClose = "</" + BlockDelimiter + ">\n"
 
-// blockDelimiterPattern finds the delimiter's name in any case, with any dash, underscore, space or invisible
-// format character (or none) between its words.
-var blockDelimiterPattern = regexp.MustCompile(`(?i)context[\p{Pd}\p{Cf}\x{2212}_\s]*block`)
+// blockSeparator matches the characters allowed between the delimiter's two words in untrusted data.
+const blockSeparator = `[\p{Pd}\p{Cf}\x{2212}_\s]*`
+
+const neutralisedDelimiter = "context_block"
+
+var (
+	blockDelimiterPattern = regexp.MustCompile(`(?i)context` + blockSeparator + `block`)
+	blockStartAtEnd       = regexp.MustCompile(`(?i)context` + blockSeparator + `$`)
+	blockEndPattern       = regexp.MustCompile(`(?i)` + blockSeparator + `block`)
+)
 
 // angleEscaper escapes every character a reader could take for an angle bracket, so no text can open or
 // close a tag whatever letters it uses: ASCII, full-width, small, single and mathematical angle brackets,
@@ -72,7 +79,7 @@ func EscapeAngles(text string) string { return angleEscaper.Replace(text) }
 // Neutralise makes untrusted text safe inside a context block: every angle bracket look-alike is escaped,
 // so the text can neither close the block nor open another, and any spelling of the delimiter is changed.
 func Neutralise(text string) string {
-	return blockDelimiterPattern.ReplaceAllString(EscapeAngles(text), "context_block")
+	return blockDelimiterPattern.ReplaceAllString(EscapeAngles(text), neutralisedDelimiter)
 }
 
 // blockOpen returns the opening tag and notice of blk at 0-based index i.
@@ -167,22 +174,58 @@ func keepHeadRendered(s string, budget int) string {
 }
 
 // keepTailRendered returns the longest whole-line suffix of rest such that head + suffix renders within
-// budget bytes. Callers must check len(renderBody(head)) <= budget first.
+// budget bytes. The header ends at a line boundary. Callers must check len(renderBody(head)) <= budget first.
 func keepTailRendered(head, rest string, budget int) string {
-	if len(renderBody(head+rest)) <= budget {
-		return rest
+	if rest == "" {
+		return ""
 	}
-	starts := lineStarts(rest)
-	lo, hi := 1, len(starts)-1
-	for lo < hi {
-		mid := lo + (hi-lo)/2
-		if len(renderBody(head+rest[starts[mid]:])) <= budget {
-			hi = mid
-		} else {
-			lo = mid + 1
+	// A delimiter can span multiple lines and collapse when rendered. Cutting inside it exposes the
+	// remaining lines, so suffix sizes are not monotone. Count each replacement once as we walk the lines.
+	escaped := EscapeAngles(rest)
+	headEscaped := EscapeAngles(head)
+	matches := blockDelimiterPattern.FindAllStringIndex(escaped, -1)
+	replacementDelta := func(match []int) int { return len(neutralisedDelimiter) - (match[1] - match[0]) }
+	size := len(blockDelimiterPattern.ReplaceAllString(headEscaped, neutralisedDelimiter)) + len(escaped)
+	if !strings.HasSuffix(rest, "\n") {
+		size++
+	}
+	for _, match := range matches {
+		size += replacementDelta(match)
+	}
+
+	// Splicing a suffix onto the header can also complete a delimiter across the join.
+	var endings [][]int
+	var openLen int
+	if start := blockStartAtEnd.FindStringIndex(headEscaped); start != nil {
+		openLen = len(headEscaped) - start[0]
+		endings = blockEndPattern.FindAllStringIndex(escaped, -1)
+	}
+
+	for rawAt, at := 0, 0; rawAt < len(rest); {
+		joinedSize := size
+		for len(endings) > 0 && endings[0][1] <= at {
+			endings = endings[1:]
+		}
+		if len(endings) > 0 && endings[0][0] <= at {
+			joinedSize += len(neutralisedDelimiter) - openLen - (endings[0][1] - at)
+		}
+		if joinedSize <= budget {
+			return rest[rawAt:]
+		}
+		end := strings.IndexByte(rest[rawAt:], '\n')
+		if end < 0 {
+			break
+		}
+		rawAt += end + 1
+		lineBytes := strings.IndexByte(escaped[at:], '\n') + 1
+		at += lineBytes
+		size -= lineBytes
+		for len(matches) > 0 && matches[0][0] < at {
+			size -= replacementDelta(matches[0])
+			matches = matches[1:]
 		}
 	}
-	return rest[starts[hi]:]
+	return ""
 }
 
 func lineEnds(s string) []int {
@@ -193,17 +236,4 @@ func lineEnds(s string) []int {
 		}
 	}
 	return ends
-}
-
-func lineStarts(s string) []int {
-	starts := make([]int, 1, 2+strings.Count(s, "\n"))
-	for i := range len(s) {
-		if s[i] == '\n' {
-			starts = append(starts, i+1)
-		}
-	}
-	if starts[len(starts)-1] != len(s) {
-		starts = append(starts, len(s))
-	}
-	return starts
 }

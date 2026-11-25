@@ -200,6 +200,8 @@ type Block struct {
 	Values []string
 	// headLen is the length of the header lines at the start of Text that a cut keeps (log blocks).
 	headLen int
+	// requiredText is the redacted title, if any, and notice that survive a cut when redaction withheld a read.
+	requiredText string
 	// unitAt, when not zero, is where the unit at the end of Text that a cut removes whole starts: the
 	// absorbed tally of a summary (#796).
 	unitAt int
@@ -239,8 +241,8 @@ func (b *Block) addLabel(l Label) {
 type Context struct {
 	// Blocks are in section order: summary, status, logs, metrics, Git, policy bounds.
 	Blocks []Block
-	// Truncated means the builder cut the context to [Limits.Total]: an escalation signal. A section cut to its
-	// own bound does not set it.
+	// Truncated means the context or appended text was cut to fit the message bound, an escalation signal.
+	// A section cut to its own bound does not set it.
 	Truncated bool
 	// FailedSources are the sections whose configured source failed, each once: an escalation signal. A
 	// source that is not configured is not listed.
@@ -261,6 +263,8 @@ type Context struct {
 	// previous maxReplicaCount of a proposal, and whether the scaler is ready (kedaready.Readiness). Only the
 	// fields of the status section are shown to the model, never this object.
 	ScaledObject map[string]any
+	// totalLimit is the rendered byte bound applied during the build.
+	totalLimit int
 }
 
 // TemplateContainer is one container of the subject's pod template, as the API server returned it.

@@ -20,9 +20,92 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
+
+func TestKeepTailRenderedKeepsLongestFittingSuffix(t *testing.T) {
+	const head = "hdr\n"
+	want := "certificate expired\ncontext\n" + strings.Repeat(strings.Repeat(" ", 100)+"\n", 2) + "block\nend\n"
+	rest := strings.Repeat("<", 50) + "\n" + want
+	const budget = 42
+	if n := len(renderBody(head + want)); n > budget {
+		t.Fatalf("fixture renders to %d bytes, budget %d", n, budget)
+	}
+	if got := keepTailRendered(head, rest, budget); got != want {
+		t.Errorf("kept suffix %q, want it to start with the certificate error", got)
+	}
+}
+
+type logsWithWithheldRead struct {
+	source *fake.Logs
+	key    fake.LogKey
+}
+
+func (l logsWithWithheldRead) Logs(ctx context.Context, q providers.LogQuery) (providers.LogExcerpt, error) {
+	if q.Namespace == l.key.Namespace && q.Pod == l.key.Pod && q.Container == l.key.Container && q.Previous == l.key.Previous {
+		return providers.LogExcerpt{}, providers.ErrWithheld
+	}
+	return l.source.Logs(ctx, q)
+}
+
+func TestTotalCutKeepsWithheldLogTitleAndNotice(t *testing.T) {
+	src := webSources()
+	key := fake.LogKey{Namespace: testNS, Pod: crashPod, Container: appName, Previous: true}
+	src.logs.Set(key, strings.Repeat(strings.Repeat("<", 50)+"\n", 100)+"tail-marker\n")
+	objs := webObjects()
+	crash := objs[2].(*corev1.Pod)
+	crash.Status.ContainerStatuses = append(crash.Status.ContainerStatuses, corev1.ContainerStatus{Name: "sidecar"})
+	b := newBuilder(t, reader(t, objs...), src, func(c *Config) {
+		c.Logs = logsWithWithheldRead{src.logs, fake.LogKey{Namespace: testNS, Pod: crashPod, Container: "sidecar"}}
+	})
+	c, err := b.BuildWithin(t.Context(), incident(deploymentRef()), MinTotalBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Truncated || len(c.Render()) > MinTotalBytes {
+		t.Errorf("rendered size %d, truncated %t", len(c.Render()), c.Truncated)
+	}
+	for _, blk := range c.Blocks {
+		if blk.Section == SectionLogs && hasLabel(blk, LabelWithheld) {
+			want := "pod " + crashPod + " container sidecar, current instance\ncould not fetch: withheld by redaction\n"
+			if blk.Text != want || blk.Availability != CouldNotFetch || len(blk.Data()) != 0 {
+				t.Errorf("withheld log block has text %q, availability %q and %d evidence entries", blk.Text, blk.Availability, len(blk.Data()))
+			}
+			return
+		}
+	}
+	t.Fatal("missing withheld log block")
+}
+
+func TestSectionCutKeepsWithheldLogTitleAndNotice(t *testing.T) {
+	const budget = MinSectionBytes / MaxLogExcerpts
+	const notice = "pod " + crashPod + " container " + appName + ", previous instance\ncould not fetch: withheld by redaction\n"
+	logs := &fake.Logs{Now: func() time.Time { return testNow }}
+	key := fake.LogKey{Namespace: testNS, Pod: crashPod, Container: appName}
+	logs.Set(key, "")
+	logs.SetInstance(key, providers.LogInstance{ContainerID: strings.Repeat("test-id.", 44)}, false)
+	key.Previous = true
+	b := newBuilder(t, reader(t), sources{}, func(c *Config) { c.Logs = logsWithWithheldRead{logs, key} })
+	r := containerReads{pick: logPick{namespace: testNS, pod: crashPod, container: appName, other: true}, left: budget}
+	if err := b.readInstance(t.Context(), &r, false, DefaultWindow); err != nil {
+		t.Fatal(err)
+	}
+	if !r.wantsSecond() || r.left >= len(notice) {
+		t.Fatalf("fixture left %d bytes for a %d-byte notice", r.left, len(notice))
+	}
+	if err := b.readInstance(t.Context(), &r, true, DefaultWindow); err != nil {
+		t.Fatal(err)
+	}
+	blk := r.blocks()[0]
+	if !strings.HasSuffix(blk.Text, notice) || len(blk.Text) > budget || !hasLabel(blk, LabelWithheld) {
+		t.Errorf("withheld block has %d bytes, labels %v, text %q", len(blk.Text), blk.Labels, blk.Text)
+	}
+}
 
 // #1054: Context.Size equals len(Context.Render()), and BuildWithin bounds the rendered message even when
 // escaping angle brackets expands the text about four times.

@@ -28,6 +28,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -103,6 +105,65 @@ func TestControllerWritesTheRecord(t *testing.T) {
 	}
 	if !strings.HasPrefix(rec.ID, string(got.UID)+"-") || rec.ID != strings.ToLower(rec.ID) {
 		t.Errorf("record ID %q, want the Incident's UID and the run's time in lower case", rec.ID)
+	}
+}
+
+// A reply from another model leaves no trace of the name it gave in the record, the controller's log lines, the
+// Incident's status or an Event: the record lists no model, as no configured one answered.
+func TestControllerKeepsAnUnexpectedModelOutOfTheRecord(t *testing.T) {
+	ns := namespace(t)
+	setSettings(t, 10)
+	inc := dueIncident(t, ns, nil)
+	f := newFixture()
+	other := reply(validResult)
+	other.c.Model = unexpectedModel
+	f.triage.steps = []step{other}
+	c, _ := newController(t, ns, f)
+	store := &fake.Store{}
+	c.Store = store
+	events := record.NewFakeRecorder(8)
+	c.Recorder = events
+	var logs strings.Builder
+	ctx := logr.NewContext(t.Context(), funcr.New(func(_, args string) {
+		logs.WriteString(args)
+		logs.WriteByte('\n')
+	}, funcr.Options{}))
+	if _, err := c.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(inc)}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := liveIncident(t, inc)
+	recs := store.Records()
+	if len(recs) != 1 {
+		t.Fatalf("store holds %d records, want one", len(recs))
+	}
+	var r Record
+	for _, rec := range recs {
+		if err := json.Unmarshal(rec.Data, &r); err != nil {
+			t.Fatalf("record data: %v", err)
+		}
+		if r.Reason != ReasonUnexpectedModel || len(r.Models) != 0 {
+			t.Errorf("record reason %s, models %v, want %s and no model", r.Reason, r.Models, ReasonUnexpectedModel)
+		}
+	}
+	status, err := json.Marshal(got.Status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(events.Events)
+	var evs strings.Builder
+	for e := range events.Events {
+		evs.WriteString(e)
+	}
+	tail := unexpectedModel[len(unexpectedModel)-16:]
+	sinks := map[string]string{"log lines": logs.String(), "status": string(status), "events": evs.String()}
+	for _, rec := range recs {
+		sinks["record"] = string(rec.Data)
+	}
+	for sink, text := range sinks {
+		if strings.Contains(text, tail) || strings.Contains(text, redact.String(unexpectedModel)) {
+			t.Errorf("%s hold the model name the reply named, or its redacted form", sink)
+		}
 	}
 }
 

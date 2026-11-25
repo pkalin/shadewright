@@ -68,7 +68,8 @@ type Record struct {
 	// Providers are the providers of the roles that could run, by role (ADR-0037), so a result is never read
 	// as belonging to another provider's model.
 	Providers RecordProviders `json:"providers"`
-	// Models are the model IDs the replies named.
+	// Models are the model IDs the replies named that are exactly the configured ones; a name a reply gave
+	// for another model is never stored.
 	Models        []string `json:"models"`
 	PromptVersion string   `json:"promptVersion"`
 	Summary       string   `json:"summary,omitempty"`

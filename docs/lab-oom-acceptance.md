@@ -440,7 +440,7 @@ Since shadewright-fleet [#37](https://github.com/shadewright-labs/shadewright-fl
    Expect the Incident to go `Analyzing` and then `Proposed` (its `status.remediationRequests` names the request,
    which carries the label `remediation.shadewright.io/incident-uid`) or `Escalated`, with the condition `Analyzed`
    and its reason. `UnexpectedModel` means the reply named another model than `triageModel`: the `Refused` log line
-   names both. `EndpointNotAllowed`, `ModelForbidden` or `ModelNotFound` point at the endpoint, the role assignment or
+   names the configured model and says the reply named a different one (or none), never the name it gave. `EndpointNotAllowed`, `ModelForbidden` or `ModelNotFound` point at the endpoint, the role assignment or
    the deployment name. `ProviderNotConfigured` means a deployment names the Anthropic provider and the analyzer runs
    without `--anthropic-api-key-file`, or its key file could not be read or is malformed: the analyzer's log line
    `A call to the Anthropic API failed` says which. It also means a `Foundry` deployment while the analyzer runs

@@ -1,6 +1,6 @@
 # ADR-0050: Vertex AI as a model provider
 
-- Status: Proposed
+- Status: Accepted (2026-11-25)
 - Date: 2026-11-25
 
 ## Context

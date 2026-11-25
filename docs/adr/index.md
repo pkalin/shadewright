@@ -51,6 +51,6 @@
 | [0047](0047-scoring-analysis-records-outside-the-cluster.md) | Analysis records written by an analyzer we do not run are scored by an intake outside any user cluster | Accepted, amended |
 | [0048](0048-redaction-in-a-shared-module.md) | Redaction moves to a shared module in two stages | Accepted |
 | [0049](0049-one-way-handoff-of-application-code-incidents.md) | One-way handoff of application-code incidents through the coordinator | Accepted |
-| [0050](0050-vertex-ai-as-a-model-provider.md) | Vertex AI as a model provider | Proposed |
+| [0050](0050-vertex-ai-as-a-model-provider.md) | Vertex AI as a model provider | Accepted |
 
 New ADR: copy [the template](template.md), take the next number, add a row here.

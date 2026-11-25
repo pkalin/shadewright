@@ -819,6 +819,13 @@ func TestOverlappingMatchesMerge(t *testing.T) {
 	}
 }
 
+func TestNewSkipsNilOption(t *testing.T) {
+	r, err := New(nil)
+	if err != nil || r == nil {
+		t.Fatalf("New(nil) returned redactor=%t, err=%v", r != nil, err)
+	}
+}
+
 func TestExtraPatterns(t *testing.T) {
 	r, err := New(
 		Pattern{Kind: "employee-id", Expr: `\bEMP-[0-9]{6}\b`},

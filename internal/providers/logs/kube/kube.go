@@ -34,6 +34,7 @@ import (
 
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redactadapter"
 )
 
 // Limits on queries and excerpts. They are fixed in code so that no configuration can widen them.
@@ -144,7 +145,7 @@ func New(cfg Config) (*Source, error) {
 	red := cfg.Redactor
 	if red == nil {
 		var err error
-		if red, err = redact.New(); err != nil {
+		if red, err = redactadapter.New(); err != nil {
 			return nil, fmt.Errorf("built-in redaction rules: %w", err)
 		}
 	}

@@ -5,7 +5,7 @@
 
 ## Context
 
-The AKS lab needs to compare Gemini with its Foundry models on the same recorded incidents. The analyzer already chooses a provider for each role. The record store and GitHub App signer have their own adapters. This proposal changes where the analyzer can send an inference request from a cluster outside Google Cloud. [Adapter boundaries](0013-adapters-for-every-external-system.md)
+The AKS lab needs to compare Gemini with its Foundry models on the same recorded incidents. The analyzer already chooses a provider for each role. The record store and GitHub App signer have their own adapters. This decision covers Vertex inference from clusters outside Google Cloud, including the AKS lab, and from GKE. [Adapter boundaries](0013-adapters-for-every-external-system.md)
 
 ## Decision
 
@@ -17,28 +17,40 @@ Routing Gemini through OpenAICompatible would lose the native function parts and
 
 ### 2. Give the analyzer direct federated access
 
+For an install that enables Vertex, select exactly one identity source at install time. The chart and analyzer startup reject configuration for the other source. If the selected source fails, the call fails. Both sources grant prediction directly to the analyzer's exact Kubernetes ServiceAccount and forbid key files and Google service account impersonation.
+
+#### Outside Google Cloud
+
 Mount a separate, short-lived projected token read-only in the analyzer. Bind the workload identity pool provider to the cluster's OIDC issuer and the Google projection's exact audience. Map `google.subject=assertion.sub` and set the provider's attribute condition to `assertion.sub == 'system:serviceaccount:<namespace>:<analyzer-serviceaccount>'`. Use the actual namespace and account at installation. Check the subject fits Google's 127-byte limit. The existing token projected for Azure Entra ID has audience `api://AzureADTokenExchange`. Both Foundry inference and Azure Blob can use that projection.
 
 Exchange the Google projection only at `POST https://sts.googleapis.com/v1/token`, with the install-time STS audience `//iam.googleapis.com/projects/{number}/locations/global/workloadIdentityPools/{pool}/providers/{provider}`. In the dedicated inference project, grant only `aiplatform.endpoints.predict` to the exact federated subject (`principal://iam.googleapis.com/projects/{number}/locations/global/workloadIdentityPools/{pool}/subject/{subject}`). The provider condition rejects another subject at exchange time. The IAM binding limits what the accepted subject can do. Use a pool whose issuer trust is exclusive to that cluster so another provider cannot mint the same principal.
 
-Direct access costs a projection and a trust binding per cluster. Service account impersonation would add an identity, a token-creation grant and a call to `iamcredentials.googleapis.com`. A key file would leave a reusable credential in the pod. A namespace-wide binding or the predefined Vertex AI User role would grant more access than one analyzer needs.
+Direct access from outside Google Cloud costs a projection and a trust binding per cluster. Service account impersonation would add an identity, a token-creation grant and a call to `iamcredentials.googleapis.com`. A key file would leave a reusable credential in the pod. A namespace-wide binding or the predefined Vertex AI User role would grant more access than one analyzer needs.
+
+#### On GKE
+
+Use Workload Identity Federation for GKE. In the same dedicated inference project, grant only `aiplatform.endpoints.predict` to the principal for the analyzer's exact Kubernetes ServiceAccount, selected by UID in the GKE workload identity pool. The GKE metadata server exchanges the workload's token and returns a short-lived federated access token to the analyzer.
+
+The metadata endpoint is link-local. The analyzer's chart NetworkPolicy in `dist/chart/templates/network-policy/allow-analyzer-egress.yaml` has no metadata egress rule today. The provider HTTP clients' public-address dial guard (`openaiwire.PublicControl`, which delegates to `Guard{}.Control`) refuses link-local addresses. Use a dedicated metadata client that makes only `GET http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token` with `Metadata-Flavor: Google`, a deadline, no proxy and no redirects. Keep the public-address guard on the Vertex client.
+
+Add a chart value, off by default, that allows analyzer egress only to the metadata server address and TCP port required by the installed GKE dataplane. GKE Dataplane V2 uses `169.254.169.254/32:80` for the policy rule. The other documented token egress rule uses `169.254.169.252/32:988`. Render only the rule for the selected dataplane. The network rule limits the destination and port. The metadata client limits the HTTP path. [Workload Identity Federation for GKE](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity)
 
 ### Change to invariant 6
 
 The proposed addition follows the blob container grant in the analyzer clause of invariant 6 in `AGENTS.md`.
 
-> If ADR-0050 is accepted, an analyzer outside Google Cloud configured with `provider: VertexAI` may exchange its separately projected ServiceAccount token only at Google STS for direct federated access. Its exact subject may use only `aiplatform.endpoints.predict` in the dedicated project, at the declared EU regional endpoint and with the model pinned for the role.
+> If ADR-0050 is accepted, an analyzer configured with `provider: VertexAI` may obtain a federated access token for its exact ServiceAccount from one install-time source. Outside Google Cloud it may exchange its separately projected token only at Google STS. On GKE it may fetch the token only from the GKE metadata server's token endpoint. Neither source uses a key file or impersonation. Its exact principal may use only `aiplatform.endpoints.predict` in the dedicated project, at the declared EU regional endpoint and with the model pinned for the role.
 
-### 3. Pin the regional destination and model before token exchange
+### 3. Pin the regional destination and model before acquiring a token
 
-The install declares one project, one EU region and one exact Gemini 2.5 model ID per enabled Vertex role. Validate the declaration at chart render and analyzer startup. On each settings selection the factory requires the exact base below and `deployment == ExpectedModels[role]`, with a nonempty pin, before acquiring a Google token or sending any context. Construct the request from validated installation values.
+Both identity sources use the same rules for project, location and model pins. The install declares one project, one EU region and one exact Gemini 2.5 model ID per enabled Vertex role. Validate the declaration at chart render and analyzer startup. On each settings selection the factory requires the exact base below and `deployment == ExpectedModels[role]`, with a nonempty pin, before acquiring a Google token or sending any context. Construct the request from validated installation values.
 
 ```text
 endpoint = https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}
 POST {endpoint}/publishers/google/models/{model}:generateContent
 ```
 
-Keep STS and Vertex on separate clients. Both disable proxies (`Proxy: nil`), require TLS 1.2 or later, refuse every redirect and use the public-address dial guard (`PublicControl`, with the install's additional in-cluster ranges enforced) on every resolved address. Bound each call with a deadline. Reserve `googleapis.com` and its subdomains in the compatible adapter's `ReservedHost` and the factory's `separateProviderHost` checks, even if a Foundry suffix would otherwise allow the host. Anthropic already has a fixed host. The projected token goes only to STS. Only the resulting access token goes to Vertex. Neither token appears in logs, Events, records, status, traces or errors.
+Keep STS and Vertex on separate clients. Both disable proxies (`Proxy: nil`), require TLS 1.2 or later, refuse every redirect and use the public-address dial guard (`PublicControl`, with the install's additional in-cluster ranges enforced) on every resolved address. Bound each call with a deadline. Reserve `googleapis.com` and its subdomains in the compatible adapter's `ReservedHost` and the factory's `separateProviderHost` checks, even if a Foundry suffix would otherwise allow the host. Anthropic already has a fixed host. The projected token goes only to STS. Vertex receives only the federated access token from the selected source. No token appears in logs, Events, records, status, traces or errors.
 
 A shared list would let a settings editor spend the escalation model's quota on triage before the reply check could refuse it. A hostname check alone would leave the project path open to substitution. Changing a pin, project or region requires an install change. The global endpoint cannot promise the chosen EU region, and the EU multi-region endpoint (`aiplatform.eu.rep.googleapis.com`) lets Google choose among regions. Reject both, including as fallbacks. A regional outage stops the call. Gemini 3 is unavailable to this installation until Google offers it in a qualifying region.
 
@@ -103,9 +115,9 @@ The lab can compare providers on the same recorded scenarios. A compromised anal
 - Request and response logging, grounding and explicit caching default off. Implicit caching and the 24-hour in-memory cache default on. The project control is `PATCH .../projects/{project}/cacheConfig` with `disableCache: true`. The training terms and the separate abuse-monitoring retention in decision 4 apply even when request logging is off. [Context caching](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/context-cache/context-cache-overview) and [data governance](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/data-governance)
 - Gemini 2.5 rejects function declarations together with a JSON response type (HTTP 400). Thought signatures are optional on 2.5. Gemini 3 requires them on function-call turns and signs only the first call of a parallel group. The usage fields in decision 6 distinguish cached input, tool-use input and thinking tokens. [Structured output](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/control-generated-output), [thought signatures](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures) and [usage metadata](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/reference/rest/v1/projects.locations.publishers.models/generateContent#usagemetadata)
 
-## Out of scope
+## What the first slice does not build
 
-Workload Identity Federation for GKE, a Google Cloud reference environment, GCS analysis records and Cloud KMS signing belong to the later Google Cloud epic.
+The first slice builds the STS path for clusters outside Google Cloud. The GKE identity path, including its metadata client and chart egress value, is built with the Google Cloud reference environment epic (#1160) because there is no GKE cluster before that epic. The first slice also leaves out the reference environment, GCS analysis records and Cloud KMS signing.
 
 ## Open checks before the first run
 

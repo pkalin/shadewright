@@ -27,6 +27,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -58,9 +59,10 @@ const (
 	testHeader = `{"alg":"RS256","kid":"k1"}`
 )
 
-func encodeJWT(header, payload string) string {
+// encodeJWT builds a compact JWT with the test header around payload.
+func encodeJWT(payload string) string {
 	enc := base64.RawURLEncoding.EncodeToString
-	return enc([]byte(header)) + "." + enc([]byte(payload)) + "." + enc([]byte("signature"))
+	return enc([]byte(testHeader)) + "." + enc([]byte(payload)) + "." + enc([]byte("signature"))
 }
 
 // claimsJSON is the payload of a projected token for sub and aud (a string or a list).
@@ -74,8 +76,21 @@ func claimsJSON(sub string, aud any) string {
 	return string(b)
 }
 
+// claimsWithExp is claimsJSON with the given exp claim; a nil exp leaves the claim out.
+func claimsWithExp(exp any) string {
+	m := map[string]any{"iss": "https://oidc.example", "sub": testSubject, "aud": []string{testProjection}, "mark": claimMark}
+	if exp != nil {
+		m["exp"] = exp
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
 func goodJWT() string {
-	return encodeJWT(testHeader, claimsJSON(testSubject, []string{testProjection}))
+	return encodeJWT(claimsJSON(testSubject, []string{testProjection}))
 }
 
 func writeFile(t *testing.T, path, content string) {
@@ -489,7 +504,6 @@ func TestRedirectIsNotFollowed(t *testing.T) {
 }
 
 func TestStatusClasses(t *testing.T) {
-	big := strings.Repeat("a", maxTokenResponse+1)
 	answer := func(tok, issued, typ string, exp any) string {
 		b, _ := json.Marshal(map[string]any{"access_token": tok, "issued_token_type": issued, "token_type": typ, "expires_in": exp})
 		return string(b)
@@ -519,7 +533,6 @@ func TestStatusClasses(t *testing.T) {
 		"no expiry":         {status: http.StatusOK, body: answer(issuedMark, typeAccessToken, "Bearer", 0), retryable: true},
 		"negative expiry":   {status: http.StatusOK, body: answer(issuedMark, typeAccessToken, "Bearer", -5), retryable: true},
 		"expiry as text":    {status: http.StatusOK, body: answer(issuedMark, typeAccessToken, "Bearer", "3600"), retryable: true},
-		"oversized answer":  {status: http.StatusOK, body: big, retryable: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, n, cfg := harness(t, func(rw http.ResponseWriter, r *http.Request) {
@@ -606,7 +619,7 @@ func TestAssertionRefusedLocally(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, n, cfg := harness(t, func(rw http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(rw, stsAnswer(3600)) })
-			jwt := encodeJWT(testHeader, payload)
+			jwt := encodeJWT(payload)
 			writeFile(t, cfg.TokenFile, jwt)
 			_, err := s.Token(context.Background())
 			if !providers.IsForbidden(err) || providers.IsRetryable(err) {
@@ -824,7 +837,7 @@ func TestRefreshMargin(t *testing.T) {
 		{100000, 24*time.Hour - 5*time.Minute},
 	} {
 		t.Run(fmt.Sprint(tc.expiresIn), func(t *testing.T) {
-			s, n, _ := harness(t, func(rw http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(rw, stsAnswer(tc.expiresIn)) })
+			s, n := countingSource(t, tc.expiresIn, goodJWT())
 			start := time.Now()
 			now := start
 			s.now = func() time.Time { return now }
@@ -920,7 +933,7 @@ func TestNothingLeaksToErrorsOrLogs(t *testing.T) {
 		}
 		assertNoLeak(t, err, cfg)
 	}
-	writeFile(t, cfg.TokenFile, encodeJWT(testHeader, claimsJSON(testSubject, AzureExchangeAudience)))
+	writeFile(t, cfg.TokenFile, encodeJWT(claimsJSON(testSubject, AzureExchangeAudience)))
 	_, err := s.Token(context.Background())
 	assertNoLeak(t, err, cfg)
 	_ = os.Remove(cfg.TokenFile)
@@ -929,5 +942,404 @@ func TestNothingLeaksToErrorsOrLogs(t *testing.T) {
 
 	if logs.Len() != 0 {
 		t.Errorf("the token source wrote to a log: %d bytes", logs.Len())
+	}
+}
+
+// rtFunc is a RoundTripper made of a function, so a test can serve any response and body.
+type rtFunc func(*http.Request) (*http.Response, error)
+
+func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func okResponse(r *http.Request, status int, body io.ReadCloser) (*http.Response, error) {
+	return &http.Response{StatusCode: status, Header: http.Header{}, Body: body, Request: r}, nil
+}
+
+func stsAnswerFor(token string, expiresIn int64) string {
+	return fmt.Sprintf(`{"access_token":%q,"issued_token_type":%q,"token_type":"Bearer","expires_in":%d}`,
+		token, typeAccessToken, expiresIn)
+}
+
+// pipeListener is an in-memory listener, so the HTTP/2 test needs no loopback socket.
+type pipeListener struct {
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+type pipeAddr struct{}
+
+func (pipeAddr) Network() string { return "pipe" }
+func (pipeAddr) String() string  { return "pipe" }
+
+func (l *pipeListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *pipeListener) Close() error   { l.once.Do(func() { close(l.done) }); return nil }
+func (l *pipeListener) Addr() net.Addr { return pipeAddr{} }
+
+func (l *pipeListener) dial(ctx context.Context, _, _ string) (net.Conn, error) {
+	client, server := net.Pipe()
+	select {
+	case l.conns <- server:
+		return client, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// The client must not speak HTTP/2: Go's HTTP/2 frame diagnostics (GODEBUG=http2debug) print the bytes of
+// DATA frames, which would hold the projected token and the access token. The server here offers HTTP/2;
+// the control client shows the test can see it being negotiated.
+func TestClientNegotiatesHTTP1Only(t *testing.T) {
+	lis := &pipeListener{conns: make(chan net.Conn), done: make(chan struct{})}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(rw, "ok")
+	}))
+	srv.Listener = lis
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+	const target = "https://example.com/" // the certificate of httptest names example.com
+
+	get := func(tr *http.Transport) *http.Response {
+		t.Helper()
+		defer tr.CloseIdleConnections()
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := (&http.Client{Transport: tr}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp
+	}
+	trusted := srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+
+	control := srv.Client().Transport.(*http.Transport).Clone()
+	control.DialContext = lis.dial
+	if resp := get(control); resp.ProtoMajor != 2 {
+		t.Fatalf("control client negotiated %s, want HTTP/2: the server does not offer it", resp.Proto)
+	}
+
+	s, err := New(testConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	guarded, ok := s.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport %T", s.client.Transport)
+	}
+	// The same transport settings, except that the dial guard is replaced and the test server's
+	// certificate is trusted.
+	tr := guarded.Clone()
+	tr.DialContext = lis.dial
+	tr.TLSClientConfig.RootCAs = trusted
+	resp := get(tr)
+	if resp.Proto != "HTTP/1.1" || resp.TLS == nil || resp.TLS.NegotiatedProtocol == "h2" {
+		t.Errorf("protocol %q, want HTTP/1.1 and no h2 in ALPN", resp.Proto)
+	}
+}
+
+// closeGate is a response body whose Close waits, so a test can hold an exchange between its last context
+// check and its write to the cache.
+type closeGate struct {
+	io.Reader
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (c *closeGate) Close() error {
+	c.once.Do(func() { close(c.entered) })
+	<-c.release
+	return nil
+}
+
+// An exchange that was canceled and replaced must not write the cache, even when it passed its last context
+// check before the replacement ran: it checks under the lock that it is still the current exchange.
+func TestSupersededExchangeDoesNotWriteTheCache(t *testing.T) {
+	const stale = "opaque-STALE-TOKEN-0123456789"
+	gate := &closeGate{Reader: strings.NewReader(stsAnswerFor(stale, 3600)), entered: make(chan struct{}), release: make(chan struct{})}
+	var n atomic.Int32
+	var s *Source
+	first := make(chan *exchangeCall, 1)
+	s, err := newSource(testConfig(t), rtFunc(func(r *http.Request) (*http.Response, error) {
+		if n.Add(1) == 1 {
+			s.mu.Lock()
+			first <- s.inflight
+			s.mu.Unlock()
+			return okResponse(r, http.StatusOK, gate)
+		}
+		return okResponse(r, http.StatusOK, io.NopCloser(strings.NewReader(stsAnswer(3600))))
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxA, cancelA := context.WithCancel(context.Background())
+	errA := make(chan error, 1)
+	go func() { _, err := s.Token(ctxA); errA <- err }()
+	select {
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first exchange never reached the end of its response")
+	}
+	cancelA() // the only waiter leaves: the exchange is superseded
+	if err := <-errA; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller: err = %v, want canceled", err)
+	}
+	if tok, err := s.Token(context.Background()); err != nil || tok != issuedMark {
+		t.Fatalf("second exchange: %q, %v", tok, err)
+	}
+	close(gate.release)
+	call := <-first
+	<-call.done
+	if call.token == stale {
+		t.Error("the superseded exchange returned its token")
+	}
+	if tok, err := s.Token(context.Background()); err != nil || tok != issuedMark || n.Load() != 2 {
+		t.Errorf("cache holds %q (err %v) after %d exchanges, want the second exchange's token from 2", tok, err, n.Load())
+	}
+}
+
+// countingSource is a Source whose STS answers every request with a token of the given lifetime, reading the
+// given projected token; n counts the requests.
+func countingSource(t *testing.T, expiresIn int64, projected string) (*Source, *atomic.Int32) {
+	t.Helper()
+	var n atomic.Int32
+	cfg := testConfig(t)
+	writeFile(t, cfg.TokenFile, projected)
+	s, err := newSource(cfg, rtFunc(func(r *http.Request) (*http.Response, error) {
+		n.Add(1)
+		return okResponse(r, http.StatusOK, io.NopCloser(strings.NewReader(stsAnswer(expiresIn))))
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, &n
+}
+
+func jwtExpiringAt(exp any) string { return encodeJWT(claimsWithExp(exp)) }
+
+// The cached token is dropped before the projected token it came from expires: at its exp minus the
+// refresh margin, which is the shorter of five minutes and half the time left. A projection without a
+// readable exp caps the cache at a short fixed lifetime.
+func TestCacheNeverOutlivesTheProjection(t *testing.T) {
+	start := time.Now().Truncate(time.Second)
+	in := func(d time.Duration) any { return start.Add(d).Unix() }
+	for name, tc := range map[string]struct {
+		exp       any
+		expiresIn int64
+		refresh   time.Duration // after the exchange
+	}{
+		"30 seconds left":     {in(30 * time.Second), 3600, 15 * time.Second},
+		"10 minutes left":     {in(10 * time.Minute), 3600, 5 * time.Minute},
+		"fraction of seconds": {float64(start.Unix()) + 60.5, 3600, 30 * time.Second}, // read as 60s: never later
+		"projection outlasts": {in(24 * time.Hour), 3600, 55 * time.Minute},
+		"STS outlasts":        {in(time.Hour), 7200, 55 * time.Minute},
+		"no exp":              {nil, 3600, unknownProjectionLifetime},
+		"exp as text":         {"soon", 3600, unknownProjectionLifetime},
+		"exp null":            {json.RawMessage("null"), 3600, unknownProjectionLifetime},
+		"exp as list":         {[]int{1}, 3600, unknownProjectionLifetime},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, n := countingSource(t, tc.expiresIn, jwtExpiringAt(tc.exp))
+			now := start
+			s.now = func() time.Time { return now }
+			for range 3 {
+				if _, err := s.Token(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now = start.Add(tc.refresh - time.Nanosecond)
+			if _, err := s.Token(context.Background()); err != nil || n.Load() != 1 {
+				t.Fatalf("replaced before %v: requests %d, err %v", tc.refresh, n.Load(), err)
+			}
+			now = start.Add(tc.refresh)
+			if _, err := s.Token(context.Background()); err != nil || n.Load() != 2 {
+				t.Errorf("not replaced at %v: requests %d, err %v", tc.refresh, n.Load(), err)
+			}
+		})
+	}
+	if unknownProjectionLifetime <= 0 || unknownProjectionLifetime > 10*time.Minute {
+		t.Errorf("the fixed lifetime %v is not short", unknownProjectionLifetime)
+	}
+}
+
+// A projected token that has already expired still gets its exchange answered by STS, but the answer is
+// not kept for the next caller.
+func TestAnswerForAnExpiredProjectionIsNotCached(t *testing.T) {
+	start := time.Now().Truncate(time.Second)
+	s, n := countingSource(t, 3600, jwtExpiringAt(start.Add(-time.Minute).Unix()))
+	s.now = func() time.Time { return start }
+	for i := 1; i <= 3; i++ {
+		if _, err := s.Token(context.Background()); err != nil || int(n.Load()) != i {
+			t.Fatalf("call %d: requests %d, err %v, want one exchange per call", i, n.Load(), err)
+		}
+	}
+}
+
+// A token that expired, or is inside its refresh margin, by the time the answer is read is not returned.
+func TestTokenAlreadyStaleOnArrivalIsRefused(t *testing.T) {
+	for name, tc := range map[string]struct {
+		expiresIn int64
+		transit   time.Duration
+		refused   bool
+	}{
+		"expired in transit":      {1, 2 * time.Second, true},
+		"inside the margin":       {60, 40 * time.Second, true},
+		"exactly at the margin":   {60, 30 * time.Second, true},
+		"just outside the margin": {60, 30*time.Second - time.Millisecond, false},
+		"quick answer":            {60, time.Millisecond, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := time.Now()
+			var elapsed atomic.Int64
+			s, err := newSource(testConfig(t), rtFunc(func(r *http.Request) (*http.Response, error) {
+				elapsed.Store(int64(tc.transit))
+				return okResponse(r, http.StatusOK, io.NopCloser(strings.NewReader(stsAnswer(tc.expiresIn))))
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.now = func() time.Time { return base.Add(time.Duration(elapsed.Load())) }
+			tok, err := s.Token(context.Background())
+			if tc.refused {
+				if tok != "" || !providers.IsRetryable(err) || providers.IsForbidden(err) {
+					t.Fatalf("Token = %q, %v, want an empty token and a retryable error", tok, err)
+				}
+				assertNoLeak(t, err, Config{TokenFile: "/unused"})
+				s.mu.Lock()
+				cached := s.token
+				s.mu.Unlock()
+				if cached != "" {
+					t.Error("a stale token was cached")
+				}
+				return
+			}
+			if err != nil || tok != issuedMark {
+				t.Fatalf("Token = %q, %v", tok, err)
+			}
+		})
+	}
+}
+
+// stallBody blocks its reader until ctx ends, like a response body that stops sending.
+type stallBody struct {
+	ctx     context.Context
+	reading chan struct{}
+	once    sync.Once
+}
+
+func (b *stallBody) Read([]byte) (int, error) {
+	b.once.Do(func() { close(b.reading) })
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (b *stallBody) Close() error { return nil }
+
+// A deadline or a cancellation that ends the read of a refusal body is reported as that end, not as the
+// refusal.
+func TestEndDuringRefusalBodyIsNotTheRefusal(t *testing.T) {
+	for _, code := range []int{http.StatusForbidden, http.StatusBadRequest, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprint(code, " deadline"), func(t *testing.T) {
+			s, err := newSource(testConfig(t), rtFunc(func(r *http.Request) (*http.Response, error) {
+				return okResponse(r, code, &stallBody{ctx: r.Context(), reading: make(chan struct{})})
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.timeout = 50 * time.Millisecond
+			tok, err := s.Token(context.Background())
+			if tok != "" || !providers.IsRetryable(err) || !errors.Is(err, context.DeadlineExceeded) || providers.IsForbidden(err) {
+				t.Fatalf("Token = %q, %v, want an empty token and the retryable deadline error", tok, err)
+			}
+			assertNoLeak(t, err, Config{TokenFile: "/unused"})
+		})
+		t.Run(fmt.Sprint(code, " cancellation"), func(t *testing.T) {
+			var s *Source
+			reading := make(chan struct{})
+			calls := make(chan *exchangeCall, 1)
+			s, err := newSource(testConfig(t), rtFunc(func(r *http.Request) (*http.Response, error) {
+				s.mu.Lock()
+				calls <- s.inflight
+				s.mu.Unlock()
+				return okResponse(r, code, &stallBody{ctx: r.Context(), reading: reading})
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() { <-reading; cancel() }()
+			if _, err := s.Token(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Token = %v, want canceled", err)
+			}
+			call := <-calls
+			<-call.done
+			if !errors.Is(call.err, context.Canceled) || providers.IsForbidden(call.err) || call.token != "" {
+				t.Errorf("exchange err = %v, want its cancellation", call.err)
+			}
+		})
+	}
+}
+
+// limitedBody serves a valid token answer followed by whitespace, which JSON allows after the value, and
+// fails the test when it is read after the limit and one more byte: the read limit is what stops it.
+type limitedBody struct {
+	t     *testing.T
+	data  []byte // what is left to serve
+	total int
+}
+
+func (b *limitedBody) Read(p []byte) (int, error) {
+	if b.total > maxTokenResponse {
+		b.t.Errorf("read past %d bytes: the response is not bounded", maxTokenResponse+1)
+		return 0, io.EOF
+	}
+	if len(b.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, b.data)
+	b.data = b.data[n:]
+	b.total += n
+	return n, nil
+}
+
+func (b *limitedBody) Close() error { return nil }
+
+func paddedAnswer(size int) []byte {
+	head := stsAnswer(3600)
+	return append([]byte(head), bytes.Repeat([]byte(" "), size-len(head))...)
+}
+
+func TestOversizedAnswerIsStoppedByTheReadLimit(t *testing.T) {
+	serve := func(t *testing.T, size int) (string, error) {
+		t.Helper()
+		s, err := newSource(testConfig(t), rtFunc(func(r *http.Request) (*http.Response, error) {
+			return okResponse(r, http.StatusOK, &limitedBody{t: t, data: paddedAnswer(size)})
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.Token(context.Background())
+	}
+	// The padded answer is valid JSON, so only the limit can refuse it.
+	if tok, err := serve(t, 4*maxTokenResponse); tok != "" || !providers.IsRetryable(err) {
+		t.Errorf("Token = %q, %v, want an empty token and a retryable error", tok, err)
+	}
+	if tok, err := serve(t, maxTokenResponse+1); tok != "" || !providers.IsRetryable(err) {
+		t.Errorf("one byte over the limit: Token = %q, %v", tok, err)
+	}
+	if tok, err := serve(t, maxTokenResponse); err != nil || tok != issuedMark {
+		t.Errorf("an answer of exactly the limit: Token = %q, %v", tok, err)
 	}
 }

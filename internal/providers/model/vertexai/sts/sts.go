@@ -19,12 +19,14 @@ package sts
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -79,6 +81,8 @@ const (
 	refreshMarginCap = 5 * time.Minute
 	// exchangeTimeout bounds one exchange, and the wait for the response headers.
 	exchangeTimeout = 30 * time.Second
+	// unknownProjectionLifetime caps the cache when the projected token has no readable exp claim.
+	unknownProjectionLifetime = 5 * time.Minute
 )
 
 var (
@@ -116,6 +120,8 @@ type Source struct {
 	tokenURL                                         string
 	client                                           *http.Client
 	now                                              func() time.Time
+	// timeout bounds one exchange; exchangeTimeout outside tests.
+	timeout time.Duration
 
 	// mu guards the fields below; it is never held across the network or a file read.
 	mu        sync.Mutex
@@ -145,14 +151,30 @@ func newSource(cfg Config, rt http.RoundTripper) (*Source, error) {
 		return nil, err
 	}
 	client := openaiwire.NewHTTPClient(exchangeTimeout, openaiwire.Guard{InCluster: slices.Clone(cfg.InClusterRanges)})
+	if tr, ok := client.Transport.(*http.Transport); ok {
+		onlyHTTP1(tr)
+	}
 	if rt != nil {
 		client.Transport = rt
 	}
 	return &Source{
 		audience: cfg.Audience, tokenFile: cfg.TokenFile, subject: cfg.Subject,
 		projectionAudience: cfg.ProjectionAudience,
-		tokenURL:           TokenURL, client: client, now: time.Now,
+		tokenURL:           TokenURL, client: client, now: time.Now, timeout: exchangeTimeout,
 	}, nil
+}
+
+// onlyHTTP1 makes tr negotiate HTTP/1.1 and nothing else. Go's HTTP/2 frame diagnostics (GODEBUG=http2debug)
+// print the first bytes of each DATA frame, which here would be the projected token or the access token.
+// HTTP/1.1 has no such diagnostic. Three settings agree, so none of them alone can bring HTTP/2 back: the
+// protocol set, ForceAttemptHTTP2 and an empty (not nil) TLSNextProto, which disables the HTTP/2 upgrade.
+func onlyHTTP1(tr *http.Transport) {
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	tr.Protocols = &protocols
+	tr.ForceAttemptHTTP2 = false
+	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	tr.TLSClientConfig.NextProtos = []string{"http/1.1"}
 }
 
 func validate(cfg Config) error {
@@ -272,11 +294,15 @@ func (s *Source) run(ctx context.Context, call *exchangeCall) {
 	defer call.cancel()
 	tok, refreshAt, err := s.exchange(ctx)
 	s.mu.Lock()
-	if err == nil {
-		s.token, s.refreshAt = tok, refreshAt
-	}
 	if s.inflight == call {
+		if err == nil {
+			s.token, s.refreshAt = tok, refreshAt
+		}
 		s.inflight = nil
+	} else if err == nil {
+		// Every waiter left and the exchange was replaced, possibly after its last context check: a newer
+		// exchange may have written the cache, and this one must not overwrite it.
+		tok, err = "", fmt.Errorf("sts: the token request was superseded: %w", context.Canceled)
 	}
 	s.mu.Unlock()
 	call.token, call.err = tok, err
@@ -313,7 +339,7 @@ func (s *Source) exchange(ctx context.Context) (string, time.Time, error) {
 		"subject_token_type":   {typeJWT},
 		"subject_token":        {assertion},
 	}
-	ctx, cancel := context.WithTimeout(ctx, exchangeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -321,6 +347,7 @@ func (s *Source) exchange(ctx context.Context) (string, time.Time, error) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	projectionExp, hasProjectionExp := projectionExpiry(assertion)
 	start := s.now()
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -339,10 +366,17 @@ func (s *Source) exchange(ctx context.Context) (string, time.Time, error) {
 	switch code := resp.StatusCode; {
 	case code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500:
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
+		if ctx.Err() != nil {
+			return "", time.Time{}, ctxError(ctx)
+		}
 		return "", time.Time{}, &providers.RetryableError{Err: fmt.Errorf("sts: Google STS returned status %d", code)}
 	case code != http.StatusOK:
-		// The body may quote the request: it is drained, never read into an error.
+		// The body may quote the request: it is drained, never read into an error. When the deadline or a
+		// cancellation ended the drain, that end is reported, not the refusal it interrupted.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
+		if ctx.Err() != nil {
+			return "", time.Time{}, ctxError(ctx)
+		}
 		return "", time.Time{}, fmt.Errorf("sts: Google STS refused the token request with status %d: %w",
 			code, providers.ErrForbidden)
 	}
@@ -366,7 +400,51 @@ func (s *Source) exchange(ctx context.Context) (string, time.Time, error) {
 		return "", time.Time{}, &providers.RetryableError{Err: errors.New("sts: the answer of Google STS could not be used")}
 	}
 	lifetime := time.Duration(min(body.ExpiresIn, int64(maxLifetime/time.Second))) * time.Second
-	return body.AccessToken, start.Add(lifetime - refreshMargin(lifetime)), nil
+	refreshAt := start.Add(lifetime - refreshMargin(lifetime))
+	if !s.now().Before(refreshAt) {
+		// The lifetime counts from the request, so a slow answer has used part of it: a token already expired
+		// or inside its refresh margin is not handed out.
+		return "", time.Time{}, &providers.RetryableError{Err: errors.New("sts: the access token was stale when it arrived")}
+	}
+	return body.AccessToken, earlier(refreshAt, projectionRefreshAt(start, projectionExp, hasProjectionExp)), nil
+}
+
+func earlier(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
+}
+
+// projectionRefreshAt is the latest time the cache may serve a token exchanged at start for a projected token
+// that expires at exp: exp minus the refresh margin of the time left. Without a readable exp it is a short
+// fixed lifetime from start. An expired projection gives start itself, so nothing is served from the cache.
+func projectionRefreshAt(start, exp time.Time, hasExp bool) time.Time {
+	if !hasExp {
+		return start.Add(unknownProjectionLifetime)
+	}
+	left := max(exp.Sub(start), 0)
+	return start.Add(left - refreshMargin(left))
+}
+
+// projectionExpiry reads the exp claim of the projected token without verifying the token (STS does that).
+// The payload has already been bounded by the size of the token file. An exp that is missing, not a number
+// or not finite is not readable. Nothing of the token is returned in an error or logged.
+func projectionExpiry(tok string) (time.Time, bool) {
+	payload, ok := jwtPayload(tok)
+	if !ok {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp *float64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == nil ||
+		math.IsNaN(*claims.Exp) || math.IsInf(*claims.Exp, 0) {
+		return time.Time{}, false
+	}
+	// Clamped to a range time.Unix and Duration arithmetic hold: 0 (1970) to about 36000 years.
+	secs := min(max(*claims.Exp, 0), 1<<40)
+	return time.Unix(int64(secs), 0), true
 }
 
 // checkAssertion decodes the projected token's payload, without verifying it, and refuses a token that is

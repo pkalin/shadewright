@@ -47,8 +47,16 @@ limitations under the License.
 // (0x21 to 0x7e): STS issues opaque bearer tokens, not JWTs. Any other 200 is retryable and nothing of it is
 // cached.
 //
+// The client speaks HTTP/1.1 only, so Go's HTTP/2 frame diagnostics can never print token bytes. An answer
+// whose token has expired, or is inside its refresh margin, by the time it arrives is retryable and no token
+// is returned. A deadline or cancellation that ends the read of a refusal body is reported as that end.
+//
 // The access token is cached until shortly before it expires: five minutes, or half its lifetime when that
-// is shorter. A [Source] is safe for concurrent use: callers that need a token while an exchange is in
+// is shorter. It never outlives the projected token it came from: the exp claim of that token is read
+// without verifying it, and the cache ends at exp minus the same margin. A projected token without a readable
+// exp caps the cache at five minutes. An exchange that was canceled and replaced never writes the cache.
+//
+// A [Source] is safe for concurrent use: callers that need a token while an exchange is in
 // progress share it, each waits only as long as its own context allows, and the exchange goes on while
 // anyone still waits, so one canceled caller fails no one else. When the last waiter leaves, the exchange is
 // canceled. An answer that arrives after the exchange's context ended is discarded: no status of it is

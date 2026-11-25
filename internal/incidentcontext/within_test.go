@@ -24,6 +24,32 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
+func TestBuildWithinAboveTheSectionSum(t *testing.T) {
+	src := webSources()
+	key := fake.LogKey{Namespace: testNS, Pod: crashPod, Container: appName, Previous: true}
+	line := strings.Repeat("<", 50) + "\n"
+	src.logs.Set(key, strings.Repeat(line, 400)+"tail-marker\n")
+	b := newBuilder(t, reader(t, webObjects()...), src, nil)
+	inc := incident(deploymentRef())
+	retained := func(limit int) int {
+		t.Helper()
+		c, err := b.BuildWithin(t.Context(), inc, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len(c.Render()); n > limit {
+			t.Fatalf("context renders to %d bytes, limit %d", n, limit)
+		}
+		return strings.Count(one(t, c, SectionLogs).Text, line)
+	}
+	l := DefaultLimits()
+	sum := l.Summary + l.Status + l.Logs + l.Metrics + l.Git + l.Policy
+	near, above := retained(sum+1), retained(2*sum)
+	if above <= near {
+		t.Errorf("retained %d lines near the section sum and %d above it", near, above)
+	}
+}
+
 // #981: the total a build is given (maxContextBytes) bounds the context in place of the configured one; zero
 // keeps the configured total, and a total outside the settings' range is refused before any read.
 func TestBuildWithinBoundsTheContextAtTheGivenTotal(t *testing.T) {

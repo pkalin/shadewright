@@ -681,14 +681,14 @@ func limits(q string) corev1.ResourceRequirements {
 // value from it (#494).
 func TestTemplateAndRunningPodLimitsAreLabelled(t *testing.T) {
 	d := deployment()
-	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("48Mi")}, {Name: "sidecar"}}
+	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("48Mi")}, {Name: testSidecar}}
 	rs := replicaSet("web-abc", "uid-rs-abc", d, longAgo)
 	ref := controllerRef(kindReplicaSet, rs.Name, rs.UID)
 	old := crashing(pod(crashPod, rs.Labels, longAgo, ref), "exited")
 	old.Spec.Containers = []corev1.Container{{Name: appName, Resources: limits("64Mi")}}
 	c := build(t, newBuilder(t, reader(t, d, rs, old), sources{}, nil), incident(deploymentRef()))
 
-	want := []TemplateContainer{{Name: appName, MemoryLimit: new(resource.MustParse("48Mi"))}, {Name: "sidecar"}}
+	want := []TemplateContainer{{Name: appName, MemoryLimit: new(resource.MustParse("48Mi"))}, {Name: testSidecar}}
 	if len(c.Template) != len(want) {
 		t.Fatalf("template %+v", c.Template)
 	}
@@ -702,7 +702,7 @@ func TestTemplateAndRunningPodLimitsAreLabelled(t *testing.T) {
 	text := one(t, c, SectionStatus).Text
 	for _, line := range []string{
 		"  pod template (the workload's current spec): container app, memory limit 48Mi\n",
-		"  pod template (the workload's current spec): container sidecar, memory limit not set\n",
+		"  pod template (the workload's current spec): container " + testSidecar + ", memory limit not set\n",
 		"; this pod's memory limit 64Mi\n",
 	} {
 		if !strings.Contains(text, line) {

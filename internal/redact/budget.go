@@ -20,9 +20,6 @@ import (
 	"context"
 	"math"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
-
 	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
@@ -30,9 +27,8 @@ import (
 // decision on one entry (a text, the strings of a sequence, the pieces of a tool's answer) and counts its steps
 // where the linearity tests count them (tick). The budget is linear in the size of the entry: WorkPerByte steps
 // per byte and WorkFixed for the fixed cost of a call. An entry that uses it up, or one longer than MaxEntry
-// before any work is done, is withheld whole: the caller gets Withheld and nothing of the entry, and the metric
-// shadewright_redaction_withheld_total counts it by reason. What the rules hide on an entry inside its budget does
-// not change: the budget only ever shows less.
+// before any work is done, is withheld whole: the caller gets Withheld and nothing of the entry, and the withheld
+// hook receives the reason. Entries inside the budget follow the same rules.
 
 const (
 	// WorkPerByte is the steps the budget gives each byte of an entry. It is a bound on work, not a promise that
@@ -81,7 +77,7 @@ const (
 // the text form (String) shows the marker in place of the value, as text.
 const Withheld = "[REDACTED:withheld]"
 
-// Reasons an entry is withheld, the values of the label "reason" of shadewright_redaction_withheld_total.
+// Reasons reported by the withheld hook.
 const (
 	// ReasonWork: the redaction used up its budget.
 	ReasonWork = "work"
@@ -96,21 +92,6 @@ const (
 	ReasonWait = "wait"
 )
 
-// withheldTotal counts the entries withheld, by reason (work, size, heap, wait); every series starts at zero.
-var withheldTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "shadewright_redaction_withheld_total",
-	Help: "Entries redaction withheld whole, by reason (work: the work budget ran out; size: longer than the bound; " +
-		"heap: more pieces or strings than its bytes allow; wait: the wait for the heap limit of redactions at once ended).",
-}, []string{"reason"})
-
-func init() {
-	metrics.Registry.MustRegister(withheldTotal)
-	withheldTotal.WithLabelValues(ReasonWork)
-	withheldTotal.WithLabelValues(ReasonSize)
-	withheldTotal.WithLabelValues(ReasonHeap)
-	withheldTotal.WithLabelValues(ReasonWait)
-}
-
 // PiecesSize is the size of the entry the pieces make, as the budget counts it: the bytes of each piece's text
 // and of its key, as the caller passes them, before anything is written in its Form or made valid UTF-8.
 func PiecesSize(ps []Piece) int {
@@ -121,24 +102,24 @@ func PiecesSize(ps []Piece) int {
 	return size
 }
 
-// OverLargestEntry reports whether an entry of size bytes is larger than LargestEntry, and if so counts it as
-// withheld with ReasonSize: a caller that bounds its entries to LargestEntry withholds such an entry whole before
-// any work, as an entry over MaxEntry is withheld here (#1106).
+// OverLargestEntry reports whether an entry of size bytes is larger than LargestEntry, and if so reports
+// ReasonSize to the default hook. Callers use this check to withhold entries above their measured heap bound
+// before doing any work (#1106).
 func OverLargestEntry(size int) bool {
 	if size <= LargestEntry {
 		return false
 	}
-	withheldTotal.WithLabelValues(ReasonSize).Inc()
+	defaultRedactor.hooks.withheld(ReasonSize)
 	return true
 }
 
 // tooManyParts reports whether an entry of size bytes made of parts pieces (or strings), each standing for
-// perPart bytes, is withheld before any work for the heap they would hold (ReasonHeap), and counts it if so.
-func tooManyParts(parts, size, perPart int) bool {
+// perPart bytes, is withheld before any work for the heap they would hold (ReasonHeap), and reports the refusal.
+func (r *Redactor) tooManyParts(parts, size, perPart int) bool {
 	if parts <= FreePieces+size/perPart {
 		return false
 	}
-	withheldTotal.WithLabelValues(ReasonHeap).Inc()
+	r.hooks.withheld(ReasonHeap)
 	return true
 }
 
@@ -185,42 +166,42 @@ func (r *Redactor) WithContext(ctx context.Context) *Redactor {
 // and true; or the zero value and false when the entry is withheld: longer than MaxEntry or its wait for the heap
 // limit ended (f is not run), or its budget ran out (f stopped).
 func metered[T any](r *Redactor, size int, f func(wm *meter.Meter) T) (out T, ok bool) {
-	ctx := r.ctx
-	if ctx == nil {
-		ctx = context.Background() // the wait ends after maxHeapWait
-	}
-	return meteredOn(ctx, size, r.budgetOf(size), f)
+	return meteredOn(r, size, r.budgetOf(size), f)
 }
 
-// meteredOn is metered with the budget given, its wait for the heap limit ending with ctx or at maxHeapWait.
-func meteredOn[T any](ctx context.Context, size int, steps int64, f func(wm *meter.Meter) T) (out T, ok bool) {
-	out, why := meteredWhy(ctx, size, steps, f)
+// meteredOn is metered with the budget given.
+func meteredOn[T any](r *Redactor, size int, steps int64, f func(wm *meter.Meter) T) (out T, ok bool) {
+	out, why := meteredWhy(r, size, steps, f)
 	return out, why == ""
 }
 
 // meteredWhy is meteredOn with the reason the entry was withheld (ReasonSize, ReasonWait or ReasonWork), or ""
 // when it was decided.
-func meteredWhy[T any](ctx context.Context, size int, steps int64, f func(wm *meter.Meter) T) (out T, why string) {
+func meteredWhy[T any](r *Redactor, size int, steps int64, f func(wm *meter.Meter) T) (out T, why string) {
 	if size > MaxEntry {
-		withheldTotal.WithLabelValues(ReasonSize).Inc()
+		r.hooks.withheld(ReasonSize)
 		return out, ReasonSize
 	}
+	ctx := r.ctx
+	if ctx == nil {
+		ctx = context.Background() // the wait ends after maxHeapWait
+	}
 	// The heap of the redactions running at once (heaplimit.go): given back on every return and on a panic.
-	release, ok := redactionHeap.acquire(ctx, size)
+	release, ok := redactionHeap.acquire(ctx, size, r.hooks.HeapWait)
 	if !ok {
-		withheldTotal.WithLabelValues(ReasonWait).Inc()
+		r.hooks.withheld(ReasonWait)
 		return out, ReasonWait
 	}
 	defer release()
-	if out, ok = onBudget(steps, f); !ok {
+	if out, ok = onBudget(r, steps, f); !ok {
 		return out, ReasonWork
 	}
 	return out, ""
 }
 
-// onBudget runs f on a meter of steps steps and returns its result and true, or the zero value and false, counted
-// as ReasonWork, when the meter ran out.
-func onBudget[T any](steps int64, f func(wm *meter.Meter) T) (out T, ok bool) {
+// onBudget runs f with a budget of steps and returns its result and true. If the budget runs out,
+// it reports ReasonWork and returns the zero value and false.
+func onBudget[T any](r *Redactor, steps int64, f func(wm *meter.Meter) T) (out T, ok bool) {
 	over := false
 	func() {
 		defer meter.Catch(&over)
@@ -228,7 +209,7 @@ func onBudget[T any](steps int64, f func(wm *meter.Meter) T) (out T, ok bool) {
 	}()
 	if over {
 		var zero T
-		withheldTotal.WithLabelValues(ReasonWork).Inc()
+		r.hooks.withheld(ReasonWork)
 		return zero, false
 	}
 	return out, true

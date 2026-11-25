@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+env:
+  GOFLAGS: -mod=readonly
+  GOWORK: off
+
 jobs:
   copilot-setup-steps:
     runs-on: ubuntu-latest

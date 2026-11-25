@@ -39,6 +39,7 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/providers/retryafter"
 	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redactadapter"
 )
 
 // MaxRecordBytes bounds the data of one record. A record holds counts, names and a few redacted sentences.
@@ -168,7 +169,7 @@ func New(cfg Config, opts Options) (*Store, error) {
 	red := opts.Redactor
 	if red == nil {
 		var err error
-		if red, err = redact.New(); err != nil {
+		if red, err = redactadapter.New(); err != nil {
 			return nil, fmt.Errorf("azureblob: the redactor: %w", err)
 		}
 	}

@@ -38,6 +38,7 @@ import (
 	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 	"github.com/shadewright-labs/shadewright/internal/phasegauge"
 	"github.com/shadewright-labs/shadewright/internal/policy"
+	_ "github.com/shadewright-labs/shadewright/internal/redactadapter"
 	"github.com/shadewright-labs/shadewright/internal/testutil/metricguard"
 )
 

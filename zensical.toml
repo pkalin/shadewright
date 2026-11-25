@@ -145,6 +145,7 @@ nav = [
       { "0047 Scoring records outside the cluster" = "adr/0047-scoring-analysis-records-outside-the-cluster.md" },
       { "0048 Redaction in a shared module" = "adr/0048-redaction-in-a-shared-module.md" },
       { "0049 Handoff of code incidents" = "adr/0049-one-way-handoff-of-application-code-incidents.md" },
+      { "0050 Vertex AI model provider" = "adr/0050-vertex-ai-as-a-model-provider.md" },
       { "Template" = "adr/template.md" },
     ] },
     { "The name" = "name.md" },

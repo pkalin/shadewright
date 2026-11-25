@@ -310,3 +310,4 @@ Offline transport tests do not replace scenario qualification.
 ## Amendments
 
 - 2026-11-22 ([#852](https://github.com/shadewright-labs/shadewright/issues/852)): #852, the condition this ADR set for shipping the provider, is built. Model text is stored without control characters and a tool call that holds one is refused, for every provider ([ADR-0023](0023-how-the-analyzer-calls-the-model.md), amendment of that date). Nothing else changes.
+- 2026-11-25: [ADR-0050](0050-vertex-ai-as-a-model-provider.md) (Proposed) would extend the host separation of decision 6 to reserve googleapis.com and its subdomains. A compatible key or Foundry token must never reach Google STS or Vertex. Vertex would reuse decision 7's per-attempt floor, ceiling, refusal and retry rules with its own one-token-per-byte input estimate to cover punctuation-heavy input. The compatible adapter keeps its existing estimate.

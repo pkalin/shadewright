@@ -82,6 +82,7 @@ var _ = Describe("Incident status of the cause rule", func() {
 		inc.Status.Absorbed = []v1alpha1.AbsorbedTally{
 			{Reason: v1alpha1.AbsorbedBackOff, Count: v1alpha1.MaxIncidentCount, LastSeen: seen},
 			{Reason: v1alpha1.AbsorbedUnhealthy, Count: 0, LastSeen: seen},
+			{Reason: v1alpha1.AbsorbedFailed, Count: 4, LastSeen: seen},
 		}
 		inc.Status.AbsorbedOccurrences = occurrences(v1alpha1.MaxOccurrenceRecords)
 		inc.Status.AbsorbedOccurrencesDroppedThrough = &seen
@@ -95,10 +96,27 @@ var _ = Describe("Incident status of the cause rule", func() {
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(inc), got)).To(Succeed())
 		Expect(got.Status.Containers).To(Equal(inc.Status.Containers))
 		Expect(got.Status.Cause).To(BeTrue())
-		Expect(got.Status.Absorbed).To(HaveLen(2))
+		Expect(got.Status.Absorbed).To(HaveLen(3))
 		Expect(got.Status.AbsorbedOccurrences).To(HaveLen(v1alpha1.MaxOccurrenceRecords))
 		Expect(got.Status.AbsorbedOccurrencesDroppedThrough).NotTo(BeNil())
 		Expect(got.Status.FoldedInto).To(Equal(inc.Status.FoldedInto))
+	})
+
+	It("accepts status.consequence alone and refuses it with status.cause", func() {
+		inc := stored()
+		inc.Status.Consequence = true
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+
+		got := &v1alpha1.Incident{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(inc), got)).To(Succeed())
+		Expect(got.Status.Consequence).To(BeTrue())
+
+		both := got.DeepCopy()
+		both.Status.Cause = true
+		expectStatusRefused(both, "cause and consequence cannot both be true")
+
+		got.Status.Consequence = false
+		Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 	})
 
 	DescribeTable("refuses status.containers",
@@ -212,7 +230,7 @@ var _ = Describe("Incident status of the cause rule", func() {
 			"lastSeen", "occurrences", "occurrencesDroppedThrough", "phase", "remediationRequests", "resolvedTime",
 			"revertsProposed"}
 		added := []string{"absorbed", "absorbedOccurrences", "absorbedOccurrencesDroppedThrough", "cause",
-			"containers", "folded", "foldedInto"}
+			"consequence", "containers", "folded", "foldedInto"}
 		Expect(slices.Sorted(maps.Keys(status.Properties))).To(Equal(slices.Sorted(slices.Values(
 			append(slices.Clone(before), added...)))))
 		Expect(status.Required).To(BeEmpty(), "a new field must not be required")

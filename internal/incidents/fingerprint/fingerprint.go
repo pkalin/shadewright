@@ -112,6 +112,16 @@ func Fingerprint(o Observation) string {
 	return Prefix + hex.EncodeToString(h.Sum(nil))
 }
 
+// Scoped binds a fingerprint or occurrence key to a verified pull identity. The length-prefixed
+// fields keep container names and image references separate without storing the image.
+func Scoped(key, container, identity string) string {
+	h := sha256.New()
+	for _, field := range []string{"shadewright.io/pull/v1", key, container, identity} {
+		writeField(h, field)
+	}
+	return Prefix + hex.EncodeToString(h.Sum(nil))
+}
+
 func writeField(h hash.Hash, field string) {
 	var n [8]byte
 	binary.BigEndian.PutUint64(n[:], uint64(len(field)))

@@ -48,6 +48,8 @@ func absorbedReason(reason string) (remediationv1alpha1.AbsorbedReason, bool) {
 		return remediationv1alpha1.AbsorbedBackOff, true
 	case remediationv1alpha1.AbsorbedUnhealthy:
 		return remediationv1alpha1.AbsorbedUnhealthy, true
+	case remediationv1alpha1.AbsorbedFailed:
+		return remediationv1alpha1.AbsorbedFailed, true
 	}
 	return "", false
 }
@@ -223,7 +225,7 @@ func (c *Controller) absorbHeldFor(ctx context.Context, cause string) bool {
 // counted, as in [Controller.count]. It reports what consume does. The caller holds mu.
 func (c *Controller) absorb(ctx context.Context, o collector.Observation, name string,
 	spec remediationv1alpha1.IncidentSpec, reason remediationv1alpha1.AbsorbedReason) bool {
-	fp := o.CauseFingerprint
+	fp := spec.Fingerprint
 	b := c.pending[fp]
 	if _, ok := b.occurrenceOf(o.Occurrence); !ok {
 		if c.full(fp, o.Source) {

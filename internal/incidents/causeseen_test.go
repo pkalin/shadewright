@@ -393,7 +393,7 @@ func TestCauseResolvedLongAgoIsNotSeen(t *testing.T) {
 			c.OnCauseSeen(func(f string) { told = append(told, f) })
 			// The cause's Incident as a listing shows it: stored, a cause, Resolved at t0.
 			name := Name(fp(heldCauseF))
-			c.names[name] = struct{}{}
+			c.names[name] = false
 			c.causes[name] = causeIncident{spec: specOf(causeOf(heldCauseF, t0))}
 			c.resolvedAt[name] = t0
 			clock.set(t0.Add(48 * time.Hour))

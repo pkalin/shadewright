@@ -59,7 +59,7 @@ limitations under the License.
 // JSON response type. The caller validates every answer against its full schema.
 //
 // Output bound. generationConfig.maxOutputTokens is [Provider.OutputSpend] of the request's limit: the limit
-// plus Config.ThinkingAllowance (default 4096 tokens, zero allowed when set explicitly), and
+// plus Config.ThinkingAllowance (default 4096 tokens; zero allowed when set explicitly, except for Pro; at most 24576 for Flash and Flash-Lite), and
 // thinkingConfig.thinkingBudget is the allowance, so thinking cannot use up the room of the answer while one
 // billed cap bounds candidate and thinking tokens together.
 //

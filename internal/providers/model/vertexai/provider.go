@@ -151,7 +151,8 @@ type Config struct {
 	// DefaultMaxOutputTokens; at most MaxOutputTokens.
 	MaxOutputTokens int
 	// ThinkingAllowance is added to the request's output limit in maxOutputTokens and sent as the thinking
-	// budget. Nil means DefaultThinkingAllowance; zero is allowed when set; at most MaxThinkingAllowance.
+	// budget. Nil means DefaultThinkingAllowance; zero is allowed when set, except for Pro, which cannot turn
+	// thinking off; at most MaxThinkingAllowance, and 24576 for Flash and Flash-Lite.
 	ThinkingAllowance *int
 	// MaxAttempts bounds the attempts of one call. Zero means DefaultMaxAttempts; at most MaxAttempts.
 	MaxAttempts int
@@ -235,6 +236,9 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	}
 	if thinking < 0 || thinking > MaxThinkingAllowance {
 		return nil, invalid("the thinking allowance is out of range")
+	}
+	if err := checkThinking(cfg.Model, thinking); err != nil {
+		return nil, invalid(err.Error())
 	}
 	if cfg.MaxAttempts < 0 || cfg.MaxAttempts > MaxAttempts {
 		return nil, invalid("the attempt count is out of range")
@@ -342,6 +346,21 @@ func checkModel(model, location string) error {
 	return nil
 }
 
+// maxFlashThinking is the largest thinking budget Gemini 2.5 Flash and Flash-Lite accept.
+const maxFlashThinking = 24576
+
+// checkThinking checks the thinking budget against the model: Pro cannot turn thinking off, and Flash and
+// Flash-Lite stop below the adapter's general maximum. The returned error text is fixed.
+func checkThinking(model string, budget int) error {
+	switch {
+	case strings.HasPrefix(model, "gemini-2.5-pro") && budget == 0:
+		return errors.New("the model cannot turn thinking off, so its thinking allowance cannot be zero")
+	case !strings.HasPrefix(model, "gemini-2.5-pro") && budget > maxFlashThinking:
+		return errors.New("the thinking allowance is above what the model accepts")
+	}
+	return nil
+}
+
 // generateURL builds the generateContent URL from the validated project, location and model.
 func generateURL(project, location, model string) string {
 	u := url.URL{
@@ -407,7 +426,7 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 	unknown := false
 	// sent is set once any attempt handed its request to the HTTP client; until then nothing can be billed.
 	sent := false
-	done := func(c providers.Completion, attempts int, err error) (providers.Completion, int, error) {
+	finish := func(c providers.Completion, attempts int, err error) (providers.Completion, int, error) {
 		c.UsageUnknown = c.UsageUnknown || unknown
 		if !sent {
 			err = providers.NotSent(err)
@@ -415,15 +434,26 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 		return c, attempts, err
 	}
 	for attempt := 0; ; attempt++ {
-		data, billed, attemptSent, err := p.once(ctx, body)
+		var tok string
+		data, billed, attemptSent, err := p.once(ctx, body, &tok)
 		sent = sent || attemptSent
+		// A reply may echo the bearer token: it is never reported as the model.
+		done := func(c providers.Completion, attempts int, err error) (providers.Completion, int, error) {
+			if tok != "" && strings.Contains(c.Model, tok) {
+				c.Model = ""
+			}
+			return finish(c, attempts, err)
+		}
 		if err == nil {
-			c, perr := parseResponse(data, p.model, offered, len(req.ResponseSchema) > 0)
+			// No schema went on the wire when tools were offered, so none is checked here either.
+			c, perr := parseResponse(data, p.model, offered, len(req.ResponseSchema) > 0 && len(req.Tools) == 0)
 			if bound := p.OutputSpend(req.MaxOutputTokens); perr == nil && c.Usage.OutputTokens > int64(bound) {
 				// One billed cap covers candidate and thinking tokens (ADR-0050 decision 6): a reply that
 				// reports more broke it. Its usage stays on the completion, so that it is still charged.
 				perr = fmt.Errorf("vertexai: the reply reports more output tokens than the call allowed: %w",
 					providers.ErrMalformedOutput)
+				// The refused reply exposes only what is charged: usage and model.
+				c = providers.Completion{Usage: c.Usage, Model: c.Model}
 			}
 			return done(c, attempt+1, perr)
 		}
@@ -458,7 +488,7 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 // an error, data is the body when it was read whole within the bound, so that its usage can still be read,
 // and nil otherwise. sent is false only when the attempt ended before the request was handed to the HTTP
 // client.
-func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed, sent bool, err error) {
+func (p *Provider) once(ctx context.Context, body []byte, tokOut *string) (data []byte, billed, sent bool, err error) {
 	if ctx.Err() != nil {
 		return nil, false, false, ctxError(ctx)
 	}
@@ -471,6 +501,7 @@ func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed, 
 	if err := checkToken(tok); err != nil {
 		return nil, false, false, err
 	}
+	*tokOut = tok // so that a reply echoing it can be scrubbed
 	if actx.Err() != nil {
 		// The deadline or the cancellation came while the token was fetched: nothing was handed to the client.
 		return nil, false, false, transportError(ctx, actx.Err())
@@ -498,8 +529,9 @@ func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed, 
 	if resp.StatusCode != http.StatusOK {
 		// The body of an error may quote the request: it is drained, never read into an error.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
-		if actx.Err() != nil {
-			return nil, false, true, transportError(ctx, actx.Err())
+		if ctx.Err() != nil {
+			// Only the call's own end wins: the status is known, so a stalled body is not a timeout.
+			return nil, false, true, transportError(ctx, ctx.Err())
 		}
 		return nil, false, true, statusError(resp, p.now())
 	}

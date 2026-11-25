@@ -19,6 +19,7 @@ package vertexai
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -226,7 +227,7 @@ func callPart(id, name, args string) string {
 	if id != "" {
 		fc = `"id":"` + id + `",` + fc
 	}
-	return `{"functionCall":{` + fc + `},"thoughtSignature":"c2lnLQ==` + name + id + `"}`
+	return `{"functionCall":{` + fc + `},"thoughtSignature":"` + base64.StdEncoding.EncodeToString([]byte("sig-"+name+id)) + `"}`
 }
 
 func structuredRequest() providers.CompletionRequest {
@@ -379,7 +380,7 @@ func TestNewEndpointCorpus(t *testing.T) {
 // Models across every allowed location: only Gemini 2.5 IDs are accepted, Gemini 3 and others are refused,
 // and Flash-Lite is refused where the region does not serve it.
 func TestNewModelCorpus(t *testing.T) {
-	valid := []string{"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-flash-001",
+	valid := []string{modelPro, testModel, modelLite, "gemini-2.5-flash-001",
 		"gemini-2.5-pro-preview-06-2025", "gemini-2.5-flash-lite-002"}
 	invalid := []string{"", "gemini-3-pro-preview", "gemini-3.0-flash", "gemini-3", "gemini-2.0-flash",
 		"gemini-1.5-pro", "gemini-2.5-flash-image", "Gemini-2.5-flash", "gemini-2.5-flash/../x", "gemini-2.5-flash ",
@@ -544,7 +545,12 @@ func TestOutputSpendIsSentAndBounded(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			gc = body.GenerationConfig
 			reply(w, replyJSON(`[{"text":"{}"}]`))
-		}, func(c *Config) { c.ThinkingAllowance = tc.allowance })
+		}, func(c *Config) {
+			c.ThinkingAllowance = tc.allowance
+			if tc.allowance != nil && *tc.allowance > maxFlashThinking {
+				c.Model = modelPro // the only model that takes the largest allowance
+			}
+		})
 		if got := h.p.OutputSpend(tc.limit); got != tc.want {
 			t.Errorf("allowance %v, limit %d: OutputSpend = %d, want %d", tc.allowance, tc.limit, got, tc.want)
 		}

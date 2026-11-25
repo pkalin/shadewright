@@ -18,6 +18,7 @@ package vertexai
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -128,7 +129,7 @@ type (
 	generateResponse struct {
 		Candidates    json.RawMessage `json:"candidates"`
 		UsageMetadata *usageMetadata  `json:"usageMetadata"`
-		ModelVersion  string          `json:"modelVersion"`
+		ModelVersion  json.RawMessage `json:"modelVersion"`
 	}
 	candidate struct {
 		Content      *replyContent `json:"content"`
@@ -525,10 +526,11 @@ func parseResponse(data []byte, model string, offered map[string]bool, structure
 	if !ok {
 		return unknown, malformed("the reply has no usage, or its usage is out of range or inconsistent")
 	}
-	if !validModel(r.ModelVersion) {
+	version := modelVersionOf(r.ModelVersion)
+	if !validModel(version) {
 		return providers.Completion{Usage: u}, malformed("the reply names no valid model version")
 	}
-	billed := providers.Completion{Usage: u, Model: r.ModelVersion}
+	billed := providers.Completion{Usage: u, Model: version}
 	fail := func(msg string) (providers.Completion, error) { return billed, malformed(msg) }
 
 	var cands []candidate
@@ -589,7 +591,7 @@ func parseResponse(data []byte, model string, offered map[string]bool, structure
 			return fail("the reply is not the JSON object the response schema asks for")
 		}
 	}
-	c := providers.Completion{Content: answer, ToolCalls: calls, Usage: u, Model: r.ModelVersion}
+	c := providers.Completion{Content: answer, ToolCalls: calls, Usage: u, Model: version}
 	if len(calls) > 0 {
 		// Every part goes back on the next turn of the tool loop, thoughts and signatures included and unchanged.
 		c.ProviderBlocks = providers.NewOpaque(encodeBlocks(model, cand.Content.Parts))
@@ -646,10 +648,24 @@ func decodePart(raw json.RawMessage) (replyPart, error) {
 	if (pt.Text == nil) == (pt.FunctionCall == nil) {
 		return replyPart{}, errors.New("a part is not either text or a function call")
 	}
+	if pt.ThoughtSignature != nil && !validSignature(*pt.ThoughtSignature) {
+		return replyPart{}, errors.New("a thought signature is not base64")
+	}
 	if pt.FunctionCall != nil && pt.Thought != nil && *pt.Thought {
 		return replyPart{}, errors.New("a function call is marked as a thought")
 	}
 	return pt, nil
+}
+
+// validSignature reports whether s is base64, in the standard or the URL-safe alphabet with or without padding:
+// the thought signature is a bytes field, and a value Vertex cannot decode would be rejected on the next turn.
+func validSignature(s string) bool {
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if _, err := enc.DecodeString(s); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // callOf checks a function call at position k of its reply and returns it as a tool call: the reply's ID, or
@@ -712,6 +728,16 @@ func usageOf(u *usageMetadata) (providers.Usage, bool) {
 	return providers.Usage{InputTokens: input, CachedInputTokens: u.CachedContentTokenCount, OutputTokens: output}, true
 }
 
+// modelVersionOf reads a modelVersion that was kept raw, so that one of the wrong type costs the reply its model
+// and not the usage it reported. It returns "" unless the value is a JSON string.
+func modelVersionOf(raw json.RawMessage) string {
+	var v string
+	if json.Unmarshal(raw, &v) != nil {
+		return ""
+	}
+	return v
+}
+
 func validModel(m string) bool { return len(m) <= maxModelName && modelVersionPattern.MatchString(m) }
 
 // billedUsage reads only the usage and model version of a 200 reply that was refused before it was parsed (a
@@ -719,8 +745,8 @@ func validModel(m string) bool { return len(m) <= maxModelName && modelVersionPa
 // it was not read whole. Without a usable usage the Completion says UsageUnknown.
 func billedUsage(data []byte) providers.Completion {
 	var r struct {
-		ModelVersion  string         `json:"modelVersion"`
-		UsageMetadata *usageMetadata `json:"usageMetadata"`
+		ModelVersion  json.RawMessage `json:"modelVersion"`
+		UsageMetadata *usageMetadata  `json:"usageMetadata"`
 	}
 	if data == nil || !uniqueKeys(data) || json.Unmarshal(data, &r) != nil {
 		return providers.Completion{UsageUnknown: true}
@@ -730,8 +756,8 @@ func billedUsage(data []byte) providers.Completion {
 		return providers.Completion{UsageUnknown: true}
 	}
 	c := providers.Completion{Usage: u}
-	if validModel(r.ModelVersion) {
-		c.Model = r.ModelVersion
+	if v := modelVersionOf(r.ModelVersion); validModel(v) {
+		c.Model = v
 	}
 	return c
 }

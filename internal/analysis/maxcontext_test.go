@@ -215,6 +215,11 @@ func TestMaxContextBytesBoundsRenderedMessage(t *testing.T) {
 		})
 	}
 
+	testAppendedTextContextBounds(t, scheme, red, now)
+}
+
+func testAppendedTextContextBounds(t *testing.T, scheme *runtime.Scheme, red *redact.Redactor, now time.Time) {
+	t.Helper()
 	for _, tc := range []struct {
 		name     string
 		hint     string

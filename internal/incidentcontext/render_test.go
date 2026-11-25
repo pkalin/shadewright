@@ -28,6 +28,8 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
+const testSidecar = "sidecar"
+
 func TestKeepTailRenderedKeepsLongestFittingSuffix(t *testing.T) {
 	const head = "hdr\n"
 	want := "certificate expired\ncontext\n" + strings.Repeat(strings.Repeat(" ", 100)+"\n", 2) + "block\nend\n"
@@ -59,9 +61,9 @@ func TestTotalCutKeepsWithheldLogTitleAndNotice(t *testing.T) {
 	src.logs.Set(key, strings.Repeat(strings.Repeat("<", 50)+"\n", 100)+"tail-marker\n")
 	objs := webObjects()
 	crash := objs[2].(*corev1.Pod)
-	crash.Status.ContainerStatuses = append(crash.Status.ContainerStatuses, corev1.ContainerStatus{Name: "sidecar"})
+	crash.Status.ContainerStatuses = append(crash.Status.ContainerStatuses, corev1.ContainerStatus{Name: testSidecar})
 	b := newBuilder(t, reader(t, objs...), src, func(c *Config) {
-		c.Logs = logsWithWithheldRead{src.logs, fake.LogKey{Namespace: testNS, Pod: crashPod, Container: "sidecar"}}
+		c.Logs = logsWithWithheldRead{src.logs, fake.LogKey{Namespace: testNS, Pod: crashPod, Container: testSidecar}}
 	})
 	c, err := b.BuildWithin(t.Context(), incident(deploymentRef()), MinTotalBytes)
 	if err != nil {
@@ -72,7 +74,7 @@ func TestTotalCutKeepsWithheldLogTitleAndNotice(t *testing.T) {
 	}
 	for _, blk := range c.Blocks {
 		if blk.Section == SectionLogs && hasLabel(blk, LabelWithheld) {
-			want := "pod " + crashPod + " container sidecar, current instance\ncould not fetch: withheld by redaction\n"
+			want := "pod " + crashPod + " container " + testSidecar + ", current instance\ncould not fetch: withheld by redaction\n"
 			if blk.Text != want || blk.Availability != CouldNotFetch || len(blk.Data()) != 0 {
 				t.Errorf("withheld log block has text %q, availability %q and %d evidence entries", blk.Text, blk.Availability, len(blk.Data()))
 			}

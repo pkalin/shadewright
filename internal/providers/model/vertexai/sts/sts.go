@@ -122,6 +122,8 @@ type Source struct {
 	now                                              func() time.Time
 	// timeout bounds one exchange; exchangeTimeout outside tests.
 	timeout time.Duration
+	// readFile reads the token file; readTokenFile outside tests.
+	readFile func(path string) (string, error)
 
 	// mu guards the fields below; it is never held across the network or a file read.
 	mu        sync.Mutex
@@ -165,6 +167,10 @@ func newSource(cfg Config, rt http.RoundTripper) (*Source, error) {
 	client := openaiwire.NewHTTPClient(exchangeTimeout, openaiwire.Guard{InCluster: slices.Clone(cfg.InClusterRanges)})
 	if tr, ok := client.Transport.(*http.Transport); ok {
 		onlyHTTP1(tr)
+		// One exchange per connection, closed after the response: net/http logs the first bytes of anything
+		// a server sends on an idle connection past the declared Content-Length, and that could be the token.
+		// A closed connection is never read again. An exchange happens about once an hour.
+		tr.DisableKeepAlives = true
 	}
 	if rt != nil {
 		client.Transport = rt
@@ -172,7 +178,7 @@ func newSource(cfg Config, rt http.RoundTripper) (*Source, error) {
 	return &Source{
 		audience: cfg.Audience, tokenFile: cfg.TokenFile, subject: cfg.Subject,
 		projectionAudience: cfg.ProjectionAudience,
-		tokenURL:           TokenURL, client: client, now: time.Now, timeout: exchangeTimeout,
+		tokenURL:           TokenURL, client: client, now: time.Now, timeout: exchangeTimeout, readFile: readTokenFile,
 	}, nil
 }
 
@@ -304,8 +310,13 @@ func (s *Source) Token(ctx context.Context) (string, error) {
 // run performs one exchange for every caller waiting on call, and caches its token.
 func (s *Source) run(ctx context.Context, call *exchangeCall) {
 	defer call.cancel()
-	tok, refreshAt, err := s.exchange(ctx)
+	tok, refreshAt, freshUntil, err := s.exchange(ctx)
 	s.mu.Lock()
+	if err == nil && !s.now().Before(freshUntil) {
+		// The response body was still closing when the token went stale: every waiter, one that joined meanwhile
+		// included, gets a retryable error, not a token that is already expired or inside its refresh margin.
+		tok, err = "", &providers.RetryableError{Err: errors.New("sts: the access token was stale when it arrived")}
+	}
 	if s.inflight == call {
 		if err == nil {
 			s.token, s.refreshAt = tok, refreshAt
@@ -335,13 +346,33 @@ func refreshMargin(lifetime time.Duration) time.Duration {
 
 // exchange returns a new access token and the time to replace it. ctx ends only when every caller waiting
 // for it has left (see Token); the exchange is bounded by exchangeTimeout.
-func (s *Source) exchange(ctx context.Context) (string, time.Time, error) {
-	assertion, err := readTokenFile(s.tokenFile)
-	if err != nil {
-		return "", time.Time{}, &providers.RetryableError{Err: fmt.Errorf("sts: %w", err)}
+func (s *Source) exchange(ctx context.Context) (_ string, refreshAt, freshUntil time.Time, err error) {
+	// The deadline starts before the token file is read: O_NONBLOCK does not bound the read of a regular file,
+	// and a stalled filesystem must not hold every waiter. The read runs on its own goroutine, which ends
+	// when the read does and whose result is then dropped.
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	type fileResult struct {
+		token string
+		err   error
+	}
+	read := make(chan fileResult, 1)
+	go func() {
+		tok, err := s.readFile(s.tokenFile)
+		read <- fileResult{tok, err}
+	}()
+	var assertion string
+	select {
+	case r := <-read:
+		if r.err != nil {
+			return "", time.Time{}, time.Time{}, &providers.RetryableError{Err: fmt.Errorf("sts: %w", r.err)}
+		}
+		assertion = r.token
+	case <-ctx.Done():
+		return "", time.Time{}, time.Time{}, ctxError(ctx)
 	}
 	if err := s.checkAssertion(assertion); err != nil {
-		return "", time.Time{}, err
+		return "", time.Time{}, time.Time{}, err
 	}
 	form := url.Values{
 		"grant_type":           {grantTokenExchange},
@@ -351,77 +382,108 @@ func (s *Source) exchange(ctx context.Context) (string, time.Time, error) {
 		"subject_token_type":   {typeJWT},
 		"subject_token":        {assertion},
 	}
-	ctx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", time.Time{}, errors.New("sts: could not build the token request")
+		return "", time.Time{}, time.Time{}, errors.New("sts: could not build the token request")
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	projectionExp, hasProjectionExp := projectionExpiry(assertion)
 	start := s.now()
-	resp, err := s.client.Do(req)
+	resp, err := noRedirect(s.client).Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", time.Time{}, ctxError(ctx)
+			return "", time.Time{}, time.Time{}, ctxError(ctx)
 		}
-		return "", time.Time{}, &providers.RetryableError{Err: errors.New("sts: no answer from Google STS")}
+		return "", time.Time{}, time.Time{}, &providers.RetryableError{Err: errors.New("sts: no answer from Google STS")}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if ctx.Err() != nil {
 		// net/http can return an answer that raced the end of the exchange's context: every waiter left, or
 		// exchangeTimeout passed. The end came first: no status of it is classified and no token of it is
 		// cached.
-		return "", time.Time{}, ctxError(ctx)
+		return "", time.Time{}, time.Time{}, ctxError(ctx)
 	}
 	switch code := resp.StatusCode; {
-	case code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500:
+	case code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || (code >= 500 && code < 600):
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
 		if ctx.Err() != nil {
-			return "", time.Time{}, ctxError(ctx)
+			return "", time.Time{}, time.Time{}, ctxError(ctx)
 		}
-		return "", time.Time{}, &providers.RetryableError{Err: fmt.Errorf("sts: Google STS returned status %d", code)}
+		return "", time.Time{}, time.Time{}, &providers.RetryableError{Err: fmt.Errorf("sts: Google STS returned status %d", code)}
 	case code != http.StatusOK:
 		// The body may quote the request: it is drained, never read into an error. When the deadline or a
 		// cancellation ended the drain, that end is reported, not the refusal it interrupted.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
 		if ctx.Err() != nil {
-			return "", time.Time{}, ctxError(ctx)
+			return "", time.Time{}, time.Time{}, ctxError(ctx)
 		}
-		return "", time.Time{}, fmt.Errorf("sts: Google STS refused the token request with status %d: %w",
+		return "", time.Time{}, time.Time{}, fmt.Errorf("sts: Google STS refused the token request with status %d: %w",
 			code, providers.ErrForbidden)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponse+1))
 	if ctx.Err() != nil {
 		// The end of the exchange interrupted the read: report that end, not a read error.
-		return "", time.Time{}, ctxError(ctx)
+		return "", time.Time{}, time.Time{}, ctxError(ctx)
 	}
 	if err != nil || len(data) > maxTokenResponse {
-		return "", time.Time{}, &providers.RetryableError{Err: errors.New("sts: the answer of Google STS could not be read")}
+		return "", time.Time{}, time.Time{}, &providers.RetryableError{Err: errors.New("sts: the answer of Google STS could not be read")}
 	}
 	var body struct {
-		AccessToken     string `json:"access_token"`
-		IssuedTokenType string `json:"issued_token_type"`
-		TokenType       string `json:"token_type"`
-		ExpiresIn       int64  `json:"expires_in"`
+		AccessToken string `json:"access_token"`
+		// Raw: a field that is present, empty or null included, must name the access token type.
+		IssuedTokenType json.RawMessage `json:"issued_token_type"`
+		TokenType       string          `json:"token_type"`
+		ExpiresIn       int64           `json:"expires_in"`
 	}
 	if err := json.Unmarshal(data, &body); err != nil || !strings.EqualFold(body.TokenType, "Bearer") ||
-		(body.IssuedTokenType != "" && body.IssuedTokenType != typeAccessToken) || body.ExpiresIn <= 0 ||
+		!issuedTypeUsable(body.IssuedTokenType) || body.ExpiresIn <= 0 ||
 		!printable(body.AccessToken, maxAccessToken) {
-		return "", time.Time{}, &providers.RetryableError{Err: errors.New("sts: the answer of Google STS could not be used")}
+		return "", time.Time{}, time.Time{}, &providers.RetryableError{Err: errors.New("sts: the answer of Google STS could not be used")}
 	}
 	lifetime := time.Duration(min(body.ExpiresIn, int64(maxLifetime/time.Second))) * time.Second
-	refreshAt := start.Add(lifetime - refreshMargin(lifetime))
+	refreshAt = start.Add(lifetime - refreshMargin(lifetime))
 	projRefresh := projectionRefreshAt(start, projectionExp, hasProjectionExp)
-	if !s.now().Before(refreshAt) || (projRefresh.After(start) && !s.now().Before(projRefresh)) {
+	freshUntil = refreshAt
+	if projRefresh.After(start) {
+		freshUntil = earlier(refreshAt, projRefresh)
+	}
+	if !s.now().Before(freshUntil) {
 		// The lifetime counts from the request, so a slow answer has used part of it: a token already expired
 		// or inside its refresh margin is not handed out. The same holds for the projected token it was
 		// exchanged for, when that was still usable at the request: its expiry is a bound too. A projection
 		// already expired at the request is left to STS and is never cached.
-		return "", time.Time{}, &providers.RetryableError{Err: errors.New("sts: the access token was stale when it arrived")}
+		return "", time.Time{}, time.Time{}, &providers.RetryableError{Err: errors.New("sts: the access token was stale when it arrived")}
 	}
-	return body.AccessToken, earlier(refreshAt, projRefresh), nil
+	return body.AccessToken, earlier(refreshAt, projRefresh), freshUntil, nil
+}
+
+// noRedirect returns a copy of c that never reads a Location header. net/http parses Location before it asks
+// CheckRedirect, so a redirect with an unparsable one would fail as a transport error and be retried. Without a
+// Location the response comes back as it is, and its status is refused like any other.
+func noRedirect(c *http.Client) *http.Client {
+	cp := *c
+	cp.Transport = withoutLocation{c.Transport}
+	return &cp
+}
+
+type withoutLocation struct{ next http.RoundTripper }
+
+func (w withoutLocation) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := w.next.RoundTrip(req)
+	if resp != nil {
+		resp.Header.Del("Location")
+	}
+	return resp, err
+}
+
+// issuedTypeUsable accepts an absent issued_token_type, or one that is exactly the access token type.
+func issuedTypeUsable(raw json.RawMessage) bool {
+	if raw == nil {
+		return true
+	}
+	var typ string
+	return json.Unmarshal(raw, &typ) == nil && typ == typeAccessToken
 }
 
 func earlier(a, b time.Time) time.Time {
@@ -529,7 +591,8 @@ func decodeAllClaims(tok string) (sub string, auds []string, exp any, ok bool) {
 	return sub, auds, exp, haveSub
 }
 
-// jwtPayload returns the decoded payload of a compact JWT, whose bytes are all base64url or dots.
+// jwtPayload returns the decoded payload of a compact JWT, whose bytes are all base64url or dots and whose
+// header is a JSON object.
 func jwtPayload(tok string) ([]byte, bool) {
 	for i := range len(tok) {
 		if !base64URLOrDot(tok[i]) {
@@ -546,7 +609,14 @@ func jwtPayload(tok string) ([]byte, bool) {
 		if err != nil || p == "" {
 			return nil, false
 		}
-		if i == 1 {
+		switch i {
+		case 0:
+			// The header must be one JSON object, as the payload is: anything else is not a JWT.
+			var header map[string]json.RawMessage
+			if json.Unmarshal(b, &header) != nil || header == nil {
+				return nil, false
+			}
+		case 1:
 			payload = b
 		}
 	}

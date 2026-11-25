@@ -60,6 +60,10 @@ const (
 	testHeader = `{"alg":"RS256","kid":"k1"}`
 )
 
+// fixtureExp is the exp of the shared projected token: far enough ahead of the run that a test's clock,
+// real or fake, is inside it.
+var fixtureExp = time.Now().AddDate(20, 0, 0).Unix()
+
 // encodeJWT builds a compact JWT with the test header around payload.
 func encodeJWT(payload string) string {
 	enc := base64.RawURLEncoding.EncodeToString
@@ -69,7 +73,7 @@ func encodeJWT(payload string) string {
 // claimsJSON is the payload of a projected token for sub and aud (a string or a list).
 func claimsJSON(sub string, aud any) string {
 	b, err := json.Marshal(map[string]any{
-		"iss": "https://oidc.example", "sub": sub, "aud": aud, "exp": 1900000000, "mark": claimMark,
+		"iss": "https://oidc.example", "sub": sub, "aud": aud, "exp": fixtureExp, "mark": claimMark,
 	})
 	if err != nil {
 		panic(err)
@@ -521,8 +525,27 @@ func TestRedirectIsNotFollowed(t *testing.T) {
 	assertNoLeak(t, err, cfg)
 }
 
+// A 3xx whose Location cannot be parsed fails inside net/http before CheckRedirect runs; it is still a
+// redirect, refused and not retried.
+func TestMalformedRedirectIsRefused(t *testing.T) {
+	for _, loc := range []string{"%", "http://[::1"} {
+		t.Run(loc, func(t *testing.T) {
+			s, _, cfg := harness(t, func(rw http.ResponseWriter, r *http.Request) {
+				rw.Header().Set("Location", loc)
+				rw.WriteHeader(http.StatusFound)
+				_, _ = io.WriteString(rw, bodyMark)
+			})
+			_, err := s.Token(context.Background())
+			if !providers.IsForbidden(err) || providers.IsRetryable(err) {
+				t.Fatalf("err = %v, want forbidden", err)
+			}
+			assertNoLeak(t, err, cfg)
+		})
+	}
+}
+
 func TestStatusClasses(t *testing.T) {
-	answer := func(tok, issued, typ string, exp any) string {
+	answer := func(tok string, issued any, typ string, exp any) string {
 		b, _ := json.Marshal(map[string]any{"access_token": tok, "issued_token_type": issued, "token_type": typ, "expires_in": exp})
 		return string(b)
 	}
@@ -540,6 +563,8 @@ func TestStatusClasses(t *testing.T) {
 		"throttled":         {status: http.StatusTooManyRequests, body: bodyMark, retryable: true},
 		"server error":      {status: http.StatusInternalServerError, body: bodyMark, retryable: true},
 		"unavailable":       {status: http.StatusServiceUnavailable, body: bodyMark, retryable: true},
+		"status 600":        {status: 600, body: bodyMark, forbidden: true},
+		"status 999":        {status: 999, body: bodyMark, forbidden: true},
 		"not JSON":          {status: http.StatusOK, body: bodyMark, retryable: true},
 		"no token":          {status: http.StatusOK, body: `{"token_type":"Bearer","expires_in":3600}`, retryable: true},
 		"empty token":       {status: http.StatusOK, body: answer("", typeAccessToken, "Bearer", 3600), retryable: true},
@@ -548,6 +573,8 @@ func TestStatusClasses(t *testing.T) {
 		"oversized token":   {status: http.StatusOK, body: answer(issuedMark+strings.Repeat("a", maxAccessToken), typeAccessToken, "Bearer", 3600), retryable: true},
 		"wrong type":        {status: http.StatusOK, body: answer(issuedMark, typeAccessToken, "pop", 3600), retryable: true},
 		"wrong issued type": {status: http.StatusOK, body: answer(issuedMark, typeJWT, "Bearer", 3600), retryable: true},
+		"empty issued type": {status: http.StatusOK, body: answer(issuedMark, "", "Bearer", 3600), retryable: true},
+		"null issued type":  {status: http.StatusOK, body: answer(issuedMark, nil, "Bearer", 3600), retryable: true},
 		"no expiry":         {status: http.StatusOK, body: answer(issuedMark, typeAccessToken, "Bearer", 0), retryable: true},
 		"negative expiry":   {status: http.StatusOK, body: answer(issuedMark, typeAccessToken, "Bearer", -5), retryable: true},
 		"expiry as text":    {status: http.StatusOK, body: answer(issuedMark, typeAccessToken, "Bearer", "3600"), retryable: true},
@@ -627,17 +654,28 @@ func TestTokenFileProblemsAreRetryable(t *testing.T) {
 // A token of another ServiceAccount, for the Azure audience or for more than one audience is refused before
 // anything is sent.
 func TestAssertionRefusedLocally(t *testing.T) {
-	for name, payload := range map[string]string{
-		"another ServiceAccount": claimsJSON("system:serviceaccount:shadewright-system:other", []string{testProjection}),
-		"another namespace":      claimsJSON("system:serviceaccount:default:shadewright-analyzer", testProjection),
-		"Azure audience":         claimsJSON(testSubject, []string{AzureExchangeAudience}),
-		"Azure and Google":       claimsJSON(testSubject, []string{testProjection, AzureExchangeAudience}),
-		"another audience":       claimsJSON(testSubject, "https://kubernetes.default.svc"),
-		"two audiences":          claimsJSON(testSubject, []string{testProjection, "https://kubernetes.default.svc"}),
+	good := claimsJSON(testSubject, []string{testProjection})
+	for name, tc := range map[string]struct{ header, payload string }{
+		"another ServiceAccount": {payload: claimsJSON("system:serviceaccount:shadewright-system:other", []string{testProjection})},
+		"another namespace":      {payload: claimsJSON("system:serviceaccount:default:shadewright-analyzer", testProjection)},
+		"Azure audience":         {payload: claimsJSON(testSubject, []string{AzureExchangeAudience})},
+		"Azure and Google":       {payload: claimsJSON(testSubject, []string{testProjection, AzureExchangeAudience})},
+		"another audience":       {payload: claimsJSON(testSubject, "https://kubernetes.default.svc")},
+		"two audiences":          {payload: claimsJSON(testSubject, []string{testProjection, "https://kubernetes.default.svc"})},
+		"header not JSON":        {header: "not json", payload: good},
+		"header an array":        {header: `["RS256"]`, payload: good},
+		"header a string":        {header: `"RS256"`, payload: good},
+		"header null":            {header: " null ", payload: good},
+		"header with trailing":   {header: `{"alg":"RS256"} {}`, payload: good},
 	} {
+		header, payload := tc.header, tc.payload
 		t.Run(name, func(t *testing.T) {
 			s, n, cfg := harness(t, func(rw http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(rw, stsAnswer(3600)) })
 			jwt := encodeJWT(payload)
+			if header != "" {
+				enc := base64.RawURLEncoding.EncodeToString
+				jwt = enc([]byte(header)) + "." + enc([]byte(payload)) + "." + enc([]byte("signature"))
+			}
 			writeFile(t, cfg.TokenFile, jwt)
 			_, err := s.Token(context.Background())
 			if !providers.IsForbidden(err) || providers.IsRetryable(err) {
@@ -856,7 +894,8 @@ func TestRefreshMargin(t *testing.T) {
 	} {
 		t.Run(fmt.Sprint(tc.expiresIn), func(t *testing.T) {
 			s, n := countingSource(t, tc.expiresIn, goodJWT())
-			start := time.Now()
+			// A fake clock fixed in 2030: the cache must not depend on the date the test runs.
+			start := time.Unix(1900000001, 0)
 			now := start
 			s.now = func() time.Time { return now }
 			for range 3 {
@@ -1523,4 +1562,152 @@ func TestRotatedTokenFileIsUsedByTheNextExchange(t *testing.T) {
 	if len(sent) != 2 || sent[0] != jwt1 || sent[1] != jwt2 {
 		t.Errorf("exchanges sent the projected tokens %v, want the first then the rotated one", len(sent))
 	}
+}
+
+// A token that expires while the exchange is still closing its response body is not handed to anyone, and a
+// caller that joins during that time gets a retryable error, not a token that expired before it joined.
+func TestTokenExpiredAtPublishIsNotHandedOut(t *testing.T) {
+	gate := &closeGate{Reader: strings.NewReader(stsAnswer(1)), entered: make(chan struct{}), release: make(chan struct{})}
+	base := time.Now()
+	var elapsed atomic.Int64
+	s, err := newSource(testConfig(t), rtFunc(func(r *http.Request) (*http.Response, error) {
+		return okResponse(r, http.StatusOK, gate)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return base.Add(time.Duration(elapsed.Load())) }
+	type result struct {
+		tok string
+		err error
+	}
+	first, second := make(chan result, 1), make(chan result, 1)
+	go func() { tok, err := s.Token(context.Background()); first <- result{tok, err} }()
+	select {
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the exchange never reached the end of its response")
+	}
+	elapsed.Store(int64(2 * time.Second)) // the one-second token is now expired
+	go func() { tok, err := s.Token(context.Background()); second <- result{tok, err} }()
+	for { // wait until the second caller has joined the exchange
+		s.mu.Lock()
+		joined := s.inflight != nil && s.inflight.waiters == 2
+		s.mu.Unlock()
+		if joined {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(gate.release)
+	for name, ch := range map[string]chan result{"first": first, "second": second} {
+		select {
+		case r := <-ch:
+			if r.tok != "" || !providers.IsRetryable(r.err) || providers.IsForbidden(r.err) {
+				t.Errorf("%s caller: %q, %v, want an empty token and a retryable error", name, r.tok, r.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s caller never returned", name)
+		}
+	}
+	s.mu.Lock()
+	cached := s.token
+	s.mu.Unlock()
+	if cached != "" {
+		t.Error("an expired token was cached")
+	}
+}
+
+// The exchange deadline covers reading the token file: a read that stalls, as a regular file on a stalled
+// filesystem can, does not hold every caller past it.
+func TestStalledTokenFileReadEndsAtTheDeadline(t *testing.T) {
+	s, n, cfg := harness(t, func(rw http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(rw, stsAnswer(3600)) })
+	s.timeout = 50 * time.Millisecond
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	s.readFile = func(path string) (string, error) {
+		entered <- struct{}{}
+		<-gate
+		return readTokenFile(path)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := s.Token(context.Background()); done <- err }()
+	select {
+	case err := <-done:
+		if !providers.IsRetryable(err) || !errors.Is(err, context.DeadlineExceeded) || providers.IsForbidden(err) {
+			t.Errorf("err = %v, want a retryable deadline", err)
+		}
+		assertNoLeak(t, err, cfg)
+	case <-time.After(5 * time.Second):
+		t.Error("the caller is still blocked on the stalled read")
+	}
+	close(gate)
+	<-entered
+	if n.Load() != 0 {
+		t.Errorf("sent %d requests for a read that ended after the deadline", n.Load())
+	}
+}
+
+// HTTP/1.1 does not by itself keep bytes out of the standard log: when a server sends more than its
+// Content-Length declares, net/http logs the start of the extra bytes as an unsolicited response. The answer
+// of STS holds the access token, so the production transport must not leave a connection to be read like that.
+func TestBytesPastTheDeclaredLengthAreNotLogged(t *testing.T) {
+	const marker = "SYNTHETIC-TOKEN-MARK-0123456789"
+	var logs syncBuffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		conn, buf, err := rw.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		answer := stsAnswer(3600)
+		// The header declares the length of the answer, and the marker follows it.
+		_, _ = fmt.Fprintf(buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s%s",
+			len(answer), answer, marker)
+		_ = buf.Flush()
+		time.Sleep(500 * time.Millisecond) // keep the connection open, as a server that reuses it would
+	}))
+	defer srv.Close()
+
+	s, err := New(testConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The production transport, with the dial guard replaced and the fixture's certificate trusted.
+	tr := s.client.Transport.(*http.Transport).Clone()
+	tr.DialContext = (&net.Dialer{}).DialContext
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	tr.TLSClientConfig.RootCAs = pool
+	s.client.Transport = tr
+	s.tokenURL = srv.URL + "/v1/token"
+	if tok, err := s.Token(context.Background()); err != nil || tok != issuedMark {
+		t.Fatalf("Token = %q, %v", tok, err)
+	}
+	time.Sleep(600 * time.Millisecond) // the transport reads an idle connection in the background
+	if strings.Contains(logs.String(), marker) || strings.Contains(logs.String(), "Unsolicited") {
+		t.Errorf("the standard log holds bytes the server sent past its declared length: %q", logs.String())
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the transport's goroutines to log into.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

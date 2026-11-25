@@ -29,8 +29,9 @@ limitations under the License.
 // Each exchange reads the token file again, because the kubelet rotates it. The file is opened without
 // blocking and must be a regular file of at most 64 KiB. A file that is missing, empty, unreadable, too large
 // or not a regular file is retryable, because the kubelet swaps the projected volume while it rotates the
-// token, and no request is sent. The payload of the token is decoded,
-// not verified (STS verifies the signature), before anything is sent: it must be one JSON object with no
+// token, and no request is sent. The deadline of the exchange covers that read. The header and the payload of
+// the token are decoded, not verified (STS verifies the signature), before anything is sent: the header must
+// be one JSON object, and the payload must be one JSON object with no
 // repeated claim name, claim names are matched exactly, aud must hold exactly one audience equal to the
 // projection audience and sub must equal the subject. A token of another ServiceAccount, a token for the
 // Azure audience, a token with more than one audience and anything that is not a JWT is
@@ -39,16 +40,18 @@ limitations under the License.
 // The token is posted only to [TokenURL], as the token exchange grant asking for an access token with the
 // cloud-platform [Scope]. The HTTP client has no proxy, requires TLS 1.2 or later, follows no redirect and
 // connects only to public unicast addresses outside the declared in-cluster ranges (openaiwire.Guard). Each
-// exchange has a deadline of 30 seconds. STS answers 408, 429 and 5xx are retryable; 400, 401, 403 and any
-// other status, a redirect included, are [providers.ErrForbidden]. The kubelet replaces the token file at 80
+// exchange has a deadline of 30 seconds. STS answers 408, 429 and 5xx (500 to 599) are retryable; 400, 401, 403 and any
+// other status, a redirect included (even one whose Location cannot be parsed), are [providers.ErrForbidden]. The kubelet replaces the token file at 80
 // percent of its lifetime, so an expired assertion is not a rotation race, and no 400 is retried. A 200 must
-// be one JSON object with token_type Bearer, issued_token_type the access token type when present, a
+// be one JSON object with token_type Bearer, issued_token_type, when the field is present at all (empty and null included), the access token type, a
 // positive expires_in (counted as at most 24 hours) and an access_token of 1 to 16 KiB of printable ASCII
 // (0x21 to 0x7e): STS issues opaque bearer tokens, not JWTs. Any other 200 is retryable and nothing of it is
 // cached.
 //
-// The client speaks HTTP/1.1 only, so Go's HTTP/2 frame diagnostics can never print token bytes. An answer
-// whose token has expired, or is inside its refresh margin, by the time it arrives is retryable and no token
+// The client speaks HTTP/1.1 only, so Go's HTTP/2 frame diagnostics can never print token bytes, and it
+// closes each connection after its exchange, so net/http never logs bytes a server sends past the declared
+// length of an answer. An answer whose token has expired, or is inside its refresh margin, by the time it is
+// handed to the callers is retryable and no token
 // is returned. A deadline or cancellation that ends the read of a refusal body is reported as that end.
 //
 // The access token is cached until shortly before it expires: five minutes, or half its lifetime when that

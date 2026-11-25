@@ -158,13 +158,15 @@ import (
 // #288 cleanup bound (a request whose cleanup was failing let go of its finalizer at the end of a bound of that
 // cleanup, elapsed on the model's clock, with the pull request open), the #870 head (P3), a reopen after a release (a
 // request whose lock a verdict released when a person reopened the pull request does not take it back and records
-// nothing of it, design 6.5), and #875: a replacement deleted before it recorded the merge of its pull request after
-// its predecessor ended HandedOff (the pull request was the replacement's alone, and a request deleted before it
-// records the merge of its own pull request records nothing, as any request; the predecessor has ended). With the
-// repository gone, reads never answer, so P1 and P2 ask nothing of a merge then. The #288 shape excuses only what the
-// request that let go leaves (goneShape): the lock free on the open pull request while no live request has a commit on
-// it, the record missing of a merge of that request's commit and a lock the other request holds after the settling
-// run; a later violation by the request still there is a violation.
+// nothing of it, design 6.5), #877, a request deleted while the repository was not in the settings (its finalizer
+// does not wait for the repository, design 6, so its pull request stays open with no holder after the repository is
+// back: P3), and #875: a replacement deleted before it recorded the merge of its pull request after its predecessor
+// ended HandedOff (the pull request was the replacement's alone, and a request deleted before it records the merge of
+// its own pull request records nothing, as any request; the predecessor has ended). With the repository gone, reads
+// never answer, so P1 and P2 ask nothing of a merge then. The #288 and #877 shapes excuse only what the request that
+// let go leaves (goneShape): the lock free on the open pull request while no live request has a commit on it, and,
+// for #288, the record missing of a merge of that request's commit and a lock the other request holds after the
+// settling run; a later violation by the request still there is a violation.
 //
 // A failing seed prints its minimal sequence (steps dropped while the same property still fails) and the property; a
 // seed whose only violations an exclusion covers is skipped with the exclusion's name. The default set is the seeds 1
@@ -463,9 +465,13 @@ type hmWorld struct {
 	// gone288 names the requests that were deleted and let go of their finalizer with the pull request open after
 	// their cleanup failed until a bound of it elapsed on the model's clock (CleanupFailing True on the last copy): the
 	// end of the cleanup bound (#288).
-	gone288  map[string]bool
-	lastRepl *api.RemediationRequest
-	lastPred *api.RemediationRequest
+	gone288 map[string]bool
+	// goneMissing names the requests that, being deleted, let go of their finalizer while the repository was not in
+	// the settings, with the pull request open (design 6: a repository that left the settings does not block the
+	// deletion; #877).
+	goneMissing map[string]bool
+	lastRepl    *api.RemediationRequest
+	lastPred    *api.RemediationRequest
 	// reach is what the sequence reached, for the counts; excused counts the violations a named shape excuses;
 	// expected counts the named expectations that held (a state the design requires, checked, not excused).
 	reach    map[string]bool
@@ -614,6 +620,13 @@ var hmShapes = []struct {
 	{name: "#288 cleanup bound", excuses: "P1 P3 P6", matching: func(m *hmWorld, about string) bool {
 		return m.goneShape(m.gone288, about, true)
 	}},
+	// A request is deleted while the repository is not in the settings: nothing can close its pull request, and the
+	// deletion does not wait for the repository (design 6, the deletion; #877), so the pull request stays open with
+	// no holder after the repository comes back. It excuses only the lock free on that open pull request while no
+	// live request has a commit on it.
+	{name: "#877 deleted while the repository was missing", excuses: "P3", matching: func(m *hmWorld, about string) bool {
+		return m.goneShape(m.goneMissing, about, false)
+	}},
 	// A person pushed on top of the replacement's commit (#870): the head of the pull request carries the
 	// replacement's commit with further commits on it. P3 asks nothing of the lock of that head while the pull request
 	// is open; its merge is P12's.
@@ -709,8 +722,8 @@ func newHMWorld(t *testing.T, schema *statusSchema, start string) *hmWorld {
 		number: cr.Number, branch: cr.HeadBranch, predCommit: p.Status.PullRequest.HeadSHA, predSpec: p.Spec.DeepCopy(),
 		personCommits: map[string]bool{}, replCommits: map[string]bool{}, once: map[string]error{},
 		lose: map[string]bool{}, conflict: map[string]bool{}, crashAt: -1, writers: map[string]bool{}, awaiting: map[string]bool{},
-		gone288: map[string]bool{},
-		held:    map[string]bool{}, reach: map[string]bool{}, excused: map[string]int{}, releasedAtReopen: map[string]bool{},
+		gone288: map[string]bool{}, goneMissing: map[string]bool{},
+		held: map[string]bool{}, reach: map[string]bool{}, excused: map[string]int{}, releasedAtReopen: map[string]bool{},
 		waitingAtRemoval: map[string]bool{}, expected: map[string]int{}, lastErr: map[string]error{},
 		lastRes: map[string]reconcile.Result{}, prev: map[string]*api.RemediationRequest{},
 		stale: map[string]*api.RemediationRequest{}, lag: map[string]*api.RemediationRequest{}}
@@ -1798,9 +1811,18 @@ func (m *hmWorld) note(p, rr *api.RemediationRequest) {
 		return boundLeft(failing, cleanupFailingBound, m.now) <= 0 ||
 			(refused != nil && refused.Status == metav1.ConditionTrue && boundLeft(refused, closeRefusedGrace, m.now) <= 0)
 	}
+	// A request deleted while the repository is not in the settings: its finalizer lets go, the pull request left open
+	// (design 6, "A repository that left the settings ... does not block the deletion").
+	goneMissing := func(now, last *api.RemediationRequest) bool {
+		return now == nil && last != nil && !last.DeletionTimestamp.IsZero() && m.settings == settingsRemoved
+	}
 	open := m.pr().State == providers.ChangeRequestOpen
 	for who, now := range map[string]*api.RemediationRequest{hmPred: p, hmRepl: rr} {
 		last := map[string]*api.RemediationRequest{hmPred: m.lastPred, hmRepl: m.lastRepl}[who]
+		if open && goneMissing(now, last) && !m.goneMissing[who] {
+			m.goneMissing[who] = true
+			m.logf("  the %s, deleted while the repository is not in the settings, let go with the pull request open", who)
+		}
 		if open && letGo(now, last) && !m.gone288[who] {
 			m.gone288[who] = true
 			m.logf("  the #288 shape: the %s let go at its cleanup bound with the pull request open", who)
@@ -1813,9 +1835,9 @@ func (m *hmWorld) note(p, rr *api.RemediationRequest) {
 func (m *hmWorld) observeLock(reqs map[string]*api.RemediationRequest) {
 	cr := m.pr()
 	// P3. While the repository is not in the settings P3 asks nothing of the lock: a merge that did not deliver the
-	// plan as shown releases it (tenth decision of 2026-11-18 on #771). The release of a replacement that ended before
-	// its takeover there was withdrawn (decision of 2026-11-19 on #786); P6 checks that it keeps the lock, and the run
-	// after the repository's return checks P3.
+	// plan as shown releases it (tenth decision of 2026-11-18 on #771), and so does the finalizer of a request
+	// deleted then. The release of a replacement that ended before its takeover there was withdrawn (decision of
+	// 2026-11-19 on #786); P6 checks that it keeps the lock, and the run after the repository's return checks P3.
 	repoGone := m.settings == settingsRemoved
 	free := true
 	for who, x := range reqs {
@@ -2769,17 +2791,14 @@ func (m *hmWorld) liveness() {
 		return
 	}
 	for _, who := range []string{hmPred, hmRepl} {
-		x := m.get(who)
-		if x == nil || !ptr.Deref(x.Status.HoldsTarget, false) ||
-			(!x.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(x, FinalizerName)) {
-			continue
+		if x := m.get(who); x != nil && ptr.Deref(x.Status.HoldsTarget, false) {
+			if name := m.keptWhileMissing(who, x); name != "" {
+				m.expectMissingShown(who, x, name)
+				continue
+			}
+			m.failAbout("P6", aboutHolder+who, "%s, and the %s still holds the target lock after the settling run (%s)", why,
+				who, describe(x))
 		}
-		if name := m.keptWhileMissing(who, x); name != "" {
-			m.expectMissingShown(who, x, name)
-			continue
-		}
-		m.failAbout("P6", aboutHolder+who, "%s, and the %s still holds the target lock after the settling run (%s)", why,
-			who, describe(x))
 	}
 }
 
@@ -2787,18 +2806,11 @@ func (m *hmWorld) liveness() {
 // for none. A holder with no verdict stored keeps the lock, as nothing can read its pull request any more (design 6,
 // the table of stops; tenth decision of 2026-11-18 on #771; decision of 2026-11-19 on #786, points 1 and 3): one that
 // had stopped (the replacement whose recovery holds the lock included, whose release there the same decision
-// withdrew), one that waited for the other request's merge record when the repository left, and a deleted holder still
-// within its 24 hour CleanupFailing bound (for example a predecessor whose own cleanup started only after a deleted
-// replacement's 24 hour bound ended, #877). A request still at work, a deleted one past its bound, or one with a
-// verdict stored, has no such expectation.
+// withdrew), and one that waited for the other request's merge record when the repository left. A request still at
+// work, or one with a verdict stored, has no such expectation.
 func (m *hmWorld) keptWhileMissing(who string, x *api.RemediationRequest) string {
 	switch {
 	case m.settings != settingsRemoved || verdictStored(x):
-		return ""
-	case !x.DeletionTimestamp.IsZero():
-		if deletingWithinCleanupBound(x, m.now) {
-			return "deleted holder keeps the lock within its cleanup bound while the repository is missing"
-		}
 		return ""
 	case m.waitingAtRemoval[who]:
 		return "holder waiting for the merge record keeps the lock while the repository is missing"
@@ -2806,17 +2818,6 @@ func (m *hmWorld) keptWhileMissing(who string, x *api.RemediationRequest) string
 		return "stopped holder keeps the lock while the repository is missing"
 	}
 	return ""
-}
-
-// deletingWithinCleanupBound reports whether x is being deleted and still within its 24 hour CleanupFailing bound for
-// a missing repository (#877).
-func deletingWithinCleanupBound(x *api.RemediationRequest, now time.Time) bool {
-	if x.DeletionTimestamp.IsZero() {
-		return false
-	}
-	c := meta.FindStatusCondition(x.Status.Conditions, api.ConditionCleanupFailing)
-	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == reasonRepositoryUnavailable &&
-		boundLeft(c, cleanupFailingBound, now) > 0
 }
 
 // verdictStored reports whether x's status records a merge that settles its lock without a read: its receipt, or a
@@ -3253,196 +3254,6 @@ func TestHandoffModelDeletionWithAnUnusableEntry(t *testing.T) {
 		t.Fatalf("CleanupFailing = %+v, want reason %s", c, reasonRepositoryUnusable)
 	}
 	hmDirected(t, hmStartPushed, steps)
-}
-
-// #877: a request holds the target lock and has an open pull request, its repository entry is removed from
-// RemediationSettings, the request is deleted, and the entry is put back. The finalizer keeps the lock under
-// CleanupFailing (RepositoryUnavailable), PullRequestUnreadable (RepositoryUnavailable) and a paced retry instead of
-// letting go with the pull request open, and closes the pull request once the entry returns.
-func TestHandoffModelDeletionWithAMissingRepository(t *testing.T) {
-	steps := make([]hmStep, 0, 6)
-	steps = append(steps, stRecRepl, stRecPred, hmStep{Kind: hSettings, Variant: settingsRemoved},
-		hmStep{Kind: hDelete, Obj: hmRepl}, stRecRepl)
-	m := newHMWorld(t, requestStatusSchema(t), hmStartPushed)
-	for i, s := range steps {
-		m.stepNo = i + 1
-		m.apply(s)
-		m.observe()
-	}
-	rr := m.get(hmRepl)
-	if rr == nil || !controllerutil.ContainsFinalizer(rr, FinalizerName) {
-		t.Fatalf("the replacement let go of its finalizer while the repository was missing and its pull request open: %s",
-			describe(rr))
-	}
-	for _, cond := range []string{api.ConditionCleanupFailing, api.ConditionPullRequestUnreadable} {
-		if c := meta.FindStatusCondition(rr.Status.Conditions, cond); c == nil || c.Status != metav1.ConditionTrue ||
-			c.Reason != reasonRepositoryUnavailable {
-			t.Fatalf("%s = %+v, want True with reason %s", cond, c, reasonRepositoryUnavailable)
-		}
-	}
-	if m.lastErr[hmRepl] != nil || m.lastRes[hmRepl].RequeueAfter <= 0 {
-		t.Fatalf("reconcile while repository missing = %+v, %v; want a paced retry and no error",
-			m.lastRes[hmRepl], m.lastErr[hmRepl])
-	}
-	settled := hmDirected(t, hmStartPushed, append(steps, hmStep{Kind: hSettings, Variant: settingsRestored}))
-	if st := settled.pr().State; st != providers.ChangeRequestClosed {
-		t.Fatalf("the pull request is %s after the repository returned, want closed", st)
-	}
-}
-
-func TestHandoffModelPredecessorCleansUpAfterReplacementFinalizes(t *testing.T) {
-	m := newHMWorld(t, requestStatusSchema(t), hmStartIntent)
-	ctx := context.Background()
-	repl := m.get(hmRepl)
-	const otherFinalizer = "example.com/replacement"
-	repl.Finalizers = append(repl.Finalizers, otherFinalizer)
-	if err := m.base.Update(ctx, repl); err != nil {
-		t.Fatal(err)
-	}
-	m.changeSettings(settingsRemoved)
-	m.deleteRequest(hmPred)
-	m.deleteRequest(hmRepl)
-	m.reconcile(hmRepl)
-	m.reconcile(hmPred)
-	if got := m.lastRes[hmPred].RequeueAfter; got != m.r.pullRequestPollInterval() {
-		t.Errorf("predecessor retries after %v while replacement finalizes, want %v", got, m.r.pullRequestPollInterval())
-	}
-	m.now = m.now.Add(cleanupFailingBound + time.Second)
-	m.reconcile(hmRepl)
-	repl = m.get(hmRepl)
-	if repl == nil || !slices.Equal(repl.Finalizers, []string{otherFinalizer}) ||
-		repl.Status.Phase != api.PhasePolicyChecked {
-		t.Fatalf("expected a terminating PolicyChecked replacement with only %s, got %+v", otherFinalizer, repl)
-	}
-	m.reconcile(hmPred)
-	pred := m.get(hmPred)
-	if pred == nil || intent(pred) != nil || !ptr.Deref(pred.Status.HoldsTarget, false) ||
-		!controllerutil.ContainsFinalizer(pred, FinalizerName) {
-		t.Fatalf("expected the predecessor to abort the handoff and keep its lock and finalizer: %s", describe(pred))
-	}
-	c := meta.FindStatusCondition(pred.Status.Conditions, api.ConditionCleanupFailing)
-	if c == nil || c.Reason != reasonRepositoryUnavailable || !c.LastTransitionTime.Time.Equal(m.now) {
-		t.Fatalf("predecessor CleanupFailing = %+v, want %s starting at %s", c, reasonRepositoryUnavailable, m.now)
-	}
-	m.now = m.now.Add(cleanupFailingBound + time.Second)
-	m.reconcile(hmPred)
-	if pred := m.get(hmPred); pred != nil {
-		t.Fatalf("predecessor still exists past its cleanup bound: %s", describe(pred))
-	}
-	m.liveness()
-	if len(m.violations) != 0 {
-		t.Fatalf("neither request should still hold the target lock: %v", m.violations)
-	}
-}
-
-// #877, second review: a live predecessor whose replacement is deleted while another controller's finalizer keeps it
-// does not stay in Intent once the replacement's own finalizer is gone: the replacement can never take over.
-func TestHandoffModelLivePredecessorAbortsForAReleasedReplacement(t *testing.T) {
-	m := newHMWorld(t, requestStatusSchema(t), hmStartIntent)
-	ctx := context.Background()
-	repl := m.get(hmRepl)
-	const otherFinalizer = "example.com/replacement"
-	repl.Finalizers = append(repl.Finalizers, otherFinalizer)
-	if err := m.base.Update(ctx, repl); err != nil {
-		t.Fatal(err)
-	}
-	m.deleteRequest(hmRepl)
-	for range 3 {
-		m.reconcile(hmRepl)
-	}
-	repl = m.get(hmRepl)
-	if repl == nil || controllerutil.ContainsFinalizer(repl, FinalizerName) || tookOver(repl) || ended(repl.Status.Phase) {
-		t.Fatalf("expected a terminating replacement that kept only %s and never took over: %s", otherFinalizer,
-			describe(repl))
-	}
-	m.reconcile(hmPred)
-	if pred := m.get(hmPred); pred == nil || intent(pred) != nil {
-		t.Fatalf("the live predecessor keeps its intent for a replacement that can never take over: %s", describe(pred))
-	}
-}
-
-// #877, second review: an uninstall (RemediationSettings deleted, then every request) does not hang on a merged handoff
-// that neither request settled yet: the settings-removed release comes before the handoff writes that need settings.
-func TestHandoffModelUninstallWithAnUnsettledMergedHandoff(t *testing.T) {
-	for _, terminating := range []bool{false, true} {
-		t.Run(fmt.Sprintf("terminating=%t", terminating), func(t *testing.T) {
-			m := newHMWorld(t, requestStatusSchema(t), hmStartPushed)
-			for i, s := range []hmStep{stRecRepl, stMerge, stRecRepl} {
-				m.stepNo = i + 1
-				m.apply(s)
-			}
-			ctx := context.Background()
-			repl := m.get(hmRepl)
-			if repl == nil || !tookOver(repl) || !mergeRecorded(repl) {
-				t.Fatalf("expected a replacement that took over and recorded the merge: %s", describe(repl))
-			}
-			// Step 5 (the predecessor ended HandedOff) is lost: the predecessor still shows its intent and its lock.
-			pred := m.get(hmPred)
-			if pred == nil || !handedOff(pred) {
-				t.Fatalf("expected a predecessor ended HandedOff: %s", describe(pred))
-			}
-			pred.Status.Handoff.To.Phase = api.HandoffIntent
-			pred.Status.Phase = api.PhaseAwaitingApproval
-			pred.Status.HoldsTarget = new(true)
-			meta.RemoveStatusCondition(&pred.Status.Conditions, api.ConditionApproved)
-			if err := m.base.Status().Update(ctx, pred); err != nil {
-				t.Fatal(err)
-			}
-			st := &api.RemediationSettings{}
-			if err := m.base.Get(ctx, client.ObjectKey{Name: api.SettingsName}, st); err != nil {
-				t.Fatal(err)
-			}
-			if terminating {
-				st.Finalizers = []string{"example.com/settings"}
-				if err := m.base.Update(ctx, st); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := m.base.Delete(ctx, st); err != nil {
-				t.Fatal(err)
-			}
-			m.deleteRequest(hmRepl)
-			m.deleteRequest(hmPred)
-			for _, who := range []string{hmRepl, hmPred} {
-				for i := 0; i < 3 && m.get(who) != nil; i++ {
-					if _, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.keys[who]}); err != nil {
-						t.Fatalf("reconcile of the deleted %s during uninstall: %v", who, err)
-					}
-				}
-				if x := m.get(who); x != nil {
-					t.Fatalf("the %s still holds its finalizer during uninstall: %s", who, describe(x))
-				}
-			}
-		})
-	}
-}
-
-func TestHandoffModelFlagsExpiredDeletionLock(t *testing.T) {
-	m := newHMWorld(t, requestStatusSchema(t), hmStartIntent)
-	m.changeSettings(settingsRemoved)
-	m.deleteRequest(hmPred)
-	pred := m.get(hmPred)
-	pred.Status.Phase = api.PhaseNeedsIntervention
-	for _, kind := range []string{api.ConditionCleanupFailing, api.ConditionPullRequestUnreadable} {
-		meta.SetStatusCondition(&pred.Status.Conditions, metav1.Condition{
-			Type: kind, Status: metav1.ConditionTrue, Reason: reasonRepositoryUnavailable,
-			LastTransitionTime: metav1.NewTime(m.now),
-		})
-	}
-	if err := m.base.Status().Update(context.Background(), pred); err != nil {
-		t.Fatal(err)
-	}
-	m.deleteRequest(hmRepl)
-	repl := m.get(hmRepl)
-	controllerutil.RemoveFinalizer(repl, FinalizerName)
-	if err := m.base.Update(context.Background(), repl); err != nil {
-		t.Fatal(err)
-	}
-	m.now = m.now.Add(cleanupFailingBound + time.Second)
-	m.liveness()
-	if !slices.ContainsFunc(m.violations, func(v string) bool { return strings.HasPrefix(v, "P6:") }) {
-		t.Fatalf("a deletion lock held past its cleanup bound must violate P6, got %v", m.violations)
-	}
 }
 
 // Third round of #786, seeds 29586, 30458, 54201 and 9008: the settings name another target branch, then both requests

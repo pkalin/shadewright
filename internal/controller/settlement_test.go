@@ -104,8 +104,7 @@ func settlementWorld(t *testing.T, phase api.RemediationPhase) (*RemediationRequ
 	if err := c.Update(ctx, settings); err != nil {
 		t.Fatal(err)
 	}
-	// The fake client does not serve the field selectors the limits list with; apiServerReader does.
-	r := &RemediationRequestReconciler{Client: c, APIReader: &apiServerReader{Reader: c}, Scheme: c.Scheme(), Source: &stubResolver{result: resolved()}, OpenRepository: func(_ context.Context, repo api.GitRepository) (providers.GitProvider, error) {
+	r := &RemediationRequestReconciler{Client: c, APIReader: c, Scheme: c.Scheme(), Source: &stubResolver{result: resolved()}, OpenRepository: func(_ context.Context, repo api.GitRepository) (providers.GitProvider, error) {
 		return g.ForTarget(string(repo.TargetBranch)), nil
 	}}
 	return r, g, rr

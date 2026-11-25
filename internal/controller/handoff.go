@@ -32,7 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -1930,9 +1929,9 @@ const (
 // handoffHolds is the finalizer's look at a request with an outgoing handoff (ADR-0028 section 4 item 8): keep
 // is true when its pull request is its replacement's (handed over, or the replacement took it over and has not
 // ended this request yet), so it must not be closed; wait is true while the replacement may still take it over.
-// When the replacement cannot take over, including after it loses its finalizer during deletion, the predecessor
-// stores the abort (abortStandingIntent) and proceeds with cleanup. Before closing, stillOwns reads the request
-// again. An abort held only in memory would fail that check and start the cleanup bound prematurely (the
+// When the replacement is gone or ended without taking over, the abort of the intent is stored (abortStandingIntent)
+// and the close goes on as for any request: the close reads rr again right before it (stillOwns), and an abort kept in
+// memory only would fail that read and start the bound of the cleanup on a failure of this request's own making (the
 // close it held back could later be refused past the bound, with the pull request left open; second round of #786).
 // A failed write is returned for a retry.
 func (r *RemediationRequestReconciler) handoffHolds(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
@@ -1952,21 +1951,14 @@ func (r *RemediationRequestReconciler) handoffHolds(ctx context.Context, rr *rem
 	case repl.UID != types.UID(to.UID):
 	case tookOver(repl):
 		return true, false, nil
-	case releasedOnDelete(repl):
 	case !ended(repl.Status.Phase) && !abortedOnRefusal(repl):
 		return false, true, nil
 	}
-	if err := r.abortStandingIntent(ctx, rr, "it is being deleted, and its replacement can no longer take over "+
-		"the pull request"); err != nil {
+	if err := r.abortStandingIntent(ctx, rr, "it is being deleted, and its replacement is gone or ended without "+
+		"taking the pull request over"); err != nil {
 		return false, false, err
 	}
 	return false, false, nil
-}
-
-// releasedOnDelete reports whether rr is being deleted and its finalizer let go of it: the executor does nothing more
-// for it, whatever other finalizers still keep the object.
-func releasedOnDelete(rr *remediationv1alpha1.RemediationRequest) bool {
-	return !rr.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(rr, FinalizerName)
 }
 
 // settleHandoff is the predecessor's side of a handoff, in upd, the status about to be written with the look at
@@ -1975,10 +1967,8 @@ func releasedOnDelete(rr *remediationv1alpha1.RemediationRequest) bool {
 // the handoff. A replacement Denied for its chain link (ChainLinkInvalid) is not counted: an invalid link takes
 // nothing, not even the hint. A read that fails decides nothing and is logged at Info.
 func (r *RemediationRequestReconciler) settleHandoff(ctx context.Context, upd *remediationv1alpha1.RemediationRequest) {
-	// A deleted replacement that let go of this executor's finalizer never takes over either, even while another
-	// controller's finalizer keeps the object (#877): its finalizer removed the entries abortedOnRefusal reads.
 	gaveUp := func(repl *remediationv1alpha1.RemediationRequest) bool {
-		return (ended(repl.Status.Phase) || releasedOnDelete(repl)) && !tookOver(repl)
+		return ended(repl.Status.Phase) && !tookOver(repl)
 	}
 	// A replacement whose handoff was aborted at a refused read (abortedOnRefusal, #786) never takes over: its intent
 	// is aborted, though it still runs.

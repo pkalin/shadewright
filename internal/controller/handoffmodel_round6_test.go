@@ -90,24 +90,34 @@ func TestHandoffModelLostWaitWriteWritesNothing(t *testing.T) {
 	}
 }
 
-// The recogniser of the #288 cleanup bound excuses only what that shape leaves: the open pull request of the request
-// that let go, with no live request on it. A later violation by the request that is still there (here a P3 release and
-// a P1 double record of its own) is a violation, not excused for the rest of the sequence.
+// The recognisers of the #288 cleanup bound and of a deletion while the repository is missing (#877) excuse only what
+// that shape leaves: the open pull request of the request that let go, with no live request on it. A later violation
+// by the request that is still there (here a P3 release and a P1 double record of its own) is a violation, not
+// excused for the rest of the sequence.
 func TestHandoffModelGoneShapesExcuseOnlyTheirOwn(t *testing.T) {
-	steps := []hmStep{stRecRepl, {Kind: hDelete, Obj: hmRepl}, stSticky(503), stRecRepl, stClock(clockDay), stRecRepl}
-	m := newHMWorld(t, requestStatusSchema(t), hmStartPushed)
-	for i, s := range steps {
-		m.stepNo = i + 1
-		m.apply(s)
-		m.observe()
-	}
-	if len(m.violations) > 0 {
-		t.Fatalf("violations before the injected ones: %v", m.violations)
-	}
-	m.fail("P3", "the predecessor released the lock on a merge of its commit it does not record (injected)")
-	m.fail("P1", "the merge of the predecessor's commit is recorded on both requests (injected)")
-	if len(m.violations) != 2 {
-		t.Fatalf("violations %v, excused %v: the shape excused a violation of the request still there",
-			m.violations, m.excused)
+	for name, steps := range map[string][]hmStep{
+		"#288 cleanup bound": {stRecRepl, {Kind: hDelete, Obj: hmRepl}, stSticky(503), stRecRepl, stClock(clockDay),
+			stRecRepl},
+		"#877 deleted while the repository was missing": {stRecRepl, stRecPred,
+			{Kind: hSettings, Variant: settingsRemoved}, {Kind: hDelete, Obj: hmRepl}, stRecRepl,
+			{Kind: hSettings, Variant: settingsRestored}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := newHMWorld(t, requestStatusSchema(t), hmStartPushed)
+			for i, s := range steps {
+				m.stepNo = i + 1
+				m.apply(s)
+				m.observe()
+			}
+			if len(m.violations) > 0 {
+				t.Fatalf("violations before the injected ones: %v", m.violations)
+			}
+			m.fail("P3", "the predecessor released the lock on a merge of its commit it does not record (injected)")
+			m.fail("P1", "the merge of the predecessor's commit is recorded on both requests (injected)")
+			if len(m.violations) != 2 {
+				t.Fatalf("violations %v, excused %v: the shape excused a violation of the request still there",
+					m.violations, m.excused)
+			}
+		})
 	}
 }

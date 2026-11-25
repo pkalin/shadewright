@@ -273,7 +273,7 @@ func startHolderFinalization(t *testing.T, r *RemediationRequestReconciler, rr *
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.beginFinalize(ctx, rr, false); err != nil {
+	if _, _, err := r.beginFinalize(ctx, rr); err != nil {
 		t.Fatal(err)
 	}
 	if rr.DeletionTimestamp.IsZero() || !holdsLock(rr) ||

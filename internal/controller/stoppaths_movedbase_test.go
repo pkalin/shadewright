@@ -1331,22 +1331,6 @@ func TestDeletionWithMissingRepositoryLetsGoAfterBound(t *testing.T) {
 	recorder := record.NewFakeRecorder(20)
 	r.Recorder = recorder
 	r.APIReader = &apiServerReader{Reader: r.Client}
-	settings := &api.RemediationSettings{}
-	if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
-		t.Fatal(err)
-	}
-	settings.Spec.MaxConcurrentRemediations = 1
-	if err := r.Update(ctx, settings); err != nil {
-		t.Fatal(err)
-	}
-	blocker := rr.DeepCopy()
-	blocker.Name = "active-request"
-	blocker.UID = "988e38bb-2083-4ecb-8f83-6426643ad2a3"
-	blocker.ResourceVersion = ""
-	blocker.Status.Phase = api.PhaseAwaitingApproval
-	if err := r.Create(ctx, blocker); err != nil {
-		t.Fatal(err)
-	}
 	n := rr.Status.PullRequest.Number
 	dropRepository(t, r)
 	if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
@@ -1529,6 +1513,77 @@ func TestUninstallWithMissingRepository(t *testing.T) {
 			}
 			if pr := g.ChangeRequests()[0]; pr.State != providers.ChangeRequestOpen {
 				t.Errorf("pull request #%d is %s, want open", pr.Number, pr.State)
+			}
+		})
+	}
+}
+
+// settingsDenied is a reader whose every read of RemediationSettings is refused, as by RBAC.
+type settingsDenied struct{ client.Reader }
+
+func (d settingsDenied) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*api.RemediationSettings); ok {
+		return apierrors.NewForbidden(api.GroupVersion.WithResource("remediationsettings").GroupResource(), key.Name,
+			errors.New("denied"))
+	}
+	return d.Reader.Get(ctx, key, obj, opts...)
+}
+
+// #877, finding 5 of the third review: the read of the settings that decides an uninstall happens only for a deletion
+// that closes a pull request, and a failure of that read is a failure of the cleanup within its 24 hour bound, as
+// before #877, not a retry with no end. A request that closes nothing goes without reading the settings.
+func TestDeletionWhileTheSettingsReadFails(t *testing.T) {
+	for _, phase := range []api.RemediationPhase{api.PhaseSucceeded, api.PhaseAwaitingApproval} {
+		t.Run(string(phase), func(t *testing.T) {
+			r, _, rr := settlementWorld(t, phase)
+			ctx := context.Background()
+			clock := clockOf(r)
+			r.Recorder = record.NewFakeRecorder(20)
+			r.APIReader = settingsDenied{Reader: r.Client}
+			if phase == api.PhaseSucceeded {
+				rr.Status.HoldsTarget = nil
+				if err := r.Status().Update(ctx, rr); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rr.Finalizers = []string{FinalizerName}
+			if err := r.Update(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
+				return []string{obj.(*api.RemediationRequest).Status.BreakerClearedBy}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Delete(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}
+			deleted := clock.at
+			// The failed read may come back as an error, for the backoff; what counts is the bound it starts.
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Logf("reconcile with the settings read denied: %v", err)
+			}
+			got := &api.RemediationRequest{}
+			if phase == api.PhaseSucceeded {
+				if err := r.Get(ctx, req.NamespacedName, got); !apierrors.IsNotFound(err) {
+					t.Fatalf("a request that closes nothing is still there (%v): want it let go", err)
+				}
+				return
+			}
+			if err := r.Get(ctx, req.NamespacedName, got); err != nil {
+				t.Fatal(err)
+			}
+			if c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionCleanupFailing); c == nil ||
+				c.Status != metav1.ConditionTrue {
+				t.Fatalf("CleanupFailing = %+v: want the failed read counted against the bound", c)
+			}
+			clock.at = deleted.Add(cleanupFailingBound + time.Second)
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Logf("reconcile past the bound: %v", err)
+			}
+			if err := r.Get(ctx, req.NamespacedName, got); !apierrors.IsNotFound(err) {
+				t.Fatalf("request still there past the 24 hour bound (%v)", err)
 			}
 		})
 	}

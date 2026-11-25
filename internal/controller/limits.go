@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
-	"github.com/shadewright-labs/shadewright/internal/policy/freshness"
 )
 
 // The executor's limits (design sections 6 and 10.7, #88): a lock per target, a cap on active requests and a
@@ -225,27 +224,11 @@ func progresses(rr *remediationv1alpha1.RemediationRequest) bool {
 // holds the finalizer, and that finalizer may still write to Git (deleteMayWrite). A request that ended in
 // another phase and released the lock has a pull request known merged or closed (or none of its own), and its
 // finalizer writes nothing to Git, so it is not counted, whichever list read it.
-//
-// A request being deleted that only waits for its repository entry to come back (waitsForRepository) is not counted
-// either: no Git write can start for it. Its close takes a slot first (waitForCapOnDelete), and the check of the
-// limits made under the admission lock counts it while it closes (closingOnDelete).
 func active(rr *remediationv1alpha1.RemediationRequest) bool {
 	if !rr.DeletionTimestamp.IsZero() {
-		return controllerutil.ContainsFinalizer(rr, FinalizerName) && (!ended(rr.Status.Phase) || deleteMayWrite(rr)) &&
-			!waitsForRepository(rr)
+		return controllerutil.ContainsFinalizer(rr, FinalizerName) && (!ended(rr.Status.Phase) || deleteMayWrite(rr))
 	}
 	return progresses(rr)
-}
-
-// waitsForRepository reports whether rr is being deleted and its cleanup failed because its repository entry is
-// missing from the settings (CleanupFailing, reason RepositoryUnavailable, #877): it keeps its lock and waits out the
-// 24 hour bound without a Git write.
-func waitsForRepository(rr *remediationv1alpha1.RemediationRequest) bool {
-	if rr.DeletionTimestamp.IsZero() || !controllerutil.ContainsFinalizer(rr, FinalizerName) {
-		return false
-	}
-	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
-	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == reasonRepositoryUnavailable
 }
 
 // deleteMayWrite reports whether the finalizer of a request that ended may write to Git: it closes the pull
@@ -322,14 +305,11 @@ func (r *RemediationRequestReconciler) breakerCooldown() time.Duration {
 }
 
 // checkLimits reads the settings and the requests in rr's namespace from the API server and decides whether rr
-// may go through the policy check now. It returns errSettingsMissing when settings do not exist, and
-// errCleanupSettingsRemoved when both objects are being deleted. A deleted request with no matching repository
-// entry returns errRepositoryGone while writes are unpaused, and freshness.ErrPaused while they are paused. Like the
-// kill switch, it requires an APIReader. closing are the deleted requests whose finalizer closes now
-// (closingOnDelete): a caller that holds the admission lock passes them, so a request that waits for its repository
-// entry counts against the cap while it closes; any other caller passes nil.
-func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	closing map[types.UID]struct{}) (limitsState, error) {
+// may go through the policy check now. It returns errSettingsMissing when the settings do not exist, and any
+// other read error as it is; the caller must then not let the request through. Without an APIReader it
+// refuses too: like the kill switch, it never falls back to the cache.
+func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
+	limitsState, error) {
 	if r.APIReader == nil {
 		return limitsState{}, errors.New("cannot check the limits: no API server reader")
 	}
@@ -339,10 +319,6 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		return limitsState{}, errSettingsMissing
 	case err != nil:
 		return limitsState{}, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
-	case !rr.DeletionTimestamp.IsZero():
-		if err := cleanupSettingsError(settings, rr); err != nil {
-			return limitsState{}, err
-		}
 	}
 	// An object written before the field had a default, or by hand, may hold 0: the smallest limit the schema
 	// allows is used then, never no limit.
@@ -367,7 +343,7 @@ func (r *RemediationRequestReconciler) checkLimits(ctx context.Context, rr *reme
 		if e.probe != nil {
 			probes = append(probes, *e.probe)
 		}
-		if e.takesSlot(closing) && uid != predecessor {
+		if e.active && uid != predecessor {
 			s.active++
 			if e.deleting && e.ended {
 				s.endedDeleting = append(s.endedDeleting, uid)
@@ -430,19 +406,10 @@ const (
 	countsField = "status.breakerCounts"
 )
 
-// takesSlot reports whether the request counts against the cap: it is active, or it waits for its repository entry
-// and closes now (closing, see checkLimits).
-func (e limitsEntry) takesSlot(closing map[types.UID]struct{}) bool {
-	_, closes := closing[e.uid]
-	return e.active || (e.waitsRepo && closes)
-}
-
 // limitsEntry is what the limits need of one request, so a check keeps no whole requests in memory except the
 // breaker's probes.
 type limitsEntry struct {
 	active bool
-	// waitsRepo is waitsForRepository: counted against the cap only while it closes (checkLimits).
-	waitsRepo bool
 	// lock is holdsLock.
 	lock    bool
 	target  remediationv1alpha1.UID
@@ -594,7 +561,7 @@ func (r *RemediationRequestReconciler) readLimits(ctx context.Context, namespace
 	seen := map[types.UID]limitsEntry{}
 	for _, sel := range limitsSelectors() {
 		err := r.listPages(ctx, namespace, sel, func(o *remediationv1alpha1.RemediationRequest) {
-			e := limitsEntry{active: active(o), waitsRepo: waitsForRepository(o), lock: holdsLock(o), target: o.Spec.TargetRef.UID,
+			e := limitsEntry{active: active(o), lock: holdsLock(o), target: o.Spec.TargetRef.UID,
 				outcome: breakerOutcome(o), counts: ptr.Deref(o.Status.BreakerCounts, false), name: o.Name,
 				resourceVersion: o.ResourceVersion, uid: o.UID, deleting: !o.DeletionTimestamp.IsZero(),
 				ended: ended(o.Status.Phase), pending: r.verificationPending(o),
@@ -820,23 +787,6 @@ func (r *RemediationRequestReconciler) setPhase(rr *remediationv1alpha1.Remediat
 	classifyBreaker(rr)
 }
 
-// cleanupSettingsError reports when the finalizer can decide cleanup without taking a slot for a Git write.
-// Settings being deleted come first (an uninstall makes no write), then a pause (the deletion waits and shows
-// WritesPaused, whatever the cap), then a repository entry that is missing (no Git write, so no slot).
-func cleanupSettingsError(settings *remediationv1alpha1.RemediationSettings,
-	rr *remediationv1alpha1.RemediationRequest) error {
-	if !settings.DeletionTimestamp.IsZero() {
-		return errCleanupSettingsRemoved
-	}
-	if freshness.Paused(settings) {
-		return freshness.ErrPaused
-	}
-	if _, ok := freshness.FindRepository(settings, rr.Status.PlanRepository); !ok {
-		return errRepositoryGone
-	}
-	return nil
-}
-
 // waitForCapOnDelete holds back the Git write of the finalizer of a request that ended (the close of its pull
 // request) while the cap is reached without it. Such a request was not active until it was deleted, so a check
 // of the limits made before its finalizer marked it (markDeleting) may have let another request through in its
@@ -845,34 +795,34 @@ func cleanupSettingsError(settings *remediationv1alpha1.RemediationSettings,
 // no Git write, so two of them never wait on each other). When fewer than maxConcurrentRemediations count, the
 // request is recorded as closing until release is called and the close goes on; else wait is true and the
 // deletion is checked again after admissionRecheckDelay without writing. A failure to read the limits is
-// returned with wait true (fail closed: no close, retried with backoff). When settings are being deleted or gone,
-// errCleanupSettingsRemoved tells the finalizer to skip Git cleanup. errRepositoryGone starts bounded cleanup
-// retries without taking a slot. A new leader starts with no record of closing requests from the previous leader.
+// returned with wait true (fail closed: no close, retried with backoff); missing settings let the close go on,
+// since it then finds no repository. The record of closing requests is the leader's own: a new leader starts
+// with none, after the old one stopped.
 func (r *RemediationRequestReconciler) waitForCapOnDelete(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
 	release func(), res reconcile.Result, wait bool, err error) {
 	r.admitMu.Lock()
 	defer r.admitMu.Unlock()
 	limCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
-	s, err := r.checkLimits(limCtx, rr, r.closingOnDelete)
+	s, err := r.checkLimits(limCtx, rr)
 	err = boundErr(ctx, limCtx, "check of the limits", err)
 	cancel()
-	if errors.Is(err, errSettingsMissing) {
-		err = errCleanupSettingsRemoved
-	}
-	if err != nil {
+	switch {
+	case errors.Is(err, errSettingsMissing):
+	case err != nil:
 		return nil, reconcile.Result{}, true, err
-	}
-	n := s.active
-	for _, uid := range s.endedDeleting {
-		if _, closing := r.closingOnDelete[uid]; !closing {
-			n--
+	default:
+		n := s.active
+		for _, uid := range s.endedDeleting {
+			if _, closing := r.closingOnDelete[uid]; !closing {
+				n--
+			}
 		}
-	}
-	if n >= s.limit {
-		logf.FromContext(ctx).Info("Waiting for a slot under maxConcurrentRemediations before closing the pull "+
-			"request of a deleted RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr),
-			"active", n, "limit", s.limit)
-		return nil, reconcile.Result{RequeueAfter: admissionRecheckDelay}, true, nil
+		if n >= s.limit {
+			logf.FromContext(ctx).Info("Waiting for a slot under maxConcurrentRemediations before closing the pull "+
+				"request of a deleted RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr),
+				"active", n, "limit", s.limit)
+			return nil, reconcile.Result{RequeueAfter: admissionRecheckDelay}, true, nil
+		}
 	}
 	if r.closingOnDelete == nil {
 		r.closingOnDelete = map[types.UID]struct{}{}
@@ -899,14 +849,8 @@ func (r *RemediationRequestReconciler) waitForCapOnDelete(ctx context.Context, r
 // settings let it go on as well: the policy check denies the request then.
 func (r *RemediationRequestReconciler) holdBack(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
 	queued bool) (res reconcile.Result, probe, stop bool, clr clearing, err error) {
-	// Only the check that lets a request through holds the admission lock (reconcile); a queued request's check
-	// before it does not, and reads no closingOnDelete.
-	var closing map[types.UID]struct{}
-	if !queued {
-		closing = r.closingOnDelete
-	}
 	limCtx, cancel := bound(ctx, r.CheckTimeout, DefaultCheckTimeout)
-	s, err := r.checkLimits(limCtx, rr, closing)
+	s, err := r.checkLimits(limCtx, rr)
 	err = boundErr(ctx, limCtx, "check of the limits", err)
 	cancel()
 	if err == nil {

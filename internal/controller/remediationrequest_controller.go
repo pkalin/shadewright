@@ -413,9 +413,6 @@ var errRepositoryGone = errors.New("the repository of the plan is not configured
 var errNoSettings = fmt.Errorf("%w: RemediationSettings %s does not exist", errRepositoryGone,
 	remediationv1alpha1.SettingsName)
 
-// errCleanupSettingsRemoved means the finalizer cannot use settings because the object is being deleted or is gone.
-var errCleanupSettingsRemoved = errors.New("RemediationSettings is being deleted or is gone")
-
 // afterRecheckEnd is what reconcile does after the recheck ended the request, with the recheck's result and error.
 // A step not recorded is not retried for an ended request: the next reconcile does not run it. An end that closed
 // the recorded pull request or found it closed kept the lock, because only the read of the branch may release it
@@ -2261,13 +2258,14 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err) && deleting:
-		return false, errCleanupSettingsRemoved
+		// A failure of the cleanup for the finalizer (cleanupDone), not a repository that left the settings: the object
+		// may come back, and the request's pull request may be open (#925). CleanupFailing says so with reason
+		// SettingsNotFound until the object is back or the bound of the cleanup ends.
+		return false, errNoSettings
 	case apierrors.IsNotFound(err):
 		return false, errRepositoryGone
 	case err != nil:
 		return false, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
-	case deleting && !settings.DeletionTimestamp.IsZero():
-		return false, errCleanupSettingsRemoved
 	}
 	if freshness.Paused(settings) {
 		return false, freshness.ErrPaused

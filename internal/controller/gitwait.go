@@ -202,15 +202,30 @@ func wholeWait(tmpl api.GitWait, op string, now time.Time) (api.GitWait, bool) {
 	return w, true
 }
 
+// waitsForMissingRepository reports whether rr, being deleted outside a handoff, has a cleanup that failed on a
+// repository missing from the settings (condition CleanupFailing with reason RepositoryUnavailable, #877).
+func waitsForMissingRepository(rr *api.RemediationRequest) bool {
+	if rr.DeletionTimestamp.IsZero() || inHandoff(rr) {
+		return false
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionCleanupFailing)
+	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == reasonRepositoryUnavailable
+}
+
 // applies reports whether an entry of kind k still has something to end on rr: the request deadline only in
-// PolicyChecked before a stale plan's cleanup or a handoff, the handoff grace only while the handoff is recovered,
-// the merge waits only while the merge is not recorded and the request is not being deleted (#878: the finalizer
-// records no merge, and its cleanup is bounded on its own, so the entry would only stand past its end).
+// PolicyChecked before a stale plan's cleanup or a handoff and, outside a handoff, before a deletion whose cleanup
+// failed on a repository missing from the settings (#877), the
+// handoff grace only while the handoff is recovered, the merge waits only while the merge is not recorded and the
+// request is not being deleted (#878: the finalizer records no merge, and its cleanup is bounded on its own, so the
+// entry would only stand past its end).
 func (k waitKind) applies(rr *api.RemediationRequest) bool {
 	switch k {
 	case waitRequestDeadline:
+		// A deletion outside a handoff whose cleanup waits for a missing repository entry ends it: that wait has its
+		// own bound, and a deadline wait left standing would pace its retries past its end (#877). Any other deletion
+		// keeps it, as before #877.
 		return rr.Status.Phase == api.PhasePolicyChecked && staleMark(rr) == nil && intent(rr) == nil &&
-			!recoveringHandoff(rr)
+			!recoveringHandoff(rr) && !waitsForMissingRepository(rr)
 	case waitHandoffGrace:
 		// The grace bounds a standing intent; a refusal aborted it (third decision of 2026-11-18 on #786). Neither
 		// handoff wait applies to a request being deleted: its finalizer removes them (#786).

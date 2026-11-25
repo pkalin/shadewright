@@ -11,6 +11,10 @@ on:
 
 permissions: {}
 
+env:
+  GOFLAGS: -mod=readonly
+  GOWORK: off
+
 jobs:
   test-e2e:
     if: ${{ inputs.run != false }}
@@ -31,5 +35,6 @@ jobs:
 
       - name: Running Test e2e
         run: |
-          go mod tidy
+          # -diff detects go.mod/go.sum drift without mutating them.
+          go mod tidy -diff
           make test-e2e

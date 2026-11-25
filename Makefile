@@ -14,11 +14,17 @@ YEAR := $(shell date +%Y)
 endif
 endif
 
+# Enforce read-only module resolution and disable Go workspaces in every Make recipe
+# and $(shell go ...) call (ADR-0048), preserving unrelated caller GOFLAGS.
+override GOFLAGS := $(strip $(filter-out -mod -mod=% --mod --mod=%,$(GOFLAGS)) -mod=readonly)
+override GOWORK := off
+export GOFLAGS GOWORK
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
-ifeq (,$(shell go env GOBIN))
-GOBIN=$(shell go env GOPATH)/bin
+ifeq (,$(shell GOFLAGS="$(GOFLAGS)" GOWORK="$(GOWORK)" go env GOBIN))
+GOBIN=$(shell GOFLAGS="$(GOFLAGS)" GOWORK="$(GOWORK)" go env GOPATH)/bin
 else
-GOBIN=$(shell go env GOBIN)
+GOBIN=$(shell GOFLAGS="$(GOFLAGS)" GOWORK="$(GOWORK)" go env GOBIN)
 endif
 
 # CONTAINER_TOOL defines the container tool to be used for building images.
@@ -103,7 +109,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test-scripts
-test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection, fuzz target, docs link check, condition reasons page check, plugin dependency check and side-by-side run scripts (hack/*_test.sh).
+test-scripts: ## Test the release notes, release steps, chart docs, chart CRD copy, chart digest, CI change detection, fuzz target, docs link check, condition reasons page check, plugin dependency check, Go build settings check and side-by-side run scripts (hack/*_test.sh).
 	hack/release-notes-by-scope_test.sh
 	hack/check-chart-docs_test.sh
 	hack/chart-crds_test.sh
@@ -119,6 +125,7 @@ test-scripts: ## Test the release notes, release steps, chart docs, chart CRD co
 	hack/docs-reasons-check_test.sh
 	python3 -I hack/docs-reasons-check.py
 	hack/check-plugin-deps_test.sh
+	hack/check-go-build-settings_test.sh
 	hack/side-by-side_test.sh
 
 # The shards of the run of internal/redact with the tag redactwork in make test (top-level test names, joined
@@ -268,12 +275,16 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: lint
-lint: check-go-toolchain check-plugin-deps golangci-lint ## Run golangci-lint linter (and check the Go toolchain matches the Dockerfile builder, and the plugin's dependencies and size)
+lint: check-go-toolchain check-go-build-settings check-plugin-deps golangci-lint ## Run golangci-lint linter (and check the Go toolchain, module build settings, and the plugin's dependencies and size)
 	"$(GOLANGCI_LINT)" run
 
 .PHONY: check-go-toolchain
 check-go-toolchain: ## Fail if go.mod's toolchain line differs from the Go release of the Dockerfile builder stage.
 	hack/check-go-toolchain.sh
+
+.PHONY: check-go-build-settings
+check-go-build-settings: ## Fail if Make, Dockerfile or direct CI Go paths do not enforce GOFLAGS=-mod=readonly and GOWORK=off.
+	hack/check-go-build-settings.sh
 
 .PHONY: check-plugin-deps
 check-plugin-deps: ## Fail if kubectl-shadewright links the operator's server-side stack or outgrows its size ceiling.
@@ -525,7 +536,7 @@ ln -sf "$$(realpath "$(1)-$(3)")" "$(1)"
 endef
 
 define gomodver
-$(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
+$(shell GOFLAGS="$(GOFLAGS)" GOWORK="$(GOWORK)" go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
 
 ##@ Helm chart

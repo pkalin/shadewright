@@ -11,6 +11,10 @@ FROM --platform=$BUILDPLATFORM golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7
 ARG TARGETOS
 ARG TARGETARCH
 
+# Enforce read-only module resolution and disable Go workspaces in the builder stage (ADR-0048).
+ENV GOFLAGS=-mod=readonly \
+    GOWORK=off
+
 WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod

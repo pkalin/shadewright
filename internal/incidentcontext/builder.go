@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/redact"
 )
@@ -128,6 +129,9 @@ type Builder struct {
 	timeout          time.Duration
 	buildTimeout     time.Duration
 	now              func() time.Time
+	// showsTally, set by tests only, replaces the list of reasons whose summary shows the absorbed tally. Nil,
+	// as New leaves it, is that list: causereason.Tallied (tallyShown).
+	showsTally func(reason string) bool
 }
 
 // New returns a builder, or an error when a required field is missing or a bound is out of range.
@@ -437,4 +441,15 @@ func (b *Builder) fitTotal(c *Context) {
 			blk.addLabel(LabelContextCut)
 		}
 	}
+}
+
+// tallyShown reports whether the summary of an Incident of reason shows its absorbed tally (ADR-0039 point 18,
+// decided 2026-11-21 on #432): a reason of causereason.Tallied, an OOM kill and the waiting reasons the collector
+// reads as a cause; a non-zero exit is not on it until #1080. A Builder not made by New (showsTally nil) reads the
+// same list, so no Builder hides the tally of those reasons from the model.
+func (b *Builder) tallyShown(reason string) bool {
+	if b.showsTally != nil {
+		return b.showsTally(reason)
+	}
+	return causereason.ShowsTally(reason)
 }

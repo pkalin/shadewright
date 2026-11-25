@@ -31,13 +31,16 @@ limitations under the License.
 // Consequences and causes (cause.go, ADR-0039): each observation carries where it was read (Origin: pod status
 // or an event; only a pod-status origin is hashed into the fingerprint, so an Event cannot imitate one), its
 // container (a status entry's name, or the container an event's regarding field path names in the verified
-// pod) and a Class. Only a pod-status OOM kill or waiting cause is a cause; a kubelet BackOff or Unhealthy event
-// on a named container is a consequence, and its CauseFingerprint is the cause its pod's status shows for that
-// container: a current waiting cause, else an OOM kill that finished at most KillCauseWindow before the
-// event's own time. A consequence with no cause is held (hold.go, ADR-0039 point 19): it is emitted only when,
-// ConsequenceGrace after the collector first saw it, its pod has the same UID, the container was seen failing
-// at least twice (each reconcile of the event, and each update of its pod, is a sample), and it is still failing
-// or restarted at least twice during the hold; otherwise it is handled without an observation. A consequence
+// pod) and a Class. Every pod-status symptom (an OOM kill, a non-zero exit or a waiting cause) is a cause,
+// except a termination that is not an OOM kill of a pod whose status.reason is set (evicted, stopped by a node
+// shutdown or a deadline: termination.class); a kubelet BackOff or Unhealthy event on a named container is a
+// consequence, and its CauseFingerprint is the cause its pod's status shows for that container: a current waiting
+// cause, else an OOM kill that finished at most TerminationCauseWindow before the event's own time. A BackOff, and
+// only a BackOff, may also link to a non-zero exit within TerminationCauseWindow of its time on either side (see
+// below). A consequence with no cause is held (hold.go, ADR-0039 point
+// 19): it is emitted only when, ConsequenceGrace after the collector first saw it, its pod has the same UID,
+// the container was seen failing at least twice (each reconcile of the event, and each update of its pod, is a
+// sample), and it is still failing or restarted at least twice during the hold; otherwise it is handled without an observation. A consequence
 // whose pod shows a cause that the Incident controller has not seen yet (Config.CauseSeen, asked with the hold's
 // observation at each sample; ADR-0039 point 7) is held too: it is emitted with its cause as soon as an answer
 // says the controller has seen a cause it would be counted on, asked again when the controller tells the
@@ -48,6 +51,19 @@ limitations under the License.
 // release by the end, and an event that no longer exists, end it with nothing emitted. The holds are bounded (DefaultMaxHeldConsequences, a quarter per namespace),
 // those first seen with a cause and those with none in two shares apart; over the bound a consequence is
 // emitted at once.
+//
+// A non-zero exit is a cause of BackOff events only, and only on the Incident controller's word (decided
+// 2026-11-21 on #432, narrowed 2026-11-22): an Unhealthy event never links to one, since a liveness probe failure
+// makes the kubelet kill the container and so is the cause of the exit, not its consequence. The pod status of a
+// BackOff offers the newest exit in the window as a candidate (Observation.exitCause), next to the cause main
+// reads (CauseFingerprint). Only a held BackOff whose candidates are exits alone uses it: a hold keeps the exits
+// its samples offered, at most maxHeldExits (a newer one replaces the oldest past that), and is found by each
+// when a cause is released; a sample that shows an OOM kill or a wait drops them, and the hold links as main
+// does. A BackOff that is not held (no room to hold) never asks about an exit and links as main does. A
+// candidate becomes the cause only when Config.CauseSeen answered true for it (resolveExit, the one place that
+// decides it). The verdict is made once per hold, at its end (asked once more, a failed ask waiting no longer),
+// and a delivery retry asks nothing more. A verdict that confirms no candidate is logged and counted
+// cause_unconfirmed (the answer no, or no CauseSeen) or cause_unanswered (a failed or late answer).
 //
 // Observation-level deduplication: per event the collector remembers the UID and the last handled
 // occurrence count (the series count, or the count of an older recorder, or one), and emits only the

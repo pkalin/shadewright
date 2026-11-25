@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/shadewright-labs/shadewright/api/v1alpha1"
@@ -701,7 +702,7 @@ func TestRefuseOpenedMergedOnMovedBaseStops(t *testing.T) {
 		t.Fatal(err)
 	}
 	cr := g.ChangeRequests()[n-1]
-	err := r.refuseOpened(ctx, g, rr, cr, &renderRefusal{reason: ReasonHeadMoved, message: "The head is not the planned one"})
+	err := r.refuseOpened(ctx, g, rr, cr, &renderRefusal{reason: ReasonHeadMoved, message: headNotPlanned})
 	if !errors.Is(err, errStopped) {
 		t.Fatalf("refuseOpened: %v, want the request stopped", err)
 	}
@@ -1021,11 +1022,13 @@ func TestStoppedHolderSaysTheCheckWasNotFailed(t *testing.T) {
 	}
 }
 
-// #925: a look whose status write is lost (the request changed between its read and its write) leaves the stored
-// status as it was, and the next look tells that from what it stands for: a condition ReviewCheckNotFailed that was
-// not stored is set again, and a failed check whose Stale was not stored is written again and recorded, removing the
-// condition.
-func TestStoppedHolderCheckNoteSurvivesALostWrite(t *testing.T) {
+// #925, #1008: the status write of a look's failed review check (checkHeld's exit, afterLook) that meets a conflict
+// (another writer changed the request, an annotation, just before that write landed) is not lost: on the conflict the
+// request is read again and the outcome carried over, so a condition ReviewCheckNotFailed is stored by that look, and
+// so is Stale once the check is written, which removes the condition. An interceptor makes the first status write
+// that carries the outcome conflict, once per look. Before the single exit the conflict was returned and the outcome
+// waited for the next look.
+func TestStoppedHolderCheckOutcomeSurvivesAConflict(t *testing.T) {
 	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
 	ctx := context.Background()
 	r.ReviewerHints = true
@@ -1040,57 +1043,74 @@ func TestStoppedHolderCheckNoteSurvivesALostWrite(t *testing.T) {
 		return nil
 	})
 	key := client.ObjectKeyFromObject(rr)
+	base := r.Client
 	get := func() *api.RemediationRequest {
 		t.Helper()
 		live := &api.RemediationRequest{}
-		if err := r.Get(ctx, key, live); err != nil {
+		if err := base.Get(ctx, key, live); err != nil {
 			t.Fatal(err)
 		}
 		return live
 	}
-	lostLook := func() {
-		t.Helper()
-		stale := get()
-		other := get()
-		if other.Annotations == nil {
-			other.Annotations = map[string]string{}
-		}
-		other.Annotations["example.com/touched"] = fmt.Sprint(time.Now().UnixNano())
-		if err := r.Update(ctx, other); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := r.checkHeld(ctx, stale); !apierrors.IsConflict(err) {
-			t.Fatalf("checkHeld on a stale copy: %v; want a conflict", err)
-		}
-	}
 	note := func(live *api.RemediationRequest) *metav1.Condition {
 		return meta.FindStatusCondition(live.Status.Conditions, api.ConditionReviewCheckNotFailed)
 	}
-	lostLook()
-	if c := note(get()); c != nil {
-		t.Fatalf("ReviewCheckNotFailed %+v stored by a lost write", c)
+	// carries reports whether a status write holds the look's outcome: the condition, or state Stale.
+	carries := func(rr *api.RemediationRequest) bool {
+		pr := rr.Status.PullRequest
+		return note(rr) != nil || pr != nil && pr.ReviewCheck != nil && pr.ReviewCheck.State == api.ReviewCheckStale
 	}
-	live := get()
-	if _, err := r.checkHeld(ctx, live); err != nil {
-		t.Fatal(err)
+	armed, conflicts := false, 0
+	var touched string
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			out, ok := obj.(*api.RemediationRequest)
+			if !ok || !armed || !carries(out) {
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			}
+			armed = false
+			// Another writer changes the request between afterLook's read and its write.
+			other := get()
+			if other.Annotations == nil {
+				other.Annotations = map[string]string{}
+			}
+			touched = fmt.Sprint(time.Now().UnixNano())
+			other.Annotations["example.com/touched"] = touched
+			if err := base.Update(ctx, other); err != nil {
+				t.Fatal(err)
+			}
+			err := c.SubResource(sub).Update(ctx, obj, opts...)
+			if apierrors.IsConflict(err) {
+				conflicts++
+			}
+			return err
+		},
+	})
+	look := func() {
+		t.Helper()
+		armed, conflicts = true, 0
+		if _, err := r.checkHeld(ctx, get()); err != nil {
+			t.Fatalf("checkHeld: %v; want the write carried over", err)
+		}
+		if conflicts != 1 {
+			t.Fatalf("%d conflicts on the status write that carries the outcome: want one", conflicts)
+		}
+		if live := get(); live.Annotations["example.com/touched"] != touched {
+			t.Fatalf("annotations %v: the write of the look put back the copy it read", live.Annotations)
+		}
 	}
+	look()
 	if c := note(get()); c == nil || c.Reason != ReasonGitFailed {
-		t.Fatalf("ReviewCheckNotFailed %+v after the lost write: want it set by the next look", c)
+		t.Fatalf("ReviewCheckNotFailed %+v after a look whose write met a conflict: want it stored", c)
 	}
 	failing = false
-	lostLook()
-	if !failedOnly(g.CheckRuns(head)) || note(get()) == nil {
-		t.Fatalf("check runs %+v, conditions %s: want the check written and the condition still stored",
-			g.CheckRuns(head), conditionsOf(get()))
-	}
-	live = get()
-	if _, err := r.checkHeld(ctx, live); err != nil {
-		t.Fatal(err)
-	}
-	live = get()
-	if rc := live.Status.PullRequest.ReviewCheck; rc == nil || rc.State != api.ReviewCheckStale || note(live) != nil {
-		t.Fatalf("review check %+v, conditions %s: want Stale recorded and the condition removed", rc,
-			conditionsOf(live))
+	look()
+	live := get()
+	if rc := live.Status.PullRequest.ReviewCheck; !failedOnly(g.CheckRuns(head)) || rc == nil ||
+		rc.State != api.ReviewCheckStale || note(live) != nil {
+		t.Fatalf("check runs %+v, review check %+v, conditions %s: want the check written, Stale recorded and the "+
+			"condition removed by that look", g.CheckRuns(head), rc, conditionsOf(live))
 	}
 }
 
@@ -1135,7 +1155,7 @@ func TestStopOnMovedBaseSaysTheCheckWasNotFailed(t *testing.T) {
 			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {
 				t.Fatal(err)
 			}
-			if err := r.stopOpenElsewhere(ctx, live, cr); !errors.Is(err, errStopped) {
+			if err := r.stopOpenElsewhere(ctx, live, cr, false); !errors.Is(err, errStopped) {
 				t.Fatalf("stopOpenElsewhere: %v; want the stop", err)
 			}
 			if err := r.Get(ctx, client.ObjectKeyFromObject(rr), live); err != nil {

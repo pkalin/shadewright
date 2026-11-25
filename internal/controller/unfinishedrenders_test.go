@@ -501,6 +501,22 @@ func TestOnlyOwnMarksChanged(t *testing.T) {
 		Message: "m"})
 	checkNoteAndPhase := checkNote.DeepCopy()
 	checkNoteAndPhase.Status.Phase = remediationv1alpha1.PhaseSuperseded
+	withPR := base.DeepCopy()
+	withPR.ResourceVersion = "9"
+	withPR.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 7, HeadSHA: strings.Repeat("a", 40)}
+	staleOn := func(from *remediationv1alpha1.RemediationRequest, head string) *remediationv1alpha1.RemediationRequest {
+		rr := from.DeepCopy()
+		rr.ResourceVersion = "10"
+		rr.Status.PullRequest.ReviewCheck = &remediationv1alpha1.ReviewCheck{Head: head,
+			State: remediationv1alpha1.ReviewCheckStale}
+		return rr
+	}
+	stale := staleOn(withPR, withPR.Status.PullRequest.HeadSHA)
+	staleAndPhase := stale.DeepCopy()
+	staleAndPhase.Status.Phase = remediationv1alpha1.PhaseSuperseded
+	movedHead := stale.DeepCopy()
+	movedHead.Status.PullRequest.HeadSHA = strings.Repeat("b", 40)
+	movedHead.Status.PullRequest.ReviewCheck.Head = movedHead.Status.PullRequest.HeadSHA
 	for name, tc := range map[string]struct {
 		old, new *remediationv1alpha1.RemediationRequest
 		want     bool
@@ -515,6 +531,13 @@ func TestOnlyOwnMarksChanged(t *testing.T) {
 		"ReviewCheckNotFailed set":         {base, checkNote, true},
 		"ReviewCheckNotFailed removed":     {checkNote, base, true},
 		"ReviewCheckNotFailed and a phase": {base, checkNoteAndPhase, false},
+		// #1008: the exit of a stopped holder's look records state Stale on the head in a write of its own, after the
+		// look returned its delay (a refused close tried again at heldRecheckInterval).
+		"Stale recorded on the head":       {withPR, stale, true},
+		"Stale recorded and a phase":       {withPR, staleAndPhase, false},
+		"Stale recorded on another head":   {withPR, staleOn(withPR, strings.Repeat("c", 40)), false},
+		"Stale with a moved head":          {stale, movedHead, false},
+		"Stale recorded with a new record": {base, stale, false},
 		// #771: deliveryReadFailed names a lasting cause in Delivered Unknown and returns the failure for the error
 		// backoff, in both modes; its write must not wake the request before that delay.
 		"Delivered pending set":          {base, pendingCause, true},

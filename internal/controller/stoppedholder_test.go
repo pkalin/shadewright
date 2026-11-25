@@ -479,7 +479,7 @@ func TestDeletionLogsTheEndOfReviewCheckNotFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, lines := loggedCtx()
-	if _, _, err := r.beginFinalize(ctx, get()); err != nil {
+	if _, _, err := r.beginFinalize(ctx, get(), false); err != nil {
 		t.Fatalf("beginFinalize: %v", err)
 	}
 	if c := meta.FindStatusCondition(get().Status.Conditions, api.ConditionReviewCheckNotFailed); c != nil {
@@ -511,7 +511,7 @@ func TestDeletionLogsAHeadNotKnownToShowTheFailedCheck(t *testing.T) {
 			}
 		}
 		ctx, lines := loggedCtx()
-		if _, _, err := r.beginFinalize(ctx, get()); err != nil {
+		if _, _, err := r.beginFinalize(ctx, get(), false); err != nil {
 			t.Fatalf("stale %v: beginFinalize: %v", stale, err)
 		}
 		var found int
@@ -536,7 +536,7 @@ func TestDeletionLogsACheckThatMayStayOncePerDeletion(t *testing.T) {
 	ctx, lines := loggedCtx()
 	for range 3 {
 		r.forget(client.ObjectKeyFromObject(get()))
-		if _, _, err := r.beginFinalize(ctx, get()); err != nil {
+		if _, _, err := r.beginFinalize(ctx, get(), false); err != nil {
 			t.Fatalf("beginFinalize: %v", err)
 		}
 	}

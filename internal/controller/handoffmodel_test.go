@@ -3335,6 +3335,88 @@ func TestHandoffModelPredecessorCleansUpAfterReplacementFinalizes(t *testing.T) 
 	}
 }
 
+// #877, second review: a live predecessor whose replacement is deleted while another controller's finalizer keeps it
+// does not stay in Intent once the replacement's own finalizer is gone: the replacement can never take over.
+func TestHandoffModelLivePredecessorAbortsForAReleasedReplacement(t *testing.T) {
+	m := newHMWorld(t, requestStatusSchema(t), hmStartIntent)
+	ctx := context.Background()
+	repl := m.get(hmRepl)
+	const otherFinalizer = "example.com/replacement"
+	repl.Finalizers = append(repl.Finalizers, otherFinalizer)
+	if err := m.base.Update(ctx, repl); err != nil {
+		t.Fatal(err)
+	}
+	m.deleteRequest(hmRepl)
+	for range 3 {
+		m.reconcile(hmRepl)
+	}
+	repl = m.get(hmRepl)
+	if repl == nil || controllerutil.ContainsFinalizer(repl, FinalizerName) || tookOver(repl) || ended(repl.Status.Phase) {
+		t.Fatalf("expected a terminating replacement that kept only %s and never took over: %s", otherFinalizer,
+			describe(repl))
+	}
+	m.reconcile(hmPred)
+	if pred := m.get(hmPred); pred == nil || intent(pred) != nil {
+		t.Fatalf("the live predecessor keeps its intent for a replacement that can never take over: %s", describe(pred))
+	}
+}
+
+// #877, second review: an uninstall (RemediationSettings deleted, then every request) does not hang on a merged handoff
+// that neither request settled yet: the settings-removed release comes before the handoff writes that need settings.
+func TestHandoffModelUninstallWithAnUnsettledMergedHandoff(t *testing.T) {
+	for _, terminating := range []bool{false, true} {
+		t.Run(fmt.Sprintf("terminating=%t", terminating), func(t *testing.T) {
+			m := newHMWorld(t, requestStatusSchema(t), hmStartPushed)
+			for i, s := range []hmStep{stRecRepl, stMerge, stRecRepl} {
+				m.stepNo = i + 1
+				m.apply(s)
+			}
+			ctx := context.Background()
+			repl := m.get(hmRepl)
+			if repl == nil || !tookOver(repl) || !mergeRecorded(repl) {
+				t.Fatalf("expected a replacement that took over and recorded the merge: %s", describe(repl))
+			}
+			// Step 5 (the predecessor ended HandedOff) is lost: the predecessor still shows its intent and its lock.
+			pred := m.get(hmPred)
+			if pred == nil || !handedOff(pred) {
+				t.Fatalf("expected a predecessor ended HandedOff: %s", describe(pred))
+			}
+			pred.Status.Handoff.To.Phase = api.HandoffIntent
+			pred.Status.Phase = api.PhaseAwaitingApproval
+			pred.Status.HoldsTarget = new(true)
+			meta.RemoveStatusCondition(&pred.Status.Conditions, api.ConditionApproved)
+			if err := m.base.Status().Update(ctx, pred); err != nil {
+				t.Fatal(err)
+			}
+			st := &api.RemediationSettings{}
+			if err := m.base.Get(ctx, client.ObjectKey{Name: api.SettingsName}, st); err != nil {
+				t.Fatal(err)
+			}
+			if terminating {
+				st.Finalizers = []string{"example.com/settings"}
+				if err := m.base.Update(ctx, st); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := m.base.Delete(ctx, st); err != nil {
+				t.Fatal(err)
+			}
+			m.deleteRequest(hmRepl)
+			m.deleteRequest(hmPred)
+			for _, who := range []string{hmRepl, hmPred} {
+				for i := 0; i < 3 && m.get(who) != nil; i++ {
+					if _, err := m.r.Reconcile(ctx, reconcile.Request{NamespacedName: m.keys[who]}); err != nil {
+						t.Fatalf("reconcile of the deleted %s during uninstall: %v", who, err)
+					}
+				}
+				if x := m.get(who); x != nil {
+					t.Fatalf("the %s still holds its finalizer during uninstall: %s", who, describe(x))
+				}
+			}
+		})
+	}
+}
+
 func TestHandoffModelFlagsExpiredDeletionLock(t *testing.T) {
 	m := newHMWorld(t, requestStatusSchema(t), hmStartIntent)
 	m.changeSettings(settingsRemoved)

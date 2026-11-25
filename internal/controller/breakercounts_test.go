@@ -28,6 +28,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
@@ -211,7 +212,7 @@ func decide(t *testing.T, r *RemediationRequestReconciler, m client.Reader, now 
 	t.Helper()
 	r.APIReader = m
 	r.Now = func() time.Time { return now }
-	s, err := r.checkLimits(context.Background(), pendingRequest())
+	s, err := r.checkLimits(context.Background(), pendingRequest(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +509,7 @@ func successHistory() []*remediationv1alpha1.RemediationRequest {
 // limitsReason is the reason the limits give a new request on its own target now (empty: let through).
 func limitsReason(t *testing.T, r *RemediationRequestReconciler) string {
 	t.Helper()
-	s, err := r.checkLimits(context.Background(), pendingRequest())
+	s, err := r.checkLimits(context.Background(), pendingRequest(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -992,5 +993,106 @@ func TestRestoreRefusedIsVisible(t *testing.T) {
 	case e := <-events.Events:
 		t.Fatalf("event %q recorded; the executor writes only the kill switch's Events", e)
 	default:
+	}
+}
+
+// repositoryWaiter is a request being deleted (it stays, a restore that fails or not) whose cleanup failed because its
+// repository entry is missing from the settings (#877).
+func repositoryWaiter(t *testing.T, name string, phase remediationv1alpha1.RemediationPhase) *remediationv1alpha1.RemediationRequest {
+	t.Helper()
+	o := endedWithPR(t, name, phase)
+	o.Status.HoldsTarget = new(true)
+	meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{Type: remediationv1alpha1.ConditionCleanupFailing,
+		Status: metav1.ConditionTrue, Reason: reasonRepositoryUnavailable, LastTransitionTime: metav1.NewTime(limitsNow)})
+	return o
+}
+
+// TestRepositoryWaiterHoldsNoSlot checks #877, second review: a deleted request that only waits out the bound of its
+// missing repository entry makes no Git write, so it holds no slot under a cap of one, before or after the merge, and
+// it counts again only while its close runs (closingOnDelete, under the admission lock).
+func TestRepositoryWaiterHoldsNoSlot(t *testing.T) {
+	for _, phase := range []remediationv1alpha1.RemediationPhase{remediationv1alpha1.PhaseAwaitingApproval,
+		remediationv1alpha1.PhaseNeedsIntervention} {
+		t.Run(string(phase), func(t *testing.T) {
+			waiter := repositoryWaiter(t, "waiter", phase)
+			r, base, _, _ := limitsWorld(t, 1, waiter)
+			if err := base.Delete(context.Background(), waiter); err != nil {
+				t.Fatal(err)
+			}
+			if reason := limitsReason(t, r); reason != "" {
+				t.Fatalf("limits = %q while the deleted request only waits for its repository, want none", reason)
+			}
+			s, err := r.checkLimits(context.Background(), pendingRequest(),
+				map[types.UID]struct{}{waiter.UID: {}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.reason != ReasonConcurrencyLimit {
+				t.Fatalf("limits = %q while the deleted request closes, want %s", s.reason, ReasonConcurrencyLimit)
+			}
+		})
+	}
+}
+
+// TestDeleteAtTheCapShowsThePause checks #877, second review: a request that ended and is deleted while another fills
+// the cap and writes are paused shows WritesPaused, as every deletion that meets the pause does, instead of a silent
+// wait for a slot.
+func TestDeleteAtTheCapShowsThePause(t *testing.T) {
+	ending := endedWithPR(t, "ending", remediationv1alpha1.PhaseExpired)
+	running := otherRequest("running", "uid-elsewhere", remediationv1alpha1.PhasePRCreated, time.Minute)
+	r, base, _, _ := limitsWorld(t, 1, ending, running)
+	opens := countOpens(r)
+	ctx := context.Background()
+	settings := &remediationv1alpha1.RemediationSettings{}
+	if err := base.Get(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.Paused = new(true)
+	if err := base.Update(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := base.Delete(ctx, ending); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(ending)})
+	if err != nil || res.RequeueAfter <= 0 || *opens != 0 {
+		t.Fatalf("res = %+v, err = %v, opens = %d; want a wait without a Git write", res, err, *opens)
+	}
+	got := &remediationv1alpha1.RemediationRequest{}
+	if err := base.Get(ctx, client.ObjectKeyFromObject(ending), got); err != nil {
+		t.Fatal(err)
+	}
+	if !meta.IsStatusConditionTrue(got.Status.Conditions, remediationv1alpha1.ConditionWritesPaused) {
+		t.Fatalf("conditions = %+v, want WritesPaused while the deletion waits at the cap", got.Status.Conditions)
+	}
+}
+
+// TestSlotWaitEndsAtTheCleanupBound checks #877, second review: a request whose repository entry came back waits for a
+// slot before its close, but never past the 24 hour bound its cleanup already started: at the end of the bound it is
+// let go with PullRequestLeftOpen, without a Git write.
+func TestSlotWaitEndsAtTheCleanupBound(t *testing.T) {
+	waiter := repositoryWaiter(t, "waiter", remediationv1alpha1.PhaseAwaitingApproval)
+	meta.FindStatusCondition(waiter.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing).LastTransitionTime =
+		metav1.NewTime(limitsNow.Add(-cleanupFailingBound - time.Minute))
+	running := otherRequest("running", "uid-elsewhere", remediationv1alpha1.PhasePRCreated, time.Minute)
+	r, base, _, _ := limitsWorld(t, 1, waiter, running)
+	recorder := record.NewFakeRecorder(20)
+	r.Recorder = recorder
+	opens := countOpens(r)
+	ctx := context.Background()
+	if err := base.Delete(ctx, waiter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(waiter)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := base.Get(ctx, client.ObjectKeyFromObject(waiter), &remediationv1alpha1.RemediationRequest{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the request still waits for a slot past its cleanup bound (%v)", err)
+	}
+	if *opens != 0 {
+		t.Fatalf("opens = %d, want no Git write", *opens)
+	}
+	if n := warningsOf(recorder, EventPullRequestLeftOpen); n != 1 {
+		t.Fatalf("got %d Warning Events %s, want one", n, EventPullRequestLeftOpen)
 	}
 }

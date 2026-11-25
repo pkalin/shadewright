@@ -1952,7 +1952,7 @@ func (r *RemediationRequestReconciler) handoffHolds(ctx context.Context, rr *rem
 	case repl.UID != types.UID(to.UID):
 	case tookOver(repl):
 		return true, false, nil
-	case !repl.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(repl, FinalizerName):
+	case releasedOnDelete(repl):
 	case !ended(repl.Status.Phase) && !abortedOnRefusal(repl):
 		return false, true, nil
 	}
@@ -1963,14 +1963,22 @@ func (r *RemediationRequestReconciler) handoffHolds(ctx context.Context, rr *rem
 	return false, false, nil
 }
 
+// releasedOnDelete reports whether rr is being deleted and its finalizer let go of it: the executor does nothing more
+// for it, whatever other finalizers still keep the object.
+func releasedOnDelete(rr *remediationv1alpha1.RemediationRequest) bool {
+	return !rr.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(rr, FinalizerName)
+}
+
 // settleHandoff is the predecessor's side of a handoff, in upd, the status about to be written with the look at
 // its pull request: an intent whose replacement is gone or ended without taking over is aborted, and a Pending
 // hint the analysis answered with a replacement is declined once every replacement that names it ended without
 // the handoff. A replacement Denied for its chain link (ChainLinkInvalid) is not counted: an invalid link takes
 // nothing, not even the hint. A read that fails decides nothing and is logged at Info.
 func (r *RemediationRequestReconciler) settleHandoff(ctx context.Context, upd *remediationv1alpha1.RemediationRequest) {
+	// A deleted replacement that let go of this executor's finalizer never takes over either, even while another
+	// controller's finalizer keeps the object (#877): its finalizer removed the entries abortedOnRefusal reads.
 	gaveUp := func(repl *remediationv1alpha1.RemediationRequest) bool {
-		return ended(repl.Status.Phase) && !tookOver(repl)
+		return (ended(repl.Status.Phase) || releasedOnDelete(repl)) && !tookOver(repl)
 	}
 	// A replacement whose handoff was aborted at a refused read (abortedOnRefusal, #786) never takes over: its intent
 	// is aborted, though it still runs.

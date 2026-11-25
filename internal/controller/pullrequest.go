@@ -2495,8 +2495,8 @@ func (r *RemediationRequestReconciler) ignoreStopped(err error) error {
 // that replacement MergedForPredecessor first (supersedeReplacementAfterMerge), so the replacement never records that
 // merge a second time once this request is gone. done is true
 // when finalize returns res and err as they are: a failed write, a pause, or a failure of that step.
-func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
-	reconcile.Result, bool, error) {
+func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	settingsRemoved bool) (reconcile.Result, bool, error) {
 	marked := markDeleting(rr)
 	if removeInapplicable(rr) {
 		gitWaitSummary(rr, r.now())
@@ -2530,6 +2530,11 @@ func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *re
 			logCheckNoteEnd(ctx, rr, ended, "the request is being deleted")
 		}
 	}
+	if settingsRemoved {
+		// An uninstall (#877): the handoff writes below pass the kill switch, which refuses them without settings, so
+		// they would hold the deletion for good. The other request of the handoff is left as it is.
+		return reconcile.Result{}, false, nil
+	}
 	if err := r.supersedeReplacementAfterMerge(ctx, rr); err != nil {
 		if errors.Is(err, freshness.ErrPaused) {
 			res, err := r.waitWhilePaused(ctx, rr)
@@ -2552,8 +2557,10 @@ func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *re
 
 // finalize closes the request's pull request when the request is deleted, then removes the finalizer. It
 // never touches the cluster. A repository entry whose target branch changed is closed on the branch the plan recorded
-// (closeOwn). A missing or unusable repository entry starts bounded cleanup retries. If the RemediationSettings
-// object is being deleted or is gone, the finalizer skips Git cleanup and warns that the pull request may be open
+// (closeOwn). A missing or unusable repository entry starts bounded cleanup retries; a request that only waits for a
+// missing entry holds no slot under the cap until it closes (waitsForRepository). If the RemediationSettings object is
+// being deleted or is gone (read first, cleanupSettingsRemoved), the finalizer skips Git cleanup and every other step
+// that needs settings, a pause included, and warns that the pull request may be open when it would have closed one
 // (#877). A request that stopped (NeedsIntervention, Expired) may still have an open pull request of its own, so it is closed too, and so is
 // the one of any request that holds the lock on its target (status.holdsTarget), whatever its phase, except a merged
 // request that holds it only while its outcome is verified (heldForVerification, #719); a merged one refuses the
@@ -2572,39 +2579,20 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	if !controllerutil.ContainsFinalizer(rr, FinalizerName) {
 		return reconcile.Result{}, nil
 	}
-	if res, done, err := r.beginFinalize(ctx, rr); done {
+	// Checked before every step that needs settings (the handoff writes, the wait for a slot, the close), so an
+	// uninstall never waits on one of them.
+	settingsRemoved, err := r.cleanupSettingsRemoved(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	if res, done, err := r.beginFinalize(ctx, rr, settingsRemoved); done {
 		return res, err
 	}
-	closes := r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
-		(closeOnDelete(rr.Status.Phase) ||
-			(ptr.Deref(rr.Status.HoldsTarget, false) && !heldForVerification(rr, r.VerifyOutcomes)))
-	if closes {
-		// A pull request handed over to a replacement is the replacement's: never closed here (ADR-0028 section
-		// 4 item 8). While the replacement may still take it over, the deletion waits for it.
-		keep, wait, err := r.handoffHolds(ctx, rr)
-		switch {
-		case err != nil:
-			return reconcile.Result{}, err
-		case wait:
-			return reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}, nil
-		case keep:
-			closes = false
-		}
+	closes, closeErr, freeSlot, res, done, err := r.beforeClose(ctx, rr, settingsRemoved)
+	if done {
+		return res, err
 	}
-	var closeErr error
-	if closes && ended(rr.Status.Phase) {
-		// A request that ended was not active until it was deleted, so another may have been let through
-		// meanwhile: the close waits for a slot under the cap (waitForCapOnDelete).
-		freeSlot, res, wait, err := r.waitForCapOnDelete(ctx, rr)
-		switch {
-		case errors.Is(err, errCleanupSettingsRemoved), errors.Is(err, errRepositoryGone):
-			closeErr = err
-		case wait || err != nil:
-			return res, err
-		default:
-			defer freeSlot()
-		}
-	}
+	defer freeSlot()
 	var left *cleanupRelease
 	if closes {
 		err := closeErr
@@ -2665,6 +2653,85 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	return reconcile.Result{}, nil
+}
+
+// noSlot is the release of a slot that was not taken.
+func noSlot() {}
+
+// beforeClose decides, for finalize, whether the deletion of rr closes its pull request (closes) and whether that close
+// already failed (closeErr: settings being deleted or gone, a repository missing from them, no slot within the cleanup
+// bound). A close of a request that ended, or of one that only waited for its repository entry, takes a slot under the
+// cap first; release frees it, and is noSlot when none was taken. done is true when finalize returns res and err as
+// they are: a failed read, a wait for the replacement of a handoff, a pause, or a wait for a slot.
+func (r *RemediationRequestReconciler) beforeClose(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
+	settingsRemoved bool) (closes bool, closeErr error, release func(), res reconcile.Result, done bool, err error) {
+	closes = r.OpenRepository != nil && rr.Status.PlanRepository != nil &&
+		(closeOnDelete(rr.Status.Phase) ||
+			(ptr.Deref(rr.Status.HoldsTarget, false) && !heldForVerification(rr, r.VerifyOutcomes)))
+	switch {
+	case closes && settingsRemoved && handedOff(rr):
+		// The pull request is the replacement's (ADR-0028 section 4 item 8): this request leaves nothing open.
+		closes = false
+	case closes && settingsRemoved:
+		closeErr = errCleanupSettingsRemoved
+	case closes:
+		// A pull request handed over to a replacement is the replacement's: never closed here (ADR-0028 section
+		// 4 item 8). While the replacement may still take it over, the deletion waits for it.
+		keep, wait, err := r.handoffHolds(ctx, rr)
+		switch {
+		case err != nil:
+			return false, nil, noSlot, reconcile.Result{}, true, err
+		case wait:
+			return false, nil, noSlot, reconcile.Result{RequeueAfter: r.pullRequestPollInterval()}, true, nil
+		case keep:
+			closes = false
+		}
+	}
+	if !closes || closeErr != nil || (!ended(rr.Status.Phase) && !waitsForRepository(rr)) {
+		return closes, closeErr, noSlot, reconcile.Result{}, false, nil
+	}
+	// A request that ended was not active until it was deleted, and one that only waits for its repository entry is
+	// not active while it does, so another may have been let through meanwhile: the close waits for a slot under the
+	// cap (waitForCapOnDelete).
+	freeSlot, res, wait, err := r.waitForCapOnDelete(ctx, rr)
+	switch {
+	case errors.Is(err, freshness.ErrPaused):
+		// A pause is no failure: it holds the deletion and starts neither bound.
+		res, err = r.waitWhilePaused(ctx, rr)
+		return false, nil, noSlot, res, true, err
+	case errors.Is(err, errCleanupSettingsRemoved), errors.Is(err, errRepositoryGone):
+		return true, err, noSlot, reconcile.Result{}, false, nil
+	case wait && err == nil && r.cleanupBoundPassed(rr):
+		// A wait for a slot never outlasts a cleanup bound that has started: the bound ends it as a failure.
+		return true, errNoSlotOnDelete, noSlot, reconcile.Result{}, false, nil
+	case wait || err != nil:
+		return false, nil, noSlot, res, true, err
+	}
+	return true, nil, freeSlot, reconcile.Result{}, false, nil
+}
+
+// errNoSlotOnDelete is a close of a deleted request held back by the cap (waitForCapOnDelete) after its cleanup bound
+// passed: a failure of the cleanup, so cleanupFailedOnDelete lets the request go.
+var errNoSlotOnDelete = errors.New("no slot under maxConcurrentRemediations for the close of the pull request")
+
+// cleanupBoundPassed reports whether the 24 hour bound of CleanupFailing on rr has passed.
+func (r *RemediationRequestReconciler) cleanupBoundPassed(rr *remediationv1alpha1.RemediationRequest) bool {
+	c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionCleanupFailing)
+	return c != nil && c.Status == metav1.ConditionTrue && boundLeft(c, cleanupFailingBound, r.now()) <= 0
+}
+
+// cleanupSettingsRemoved reports whether RemediationSettings default, read from the API server now, is being deleted or
+// is gone (an uninstall): the finalizer then makes no write that needs settings and lets the request go (#877). A failed
+// read is returned for a retry.
+func (r *RemediationRequestReconciler) cleanupSettingsRemoved(ctx context.Context) (bool, error) {
+	settings := &remediationv1alpha1.RemediationSettings{}
+	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
+	case apierrors.IsNotFound(err):
+		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
+	}
+	return !settings.DeletionTimestamp.IsZero(), nil
 }
 
 // cleanupDone reports whether err, from the finalizer's close (closeOnDeleteOf), lets the finalizer go: nil, or an

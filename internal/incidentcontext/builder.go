@@ -402,43 +402,58 @@ func withholdBlock(blk *Block) {
 // summary last.
 var cutOrder = []Section{SectionLogs, SectionMetrics, SectionStatus, SectionGit, SectionPolicy, SectionSummary}
 
-// fitTotal cuts the context to the total bound, latest block of a section first, and marks it truncated
-// when it had to. A log block keeps its header and the tail of its excerpt; other blocks keep their head.
+// fitTotal cuts the context so that its rendered message ([Context.Size]: preamble, tags, notices and escaped
+// text) fits within the total bound, latest block of a section first, and marks it truncated when it had to
+// (#1054). A log block keeps its header and the tail of its excerpt; other blocks keep their head.
 func (b *Builder) fitTotal(c *Context) {
-	over := c.Size() - b.limits.Total
-	if over <= 0 {
+	rendered := make([]int, len(c.Blocks))
+	total := len(ContextPreamble)
+	for i, blk := range c.Blocks {
+		rendered[i] = renderedBlockLen(i, blk)
+		total += rendered[i]
+	}
+	if total <= b.limits.Total {
 		return
 	}
 	c.Truncated = true
 	for _, sec := range cutOrder {
-		for i := len(c.Blocks) - 1; i >= 0 && over > 0; i-- {
+		for i := len(c.Blocks) - 1; i >= 0 && total > b.limits.Total; i-- {
 			blk := &c.Blocks[i]
 			if blk.Section != sec || blk.Text == "" {
 				continue
 			}
 			before := len(blk.Text)
-			keep := max(0, before-over)
+			others := total - rendered[i]
+			wrapper := blockWrapperLenWithCutLabel(i, *blk)
+			budget := b.limits.Total - others - wrapper
 			if sec == SectionLogs {
 				head := blk.Text[:blk.headLen]
-				body, _ := keepTail(blk.Text[blk.headLen:], keep-len(head))
-				if keep < len(head) {
-					head, body = "", ""
+				if budget <= 0 || len(renderBody(head)) > budget {
+					blk.Text = ""
+					blk.headLen = 0
+				} else {
+					body := keepTailRendered(head, blk.Text[blk.headLen:], budget)
+					blk.Text = head + body
+					blk.headLen = len(head)
 				}
-				blk.Text = head + body
-				blk.headLen = len(head)
 			} else {
-				blk.Text, _ = keepHead(blk.Text, keep)
+				blk.Text = keepHeadRendered(blk.Text, budget)
 				// A cut that leaves part of the unit at the end removes all of it. The total bound cuts the
 				// summary only when it is configured below a summary with values beyond the schema's limits.
 				if blk.unitAt > 0 && len(blk.Text) > blk.unitAt && len(blk.Text) < before {
 					blk.Text = blk.Text[:blk.unitAt]
+					if len(renderBody(blk.Text)) > budget {
+						blk.Text = keepHeadRendered(blk.Text, budget)
+					}
 				}
 				if blk.unitAt >= len(blk.Text) {
 					blk.unitAt = 0
 				}
 			}
-			over -= before - len(blk.Text)
 			blk.addLabel(LabelContextCut)
+			next := renderedBlockLen(i, *blk)
+			total += next - rendered[i]
+			rendered[i] = next
 		}
 	}
 }

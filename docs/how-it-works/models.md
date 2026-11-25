@@ -18,7 +18,7 @@ It is also shown the bounds of the [policy](policy.md) that will judge a proposa
 
 ## What it sees
 
-Code builds the context: the Incident summary, the status of the object and its owners, a log excerpt, metrics when Prometheus is configured, and the policy bounds. Each block has a size limit, and the whole context text is limited by `maxContextBytes` (48 KiB by default). The limit counts the text before it is escaped and wrapped in delimiters, so the message sent is larger. Each block is redacted, tagged with its source and wrapped in a delimiter the text inside cannot close.
+Code builds the context: the Incident summary, the status of the object and its owners, a log excerpt, metrics when Prometheus is configured, and the policy bounds. Each block has a size limit, and `maxContextBytes` (48 KiB by default) bounds the whole rendered context message sent to the model, including escaping, delimiters and notices. Each block is redacted, tagged with its source and wrapped in a delimiter the text inside cannot close.
 
 ## What it may call
 

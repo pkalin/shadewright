@@ -28,7 +28,7 @@ import (
 // build the total from maxContextBytes of RemediationSettings ([Builder.BuildWithin], #981); making the
 // section bounds settings is #372.
 const (
-	// DefaultTotalBytes bounds the whole context, the sum of the text of every block.
+	// DefaultTotalBytes bounds the whole rendered context message (preamble, tags, notices and escaped text).
 	DefaultTotalBytes = 48 << 10
 	// DefaultSummaryBytes bounds the summary section.
 	DefaultSummaryBytes = 2 << 10
@@ -54,8 +54,9 @@ const (
 	MaxLimitBytes   = 256 << 10
 )
 
-// Limits are the byte bounds of the context and of each section. They count the bytes of the blocks' text,
-// not the fixed labels or the delimiters the prompt puts around the blocks.
+// Limits are the byte bounds of the context and of each section. The section bounds count the text of each
+// section's blocks; [Limits.Total] counts the rendered context message sent to the model ([Context.Size]):
+// the preamble, the tags and notices of every block, and each block's escaped text (#1054).
 type Limits struct {
 	Total   int
 	Summary int
@@ -66,9 +67,9 @@ type Limits struct {
 	Policy  int
 }
 
-// DefaultLimits returns the default bounds. The sections, Git and policy bounds included, add up to the total, so with these
-// bounds the total cut is a backstop; it marks the context truncated when a smaller total (maxContextBytes) or
-// sections that add up to more are configured.
+// DefaultLimits returns the default bounds. The section bounds, Git and policy bounds included, add up to
+// [DefaultTotalBytes] of block text; the total cut marks the context truncated when the rendered message
+// exceeds [Limits.Total] (because of a smaller maxContextBytes, escaping or wrapping, or larger section bounds).
 func DefaultLimits() Limits {
 	return Limits{
 		Total: DefaultTotalBytes, Summary: DefaultSummaryBytes, Status: DefaultStatusBytes,
@@ -270,11 +271,12 @@ type TemplateContainer struct {
 	MemoryLimit *resource.Quantity
 }
 
-// Size is the number of bytes [Limits.Total] bounds: the text of every block.
+// Size is the number of bytes [Limits.Total] bounds: the rendered context message ([Context.Render]),
+// preamble, tags, notices and escaped block text included (#1054).
 func (c *Context) Size() int {
-	n := 0
-	for _, b := range c.Blocks {
-		n += len(b.Text)
+	n := len(ContextPreamble)
+	for i, b := range c.Blocks {
+		n += renderedBlockLen(i, b)
 	}
 	return n
 }

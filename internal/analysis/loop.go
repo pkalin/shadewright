@@ -325,8 +325,8 @@ type Limits struct {
 	MaxToolSteps int
 	// MaxOutputTokens is sent with every call.
 	MaxOutputTokens int
-	// MaxContextBytes bounds the context the builder makes (maxContextBytes, #981); zero means the builder's
-	// configured total.
+	// MaxContextBytes bounds the rendered context message the builder makes (maxContextBytes, #981, #1054);
+	// zero means the builder's configured total.
 	MaxContextBytes int
 	// Triage and Escalation are the deployments; nil means not configured.
 	Triage, Escalation *remediationv1alpha1.ModelDeployment

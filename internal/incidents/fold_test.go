@@ -147,8 +147,8 @@ func TestFoldable(t *testing.T) {
 		"consequence that is a cause":  {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Cause = true }},
 		"another container":            {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Containers = []remediationv1alpha1.Name{"db"} }},
 		"one container shared": {change: func(c, cause *remediationv1alpha1.Incident) {
-			c.Status.Containers = []remediationv1alpha1.Name{"db", "web"}
-			cause.Status.Containers = []remediationv1alpha1.Name{"sidecar", "web"}
+			c.Status.Containers = []remediationv1alpha1.Name{"db", foldContainer}
+			cause.Status.Containers = []remediationv1alpha1.Name{"sidecar", foldContainer}
 		}, want: true},
 		"no container":        {change: func(c, _ *remediationv1alpha1.Incident) { c.Status.Containers = nil }},
 		"another subject":     {change: func(c, _ *remediationv1alpha1.Incident) { c.Spec.Subject.UID = otherSubjectUID }},

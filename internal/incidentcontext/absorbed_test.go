@@ -145,6 +145,35 @@ func TestNilShowsTallyReadsTheList(t *testing.T) {
 	}
 }
 
+// AbsorbedFailed (ADR-0039 point 12, amended 2026-11-21 on #1066) stays in status.absorbed and out of the
+// model's summary so the model input and reserved tally room do not change without an ADR-0025 evaluation run.
+func TestSummaryOmitsAbsorbedFailed(t *testing.T) {
+	b := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
+	pullReason := causereason.ImagePull()[0]
+	bare := cause()
+	bare.Spec.Reason, bare.Spec.Symptom = pullReason, "Container app is waiting: "+pullReason
+	want := one(t, build(t, b, bare), SectionSummary).Text
+
+	withFailed := bare.DeepCopy()
+	withFailed.Status.Absorbed = []remediationv1alpha1.AbsorbedTally{
+		absorbed(remediationv1alpha1.AbsorbedFailed, 9, testNow.Add(-time.Minute)),
+	}
+	if got := one(t, build(t, b, withFailed), SectionSummary).Text; got != want {
+		t.Errorf("summary with AbsorbedFailed only:\n%s\nwant, as with none:\n%s", got, want)
+	}
+
+	withBoth := bare.DeepCopy()
+	withBoth.Status.Absorbed = []remediationv1alpha1.AbsorbedTally{
+		absorbed(remediationv1alpha1.AbsorbedBackOff, 5, testNow.Add(-time.Minute)),
+		absorbed(remediationv1alpha1.AbsorbedFailed, 9, testNow),
+	}
+	got := tallyOf(t, one(t, build(t, b, withBoth), SectionSummary).Text)
+	wantLines := []string{absorbedHeader, "  BackOff: 5 occurrences, last seen 2026-11-05T11:59:00Z"}
+	if !slices.Equal(got, wantLines) {
+		t.Errorf("tally lines %q, want %q", got, wantLines)
+	}
+}
+
 // An Incident with an empty tally gets no tally lines: its summary is the one the builder wrote before the
 // tally block, byte for byte (the whole prompt is checked against main in test/eval TestPromptGolden).
 func TestSummaryWithoutTallyIsUnchanged(t *testing.T) {

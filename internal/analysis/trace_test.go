@@ -455,12 +455,18 @@ func TestUsageAboveTheBoundIsChargedTheCeiling(t *testing.T) {
 		s := reply(validResult)
 		s.c.Usage = u
 		f.triage.steps = []step{s}
-		out := f.analyze(t, testLimits())
+		l := testLimits()
+		out := f.analyze(t, l)
 		call := spanNamed(t, rec, spanModelCall)
 		charged, _ := attrOf(call, attrCharged)
-		if out.Tokens <= 0 || charged.AsInt64() != out.Tokens {
-			t.Errorf("usage %+v: outcome tokens %d, charged %d, want the positive upper bound", u, out.Tokens,
-				charged.AsInt64())
+		reqs := f.triage.reqs()
+		if len(reqs) != 1 {
+			t.Fatalf("usage %+v: %d triage requests, want 1", u, len(reqs))
+		}
+		want := estimateInput(reqs[0]) + outputBound(f.triage, l.MaxOutputTokens)
+		if out.Tokens != want || charged.AsInt64() != want {
+			t.Errorf("usage %+v: outcome tokens %d, charged %d, want the ceiling %d", u, out.Tokens,
+				charged.AsInt64(), want)
 		}
 		for _, k := range []attribute.Key{attrInputTokens, attrOutputTokens} {
 			if v, ok := attrOf(call, k); ok {

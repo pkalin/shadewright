@@ -23,6 +23,10 @@ on:
 
 permissions: {}
 
+env:
+  GOFLAGS: -mod=readonly
+  GOWORK: off
+
 jobs:
   analyze:
     name: Analyze ${{ matrix.language }}

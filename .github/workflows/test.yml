@@ -15,6 +15,10 @@ on:
 
 permissions: {}
 
+env:
+  GOFLAGS: -mod=readonly
+  GOWORK: off
+
 jobs:
   test:
     if: ${{ inputs.run != false }}
@@ -49,7 +53,8 @@ jobs:
         env:
           EVAL_REPORT_DIR: ${{ runner.temp }}/eval
         run: |
-          go mod tidy
+          # -diff detects go.mod/go.sum drift without mutating them.
+          go mod tidy -diff
           make test REDACTWORK_IN_TEST=no
 
       # The evaluation on the fake model ran inside make test; its report goes into the job summary (format:

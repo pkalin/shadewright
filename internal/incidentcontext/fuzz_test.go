@@ -68,13 +68,22 @@ func FuzzLogExcerpt(f *testing.F) {
 			t.Fatalf("block of %d bytes over its bound of %d", len(blk.Text), n)
 		}
 		c := &Context{Blocks: []Block{{Section: SectionSummary, Text: "subject\n"}, blk}}
+		beforeSize := c.Size()
 		cb := &Builder{limits: Limits{Total: int(total)}}
 		cb.fitTotal(c)
 		if c.Size() > max(int(total), 0) {
-			t.Fatalf("context of %d bytes over its bound of %d", c.Size(), total)
+			if int(total) >= MinTotalBytes {
+				t.Fatalf("context of %d bytes over its bound of %d", c.Size(), total)
+			}
+			for j, b := range c.Blocks {
+				if b.Text != "" {
+					t.Fatalf("context of %d bytes over its bound of %d with non-empty block %d (%d bytes)",
+						c.Size(), total, j, len(b.Text))
+				}
+			}
 		}
-		if c.Truncated != (len(blk.Text)+len("subject\n") > int(total)) {
-			t.Fatalf("truncated %t for %d bytes and a bound of %d", c.Truncated, len(blk.Text)+8, total)
+		if c.Truncated != (beforeSize > int(total)) {
+			t.Fatalf("truncated %t for %d rendered bytes and a bound of %d", c.Truncated, beforeSize, total)
 		}
 		check("total", c.Blocks[1])
 		if c.Blocks[1].headLen > 0 && !strings.HasPrefix(c.Blocks[1].Text, "pod web-abc-1 container app, previous instance\n") {

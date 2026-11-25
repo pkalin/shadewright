@@ -972,7 +972,7 @@ var outcomeMessages = map[Reason]string{
 	ReasonModelUnavailable:        "The model stayed unavailable after bounded retries, or its retries used up the call limit; handed off to a person",
 	ReasonModelNotFound:           "The model deployment does not exist; handed off to a person",
 	ReasonModelForbidden:          "The model endpoint refused the analyzer's identity; handed off to a person",
-	ReasonModelError:              "The model call failed; handed off to a person",
+	ReasonModelError:              "The model call could not be prepared or completed. The incident was handed off to a person",
 	ReasonRequestNotCreated:       "The RemediationRequest of the proposal could not be created; handed off to a person",
 	ReasonUnexpectedModel:         "A reply came from another model than the one configured for the deployment; handed off to a person",
 	ReasonModelNotAllowed:         "The model is not declared for the compatible endpoint at installation; nothing was sent; handed off to a person",

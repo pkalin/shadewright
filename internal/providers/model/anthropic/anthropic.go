@@ -80,8 +80,8 @@ const (
 	DefaultEffort = "low"
 	// DefaultMaxResponseBytes bounds the body of a reply that is read.
 	DefaultMaxResponseBytes = 1 << 20
-	// maxRequestBytes bounds the encoded request. The analyzer's context text is at most 48 KiB
-	// (maxContextBytes); escaping and the block tags can make the context message about four times that (#1054).
+	// maxRequestBytes bounds the encoded request. The analyzer's rendered context message is at most 48 KiB
+	// (maxContextBytes, #1054), plus the static system prompt, tool definitions and escalation turns.
 	maxRequestBytes = 4 << 20
 	// maxConfigDelay, maxConfigTimeout and maxConfigResponseBytes bound what Config may ask for.
 	maxConfigDelay         = 5 * time.Minute

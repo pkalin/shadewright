@@ -90,14 +90,13 @@ spec:
                   maxContextBytes:
                     default: 49152
                     description: |-
-                      maxContextBytes is the most bytes of redacted cluster context (events, pod status, log excerpts,
-                      metrics) the context builder puts into one analysis. It bounds the text of the context blocks before the
-                      prompt escapes it and wraps each block in its tags, not the context message sent: escaping can make that
-                      several times larger. 4096 to 49152; the default and maximum of 49152 (48 KiB) of context text is roughly
-                      12,000 tokens before escaping and wrapping. The bounds of the sections (summary, status, logs, metrics,
-                      Git, policy) stay fixed and add up to 48 KiB, so a larger value would add no context; a value below it
-                      cuts the context to it. A context cut at this bound is marked truncated, which is an escalation trigger
-                      (ADR-0023).
+                      maxContextBytes is the most bytes of rendered context message (the preamble, the block tags and
+                      notices, and the redacted, escaped text of events, pod status, log excerpts, metrics and policy bounds)
+                      sent to the model in one analysis. 4096 to 49152; the default and maximum of 49152 (48 KiB) is roughly
+                      12,000 tokens. The section bounds (summary, status, logs, metrics, Git, policy) stay fixed and add up
+                      to 48 KiB of block text; when the rendered message exceeds maxContextBytes (from a lower bound, escaping
+                      or block tags), a cut by the context builder or by the analyzer while appending a reviewer hint or
+                      readiness notice marks the context truncated, which is an escalation trigger (ADR-0023).
                     format: int32
                     maximum: 49152
                     minimum: 4096

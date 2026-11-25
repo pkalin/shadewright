@@ -65,7 +65,8 @@ func TestUsageMapping(t *testing.T) {
 	if !ok || u != (providers.Usage{InputTokens: 3905, CachedInputTokens: 3000, OutputTokens: 40}) {
 		t.Errorf("usage = %+v, %v", u, ok)
 	}
-	for _, bad := range []*apiUsage{nil, {InputTokens: -1}, {CacheReadInputTokens: maxUsageTokens + 1}} {
+	for _, bad := range []*apiUsage{nil, {InputTokens: -1}, {CacheReadInputTokens: providers.MaxUsageTokens + 1},
+		{InputTokens: providers.MaxUsageTokens, CacheReadInputTokens: 1}} {
 		if _, ok := usageOf(bad); ok {
 			t.Errorf("usageOf(%+v) accepted", bad)
 		}

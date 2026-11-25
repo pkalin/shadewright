@@ -337,7 +337,8 @@ func checkOutput(billed providers.Completion, content string, toolCalls []chatTo
 }
 
 // isJSONObject reports whether b is one valid JSON object, surrounded by white space at most.
-// usageOf converts a usage block, and reports false when there is none or it is out of range.
+// usageOf converts a usage block, and reports false when there is none or it is out of range: a negative count,
+// one above providers.MaxUsageTokens, or more cached input than input.
 func usageOf(cu *chatUsage) (providers.Usage, bool) {
 	if cu == nil {
 		return providers.Usage{}, false
@@ -346,7 +347,7 @@ func usageOf(cu *chatUsage) (providers.Usage, bool) {
 	if cu.PromptTokensDetails != nil {
 		u.CachedInputTokens = cu.PromptTokensDetails.CachedTokens
 	}
-	if u.InputTokens < 0 || u.OutputTokens < 0 || u.CachedInputTokens < 0 || u.CachedInputTokens > u.InputTokens {
+	if !u.InRange() || u.CachedInputTokens > u.InputTokens {
 		return providers.Usage{}, false
 	}
 	return u, true

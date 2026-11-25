@@ -1061,7 +1061,7 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 	// each of them charged on its own (billedAttemptsCharge): a call it retried after a billed failure costs
 	// every attempt, not one.
 	charge := upper
-	billed := (err == nil || providers.IsMalformedOutput(err)) && !c.UsageUnknown
+	billed := usageReported(c, err)
 	switch {
 	case notSent, providers.RefusedUnbilled(c, err):
 		charge = 0
@@ -1394,6 +1394,14 @@ func (a *Analyzer) accept(inc *remediationv1alpha1.Incident, out Outcome, reason
 	p.PolicyRef = ref
 	out.Reason, out.Plan = reason, &p
 	return out, nil
+}
+
+// usageReported reports whether the call's reply was billed with a usage that may be charged and recorded as
+// reported: a reply that completed or was malformed, with a known usage whose counts are within
+// providers.MaxUsageTokens. Counts outside it are charged the upper bound and recorded nowhere, since their sum
+// could overflow and lower the spend; the adapters refuse such a reply, and this holds for any provider.
+func usageReported(c providers.Completion, err error) bool {
+	return (err == nil || providers.IsMalformedOutput(err)) && !c.UsageUnknown && c.Usage.InRange()
 }
 
 // billedAttemptsCharge is the charge of a call whose adapter listed the attempts the service may have billed:

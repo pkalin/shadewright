@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -438,4 +439,33 @@ func (c cancelingBuilder) BuildWithin(ctx context.Context, inc *remediationv1alp
 	total int) (*incidentcontext.Context, error) {
 	c.cancel()
 	return c.b.BuildWithin(ctx, inc, total)
+}
+
+// A reply whose usage counts pass providers.MaxUsageTokens is charged its upper bound like a reply of unknown
+// usage, and its counts reach neither the span nor the outcome: input plus output would otherwise wrap negative
+// and lower the analysis's spend, letting later calls pass the token bound.
+func TestUsageAboveTheBoundIsChargedTheCeiling(t *testing.T) {
+	for _, u := range []providers.Usage{
+		{InputTokens: math.MaxInt64, OutputTokens: 1},
+		{InputTokens: 1, OutputTokens: math.MaxInt64},
+		{InputTokens: providers.MaxUsageTokens + 1},
+		{InputTokens: -1, OutputTokens: 1},
+	} {
+		f, rec := tracedFixture()
+		s := reply(validResult)
+		s.c.Usage = u
+		f.triage.steps = []step{s}
+		out := f.analyze(t, testLimits())
+		call := spanNamed(t, rec, spanModelCall)
+		charged, _ := attrOf(call, attrCharged)
+		if out.Tokens <= 0 || charged.AsInt64() != out.Tokens {
+			t.Errorf("usage %+v: outcome tokens %d, charged %d, want the positive upper bound", u, out.Tokens,
+				charged.AsInt64())
+		}
+		for _, k := range []attribute.Key{attrInputTokens, attrOutputTokens} {
+			if v, ok := attrOf(call, k); ok {
+				t.Errorf("usage %+v: span sets %s = %d", u, k, v.AsInt64())
+			}
+		}
+	}
 }

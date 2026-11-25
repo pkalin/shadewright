@@ -35,8 +35,6 @@ const (
 	maxToolCalls = 16
 	// maxModelName bounds the model name a reply reports.
 	maxModelName = 128
-	// maxUsageTokens bounds each usage count, so their sum cannot overflow.
-	maxUsageTokens = 1 << 40
 )
 
 // Content block types.
@@ -482,22 +480,25 @@ func parseResponse(data []byte, model string, offered map[string]bool, structure
 	return c, nil
 }
 
-// usageOf converts a usage block, and reports false when there is none or it is out of range. InputTokens is
+// usageOf converts a usage block, and reports false when there is none or any count, or the whole prompt, is
+// above providers.MaxUsageTokens or negative. InputTokens is
 // the whole prompt: the API reports the uncached remainder, the cache writes and the cache reads apart.
 func usageOf(au *apiUsage) (providers.Usage, bool) {
 	if au == nil {
 		return providers.Usage{}, false
 	}
 	for _, n := range []int64{au.InputTokens, au.OutputTokens, au.CacheCreationInputTokens, au.CacheReadInputTokens} {
-		if n < 0 || n > maxUsageTokens {
+		if n < 0 || n > providers.MaxUsageTokens {
 			return providers.Usage{}, false
 		}
 	}
-	return providers.Usage{
+	u := providers.Usage{
 		InputTokens:       au.InputTokens + au.CacheCreationInputTokens + au.CacheReadInputTokens,
 		CachedInputTokens: au.CacheReadInputTokens,
 		OutputTokens:      au.OutputTokens,
-	}, true
+	}
+	// Each count is bounded, so the sum cannot overflow; the whole prompt is bounded too.
+	return u, u.InRange()
 }
 
 func validModel(m string) bool { return len(m) <= maxModelName && modelNamePattern.MatchString(m) }

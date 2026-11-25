@@ -1,0 +1,98 @@
+# Configuration of the gitleaks secret scan (.github/workflows/secret-scan.yml, hack/install-gitleaks.sh).
+# Run it locally with: gitleaks git . --redact --no-banner
+#
+# The default rules stay on. The full-history scan of 2026-11-24 (gitleaks 8.30.1) gave 530 findings and none is a
+# real secret: they are values made up for the redaction tests, plus one minified vendored script. Everything
+# below exempts only those. A new finding anywhere else fails the scan.
+#
+# Why paths and not a regex: the made-up values have no common marker (no "fake" or "example" in them, 40 of the
+# 52 findings outside the corpora), so a regex either misses most of them or would also hide a real token.
+# Paths are matched as regular expressions against the repository-relative path.
+
+title = "shadewright gitleaks configuration"
+
+[extend]
+useDefault = true
+
+# Redaction corpora and sample sets: inputs that look like secrets by design, because the redactor has to find
+# them. Every rule is exempt here.
+[[allowlists]]
+description = "Redaction test corpora, secret-shaped samples and one pod fixture"
+paths = [
+  '''^internal/redact/testdata/''',
+  '''^internal/redact/redacttest/''',
+  '''^internal/modules/cloudflared/testdata/pod-crashloop\.json$''',
+]
+
+# Minified third-party script of the docs site: long identifiers and counters match the generic key rule.
+[[allowlists]]
+description = "Vendored minified mermaid.js"
+paths = [
+  '''^docs/assets/javascripts/mermaid/mermaid-[0-9.]+\.min\.js$''',
+]
+
+# Test files that hold made-up secrets as sentinels for redaction and leak checks. Each list names the files that
+# had findings of that rule in the full history, and the rule applies only with the file (condition AND): a
+# finding of another rule in these files, or of the same rule in any other file, still fails the scan. There is
+# no rule for _test.go in general, so a real token pasted into a new test file is reported.
+[[allowlists]]
+description = "Made-up generic key values in redaction and leak tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^internal/analysis/absorbed_test\.go$''',
+  '''^internal/analyzer/collector/sources_test\.go$''',
+  '''^internal/controller/pullrequest_test\.go$''',
+  '''^internal/controller/revert_test\.go$''',
+  '''^internal/gitops/sourcemap/candidate_test\.go$''',
+  '''^internal/gitops/sourcemap/sourcemap_test\.go$''',
+  '''^internal/incidentcontext/redact_order_test\.go$''',
+  '''^internal/incidents/fingerprint/fingerprint_test\.go$''',
+  '''^internal/incidents/fingerprint/redact_order_test\.go$''',
+  '''^internal/intake/sent_test\.go$''',
+  '''^internal/modules/cloudflared/cloudflared_test\.go$''',
+  '''^internal/modules/rules_test\.go$''',
+  '''^internal/modules/secretsstore/secretsstore_test\.go$''',
+  '''^internal/providers/model/openaicompatible/credential_decoy_corpus_test\.go$''',
+  '''^internal/providers/model/openaicompatible/credential_unicode_corpus_test\.go$''',
+  '''^internal/providers/model/openaicompatible/provider_test\.go$''',
+  '''^internal/redact/blockvalue_corpus_test\.go$''',
+  '''^internal/redact/keyname_test\.go$''',
+  '''^internal/redact/redact_test\.go$''',
+  '''^internal/tools/controls_corpus_test\.go$''',
+  '''^internal/tools/helpers_test\.go$''',
+  '''^internal/tools/limit_sweep_test\.go$''',
+  '''^internal/tools/released_test\.go$''',
+]
+
+[[allowlists]]
+description = "Made-up JWT values in redaction tests"
+condition = "AND"
+targetRules = ["jwt"]
+paths = [
+  '''^internal/controller/pullrequest_test\.go$''',
+  '''^internal/incidentcontext/summary_fit_test\.go$''',
+  '''^internal/incidents/fingerprint/fingerprint_test\.go$''',
+  '''^internal/modules/secretsstore/secretsstore_test\.go$''',
+  '''^internal/providers/logs/kube/kube_test\.go$''',
+  '''^internal/providers/store/azureblob/store_test\.go$''',
+]
+
+[[allowlists]]
+description = "Made-up PEM private key blocks in redaction tests"
+condition = "AND"
+targetRules = ["private-key"]
+paths = [
+  '''^internal/incidents/fingerprint/fingerprint_test\.go$''',
+  '''^internal/providers/logs/kube/kube_test\.go$''',
+  '''^internal/redact/diff_fuzz_test\.go$''',
+]
+
+[[allowlists]]
+description = "Made-up GitHub token values in redaction tests"
+condition = "AND"
+targetRules = ["github-pat"]
+paths = [
+  '''^internal/modules/rules_test\.go$''',
+  '''^internal/modules/secretsstore/secretsstore_test\.go$''',
+]

@@ -36,8 +36,8 @@ import (
 
 const (
 	pullReasonFailed = "Failed"
-	pullErrDigest    = `Failed to pull image "ghcr.io/shadewright-labs/web@sha256:` +
-		`0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": ` +
+	pullImageDigest  = "ghcr.io/shadewright-labs/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	pullErrDigest    = `Failed to pull image "` + pullImageDigest + `": ` +
 		`failed to pull and unpack image "ghcr.io/shadewright-labs/web@sha256:` +
 		`0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": not found`
 	pullErrImagePull    = "Error: ErrImagePull"
@@ -65,12 +65,14 @@ func failedEvent(name, fieldPath, note string, at time.Time) *eventsv1.Event {
 func pullWaitingPod(container string, init bool, reason string) *corev1.Pod {
 	p := specPod()
 	st := corev1.ContainerStatus{
-		Name:  container,
+		Name: container, Image: pullImageDigest,
 		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
 	}
 	if init {
+		p.Spec.InitContainers[0].Image = pullImageDigest
 		p.Status.InitContainerStatuses = []corev1.ContainerStatus{st}
 	} else {
+		p.Spec.Containers[0].Image = pullImageDigest
 		p.Status.ContainerStatuses = []corev1.ContainerStatus{st}
 	}
 	return p
@@ -240,9 +242,22 @@ func TestImagePullFailedMessageCorpus(t *testing.T) {
 			fieldPath: "spec.containers{ghost}", note: pullErrImagePull, want: ClassNone},
 	)
 
-	h, _ := causeHarness(t, nil)
 	pos, neg := 0, 0
 	for i, c := range cases {
+		// Give even malformed quoted notes their candidate image so a mismatch cannot
+		// mask a regression in the grammar checks.
+		image := pullImageDigest
+		if _, rest, ok := strings.Cut(c.note, `image "`); ok {
+			image, _, _ = strings.Cut(rest, `"`)
+		}
+		h, _ := causeHarness(t, func(p *corev1.Pod) {
+			for _, spec := range [][]corev1.Container{p.Spec.Containers, p.Spec.InitContainers} {
+				spec[0].Image = image
+			}
+			wait := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: causePullErr}}
+			p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: containerApp, Image: image, State: wait}}
+			p.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: containerInit, Image: image, State: wait}}
+		})
 		ev := failedEvent(fmt.Sprintf("corpus-%d", i), c.fieldPath, c.note, t0)
 		ev.Reason, ev.ReportingController = c.reason, c.controller
 		h.create(ev)
@@ -374,8 +389,8 @@ func TestIssue1066PullFailedDoesNotLinkToNonPullCause(t *testing.T) {
 				h.create(ev)
 				h.reconcileEvent(ev.Name)
 				got := h.one()
-				if got.Class != ClassConsequence {
-					t.Fatalf("class %q, want consequence", got.Class)
+				if got.Class != ClassNone {
+					t.Fatalf("class %q, want none without a pull wait", got.Class)
 				}
 				if got.CauseFingerprint != "" {
 					t.Errorf("pull Failed linked to %s cause %q, want none", tc.name, got.CauseFingerprint)
@@ -454,6 +469,7 @@ func TestIssue1066PullFailedHold(t *testing.T) {
 	})
 
 	t.Run("dropped when image pulls and container later restarts", func(t *testing.T) {
+		before := holdOutcomeCounts()
 		d, rs, _ := workload()
 		pod := pullWaitingPod(containerApp, false, causePullErr)
 		book, _ := seeingController()
@@ -484,6 +500,7 @@ func TestIssue1066PullFailedHold(t *testing.T) {
 		h.clock.set(t0.Add(ConsequenceGrace))
 		h.reconcileEvent(ev.Name)
 		h.none()
+		wantOutcomes(t, before, map[string]float64{holdNotOpened: 1})
 	})
 
 	t.Run("emitted with cause when still failing at end of hold", func(t *testing.T) {
@@ -508,4 +525,77 @@ func TestIssue1066PullFailedHold(t *testing.T) {
 				got.Class, got.CauseFingerprint, cause.Fingerprint)
 		}
 	})
+}
+
+func TestFailedRequiresCurrentPullImage(t *testing.T) {
+	for _, tc := range []struct{ name, quoted, status, wait string }{
+		{"unrelated quote", "web:b", "web:a", causePullErr},
+		{"stale status", "web:a", "web:b", causePullErr},
+		{"no image in status", "web:a", "", causePullErr},
+		{"configuration wait", "web:a", "web:a", reasonConfig},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, rs, _ := workload()
+			p := pullWaitingPod(containerApp, false, tc.wait)
+			p.Spec.Containers[0].Image, p.Status.ContainerStatuses[0].Image = "web:a", tc.status
+			book, see := seeingController()
+			h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, p)
+			h.reconcilePod(webPod)
+			see(h.drain())
+			ev := failedEvent("quoted", appPath, fmt.Sprintf("Failed to pull image %q: not found", tc.quoted), t0)
+			h.create(ev)
+			h.reconcileEvent(ev.Name)
+			got := h.one()
+			if got.Class != ClassNone || got.CauseFingerprint != "" {
+				t.Fatalf("class %q, link %q", got.Class, got.CauseFingerprint)
+			}
+		})
+	}
+}
+
+func TestHeldFailedSeriesRechecksImage(t *testing.T) {
+	d, rs, _ := workload()
+	p := pullWaitingPod(containerApp, false, causePullErr)
+	book, see := seeingController()
+	h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, p)
+	h.reconcilePod(webPod)
+	cause := h.one()
+	ev := failedEvent("series", appPath, pullErrDigest, t0)
+	h.create(ev)
+	h.reconcileEvent(ev.Name)
+	h.none()
+
+	// Another report arrives after the pod switches to another image. The first
+	// occurrence is still evidence of the old pull, the second is unverified.
+	p = readPod(t, h, webPod)
+	p.Spec.Containers[0].Image = "web:new"
+	if err := h.cl.Update(t.Context(), p); err != nil {
+		t.Fatal(err)
+	}
+	p.Status.ContainerStatuses[0].Image = "web:new"
+	h.update(p)
+	ev.Series = &eventsv1.EventSeries{Count: 2, LastObservedTime: metav1.NewMicroTime(t0.Add(time.Second))}
+	h.update(ev)
+	see([]Observation{cause})
+	h.c.ReleaseCause(cause.Fingerprint)
+	h.reconcileEvent(ev.Name)
+	got := h.drain()
+	if len(got) != 2 || got[0].CauseFingerprint != cause.Fingerprint || got[0].Total != 1 || got[1].Class != ClassNone || got[1].Count != 1 || got[1].CauseFingerprint != "" {
+		t.Fatalf("series across image change: %+v", got)
+	}
+}
+
+func TestCauseFingerprintChangesWithImage(t *testing.T) {
+	keys := map[string]bool{}
+	for _, image := range []string{"web:v123", "web:v456"} {
+		p := pullWaitingPod(containerApp, false, causePullErr)
+		p.Spec.Containers[0].Image, p.Status.ContainerStatuses[0].Image = image, image
+		d, rs, _ := workload()
+		h := newHarness(t, Config{}, d, rs, p)
+		h.reconcilePod(webPod)
+		keys[h.one().Fingerprint] = true
+	}
+	if len(keys) != 2 {
+		t.Fatal("two rollout images share a cause fingerprint")
+	}
 }

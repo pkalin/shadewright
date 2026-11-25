@@ -34,6 +34,13 @@ type IncidentSpec struct {
 	// +required
 	Fingerprint string `json:"fingerprint"`
 
+	// pullCauseFingerprint identifies the verified container and image of a kubelet Failed event.
+	// The analyzer folds this Incident only into a cause with this fingerprint.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	// +optional
+	PullCauseFingerprint string `json:"pullCauseFingerprint,omitempty"`
+
 	// subject is the object the symptoms are correlated to: the owning workload when there is one.
 	// +required
 	Subject ObjectRef `json:"subject"`
@@ -247,11 +254,8 @@ type IncidentStatus struct {
 	// +optional
 	Cause bool `json:"cause,omitempty"`
 
-	// consequence is true when every observation counted on this Incident was classified as a consequence by the
-	// collector (ADR-0039 point 12, amended 2026-11-21). The late-cause fold reads it for kubelet Failed Incidents
-	// so that an image-pull Failed Incident folds into its container's pull cause while any other Failed Incident
-	// stays untouched, also across a restart. Cleared if a non-consequence observation is counted on the Incident.
-	// Allowed only when cause is not true.
+	// consequence records that the analyzer classified all observations counted here as consequences.
+	// Older status writers may omit it. The late fold matches spec.pullCauseFingerprint.
 	// +optional
 	Consequence bool `json:"consequence,omitempty"`
 

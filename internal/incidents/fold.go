@@ -49,7 +49,7 @@ var errSelfFold = errors.New("an Incident is never folded into itself")
 
 // consequenceIncident reports whether inc is itself a consequence (ADR-0039 point 12, amended 2026-11-21 on
 // #1066): reported by the kubelet with reason BackOff or Unhealthy, or reason Failed marked with
-// status.consequence (an image-pull Failed event classified by the collector). An Incident of a non-zero exit
+// spec.pullCauseFingerprint (the verified container and image). An Incident of a non-zero exit
 // termination read from pod status, or of any other Failed Event, is a symptom of its own and never folds.
 func consequenceIncident(inc *remediationv1alpha1.Incident) bool {
 	if inc.Spec.ReportingController != kubeletController {
@@ -59,7 +59,7 @@ func consequenceIncident(inc *remediationv1alpha1.Incident) bool {
 	case remediationv1alpha1.AbsorbedBackOff, remediationv1alpha1.AbsorbedUnhealthy:
 		return true
 	case remediationv1alpha1.AbsorbedFailed:
-		return inc.Status.Consequence
+		return inc.Spec.PullCauseFingerprint != ""
 	}
 	return false
 }
@@ -104,6 +104,9 @@ func reachedPullRequest(rr *remediationv1alpha1.RemediationRequest) bool {
 func foldable(inc, cause *remediationv1alpha1.Incident, requests []remediationv1alpha1.RemediationRequest) bool {
 	if !cause.Status.Cause || inc.Name == cause.Name || inc.UID == cause.UID || !inc.HasDerivedName() ||
 		!foldCandidate(inc) {
+		return false
+	}
+	if inc.Spec.Reason == string(remediationv1alpha1.AbsorbedFailed) && inc.Spec.PullCauseFingerprint != cause.Spec.Fingerprint {
 		return false
 	}
 	if !causeTakes(cause.Spec.Reason, inc.Spec.Reason) {

@@ -151,7 +151,7 @@ type consequenceHold struct {
 	opened bool
 	// total is the event's series total at the first delivery of the decision: the occurrences released under
 	// cause. A retried delivery whose pod shows another cause by then delivers only these, and holds the later
-	// ones again for the new cause (decided 2026-11-17, fourth, on #828). Zero until the first delivery.
+	// ones again for the new cause. For a pull Failed hold it is the last total verified for its image.
 	total int64
 }
 
@@ -670,7 +670,8 @@ func (c *Collector) heldEventsOf(_ context.Context, obj client.Object) []reconci
 //     emits with it, even when the pod shows none now. Any other hold, with a cause or none (amended 2026-11-16
 //     and 2026-11-17, fifth): holdEmit, with the cause if any (cause_unseen), when at least minHoldSamples
 //     samples were failing and either this last one is failing or the container restarted at least
-//     minHoldRestarts times during the hold, else holdDrop (not_opened).
+//     minHoldRestarts times during the hold, else holdDrop (not_opened). A pull Failed hold requires the
+//     final sample to match its image even if the container restarted.
 //
 // A hold with a cause emits the observation of the last sample that showed it (consequenceHold.linked). A
 // CauseSeen call (askHeld) that does not answer within its deadline decides nothing: holdWait after
@@ -687,6 +688,10 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 			*obs = o
 		}
 		return holdEmit, 0, nil
+	case held && s.reason == reasonFailed && obs.CauseFingerprint != s.cause && occurrences(ev) > s.total:
+		// Release only the prefix verified for the previous image. emit reconciles the
+		// remaining occurrences against the current pod after that delivery succeeds.
+		return c.endWithCause(ctx, key, s, obs, c.causeOutcome(ctx, s), "later occurrences no longer match the pull")
 	case !held && obs.Class != ClassConsequence:
 		return holdEmit, 0, nil
 	case held && (pod == nil || pod.UID != s.pod):
@@ -711,10 +716,13 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 			restarts: st.RestartCount,
 		}
 	}
-	if obs.CauseFingerprint != "" {
+	if obs.CauseFingerprint != "" && (!held || s.reason != reasonFailed || obs.CauseFingerprint == s.cause) {
 		// An OOM kill or a wait: the hold links as main does, and exits are not its candidates (decided
 		// 2026-11-22 on #432).
 		s.cause, s.obs = obs.CauseFingerprint, *obs
+		if s.reason == reasonFailed {
+			s.total = occurrences(ev)
+		}
 		s.exits = nil
 	} else if s.cause == "" && obs.exitCause != "" {
 		if dropped := s.addExit(*obs); dropped != "" {
@@ -722,7 +730,7 @@ func (c *Collector) holdConsequence(ctx context.Context, key types.NamespacedNam
 				"reason", s.reason, "container", s.container, "limit", maxHeldExits, "causeFingerprint", dropped)
 		}
 	}
-	failing := found && s.failingNow(st)
+	failing := found && s.failingNow(st) && (s.reason != reasonFailed || obs.CauseFingerprint == s.cause)
 	if failing {
 		s.failing++
 	}

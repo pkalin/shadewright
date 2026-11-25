@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 )
 
 const (
@@ -56,6 +57,7 @@ type termination struct {
 	exitCode  int32
 	finished  time.Time
 	waiting   bool
+	image     string
 }
 
 // terminations returns the abnormal terminations in a pod's status: OOMKilled or a non-zero exit code, in
@@ -99,7 +101,8 @@ func terminations(pod *corev1.Pod) []termination {
 
 // waitings returns the waiting reasons of WaitingCauseReasons in a pod's status, in init and app containers
 // (ADR-0039 point 4). A waiting state is identified by its reason and the container's restart count: it has no
-// ID or start time, so a container that waits again with the same reason after a restart is a new one, and
+// ID or start time. A pull also includes the status image and treats the initial failure and back-off
+// as one wait. A container that waits again with the same reason after a restart is a new one, and
 // one that keeps waiting is the same one. Its finish time stays zero here; the tracker sets it to the time the
 // collector first saw the state (terminationTracker.pending). The waiting message is never read: it is free
 // text.
@@ -110,9 +113,17 @@ func waitings(pod *corev1.Pod) []termination {
 		if w == nil || !causereason.IsWaiting(w.Reason) {
 			continue
 		}
+		image := pullImage(st)
+		reason := w.Reason
+		if image != "" {
+			reason = pullWaitReason(reason)
+		}
+		id := fmt.Sprintf("waiting-%s-restarts-%d", reason, st.RestartCount)
+		if image != "" {
+			id = fingerprint.Scoped(id, st.Name, image)
+		}
 		out = append(out, termination{
-			container: st.Name, id: fmt.Sprintf("waiting-%s-restarts-%d", w.Reason, st.RestartCount),
-			reason: w.Reason, waiting: true,
+			container: st.Name, id: id, image: image, reason: w.Reason, waiting: true,
 		})
 	}
 	return out
@@ -411,7 +422,11 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		if t.repeat {
 			at = now
 		}
-		obs := r.c.observation(r.c.podStatusInput(&pod, owner, t.reason, note), subject, pod.Namespace, at)
+		input := r.c.podStatusInput(&pod, owner, t.reason, note)
+		obs := r.c.observation(input, subject, pod.Namespace, at)
+		if t.image != "" {
+			obs.Fingerprint = waitingFingerprint(input, t.container, t.image)
+		}
 		obs.Occurrence, obs.Began, obs.Total, obs.MayRepeat = t.occurrence(pod.UID), t.finished, 1, t.mayRepeat
 		// A waiting reason is never in immediateTerminationReasons: a wait is often short while an image is
 		// pulled (ADR-0039 point 4).

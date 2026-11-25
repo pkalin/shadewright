@@ -251,7 +251,7 @@ func (r *eventReconciler) emit(ctx context.Context, key types.NamespacedName, ev
 			cause = o.CauseFingerprint
 			obs.CauseFingerprint = cause
 		}
-		if shown != "" && shown != cause && n > s.total {
+		if shown != cause && (shown != "" || s.reason == reasonFailed) && n > s.total {
 			delta = max(delta-(n-s.total), 0)
 			n, split = s.total, true
 		}
@@ -318,7 +318,7 @@ func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observat
 	obs := c.observation(fo, subject, ev.Namespace, lastOccurrence(ev))
 	var init bool
 	obs.Container, init = namedContainer(reg, pod)
-	obs.Class = eventClass(ev, obs.Container)
+	obs.Class = eventClass(ev, pod, obs.Container, init)
 	if obs.Class == ClassConsequence {
 		at, ok := kubeletTime(ev)
 		obs.CauseFingerprint, obs.exitCause = c.causeFingerprint(pod, owner, obs.Container, init, at, ok, ev.Reason)

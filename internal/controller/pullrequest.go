@@ -2555,8 +2555,8 @@ func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *re
 // never touches the cluster. A repository that left the settings is a failure of the cleanup within the bound of
 // CleanupFailing (reason RepositoryUnavailable), with the target kept locked, since the entry may come back and the
 // pull request may be open (#877); for a request of a handoff (inHandoff) it still does not block the deletion, as
-// before #877. While RemediationSettings is being deleted or is gone (an uninstall), a request outside a handoff is
-// let go at once without a close, with a Warning Event PullRequestLeftOpen. One whose entry names another target
+// before #877. While RemediationSettings is gone, or is being deleted without the plan's repository entry (an
+// uninstall), a request outside a handoff is let go at once without a close, with a Warning Event PullRequestLeftOpen. One whose entry names another target
 // branch now is closed on the branch the plan recorded (closeOwn). An entry that cannot be used (a bad key, client ID or installation) is a failure of the cleanup within
 // the bound of CleanupFailing, since the pull request may be open and the entry may be fixed (#786, third round). A
 // request that stopped (NeedsIntervention,
@@ -2586,10 +2586,12 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 			(ptr.Deref(rr.Status.HoldsTarget, false) && !heldForVerification(rr, r.VerifyOutcomes)))
 	var left *cleanupRelease
 	if closes && !inHandoff(rr) {
-		// An uninstall (#877): the settings will not come back, so the close is not tried and the request goes at once,
-		// before the wait for a slot and the pause, which both need them. A request of a handoff goes on as before. A
+		// An uninstall (#877): settings gone, or being deleted without the plan's repository entry, will not come back,
+		// so the close is not tried and the request goes at once, before the wait for a slot and the pause, which both
+		// need them. Settings being deleted that still configure the repository close as before. A request of a
+		// handoff goes on as before. A
 		// failed read decides nothing: the close reads the settings again, and its failure counts against the bound.
-		if removed, err := r.cleanupSettingsRemoved(ctx); err == nil && removed {
+		if removed, err := r.cleanupSettingsRemoved(ctx, rr); err == nil && removed {
 			closes, left = false, &cleanupRelease{settingsRemoved: true}
 		}
 	}
@@ -2708,9 +2710,11 @@ func inHandoff(rr *remediationv1alpha1.RemediationRequest) bool {
 	return rr.Spec.Replaces != nil || rr.Status.Handoff != nil
 }
 
-// cleanupSettingsRemoved reports whether RemediationSettings default, read from the API server now, is being deleted
-// or is gone (an uninstall, #877). A failed read is returned.
-func (r *RemediationRequestReconciler) cleanupSettingsRemoved(ctx context.Context) (bool, error) {
+// cleanupSettingsRemoved reports whether RemediationSettings default, read from the API server now, is gone, or is
+// being deleted while the entry of rr's plan repository is missing from it (an uninstall, #877). Settings being deleted
+// that still configure the repository report false: the close runs as before #877. A failed read is returned.
+func (r *RemediationRequestReconciler) cleanupSettingsRemoved(ctx context.Context,
+	rr *remediationv1alpha1.RemediationRequest) (bool, error) {
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err):
@@ -2718,7 +2722,11 @@ func (r *RemediationRequestReconciler) cleanupSettingsRemoved(ctx context.Contex
 	case err != nil:
 		return false, fmt.Errorf("get RemediationSettings %s: %w", remediationv1alpha1.SettingsName, err)
 	}
-	return !settings.DeletionTimestamp.IsZero(), nil
+	if settings.DeletionTimestamp.IsZero() {
+		return false, nil
+	}
+	_, _, configured := cleanupRepository(settings, rr, staleMark(rr) != nil || staleCleanupStopped(rr))
+	return !configured, nil
 }
 
 // cleanupDone reports whether err, from the finalizer's close (closeOnDeleteOf), lets the finalizer go: nil, or an

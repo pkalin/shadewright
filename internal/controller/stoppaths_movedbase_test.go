@@ -1518,6 +1518,93 @@ func TestUninstallWithMissingRepository(t *testing.T) {
 	}
 }
 
+// #877: the uninstall release covers only a repository entry missing from the settings. With the settings being
+// deleted and the entry still configured, the deletion closes the marked pull request and goes, as before #877.
+func TestUninstallWithConfiguredRepositoryCloses(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+	ctx := context.Background()
+	recorder := record.NewFakeRecorder(20)
+	r.Recorder = recorder
+	settings := &api.RemediationSettings{}
+	if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Finalizers = []string{"example.com/settings"}
+	if err := r.Update(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	rr.Finalizers = []string{FinalizerName}
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
+		return []string{obj.(*api.RemediationRequest).Status.BreakerClearedBy}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}
+	for i := range 3 {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Logf("Reconcile %d: %v", i, err)
+		}
+	}
+	if err := r.Get(ctx, req.NamespacedName, &api.RemediationRequest{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("request still present (%v): want it gone after the close", err)
+	}
+	n := rr.Status.PullRequest.Number
+	if st := g.ChangeRequests()[n-1].State; st != providers.ChangeRequestClosed {
+		t.Fatalf("pull request #%d is %s: want it closed while the entry is configured", n, st)
+	}
+	if left := warningsOf(recorder, EventPullRequestLeftOpen); left != 0 {
+		t.Fatalf("%d Warning Events %s: want none", left, EventPullRequestLeftOpen)
+	}
+}
+
+// #877: a deleted PolicyChecked request outside a handoff whose repository is configured keeps its RequestDeadline
+// wait when its cleanup fails, as before #877; only a missing repository entry ends it.
+func TestDeletionWithConfiguredRepositoryKeepsRequestDeadlineWait(t *testing.T) {
+	r, _, rr := settlementWorld(t, api.PhasePolicyChecked)
+	ctx := context.Background()
+	clock := clockOf(r)
+	r.Recorder = record.NewFakeRecorder(20)
+	r.OpenRepository = func(context.Context, api.GitRepository) (providers.GitProvider, error) {
+		return nil, errors.New("the Git host is down")
+	}
+	since := metav1.NewTime(clock.at)
+	deadline := metav1.NewTime(clock.at.Add(time.Hour))
+	rr.Status.Deadline = &deadline
+	rr.Status.GitWaits = []api.GitWait{{Kind: api.GitWaitRequestDeadline, Since: since, Ends: &deadline,
+		Operation: opGet}}
+	gitWaitSummary(rr, clock.at)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	rr.Finalizers = []string{FinalizerName}
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Logf("reconcile with the Git host down: %v", err)
+	}
+	got := &api.RemediationRequest{}
+	if err := r.Get(ctx, req.NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	if gitWait(got, waitRequestDeadline) == nil {
+		t.Fatalf("status.gitWaits = %+v: want the RequestDeadline wait kept", got.Status.GitWaits)
+	}
+}
+
 // settingsDenied is a reader whose every read of RemediationSettings is refused, as by RBAC.
 type settingsDenied struct{ client.Reader }
 

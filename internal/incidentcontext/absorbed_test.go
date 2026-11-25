@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
 )
 
 const absorbedHeader = "consequences counted on this cause, not in its occurrences:"
@@ -56,7 +57,7 @@ func tallyOf(t *testing.T, summary string) []string {
 
 func cause(tally ...remediationv1alpha1.AbsorbedTally) *remediationv1alpha1.Incident {
 	inc := incident(deploymentRef())
-	inc.Spec.Reason, inc.Spec.Symptom = "OOMKilled", "Container app terminated with exit code 137"
+	inc.Spec.Reason, inc.Spec.Symptom = causereason.OOMKilled, "Container app terminated with exit code 137"
 	inc.Status.Cause, inc.Status.Absorbed = true, tally
 	return inc
 }
@@ -82,6 +83,65 @@ func TestSummaryShowsTheAbsorbedTally(t *testing.T) {
 		if strings.Contains(part, "occurrences") || strings.Contains(part, absorbedHeader) {
 			t.Errorf("the tally is quotable: %q", part)
 		}
+	}
+}
+
+// reasonNonZeroExit is the reason of an Incident of a non-zero exit read from pod status.
+const reasonNonZeroExit = "Error"
+
+// The decision of 2026-11-21 on #432 (B, corrected the same day): the tally block is shown only for the reasons
+// that showed it before #432 (causereason.Tallied), which a non-zero exit is not. A cause Incident of a non-zero exit (reason Error, the crash loop of #432) whose status.absorbed holds
+// a tally gets the summary of an Incident with none, byte for byte: the model's input does not change until #1080
+// adds the reason.
+func TestSummaryOfANonZeroExitShowsNoTally(t *testing.T) {
+	b := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
+	bare := cause()
+	bare.Spec.Reason, bare.Spec.Symptom = reasonNonZeroExit, "Container app terminated with exit code 2"
+	want := one(t, build(t, b, bare), SectionSummary).Text
+	inc := bare.DeepCopy()
+	inc.Status.Absorbed = []remediationv1alpha1.AbsorbedTally{
+		absorbed(remediationv1alpha1.AbsorbedUnhealthy, 3, testNow.Add(-2*time.Minute)),
+		absorbed(remediationv1alpha1.AbsorbedBackOff, 12, testNow.Add(-time.Minute)),
+	}
+	got := one(t, build(t, b, inc), SectionSummary).Text
+	if strings.Contains(got, absorbedHeader) || got != want {
+		t.Errorf("summary of a non-zero exit with a tally:\n%s\nwant, as with none:\n%s", got, want)
+	}
+}
+
+// The decision of 2026-11-21 on #432 (corrects B): the Incidents that showed the tally block before #432 still
+// show it, byte for byte: an OOM kill and each waiting reason the collector reads as a cause (causereason.Tallied).
+func TestSummaryShowsTheTallyForEachReasonOfMain(t *testing.T) {
+	want := causereason.Tallied()
+	b := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
+	before := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
+	anyReasonShowsTally(before)
+	for _, reason := range want {
+		inc := cause(absorbed(remediationv1alpha1.AbsorbedUnhealthy, 3, testNow.Add(-2*time.Minute)),
+			absorbed(remediationv1alpha1.AbsorbedBackOff, 12, testNow.Add(-time.Minute)))
+		inc.Spec.Reason, inc.Spec.Symptom = reason, "Container app is waiting: "+reason
+		got := one(t, build(t, b, inc), SectionSummary).Text
+		if len(tallyOf(t, got)) != 3 {
+			t.Errorf("%s: summary shows no tally:\n%s", reason, got)
+		}
+		if old := one(t, build(t, before, inc), SectionSummary).Text; got != old {
+			t.Errorf("%s: summary:\n%s\nwant, as before #432:\n%s", reason, got, old)
+		}
+	}
+}
+
+// A Builder whose showsTally is nil (one not made by New, or a test that cleared it) shows the tally for the same
+// reasons as one made by New, causereason.Tallied, and not for a non-zero exit: nil is not "none".
+func TestNilShowsTallyReadsTheList(t *testing.T) {
+	b := newBuilder(t, reader(t, webObjects()...), webSources(), nil)
+	b.showsTally = nil
+	inc := cause(absorbed(remediationv1alpha1.AbsorbedBackOff, 12, testNow.Add(-time.Minute)))
+	if got := one(t, build(t, b, inc), SectionSummary).Text; len(tallyOf(t, got)) != 2 {
+		t.Errorf("an OOM kill's summary with showsTally nil shows no tally:\n%s", got)
+	}
+	inc.Spec.Reason = reasonNonZeroExit
+	if got := one(t, build(t, b, inc), SectionSummary).Text; strings.Contains(got, absorbedHeader) {
+		t.Errorf("a non-zero exit's summary with showsTally nil shows the tally:\n%s", got)
 	}
 }
 

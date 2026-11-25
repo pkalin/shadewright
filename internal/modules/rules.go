@@ -140,7 +140,7 @@ type Evidence struct {
 	// Value is the value read, as the rule found it. It is untrusted. The evaluator redacts it with
 	// fingerprint.Value ([BoundValue]), which by itself caps a value at 1024 bytes, and then cuts it to
 	// [MaxEvidenceValueLength] bytes. The one exception is a value that is a whole Flux revision
-	// (redact.IsFluxRevision), which holds only a reference name and a commit and is kept as it is.
+	// ([IsFluxRevision]), which holds only a reference name and a commit and is kept as it is.
 	Value string
 }
 
@@ -286,7 +286,7 @@ func finding(module, rule string, subject ObjectRef, s Symptom) (Finding, bool) 
 // that is a milli quantity such as "6500m" kept; a value over 4 KiB is not read and becomes "<long value: N
 // bytes>") and cuts it to [MaxEvidenceValueLength] bytes, redacting
 // again after the cut. The one exception is a value that is, as a whole, a Flux revision
-// ([redact.IsFluxRevision]): it holds only a reference name and a commit and is kept as it is. A revision
+// ([IsFluxRevision]): it holds only a reference name and a commit and is kept as it is. A revision
 // inside other text is redacted like the rest. If redaction panics, the whole value is withheld as
 // "[REDACTED]": BoundValue runs in informer predicates and rule evaluation, outside any recover, so a
 // redactor bug must neither stop the analyzer nor let the value through (#523).
@@ -304,7 +304,7 @@ var boundWithoutRecover = boundValue
 
 // boundValue is [BoundValue] without the recover.
 func boundValue(s string) string {
-	if redact.IsFluxRevision(s) {
+	if IsFluxRevision(s) {
 		return s
 	}
 	s = fingerprint.Value(s)

@@ -16,55 +16,27 @@ limitations under the License.
 
 package redact
 
-// EntryCase is one generated input of the block corpora, as a caller reads it, with the secrets the
-// generator placed in it. The entry point test (package redact_test) runs it through every function that
-// produces text for the model, a status, an Event or a log line.
-type EntryCase struct {
-	Name    string
-	In      string
-	Secrets []string
-}
+import (
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+)
 
-// EntryCorpus returns every input of both block corpora that the redactor's own tests require to be
-// redacted. A value that only a source flattened is given with its lines, as the callers read it before they
-// flatten it themselves (blockPipeline); the one-line forms that say "block" are given flattened.
-func EntryCorpus() []EntryCase {
-	var out []EntryCase
-	for _, c := range blockCorpus(blockSecretKeys, true) {
-		if !c.indicator && (c.afterText || c.bareQuoted) {
-			continue
-		}
-		in := c.in
-		if !c.indicator && c.lined != c.in {
-			in = c.lined
-		}
-		e := EntryCase{Name: "block value: " + c.name, In: in}
-		for _, r := range c.secrets {
-			e.Secrets = append(e.Secrets, c.in[r[0]:r[1]])
-		}
-		out = append(out, e)
-	}
-	for _, c := range formCorpus() {
-		e := EntryCase{Name: "block form: " + c.name, In: c.in}
-		for _, r := range c.secrets {
-			e.Secrets = append(e.Secrets, c.in[r[0]:r[1]])
-		}
-		out = append(out, e)
-	}
-	return out
-}
+// EntryCase is the shared block corpus case used by entry-point tests.
+type EntryCase = redacttest.EntryCase
 
-// RaceKeeps and RaceSampleEvery are raceKeeps and raceSampleEvery (racesample_test.go), for the tests of
-// package redact_test.
-var RaceKeeps = raceKeeps
+// EntryCorpus returns the shared block corpus.
+var EntryCorpus = redacttest.EntryCorpus
 
-const RaceSampleEvery = raceSampleEvery
+// RaceKeeps selects the shared seeded sample under the race detector.
+var RaceKeeps = redacttest.RaceKeeps
 
-// RaceDetector is raceDetector (race_test.go, norace_test.go), for the tests of package redact_test.
-const RaceDetector = raceDetector
+// RaceSampleEvery is the share checked under the race detector.
+const RaceSampleEvery = redacttest.RaceSampleEvery
 
-// ParallelUnderRace is parallelUnderRace (racesample_test.go), for the tests of package redact_test.
-var ParallelUnderRace = parallelUnderRace
+// RaceDetector reports whether this binary uses the race detector.
+const RaceDetector = redacttest.RaceDetector
+
+// ParallelUnderRace marks independent tests parallel under the race detector.
+var ParallelUnderRace = redacttest.ParallelUnderRace
 
 // MaxShownBytes is maxShownBytes, for TestReleasedShownMatchesValue.
 const MaxShownBytes = maxShownBytes

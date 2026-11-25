@@ -902,38 +902,9 @@ func TestQuotedBlockValueEscapingTheLineBreak(t *testing.T) {
 	}
 }
 
-// A Flux revision is kept only when it is the whole value (IsFluxRevision); inside text, the commit hash is
-// redacted like any other long hex run, so "sha1:" written in front of a secret keeps nothing.
-func TestFluxRevisions(t *testing.T) {
+// In free text, the redactor hides a Flux revision hash like any other long hex run.
+func TestFluxRevisionHashesInText(t *testing.T) {
 	const commit = "1f3c5e7a9b2d4f6081a3c5e7f9b1d3f5a7c9e1b3"
-	for _, in := range []string{
-		"main@sha1:" + commit,
-		"refs/heads/main@sha1:" + commit,
-		"cluster/kind@sha1:" + commit,
-		"sha1:" + commit,
-	} {
-		if !IsFluxRevision(in) {
-			t.Errorf("IsFluxRevision(%q) = false", in)
-		}
-	}
-	for _, in := range []string{
-		"",
-		commit,
-		"main@sha1:" + commit + "a",
-		"main@sha1:" + strings.ToUpper(commit),
-		"main@sha1:" + commit + " failed",
-		"token main@sha1:" + commit,
-		"main@sha1:" + commit + "-" + randomToken,
-		"main@sha1:" + commit + "\n",
-		"ma in@sha1:" + commit,
-		"main@@sha1:" + commit,
-		"main@sha256:" + commit,
-		strings.Repeat("a", 256) + "@sha1:" + commit,
-	} {
-		if IsFluxRevision(in) {
-			t.Errorf("IsFluxRevision(%q) = true", in)
-		}
-	}
 	checkGapCases(t, []gapCase{
 		{name: "sha1 prefix written before a secret", input: "Bearer sha1:" + commit, secrets: []string{commit}},
 		{name: "revision inside a message", input: "Applied revision: main@sha1:" + commit, secrets: []string{commit}},

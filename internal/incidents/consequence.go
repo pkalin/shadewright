@@ -33,8 +33,9 @@ import (
 // maxLoggedContainer bounds the bytes of a refused container name that are logged.
 const maxLoggedContainer = 80
 
-// isCause reports whether o is a cause of the consequence rule (ADR-0039 points 2 and 8): of class cause and
-// read from pod status. Only such an observation sets status.cause; an Event never does, whatever its reason.
+// isCause reports whether o is a cause of the consequence rule (ADR-0039 points 2, 3 and 8): of class cause and
+// read from pod status, which the collector sets for an OOM kill, a non-zero exit and a waiting reason.
+// Only such an observation sets status.cause; an Event never does, whatever its reason.
 func isCause(o collector.Observation) bool {
 	return o.Class == collector.ClassCause && o.Origin == fingerprint.SourcePodStatus
 }
@@ -77,8 +78,8 @@ type causeIncident struct {
 
 // causeFor returns the Incident a consequence observation is counted on as evidence (ADR-0039 point 6): the
 // Incident [Controller.causeIncident] finds for its CauseFingerprint, subject UID and time. Not linked, besides,
-// is an observation that is not a consequence, names no container or no cause, or carries a reason outside the
-// table. The caller holds mu.
+// is an observation that is not a consequence, names no container or no cause, carries a reason outside the
+// table, or one that cause does not take ([causeTakes]: an Unhealthy for a non-zero exit). The caller holds mu.
 func (c *Controller) causeFor(o collector.Observation) (string, remediationv1alpha1.IncidentSpec, remediationv1alpha1.AbsorbedReason, bool) {
 	none := remediationv1alpha1.IncidentSpec{}
 	if o.Class != collector.ClassConsequence || o.CauseFingerprint == "" || o.Container == "" {
@@ -89,7 +90,7 @@ func (c *Controller) causeFor(o collector.Observation) (string, remediationv1alp
 		return "", none, "", false
 	}
 	name, spec, ok := c.causeIncident(o.CauseFingerprint, o.Subject.UID, o.ObservedAt)
-	if !ok {
+	if !ok || !causeTakes(spec.Reason, string(reason)) {
 		return "", none, "", false
 	}
 	return name, spec, reason, true

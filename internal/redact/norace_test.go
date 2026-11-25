@@ -18,5 +18,8 @@ limitations under the License.
 
 package redact
 
-// raceDetector is false: the tests run without -race (see race_test.go).
-const raceDetector = false
+import (
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+)
+
+const raceDetector = redacttest.RaceDetector

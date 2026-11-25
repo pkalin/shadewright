@@ -194,7 +194,7 @@ test-redactwork-1 test-redactwork-2 test-redactwork-3 test-redactwork-4 test-red
 test-redactwork-rest:
 	$(REDACTWORK_TEST) -skip '^($(REDACT_SHARD_1)|$(REDACT_SHARD_2)|$(REDACT_SHARD_3)|$(REDACT_SHARD_4)|$(REDACT_SHARD_5)|$(REDACT_SHARD_6)|$(REDACT_SHARD_7)|$(REDACT_SHARD_8)|$(REDACT_SHARD_9))$$' ./internal/redact
 test-redactwork-other:
-	$(REDACTWORK_TEST) ./internal/redact/released ./internal/redact/meter ./internal/providers/logs/kube ./internal/incidentcontext ./internal/tools
+	$(REDACTWORK_TEST) ./internal/redact/released ./internal/redact/meter ./internal/redact/redacttest ./internal/providers/logs/kube ./internal/incidentcontext ./internal/tools && $(REDACTWORK_TEST) -short ./internal/redact/redacttest
 
 # One line of JSON for the matrix of the redactwork jobs of .github/workflows/test.yml: every entry of
 # REDACTWORK_TARGETS, so that a run added to make test is a job in CI as well.

@@ -30,7 +30,7 @@ docs_re='^(docs/.*|overrides/.*|includes/.*|zensical\.toml|requirements-docs\.(i
 # CodeQL analyses Go (built from the module) and the workflows and composite actions themselves.
 codeql_re='^(.*\.go|go\.mod|go\.sum|\.github/workflows/.*|\.github/actions/.*|\.github/codeql/.*)$'
 # ci.yml and the workflows it calls, and this script.
-self_re='^(\.github/workflows/(ci|lint|test|test-e2e|vulncheck|workflow-lint|images-build|chart-test|docs-check|codeql)\.yml|hack/ci-changed\.sh)$'
+self_re='^(\.github/workflows/(ci|lint|test|test-e2e|vulncheck|workflow-lint|images-build|chart-test|docs-check|codeql|secret-scan)\.yml|hack/ci-changed\.sh)$'
 
 emit() { # go images chart docs codeql
   echo "go=$1"

@@ -144,6 +144,7 @@ nav = [
       { "0046 Stopped holder's failed check" = "adr/0046-the-failed-review-check-of-a-stopped-holder-while-the-lock-is-held.md" },
       { "0047 Scoring records outside the cluster" = "adr/0047-scoring-analysis-records-outside-the-cluster.md" },
       { "0048 Redaction in a shared module" = "adr/0048-redaction-in-a-shared-module.md" },
+      { "0049 Handoff of code incidents" = "adr/0049-one-way-handoff-of-application-code-incidents.md" },
       { "Template" = "adr/template.md" },
     ] },
     { "The name" = "name.md" },

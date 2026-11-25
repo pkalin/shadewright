@@ -20,19 +20,17 @@ import (
 	"context"
 	"math"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/go-logr/logr/funcr"
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // analyzerGoMemLimit is the Go memory limit both install paths give the analyzer: 90 percent of its 256 Mi.
-const analyzerGoMemLimit = MeasuredGoMemoryLimit
+const analyzerGoMemLimit = 256 << 20 * 9 / 10
 
 // withHeapLimiter runs f with the process-wide limit replaced by l.
 func withHeapLimiter(l *heapLimiter, f func()) {
@@ -44,9 +42,13 @@ func withHeapLimiter(l *heapLimiter, f func()) {
 
 // The limit is half of the Go memory limit; without one it is fallbackHeapLimit, never off.
 func TestHeapLimitIsNeverOff(t *testing.T) {
-	defer debug.SetMemoryLimit(debug.SetMemoryLimit(analyzerGoMemLimit))
 	l := &heapLimiter{}
-	l.size()
+	defer debug.SetMemoryLimit(debug.SetMemoryLimit(analyzerGoMemLimit))
+	withHeapLimiter(l, func() {
+		if got := String("ordinary text"); got != "ordinary text" {
+			t.Fatalf("first decision returned %q", got)
+		}
+	})
 	if want := int64(analyzerGoMemLimit / heapShareOfLimit); l.limit != want || l.sem == nil {
 		t.Errorf("limit %d bytes from a Go memory limit of %d, want %d", l.limit, analyzerGoMemLimit, want)
 	}
@@ -272,33 +274,5 @@ func TestShareGivenBackOnPanic(t *testing.T) {
 	})
 	if !l.sem.TryAcquire(l.limit) {
 		t.Error("the share of an entry that panicked was not given back")
-	}
-}
-
-// The analyzer logs one warning when its Go memory limit is under the one the heap limit was measured for (the
-// 256 Mi install), and none at or above it or without one (#1087, decision of 2026-11-22).
-func TestWarningUnderTheMeasuredMemory(t *testing.T) {
-	defer debug.SetMemoryLimit(debug.SetMemoryLimit(math.MaxInt64))
-	for _, c := range []struct {
-		name  string
-		limit int64
-		want  int
-	}{
-		{"128Mi install", 128 << 20 * 9 / 10, 1},
-		{"one byte under", MeasuredGoMemoryLimit - 1, 1},
-		{"256Mi install", MeasuredGoMemoryLimit, 0},
-		{"512Mi install", 512 << 20 * 9 / 10, 0},
-		{"no Go memory limit", math.MaxInt64, 0},
-	} {
-		debug.SetMemoryLimit(c.limit)
-		var lines []string
-		log := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{})
-		warned := WarnIfMemoryUnderMeasured(log)
-		if len(lines) != c.want || warned != (c.want == 1) {
-			t.Errorf("%s: %d lines, warned %v, want %d: %v", c.name, len(lines), warned, c.want, lines)
-		}
-		if c.want == 1 && len(lines) == 1 && !strings.Contains(lines[0], "killed for its memory") {
-			t.Errorf("%s: the warning does not name the risk: %s", c.name, lines[0])
-		}
 	}
 }

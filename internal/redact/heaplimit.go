@@ -23,10 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/semaphore"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 // The heap of the redactions running at once (#1087, decisions of 2026-11-22). The analyzer runs up to eight
@@ -42,8 +39,8 @@ import (
 //
 // The limit is half of the Go memory limit of the process (GOMEMLIMIT, which both install paths set to 90 percent
 // of the analyzer's memory limit: 115.2 MiB of its 256 Mi), read at the first decision. Without a Go memory limit
-// the limit is fallbackHeapLimit, logged once: it is never off. An entry whose weight is over the whole limit takes
-// all of it: it runs alone, after the ones running when it came, and none starts beside it. Waiters are served in
+// the limit is fallbackHeapLimit, reported once to the fallback callback. An entry heavier than the limit
+// takes all of it and runs alone after the entries already running finish. Waiters are served in
 // the order they came, so a heavy entry is not starved by light ones. So the entries running at once hold at most
 // the larger of the limit and one entry at the tests' line (HeapFixed plus 75 bytes per byte: 116.5 MiB at 1.5 MiB),
 // as TestRedactionsAtOnceStayUnderTheLimit checks.
@@ -77,10 +74,11 @@ const heapWeightRoom = 75
 
 // heapLimiter is the process-wide limit of the heap of the redactions running at once.
 type heapLimiter struct {
-	once    sync.Once
-	sem     *semaphore.Weighted
-	limit   int64
-	maxWait time.Duration // maxHeapWait; shorter only in a test
+	once       sync.Once
+	sem        *semaphore.Weighted
+	limit      int64
+	maxWait    time.Duration // maxHeapWait; shorter only in a test
+	onFallback func(limitBytes int64)
 }
 
 // redactionHeap is the limit of this process, sized at the first decision.
@@ -99,9 +97,8 @@ func (l *heapLimiter) size() {
 		l.limit = fallbackHeapLimit
 		if gomem := debug.SetMemoryLimit(-1); gomem > 0 && gomem < math.MaxInt64 {
 			l.limit = gomem / heapShareOfLimit
-		} else {
-			logf.Log.WithName("redact").Info("no Go memory limit (GOMEMLIMIT) is set: the redactions running at once share a fixed heap limit",
-				"limitBytes", l.limit)
+		} else if l.onFallback != nil {
+			l.onFallback(l.limit)
 		}
 		l.sem, l.maxWait = semaphore.NewWeighted(l.limit), maxHeapWait
 	})
@@ -112,14 +109,16 @@ func heapWeight(size int) int64 { return HeapFixed + HeapWeightPerByte*int64(siz
 
 // acquire waits until an entry of size bytes may run, at most until ctx ends or the limiter's longest wait passes,
 // and returns the function that gives its share back; ok is false, and nothing is held, when the wait ended first.
-func (l *heapLimiter) acquire(ctx context.Context, size int) (release func(), ok bool) {
+func (l *heapLimiter) acquire(ctx context.Context, size int, onWait func()) (release func(), ok bool) {
 	l.size()
 	w := min(heapWeight(size), l.limit)
 	release = func() { l.sem.Release(w) }
 	if l.sem.TryAcquire(w) {
 		return release, true
 	}
-	heapWaitsTotal.Inc()
+	if onWait != nil {
+		onWait()
+	}
 	wctx, cancel := context.WithTimeout(ctx, l.maxWait)
 	defer cancel()
 	if err := l.sem.Acquire(wctx, w); err != nil {
@@ -127,12 +126,3 @@ func (l *heapLimiter) acquire(ctx context.Context, size int) (release func(), ok
 	}
 	return release, true
 }
-
-// heapWaitsTotal counts the redactions that waited for the limit.
-var heapWaitsTotal = prometheus.NewCounter(prometheus.CounterOpts{
-	Name: "shadewright_redaction_heap_waits_total",
-	Help: "Redactions that waited for others to finish before running, so that the heap of the redactions running " +
-		"at once stays within its limit.",
-})
-
-func init() { metrics.Registry.MustRegister(heapWaitsTotal) }

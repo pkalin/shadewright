@@ -41,7 +41,7 @@ func TestShortEntryDoesNotWaitForTheHeapLimit(t *testing.T) {
 	l := newHeapLimiter(64 << 20)
 	l.maxWait = time.Hour // a wait of the ordinary entry points would outlast the test
 	withHeapLimiter(l, func() {
-		held, ok := l.acquire(context.Background(), largestObject)
+		held, ok := l.acquire(context.Background(), largestObject, nil)
 		if !ok {
 			t.Fatal("the entry that holds the limit did not run")
 		}

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package redact
+package redacttest
 
 import (
 	"fmt"
@@ -25,8 +25,7 @@ import (
 // The forms of the second round of #845 (decision of 2026-11-17): a key and its value split over more than two
 // strings of a sequence, a key written with format characters or a colon look-alike, an explicit YAML key, a
 // comment at column 0 inside a block, an environment entry in block form with its value first, and the labels
-// of a metric series. Like canonical_gen_test.go, this file uses only String and the redactor's spans, so it
-// runs unchanged in a checkout of main.
+// of a metric series. The generator is independent of the redactor.
 
 // canonSeqPart is one piece of a string of a sequence: text that must survive, text that may go (a blank, a
 // line break), or the secret.
@@ -72,43 +71,43 @@ var canonSplitKeys = func() [][][]canonSeqPart {
 
 // sequenceParts writes "serve", the strings of items, then the value strings (each written by one of vals),
 // then after, in rendering r, and records the strings in args.
-func (w *canonWriter) sequenceParts(r int, items [][]canonSeqPart, vals []func(w *canonWriter), after string) { //nolint:unparam // every generated sequence ends with the same flag, text that must stay
+func (w *CanonWriter) sequenceParts(r int, items [][]canonSeqPart, vals []func(w *CanonWriter), after string) { //nolint:unparam // every generated sequence ends with the same flag, text that must stay
 	rd := canonSeqRenderings[r]
-	w.text(rd.open + rd.quote)
-	w.kept(canonServe)
-	w.text(rd.quote)
-	w.c.args = append(w.c.args, canonServe)
+	w.Text(rd.open + rd.quote)
+	w.Kept(canonServe)
+	w.Text(rd.quote)
+	w.C.Args = append(w.C.Args, canonServe)
 	item := func(f func()) {
-		w.text(rd.sep + rd.quote)
-		start := w.b.Len()
+		w.Text(rd.sep + rd.quote)
+		start := w.B.Len()
 		f()
-		w.c.args = append(w.c.args, w.b.String()[start:])
-		w.text(rd.quote)
+		w.C.Args = append(w.C.Args, w.B.String()[start:])
+		w.Text(rd.quote)
 	}
 	for _, it := range items {
 		item(func() {
 			for _, p := range it {
 				if p.kept != "" {
-					w.kept(p.kept)
+					w.Kept(p.kept)
 				}
-				w.text(p.text)
+				w.Text(p.text)
 			}
 		})
 	}
 	for _, v := range vals {
 		item(func() { v(w) })
 	}
-	item(func() { w.kept(after) })
-	w.text(rd.close)
+	item(func() { w.Kept(after) })
+	w.Text(rd.close)
 }
 
 // splitSequenceCases writes a key and its value split over more than two strings of a sequence, in each
 // rendering, and a block value over two strings under a key with a block indicator.
 func (g *canonGen) splitSequenceCases() {
-	value := func(w *canonWriter) { w.secret() }
-	indented := func(w *canonWriter) {
-		w.text("  ")
-		w.secret()
+	value := func(w *CanonWriter) { w.Secret() }
+	indented := func(w *CanonWriter) {
+		w.Text("  ")
+		w.Secret()
 	}
 	for ki, items := range canonSplitKeys {
 		for r := range canonSeqRenderings {
@@ -118,15 +117,15 @@ func (g *canonGen) splitSequenceCases() {
 				// JSON escaped inside a string holds no raw line break in a string.
 				continue
 			}
-			g.add(canonFormSequence, fmt.Sprintf("split key %d %q, rendering %d", ki, canonSeqText(items), r), func(w *canonWriter) {
-				w.sequenceParts(r, items, []func(*canonWriter){value}, "--port=8080")
+			g.add(canonFormSequence, fmt.Sprintf("split key %d %q, rendering %d", ki, canonSeqText(items), r), func(w *CanonWriter) {
+				w.sequenceParts(r, items, []func(*CanonWriter){value}, "--port=8080")
 			})
 		}
 	}
 	for _, key := range []string{passwordKey, clientSecretKey, canonTokenKey} {
 		for r := range canonSeqRenderings {
-			g.add(canonFormSequence, fmt.Sprintf("%s block over two strings, rendering %d", key, r), func(w *canonWriter) {
-				w.sequenceParts(r, [][]canonSeqPart{{{kept: key + ": |"}}}, []func(*canonWriter){indented, indented}, "--port=8080")
+			g.add(canonFormSequence, fmt.Sprintf("%s block over two strings, rendering %d", key, r), func(w *CanonWriter) {
+				w.sequenceParts(r, [][]canonSeqPart{{{kept: key + ": |"}}}, []func(*CanonWriter){indented, indented}, "--port=8080")
 			})
 		}
 	}
@@ -166,34 +165,34 @@ func (g *canonGen) glyphCases() {
 			written := key[:at] + fc + key[at:]
 			for v := range 4 {
 				nl := canonNLs[(ki+fi+v)%len(canonNLs)]
-				g.add(canonFormGlyph, fmt.Sprintf("key %q, shape %d, line end %q", written, v, nl), func(w *canonWriter) {
+				g.add(canonFormGlyph, fmt.Sprintf("key %q, shape %d, line end %q", written, v, nl), func(w *CanonWriter) {
 					switch v {
 					case 0:
-						w.kept(key[:at])
-						w.text(fc)
-						w.kept(key[at:])
-						w.text(": ")
-						w.secret()
+						w.Kept(key[:at])
+						w.Text(fc)
+						w.Kept(key[at:])
+						w.Text(": ")
+						w.Secret()
 					case 1:
-						w.kept(key[:at])
-						w.text(fc)
-						w.kept(key[at:])
-						w.text(": " + canonIndicators[(ki+fi)%len(canonIndicators)] + nl + "  ")
-						w.secret()
+						w.Kept(key[:at])
+						w.Text(fc)
+						w.Kept(key[at:])
+						w.Text(": " + canonIndicators[(ki+fi)%len(canonIndicators)] + nl + "  ")
+						w.Secret()
 					case 2:
-						w.kept(key[:at])
-						w.text(fc)
-						w.kept(key[at:])
-						w.text("=")
-						w.secret()
+						w.Kept(key[:at])
+						w.Text(fc)
+						w.Kept(key[at:])
+						w.Text("=")
+						w.Secret()
 					case 3:
-						w.text(`{"`)
-						w.kept(key[:at])
-						w.text(fc)
-						w.kept(key[at:])
-						w.text(`": "`)
-						w.secret()
-						w.text(`"}`)
+						w.Text(`{"`)
+						w.Kept(key[:at])
+						w.Text(fc)
+						w.Kept(key[at:])
+						w.Text(`": "`)
+						w.Secret()
+						w.Text(`"}`)
 					}
 					w.next(nl)
 				})
@@ -202,19 +201,19 @@ func (g *canonGen) glyphCases() {
 		for ci, c := range canonColonLookalikes {
 			for v := range 4 {
 				nl := canonNLs[(ki+ci+v)%len(canonNLs)]
-				g.add(canonFormGlyph, fmt.Sprintf("key %s, colon %q, shape %d, line end %q", key, c, v, nl), func(w *canonWriter) {
-					w.kept(key)
+				g.add(canonFormGlyph, fmt.Sprintf("key %s, colon %q, shape %d, line end %q", key, c, v, nl), func(w *CanonWriter) {
+					w.Kept(key)
 					switch v {
 					case 0:
-						w.text(c + " ")
+						w.Text(c + " ")
 					case 1:
-						w.text(c)
+						w.Text(c)
 					case 2:
-						w.text(" " + c + " ")
+						w.Text(" " + c + " ")
 					case 3:
-						w.text(c + " " + canonIndicators[(ki+ci)%len(canonIndicators)] + nl + "  ")
+						w.Text(c + " " + canonIndicators[(ki+ci)%len(canonIndicators)] + nl + "  ")
 					}
-					w.secret()
+					w.Secret()
 					w.next(nl)
 				})
 			}
@@ -232,34 +231,34 @@ func (g *canonGen) explicitKeyCases() {
 		for v := range 5 {
 			nl := canonNLs[(ki+v)%len(canonNLs)]
 			ind := canonIndicators[(ki+v)%len(canonIndicators)]
-			g.add(canonFormExplicit, fmt.Sprintf("key %s, shape %d, line end %q", key, v, nl), func(w *canonWriter) {
+			g.add(canonFormExplicit, fmt.Sprintf("key %s, shape %d, line end %q", key, v, nl), func(w *CanonWriter) {
 				switch v {
 				case 0:
-					w.text("? ")
-					w.kept(key)
-					w.text(nl + ": ")
-					w.secret()
+					w.Text("? ")
+					w.Kept(key)
+					w.Text(nl + ": ")
+					w.Secret()
 				case 1:
-					w.text("? ")
-					w.kept(key)
-					w.text(nl + ": " + ind + nl + "  ")
-					w.secret()
+					w.Text("? ")
+					w.Kept(key)
+					w.Text(nl + ": " + ind + nl + "  ")
+					w.Secret()
 				case 2:
-					w.kept("spec")
-					w.text(":" + nl + "  ? ")
-					w.kept(key)
-					w.text(nl + "  : ")
-					w.secret()
+					w.Kept("spec")
+					w.Text(":" + nl + "  ? ")
+					w.Kept(key)
+					w.Text(nl + "  : ")
+					w.Secret()
 				case 3:
-					w.text("- ? ")
-					w.kept(key)
-					w.text(nl + "  : ")
-					w.secret()
+					w.Text("- ? ")
+					w.Kept(key)
+					w.Text(nl + "  : ")
+					w.Secret()
 				case 4:
-					w.text("?   ")
-					w.kept(key)
-					w.text(nl + ":   " + ind + nl + "    ")
-					w.secret()
+					w.Text("?   ")
+					w.Kept(key)
+					w.Text(nl + ":   " + ind + nl + "    ")
+					w.Secret()
 				}
 				w.next(nl)
 			})
@@ -273,30 +272,30 @@ func (g *canonGen) commentCases() {
 		for v := range 4 {
 			nl := canonNLs[(ki+v)%len(canonNLs)]
 			ind := canonIndicators[(ki+v)%len(canonIndicators)]
-			g.add(canonFormComment, fmt.Sprintf("key %s, %q, shape %d, line end %q", key, ind, v, nl), func(w *canonWriter) {
+			g.add(canonFormComment, fmt.Sprintf("key %s, %q, shape %d, line end %q", key, ind, v, nl), func(w *CanonWriter) {
 				lead := "  "
 				if v == 2 {
-					w.kept("spec")
-					w.text(":" + nl + lead)
+					w.Kept("spec")
+					w.Text(":" + nl + lead)
 					lead += lead
 				}
-				w.kept(key)
-				w.text(": " + ind + nl + lead)
-				w.secret()
-				w.text(nl)
+				w.Kept(key)
+				w.Text(": " + ind + nl + lead)
+				w.Secret()
+				w.Text(nl)
 				switch v {
 				case 1:
-					w.text(nl)
+					w.Text(nl)
 				case 3:
-					w.text("#" + nl)
+					w.Text("#" + nl)
 				}
 				if v != 3 {
-					w.text("# ")
-					w.kept("rotated")
-					w.text(nl)
+					w.Text("# ")
+					w.Kept("rotated")
+					w.Text(nl)
 				}
-				w.text(lead)
-				w.secret()
+				w.Text(lead)
+				w.Secret()
 				w.next(nl)
 			})
 		}
@@ -308,42 +307,42 @@ func (g *canonGen) envValueFirstBlockCases() {
 	for ni, name := range canonEnvNames {
 		for v := range 6 {
 			nl := canonNLs[(ni+v)%len(canonNLs)]
-			g.add(canonFormEnv, fmt.Sprintf("%s, value first in block form, shape %d, line end %q", name, v, nl), func(w *canonWriter) {
+			g.add(canonFormEnv, fmt.Sprintf("%s, value first in block form, shape %d, line end %q", name, v, nl), func(w *CanonWriter) {
 				lead := ""
 				if v == 3 {
-					w.kept("env")
-					w.text(":" + nl)
+					w.Kept("env")
+					w.Text(":" + nl)
 					lead = "  "
 				}
-				w.text(lead + "- ")
-				w.kept("value")
+				w.Text(lead + "- ")
+				w.Kept("value")
 				switch v {
 				case 1:
-					w.text(`: "`)
-					w.secret()
-					w.text(`"`)
+					w.Text(`: "`)
+					w.Secret()
+					w.Text(`"`)
 				case 2:
-					w.text(": |" + nl + lead + strings.Repeat(" ", 4))
-					w.secret()
+					w.Text(": |" + nl + lead + strings.Repeat(" ", 4))
+					w.Secret()
 				default:
-					w.text(": ")
-					w.secret()
+					w.Text(": ")
+					w.Secret()
 				}
 				if v == 4 {
-					w.text(nl + lead + "  ")
-					w.kept("description")
-					w.text(": ")
-					w.kept("db")
+					w.Text(nl + lead + "  ")
+					w.Kept("description")
+					w.Text(": ")
+					w.Kept("db")
 				}
-				w.text(nl + lead + "  ")
-				w.kept("name")
-				w.text(": ")
+				w.Text(nl + lead + "  ")
+				w.Kept("name")
+				w.Text(": ")
 				if v == 5 {
-					w.text(`"`)
-					w.kept(name)
-					w.text(`"`)
+					w.Text(`"`)
+					w.Kept(name)
+					w.Text(`"`)
 				} else {
-					w.kept(name)
+					w.Kept(name)
 				}
 				w.next(nl)
 			})
@@ -361,7 +360,7 @@ func (g *canonGen) labelCases() {
 	for ki, key := range canonLabelKeys {
 		second := canonLabelKeys[(ki+1)%len(canonLabelKeys)]
 		for v := range 4 {
-			g.add(canonFormLabels, fmt.Sprintf("label %s, shape %d", key, v), func(w *canonWriter) {
+			g.add(canonFormLabels, fmt.Sprintf("label %s, shape %d", key, v), func(w *CanonWriter) {
 				type label struct {
 					name   string
 					secret bool
@@ -379,21 +378,21 @@ func (g *canonGen) labelCases() {
 					ls = []label{{name: key, secret: true}, {name: "msg", value: "retry"}, {name: second, secret: true}}
 				}
 				slices.SortFunc(ls, func(a, b label) int { return strings.Compare(a.name, b.name) })
-				w.text("{")
+				w.Text("{")
 				for i, l := range ls {
 					if i > 0 {
-						w.text(", ")
+						w.Text(", ")
 					}
-					w.kept(l.name)
-					w.text("=")
+					w.Kept(l.name)
+					w.Text("=")
 					if l.secret {
-						l.value = w.secret()
+						l.value = w.Secret()
 					} else {
-						w.kept(l.value)
+						w.Kept(l.value)
 					}
-					w.c.labels = append(w.c.labels, [2]string{l.name, l.value})
+					w.C.Labels = append(w.C.Labels, [2]string{l.name, l.value})
 				}
-				w.text("}")
+				w.Text("}")
 			})
 		}
 	}

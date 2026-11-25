@@ -18,5 +18,8 @@ limitations under the License.
 
 package redact
 
-// raceDetector is true when the tests run under -race.
-const raceDetector = true
+import (
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+)
+
+const raceDetector = redacttest.RaceDetector

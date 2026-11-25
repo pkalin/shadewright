@@ -255,36 +255,15 @@ const delimiter = "tool-result"
 // format character (or none) between its words.
 var delimiterPattern = regexp.MustCompile(`(?i)tool[\p{Pd}\p{Cf}\x{2212}_\s]*result`)
 
-// angleEscaper escapes every character a reader could take for an angle bracket, so no text can open or
-// close a tag whatever letters it uses: ASCII, full-width, small, single and mathematical angle brackets,
-// CJK angle brackets and the modifier letters and syllabics that look like them.
-var angleEscaper = strings.NewReplacer(
-	"<", "&lt;", ">", "&gt;",
-	"\uFF1C", "&lt;", "\uFF1E", "&gt;", // full-width
-	"\uFE64", "&lt;", "\uFE65", "&gt;", // small
-	"\u2039", "&lt;", "\u203A", "&gt;", // single angle quotation marks
-	"\u2329", "&lt;", "\u232A", "&gt;", // angle brackets
-	"\u3008", "&lt;", "\u3009", "&gt;", // CJK angle brackets
-	"\u27E8", "&lt;", "\u27E9", "&gt;", // mathematical angle brackets
-	"\u276E", "&lt;", "\u276F", "&gt;", // heavy angle quotation marks
-	"\u2770", "&lt;", "\u2771", "&gt;", // heavy angle brackets
-	"\u29FC", "&lt;", "\u29FD", "&gt;", // curved angle brackets
-	"\u02C2", "&lt;", "\u02C3", "&gt;", // modifier letter arrowheads
-	"\u1438", "&lt;", "\u1433", "&gt;", // Canadian syllabics
-	"\u227A", "&lt;", "\u227B", "&gt;", // precedes, succeeds
-	"\u226E", "&lt;", "\u226F", "&gt;", // not less than, not greater than (a bracket with a combining overlay, composed)
-	"\uFE3F", "&lt;", "\uFE40", "&gt;", // presentation forms for vertical angle brackets
-)
-
 // EscapeAngles escapes every character a reader could take for an angle bracket, as [Result.Content] does
 // for a tool result, so that untrusted text in any delimited block of a prompt can neither close the block nor
 // open another.
-func EscapeAngles(text string) string { return angleEscaper.Replace(text) }
+func EscapeAngles(text string) string { return incidentcontext.EscapeAngles(text) }
 
 // neutralise makes text safe inside the block: every angle bracket look-alike is escaped and any spelling of
 // the delimiter's name is changed.
 func neutralise(text string) string {
-	return delimiterPattern.ReplaceAllString(angleEscaper.Replace(text), "tool_result")
+	return delimiterPattern.ReplaceAllString(incidentcontext.EscapeAngles(text), "tool_result")
 }
 
 // Data returns the parts of the result a quote may cite as evidence: each of its [Result.Values] as

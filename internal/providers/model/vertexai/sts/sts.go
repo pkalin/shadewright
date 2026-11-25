@@ -131,6 +131,9 @@ type Source struct {
 	refreshAt time.Time
 	// inflight is the exchange in progress, shared by every caller that needs a token meanwhile.
 	inflight *exchangeCall
+	// readSlot has room for one token file read: the read holds it until it returns, even after its caller
+	// timed out, so a stalled filesystem cannot pile up goroutines and open files.
+	readSlot chan struct{}
 }
 
 // exchangeCall is one exchange in progress. Its result is set before done is closed; waiters is guarded by
@@ -179,6 +182,7 @@ func newSource(cfg Config, rt http.RoundTripper) (*Source, error) {
 		audience: cfg.Audience, tokenFile: cfg.TokenFile, subject: cfg.Subject,
 		projectionAudience: cfg.ProjectionAudience,
 		tokenURL:           TokenURL, client: client, now: time.Now, timeout: exchangeTimeout, readFile: readTokenFile,
+		readSlot: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -356,9 +360,16 @@ func (s *Source) exchange(ctx context.Context) (_ string, refreshAt, freshUntil 
 		token string
 		err   error
 	}
+	select {
+	case s.readSlot <- struct{}{}:
+	case <-ctx.Done():
+		// An earlier read is still stuck and holds the slot.
+		return "", time.Time{}, time.Time{}, ctxError(ctx)
+	}
 	read := make(chan fileResult, 1)
 	go func() {
 		tok, err := s.readFile(s.tokenFile)
+		<-s.readSlot
 		read <- fileResult{tok, err}
 	}()
 	var assertion string

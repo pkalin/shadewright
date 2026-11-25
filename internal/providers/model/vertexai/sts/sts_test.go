@@ -1648,6 +1648,42 @@ func TestStalledTokenFileReadEndsAtTheDeadline(t *testing.T) {
 	}
 }
 
+// A stalled read keeps its slot until it returns: retries while it is stuck start no further reads, so
+// goroutines and open files do not pile up, and the slot is free again once the read ends.
+func TestStalledTokenFileReadsAreNotStackedByRetries(t *testing.T) {
+	s, _, _ := harness(t, func(rw http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(rw, stsAnswer(3600)) })
+	s.timeout = 20 * time.Millisecond
+	gate := make(chan struct{})
+	var reads atomic.Int32
+	s.readFile = func(path string) (string, error) {
+		if reads.Add(1) == 1 {
+			<-gate
+		}
+		return readTokenFile(path)
+	}
+	for i := range 5 {
+		_, err := s.Token(context.Background())
+		if !providers.IsRetryable(err) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("attempt %d: err = %v, want a retryable deadline", i, err)
+		}
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("%d reads started while the first was stuck, want 1", got)
+	}
+	close(gate)
+	var tok string
+	var err error
+	for range 200 {
+		if tok, err = s.Token(context.Background()); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil || tok == "" {
+		t.Fatalf("no token after the read returned: %v", err)
+	}
+}
+
 // HTTP/1.1 does not by itself keep bytes out of the standard log: when a server sends more than its
 // Content-Length declares, net/http logs the start of the extra bytes as an unsolicited response. The answer
 // of STS holds the access token, so the production transport must not leave a connection to be read like that.

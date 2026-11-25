@@ -31,6 +31,7 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 	"github.com/shadewright-labs/shadewright/internal/redact"
 	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+	_ "github.com/shadewright-labs/shadewright/internal/redactadapter"
 )
 
 // recordingRedactor is the package's redactor that records the size of every answer it is asked to decide
@@ -208,6 +209,35 @@ func TestGetResourceOverTheLargestEntryIsWithheld(t *testing.T) {
 	}
 	if r := src.run(set, diffScene{pod: podWith(64 << 10)}, NameGetResource, args); r.Status != StatusOK {
 		t.Errorf("a pod of 64 KiB: status %s, want ok", r.Status)
+	}
+}
+
+func TestToolAnswerLargestEntryBoundary(t *testing.T) {
+	set, _, rec := recordingSet(t)
+	for _, c := range []struct {
+		name    string
+		size    int
+		decided bool
+		calls   int
+		delta   float64
+	}{
+		{"at limit", redact.LargestEntry, true, 1, 0},
+		{"one byte over", redact.LargestEntry + 1, false, 0, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			before := withheldForSize(t)
+			calls := len(rec.sizes)
+			ps := []redact.Piece{{Text: strings.Repeat("a", c.size)}}
+			if _, ok := set.decide(ps, -1, nil); ok != c.decided {
+				t.Errorf("decided %v, want %v", ok, c.decided)
+			}
+			if n := len(rec.sizes) - calls; n != c.calls {
+				t.Errorf("redactor called %d times, want %d", n, c.calls)
+			}
+			if d := withheldForSize(t) - before; d != c.delta {
+				t.Errorf("%v entries withheld for size, want %v", d, c.delta)
+			}
+		})
 	}
 }
 

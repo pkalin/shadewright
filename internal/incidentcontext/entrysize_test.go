@@ -30,6 +30,7 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/redact"
 	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+	_ "github.com/shadewright-labs/shadewright/internal/redactadapter"
 )
 
 // sizeRecorder is the package's redactor that records the size of every entry the build hands it: the pieces of
@@ -136,21 +137,42 @@ func widestLimits(c *Config) {
 // reads it, with the reason size (#1106, decision of 2026-11-22): the pieces of a section (decidedPieces) and a
 // text (checkedTwice, the log header and excerpt).
 func TestEntryOverTheLargestEntryIsWithheld(t *testing.T) {
-	for _, size := range []int{redact.LargestEntry, redact.LargestEntry + 1} {
-		over := size > redact.LargestEntry
-		text := strings.Repeat("a", size-1) + "\n"
-		rec := &echoRecorder{}
-		before := withheldForSize(t)
-		_, withheld := decidedPieces(rec, frag{{Piece: redact.Piece{Text: text}}})
-		_, ok := checkedTwice(rec, text, nil)
-		if withheld != over || ok == over {
-			t.Errorf("%d bytes: pieces withheld %v, text decided %v; want withheld %v", size, withheld, ok, over)
-		}
-		if want := map[bool]int{false: 2, true: 0}[over]; len(rec.sizes) != want {
-			t.Errorf("%d bytes: the redactor read %d entries, want %d", size, len(rec.sizes), want)
-		}
-		if d, want := withheldForSize(t)-before, map[bool]float64{false: 0, true: 2}[over]; d != want {
-			t.Errorf("%d bytes: %v entries withheld for size, want %v", size, d, want)
+	for _, c := range []struct {
+		name  string
+		size  int
+		over  bool
+		delta float64
+	}{
+		{"at limit", redact.LargestEntry, false, 0},
+		{"one byte over", redact.LargestEntry + 1, true, 1},
+	} {
+		text := strings.Repeat("a", c.size-1) + "\n"
+		for _, entry := range []struct {
+			name   string
+			decide func(*echoRecorder) bool
+		}{
+			{"pieces", func(rec *echoRecorder) bool {
+				_, withheld := decidedPieces(rec, frag{{Piece: redact.Piece{Text: text}}})
+				return !withheld
+			}},
+			{"text", func(rec *echoRecorder) bool {
+				_, ok := checkedTwice(rec, text, nil)
+				return ok
+			}},
+		} {
+			t.Run(c.name+"/"+entry.name, func(t *testing.T) {
+				rec := &echoRecorder{}
+				before := withheldForSize(t)
+				if ok := entry.decide(rec); ok == c.over {
+					t.Errorf("decided %v, want %v", ok, !c.over)
+				}
+				if want := map[bool]int{false: 1, true: 0}[c.over]; len(rec.sizes) != want {
+					t.Errorf("the redactor read %d entries, want %d", len(rec.sizes), want)
+				}
+				if d := withheldForSize(t) - before; d != c.delta {
+					t.Errorf("%v entries withheld for size, want %v", d, c.delta)
+				}
+			})
 		}
 	}
 }

@@ -45,6 +45,7 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/redact"
 	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/redactadapter/redactadaptertest"
 )
 
 const (
@@ -1212,5 +1213,37 @@ func TestExcerptRedactsBeforeTheCut(t *testing.T) {
 		if err != nil || strings.Contains(got, "Qz1000") || !truncated || len(got) > keep || !strings.HasSuffix(got, "ready\n") {
 			t.Errorf("%s: Excerpt(keep %d) = %q, truncated %v, %v", name, keep, got, truncated, err)
 		}
+	}
+}
+
+func TestFallbackRedactorReportsDecisions(t *testing.T) {
+	plain, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("a", redact.MaxShortEntry+1)
+	for _, c := range []struct {
+		name     string
+		redactor *redact.Redactor
+		want     float64
+	}{
+		{"built-in", nil, 1},
+		{"supplied without hooks", plain, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{Pods: fakePods(t, fake.NewClientset()), Redactor: c.redactor}
+			src, err := New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := src.redactor
+			before := redactadaptertest.WithheldCount(t, redact.ReasonSize)
+			if out := r.StringShort(long); out != redact.Withheld {
+				t.Error("oversized short entry was released")
+			}
+			if got := redactadaptertest.WithheldCount(t, redact.ReasonSize) - before; got != c.want {
+				t.Errorf("size counter increased by %v, want %v", got, c.want)
+			}
+		})
 	}
 }

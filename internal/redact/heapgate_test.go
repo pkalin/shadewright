@@ -19,15 +19,22 @@ package redact
 import (
 	"strings"
 	"testing"
-
-	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // An answer of more pieces than its bytes allow (FreePieces, one for every PieceBytes bytes past it), or a
 // sequence of more strings (one for every ItemBytes), is withheld whole before any work, with the flag and the
 // reason heap; one piece or string fewer is decided (#873, decision of 2026-11-21 on the heap).
 func TestHeapGateWithholdsTooManyParts(t *testing.T) {
-	heap := func() float64 { return promtest.ToFloat64(withheldTotal.WithLabelValues(ReasonHeap)) }
+	heap := 0
+	r, err := New(Hooks{Withheld: func(reason string) {
+		if reason != ReasonHeap {
+			t.Errorf("refused because of %q, want heap", reason)
+		}
+		heap++
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Pieces of one byte each (an empty value under a one-letter key, the secret in the first): size = pieces.
 	pieces := func(n int) []Piece {
 		ps := make([]Piece, n)
@@ -48,12 +55,12 @@ func TestHeapGateWithholdsTooManyParts(t *testing.T) {
 		name string
 		run  func(ps []Piece) ([]string, bool)
 	}{
-		{epPiecesWithin, func(ps []Piece) ([]string, bool) { return defaultRedactor.PiecesWithin(ps, -1) }},
+		{epPiecesWithin, func(ps []Piece) ([]string, bool) { return r.PiecesWithin(ps, -1) }},
 		{epPiecesFitting, func(ps []Piece) ([]string, bool) {
-			return defaultRedactor.PiecesFitting(ps, func([]string) bool { return true })
+			return r.PiecesFitting(ps, func([]string) bool { return true })
 		}},
 	} {
-		before := heap()
+		before := heap
 		out, ok := c.run(pieces(most))
 		if !ok || strings.Contains(out[0], "hunter2") {
 			t.Errorf("%s of %d pieces: ok %v, %q; want decided and redacted", c.name, most, ok, out[0])
@@ -62,8 +69,8 @@ func TestHeapGateWithholdsTooManyParts(t *testing.T) {
 		if ok || out[0] != Withheld || len(out) != most+1 {
 			t.Errorf("%s of %d pieces: ok %v, first %q, %d strings; want withheld", c.name, most+1, ok, out[0], len(out))
 		}
-		if got := heap() - before; got != 1 {
-			t.Errorf("%s: %v entries counted with reason heap, want 1", c.name, got)
+		if got := heap - before; got != 1 {
+			t.Errorf("%s: %d entries counted with reason heap, want 1", c.name, got)
 		}
 	}
 	// Strings of one byte each: size = 2 per string.
@@ -74,14 +81,14 @@ func TestHeapGateWithholdsTooManyParts(t *testing.T) {
 		}
 	}
 	items := func(n int) []string { return strings.Split(strings.Repeat("x\n", n-1)+"x", "\n") }
-	before := heap()
-	if _, ok := defaultRedactor.StringsChecked(items(mostItems)); !ok {
+	before := heap
+	if _, ok := r.StringsChecked(items(mostItems)); !ok {
 		t.Errorf("StringsChecked of %d strings withheld, want decided", mostItems)
 	}
-	if out, ok := defaultRedactor.StringsChecked(items(mostItems + 1)); ok || out[0] != Withheld {
+	if out, ok := r.StringsChecked(items(mostItems + 1)); ok || out[0] != Withheld {
 		t.Errorf("StringsChecked of %d strings: ok %v, first %q; want withheld", mostItems+1, ok, out[0])
 	}
-	if got := heap() - before; got != 1 {
-		t.Errorf("StringsChecked: %v entries counted with reason heap, want 1", got)
+	if got := heap - before; got != 1 {
+		t.Errorf("StringsChecked: %d entries counted with reason heap, want 1", got)
 	}
 }

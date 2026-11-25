@@ -30,11 +30,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
 )
 
 const (
-	// ReasonOOMKilled is the termination reason of a container the kernel killed for using too much memory.
-	ReasonOOMKilled = "OOMKilled"
+	// ReasonOOMKilled is the termination reason of a container the kernel killed for using too much memory
+	// (causereason.OOMKilled, which the context builder reads too).
+	ReasonOOMKilled = causereason.OOMKilled
 	// reasonTerminated replaces a termination reason that is not a plain CamelCase word.
 	reasonTerminated = "Terminated"
 	// reportingKubelet is the reporting controller of observations read from pod status.
@@ -104,7 +107,7 @@ func waitings(pod *corev1.Pod) []termination {
 	var out []termination
 	for _, st := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
 		w := st.State.Waiting
-		if w == nil || !slices.Contains(WaitingCauseReasons, w.Reason) {
+		if w == nil || !causereason.IsWaiting(w.Reason) {
 			continue
 		}
 		out = append(out, termination{
@@ -144,13 +147,17 @@ func (t termination) slot() string {
 	return t.container
 }
 
-// class is the termination's part in the consequence rule: an OOM kill or a waiting reason is a cause; a
-// non-zero exit is a symptom of its own and links nothing (ADR-0039 point 3).
-func (t termination) class() Class {
-	if t.waiting || t.reason == ReasonOOMKilled {
-		return ClassCause
+// class is the part of t, a symptom read from pod's status, in the consequence rule (ADR-0039 point 3, amended
+// 2026-11-20 and narrowed 2026-11-21): an OOM kill, a non-zero exit or a waiting reason is a cause. A termination
+// that is not an OOM kill has no class when the pod's status.reason is set, whatever its value (Evicted, a node
+// shutdown, a deadline, or any other): the kubelet stopped the pod, so its exits are not a crash loop. That is as
+// before the crash loop link; evictions are designed apart (#1077). It is the one place that decides it, for the
+// observation of t and for the cause a consequence links to.
+func (t termination) class(pod *corev1.Pod) Class {
+	if !t.waiting && t.reason != ReasonOOMKilled && pod.Status.Reason != "" {
+		return ClassNone
 	}
-	return ClassNone
+	return ClassCause
 }
 
 func hasPodSymptom(o client.Object) bool {
@@ -409,7 +416,7 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		// A waiting reason is never in immediateTerminationReasons: a wait is often short while an image is
 		// pulled (ADR-0039 point 4).
 		obs.Immediate = immediateTermination(t.reason)
-		obs.Container, obs.Class = t.container, t.class()
+		obs.Container, obs.Class = t.container, t.class(&pod)
 		var sent bool
 		if t.repeat {
 			// The same occurrence reported again: nothing new to count (MayRepeat, Count 0), so the Incident

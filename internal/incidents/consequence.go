@@ -74,8 +74,82 @@ func containerName(ctx context.Context, name string) string {
 // a listing showed it with status.cause. A listing that shows the name with another UID and no cause (the
 // Incident was deleted and created again) forgets it ([Controller.noteState]).
 type causeIncident struct {
-	spec remediationv1alpha1.IncidentSpec
-	uid  types.UID
+	spec          remediationv1alpha1.IncidentSpec
+	uid           types.UID
+	continuedPull string
+	resolved      bool
+}
+
+// previousPull finds an open cause from before the upgrade. The first match needs a recorded
+// wait for this pod, container and restart count. Later matches use the stored image identity.
+// The caller holds mu.
+func (c *Controller) previousPull(o collector.Observation, scoped string) (collector.PreviousPullWait, bool) {
+	var first collector.PreviousPullWait
+	if scoped == "" || o.Subject.UID == "" || o.PreviousPullWaits[0].Fingerprint == "" {
+		return first, false
+	}
+	if _, exists := c.names[c.nameOf(scoped)]; exists {
+		return first, false
+	}
+	for _, key := range o.PreviousPullWaits {
+		if key.Fingerprint == "" {
+			break
+		}
+		name := c.nameOf(key.Fingerprint)
+		cause, ok := c.causes[name]
+		if !ok || cause.resolved || cause.spec.Subject.UID != o.Subject.UID || cause.spec.Fingerprint != key.Fingerprint {
+			continue
+		}
+		counted := c.records[key.Occurrence].incident == name
+		if cause.continuedPull == scoped {
+			if !counted {
+				key.Occurrence = ""
+			}
+			return key, true
+		}
+		if counted && cause.continuedPull == "" && first.Fingerprint == "" {
+			first = key
+		}
+	}
+	return first, first.Fingerprint != ""
+}
+
+// pullDestination returns the stored Incident fingerprint for a collector pull identity.
+func (c *Controller) pullDestination(o collector.Observation, fp string) string {
+	if key, ok := c.previousPull(o, fp); ok {
+		return key.Fingerprint
+	}
+	return fp
+}
+
+// continuePull records the image identity on the original Incident. A replay of its stored
+// wait uses the old occurrence ID so it contributes no count. The caller holds mu.
+func (c *Controller) continuePull(o *collector.Observation) {
+	scoped := o.CauseFingerprint
+	own := isCause(*o)
+	if own {
+		scoped = o.Fingerprint
+	}
+	key, ok := c.previousPull(*o, scoped)
+	if !ok {
+		return
+	}
+	if own {
+		o.Fingerprint = key.Fingerprint
+		if key.Occurrence != "" {
+			o.Occurrence = key.Occurrence
+		}
+	}
+	name := c.nameOf(key.Fingerprint)
+	cause := c.causes[name]
+	cause.continuedPull = scoped
+	c.causes[name] = cause
+	b := c.pending[key.Fingerprint]
+	if b == nil {
+		b = &batch{spec: cause.spec, occurrences: map[string]heldOccurrence{}}
+		c.pending[key.Fingerprint] = b
+	}
+	b.continuedPull = scoped
 }
 
 // causeFor returns the Incident a consequence observation is counted on as evidence (ADR-0039 point 6): the
@@ -91,7 +165,8 @@ func (c *Controller) causeFor(o collector.Observation) (string, remediationv1alp
 	if !ok {
 		return "", none, "", false
 	}
-	name, spec, ok := c.causeIncident(o.CauseFingerprint, o.Subject.UID, o.ObservedAt)
+	fp := c.pullDestination(o, o.CauseFingerprint)
+	name, spec, ok := c.causeIncident(fp, o.Subject.UID, o.ObservedAt)
 	if !ok || !causeTakes(spec.Reason, string(reason)) {
 		return "", none, "", false
 	}
@@ -167,7 +242,8 @@ func (c *Controller) causeSeen(o collector.Observation) bool {
 // hold of that cause, so a hold of another subject, or observed at another time, is decided by its own answer.
 // The caller holds mu.
 func (c *Controller) causeOpenedFor(o collector.Observation) bool {
-	_, _, ok := c.causeIncident(o.Fingerprint, o.Subject.UID, o.ObservedAt)
+	fp := c.pullDestination(o, o.Fingerprint)
+	_, _, ok := c.causeIncident(fp, o.Subject.UID, o.ObservedAt)
 	return ok
 }
 
@@ -201,8 +277,8 @@ func (c *Controller) absorbHeld(ctx context.Context, fp, name string, spec remed
 // [Controller.causeFor], from the controller's own list, so one of another subject UID, or whose cause has no
 // Incident (refused at the cap, held as a first sighting itself), stays held as before. It reports what
 // consume does. The caller holds mu.
-func (c *Controller) absorbHeldFor(ctx context.Context, cause string) bool {
-	fps := c.sightings.consequencesOf(cause)
+func (c *Controller) absorbHeldFor(ctx context.Context, scoped, cause string) bool {
+	fps := c.sightings.consequencesOf(scoped)
 	if len(fps) == 0 {
 		return false
 	}
@@ -225,7 +301,7 @@ func (c *Controller) absorbHeldFor(ctx context.Context, cause string) bool {
 // counted, as in [Controller.count]. It reports what consume does. The caller holds mu.
 func (c *Controller) absorb(ctx context.Context, o collector.Observation, name string,
 	spec remediationv1alpha1.IncidentSpec, reason remediationv1alpha1.AbsorbedReason) bool {
-	fp := o.CauseFingerprint
+	fp := spec.Fingerprint
 	b := c.pending[fp]
 	if _, ok := b.occurrenceOf(o.Occurrence); !ok {
 		if c.full(fp, o.Source) {

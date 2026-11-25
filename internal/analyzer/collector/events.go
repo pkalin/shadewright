@@ -219,6 +219,10 @@ func (r *eventReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	switch hv {
 	case holdWait:
 		return ctrl.Result{RequeueAfter: wait}, nil
+	case holdDropPrefix:
+		r.c.holds.done(key)
+		r.c.series.commit(key, ev.UID, created, obs.Total)
+		return r.Reconcile(ctx, req)
 	case holdDrop:
 		// Handled without an observation: only a larger series total later is a new hold.
 		r.c.probes.done(key)
@@ -321,7 +325,7 @@ func (c *Collector) fromEvent(ctx context.Context, ev *eventsv1.Event) (Observat
 	obs.Class = eventClass(ev, pod, obs.Container, init)
 	if obs.Class == ClassConsequence {
 		at, ok := kubeletTime(ev)
-		obs.CauseFingerprint, obs.exitCause = c.causeFingerprint(pod, owner, obs.Container, init, at, ok, ev.Reason)
+		obs.CauseFingerprint, obs.exitCause, obs.PreviousPullWaits = c.causeFingerprint(pod, owner, obs.Container, init, at, ok, ev.Reason)
 	}
 	return obs, pod, subjectUsable, nil
 }

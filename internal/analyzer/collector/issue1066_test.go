@@ -36,6 +36,7 @@ import (
 
 const (
 	pullReasonFailed = "Failed"
+	pullImageA       = "web:a"
 	pullImageDigest  = "ghcr.io/shadewright-labs/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	pullErrDigest    = `Failed to pull image "` + pullImageDigest + `": ` +
 		`failed to pull and unpack image "ghcr.io/shadewright-labs/web@sha256:` +
@@ -529,15 +530,15 @@ func TestIssue1066PullFailedHold(t *testing.T) {
 
 func TestFailedRequiresCurrentPullImage(t *testing.T) {
 	for _, tc := range []struct{ name, quoted, status, wait string }{
-		{"unrelated quote", "web:b", "web:a", causePullErr},
-		{"stale status", "web:a", "web:b", causePullErr},
-		{"no image in status", "web:a", "", causePullErr},
-		{"configuration wait", "web:a", "web:a", reasonConfig},
+		{"unrelated quote", "web:b", pullImageA, causePullErr},
+		{"stale status", pullImageA, "web:b", causePullErr},
+		{"no image in status", pullImageA, "", causePullErr},
+		{"configuration wait", pullImageA, pullImageA, reasonConfig},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, rs, _ := workload()
 			p := pullWaitingPod(containerApp, false, tc.wait)
-			p.Spec.Containers[0].Image, p.Status.ContainerStatuses[0].Image = "web:a", tc.status
+			p.Spec.Containers[0].Image, p.Status.ContainerStatuses[0].Image = pullImageA, tc.status
 			book, see := seeingController()
 			h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, p)
 			h.reconcilePod(webPod)
@@ -597,5 +598,154 @@ func TestCauseFingerprintChangesWithImage(t *testing.T) {
 	}
 	if len(keys) != 2 {
 		t.Fatal("two rollout images share a cause fingerprint")
+	}
+}
+
+func TestPullImageReferenceCorpus(t *testing.T) {
+	digest := "@sha256:" + strings.Repeat("a", 64)
+	otherDigest := "@sha256:" + strings.Repeat("b", 64)
+	for _, tc := range []struct {
+		spec, quoted string
+		match        bool
+	}{
+		{web, "web:latest", true},
+		{web, "docker.io/web:latest", true},
+		{web, "library/web", true},
+		{"library/web", "docker.io/library/web:latest", true},
+		{"team/web:V1", "docker.io/team/web:V1", true},
+		{web + digest, "docker.io/library/web" + digest, true},
+		{"web:v1" + digest, "docker.io/library/web" + digest, true},
+		{"web:v1" + digest, "web:v1" + otherDigest, false},
+		{"registry.example:5000/team/web", "registry.example:5000/team/web:latest", true},
+		{web, "web:1.2", false},
+		{web, "other/web", false},
+		{"web:1.2", web + otherDigest, false},
+		{web + digest, web + otherDigest, false},
+		{"web:V1", "web:v1", false},
+		{"registry.example:5000/web", "registry.example:5001/web", false},
+		{"Web", "Web", false},
+		{"team/Web", "team/web", false},
+	} {
+		note := fmt.Sprintf("Failed to pull image %q: not found", tc.quoted)
+		if got := isImagePullFailedNote(note, tc.spec); got != tc.match {
+			t.Errorf("spec %q, quoted %q: matched %t, want %t", tc.spec, tc.quoted, got, tc.match)
+		}
+	}
+}
+
+func TestPullCauseUsesSpecImage(t *testing.T) {
+	for _, init := range []bool{false, true} {
+		container, path := containerApp, appPath
+		if init {
+			container, path = containerInit, "spec.initContainers{"+containerInit+"}"
+		}
+		observe := func(spec, status string) Observation {
+			p := pullWaitingPod(container, init, causePullErr)
+			if init {
+				p.Spec.InitContainers[0].Image, p.Status.InitContainerStatuses[0].Image = spec, status
+			} else {
+				p.Spec.Containers[0].Image, p.Status.ContainerStatuses[0].Image = spec, status
+			}
+			d, rs, _ := workload()
+			h := newHarness(t, Config{}, d, rs, p)
+			h.reconcilePod(webPod)
+			cause := h.one()
+			ev := failedEvent("backoff", path, pullBackOffNote, t0)
+			ev.Reason = reasonBackOff
+			h.create(ev)
+			h.reconcileEvent(ev.Name)
+			if got := h.one(); got.CauseFingerprint != cause.Fingerprint {
+				t.Fatalf("BackOff on %s linked to %q, want %q", container, got.CauseFingerprint, cause.Fingerprint)
+			}
+			return cause
+		}
+		old := observe("web:a", "web:a")
+		current := observe("web:b", "web:b")
+		for _, status := range []string{"web:a", ""} {
+			got := observe("web:b", status)
+			if got.Fingerprint != current.Fingerprint || got.Occurrence != current.Occurrence ||
+				got.Fingerprint == old.Fingerprint || got.Occurrence == old.Occurrence {
+				t.Errorf("container %s, status image %q: spec image change did not identify the new pull", container, status)
+			}
+		}
+	}
+}
+
+func TestRecoveredPullSeriesDropsOnlyVerifiedPrefix(t *testing.T) {
+	before := holdOutcomeCounts()
+	d, rs, _ := workload()
+	p := pullWaitingPod(containerApp, false, causePullErr)
+	book, _ := seeingController()
+	h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, p)
+	ev := failedEvent("series", appPath, pullErrDigest, t0)
+	h.create(ev)
+	h.reconcileEvent(ev.Name)
+	h.none()
+	p = readPod(t, h, webPod)
+	p.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	h.update(p)
+	ev.Series = &eventsv1.EventSeries{Count: 3, LastObservedTime: metav1.NewMicroTime(t0.Add(time.Second))}
+	h.update(ev)
+	h.reconcileEvent(ev.Name)
+	got := h.drain()
+	if len(got) != 1 || got[0].Class != ClassNone || got[0].Total != 3 || got[0].Count != 2 {
+		t.Fatalf("after one failing sample and recovery: %+v, want only two unverified increments", got)
+	}
+	wantOutcomes(t, before, map[string]float64{holdNotOpened: 1})
+}
+
+func TestUnseenPullNeedsMatchingFinalSample(t *testing.T) {
+	for _, removed := range []bool{false, true} {
+		before := holdOutcomeCounts()
+		d, rs, _ := workload()
+		p := pullWaitingPod(containerApp, false, causePullErr)
+		book, _ := seeingController()
+		h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, p)
+		ev := failedEvent("pull", appPath, pullErrDigest, t0)
+		h.create(ev)
+		h.reconcileEvent(ev.Name)
+		h.reconcileEvent(ev.Name)
+		h.none()
+		if removed {
+			if err := h.cl.Delete(t.Context(), p); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			ev.Type = corev1.EventTypeNormal
+			h.update(ev)
+		}
+		h.reconcileEvent(ev.Name)
+		h.none()
+		wantOutcomes(t, before, map[string]float64{holdNotOpened: 1})
+	}
+}
+
+func TestNormalizedPullAcrossPodAndEvent(t *testing.T) {
+	d, rs, _ := workload()
+	p := pullWaitingPod(containerApp, false, causePullErr)
+	p.Spec.Containers[0].Image = web
+	p.Status.ContainerStatuses[0].Image = "docker.io/library/web:latest"
+	book, see := seeingController()
+	h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, p)
+	h.reconcilePod(webPod)
+	cause := h.one()
+	see([]Observation{cause})
+	ev := failedEvent("normalized", appPath, `Failed to pull image "web:latest": unavailable`, t0)
+	h.create(ev)
+	h.reconcileEvent(ev.Name)
+	got := h.one()
+	if got.Class != ClassConsequence || got.CauseFingerprint != cause.Fingerprint {
+		t.Fatalf("normalized quote linked to %q, want %q", got.CauseFingerprint, cause.Fingerprint)
+	}
+	p = readPod(t, h, webPod)
+	p.Spec.Containers[0].Image = "library/web:latest"
+	if err := h.cl.Update(t.Context(), p); err != nil {
+		t.Fatal(err)
+	}
+	h.clock.add(SettleAfter)
+	h.reconcilePod(webPod)
+	repeat := h.one()
+	if repeat.Fingerprint != cause.Fingerprint || repeat.Occurrence != cause.Occurrence || repeat.Count != 0 {
+		t.Fatalf("equivalent spec spelling changed the wait: %+v", repeat)
 	}
 }

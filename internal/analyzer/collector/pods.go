@@ -58,6 +58,7 @@ type termination struct {
 	finished  time.Time
 	waiting   bool
 	image     string
+	restarts  int32
 }
 
 // terminations returns the abnormal terminations in a pod's status: OOMKilled or a non-zero exit code, in
@@ -101,30 +102,43 @@ func terminations(pod *corev1.Pod) []termination {
 
 // waitings returns the waiting reasons of WaitingCauseReasons in a pod's status, in init and app containers
 // (ADR-0039 point 4). A waiting state is identified by its reason and the container's restart count: it has no
-// ID or start time. A pull also includes the status image and treats the initial failure and back-off
+// ID or start time. A pull also includes the spec image and treats the initial failure and back-off
 // as one wait. A container that waits again with the same reason after a restart is a new one, and
 // one that keeps waiting is the same one. Its finish time stays zero here; the tracker sets it to the time the
 // collector first saw the state (terminationTracker.pending). The waiting message is never read: it is free
 // text.
 func waitings(pod *corev1.Pod) []termination {
+	init := containerWaits(pod.Spec.InitContainers, pod.Status.InitContainerStatuses)
+	return append(init, containerWaits(pod.Spec.Containers, pod.Status.ContainerStatuses)...)
+}
+
+func containerWaits(spec []corev1.Container, statuses []corev1.ContainerStatus) []termination {
 	var out []termination
-	for _, st := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
+	var images map[string]string
+	for _, st := range statuses {
 		w := st.State.Waiting
 		if w == nil || !causereason.IsWaiting(w.Reason) {
 			continue
 		}
-		image := pullImage(st)
+		t := termination{container: st.Name, reason: w.Reason, restarts: st.RestartCount, waiting: true}
 		reason := w.Reason
-		if image != "" {
-			reason = pullWaitReason(reason)
+		if causereason.IsImagePull(reason) {
+			if images == nil {
+				images = make(map[string]string, len(spec))
+				for _, c := range spec {
+					images[c.Name] = c.Image
+				}
+			}
+			t.image = pullIdentity(images[st.Name])
+			if t.image != "" {
+				reason = pullWaitReason(reason)
+			}
 		}
-		id := fmt.Sprintf("waiting-%s-restarts-%d", reason, st.RestartCount)
-		if image != "" {
-			id = fingerprint.Scoped(id, st.Name, image)
+		t.id = fmt.Sprintf("waiting-%s-restarts-%d", reason, t.restarts)
+		if t.image != "" {
+			t.id = fingerprint.Scoped(t.id, t.container, t.image)
 		}
-		out = append(out, termination{
-			container: st.Name, id: id, image: image, reason: w.Reason, waiting: true,
-		})
+		out = append(out, t)
 	}
 	return out
 }
@@ -425,7 +439,7 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		input := r.c.podStatusInput(&pod, owner, t.reason, note)
 		obs := r.c.observation(input, subject, pod.Namespace, at)
 		if t.image != "" {
-			obs.Fingerprint = waitingFingerprint(input, t.container, t.image)
+			obs.Fingerprint, obs.PreviousPullWaits = waitingFingerprint(input, t.termination)
 		}
 		obs.Occurrence, obs.Began, obs.Total, obs.MayRepeat = t.occurrence(pod.UID), t.finished, 1, t.mayRepeat
 		// A waiting reason is never in immediateTerminationReasons: a wait is often short while an image is

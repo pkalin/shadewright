@@ -432,13 +432,17 @@ func TestOldSchemaKeepsMixedPullBatch(t *testing.T) {
 
 // The CRD admits only a cause fingerprint in the immutable fold link.
 func TestPullCauseFingerprintSchema(t *testing.T) {
-	rule := regexp.MustCompile(crdschema.Pattern(t, "remediation.shadewright.io_incidents.yaml", "spec.pullCauseFingerprint"))
-	if !rule.MatchString(fp(1)) {
-		t.Fatal("valid pull cause fingerprint refused")
-	}
-	for _, invalid := range []string{"", "web:v2", fp(1) + "0", fp(1)[1:]} {
-		if rule.MatchString(invalid) {
-			t.Errorf("schema accepted %q as a pull cause fingerprint", invalid)
-		}
+	for _, field := range []string{"spec.pullCauseFingerprint", "status.continuedPullFingerprint"} {
+		t.Run(field, func(t *testing.T) {
+			rule := regexp.MustCompile(crdschema.Pattern(t, "remediation.shadewright.io_incidents.yaml", field))
+			if !rule.MatchString(fp(1)) {
+				t.Fatal("valid pull cause fingerprint refused")
+			}
+			for _, invalid := range []string{"", "web:v2", fp(1) + "0", fp(1)[1:]} {
+				if rule.MatchString(invalid) {
+					t.Errorf("schema accepted %q as a pull cause fingerprint", invalid)
+				}
+			}
+		})
 	}
 }

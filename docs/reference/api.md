@@ -831,6 +831,7 @@ Used by: [Incident](#incident).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
+| `continuedPullFingerprint` | string | No | continuedPullFingerprint identifies the container and spec image of a pull that continued across an analyzer upgrade. The analyzer sets it when a stored waiting occurrence matches.<br>Maximum length: 71<br>Pattern: `^sha256:[0-9a-f]{64}$` |
 | `phase` | [IncidentPhase](#incidentphase) | No | phase summarizes the incident.<br>One of `Open`, `Analyzing`, `Proposed`, `Escalated`, `Resolved` |
 | `firstSeen` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | firstSeen is when the first observation arrived. |
 | `lastSeen` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | lastSeen is when the latest observation arrived. |

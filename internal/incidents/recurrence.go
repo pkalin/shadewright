@@ -149,7 +149,13 @@ func (c *Controller) noteState(inc *remediationv1alpha1.Incident) {
 	}
 	st := &inc.Status
 	if st.Cause && inc.HasDerivedName() {
-		c.causes[inc.Name] = causeIncident{spec: inc.Spec, uid: inc.UID}
+		fp := st.ContinuedPullFingerprint
+		if cur := c.causes[inc.Name]; cur.uid == inc.UID && fp == "" {
+			// A listing may predate the write that recorded the continuing pull.
+			fp = cur.continuedPull
+		}
+		resolved := st.Phase == remediationv1alpha1.IncidentResolved
+		c.causes[inc.Name] = causeIncident{spec: inc.Spec, uid: inc.UID, continuedPull: fp, resolved: resolved}
 	} else if cur, ok := c.causes[inc.Name]; ok && cur.uid != "" && cur.uid != inc.UID {
 		delete(c.causes, inc.Name)
 	}

@@ -391,6 +391,13 @@ spec:
                 maxItems: 8
                 type: array
                 x-kubernetes-list-type: set
+              continuedPullFingerprint:
+                description: |-
+                  continuedPullFingerprint identifies the container and spec image of a pull that continued
+                  across an analyzer upgrade. The analyzer sets it when a stored waiting occurrence matches.
+                maxLength: 71
+                pattern: ^sha256:[0-9a-f]{64}$
+                type: string
               count:
                 description: |-
                   count is the number of occurrences counted, counting event series increments, not totals. It

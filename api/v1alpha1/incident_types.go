@@ -200,6 +200,13 @@ type AbsorbedTally struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.foldedInto) || has(self.foldedInto) || (has(self.phase) && self.phase != 'Resolved')",message="foldedInto is cleared only together with a move to a phase other than Resolved"
 // +kubebuilder:validation:XValidation:rule="!(has(oldSelf.folded) && oldSelf.folded) || (has(self.folded) && self.folded)",message="folded cannot change from true to false"
 type IncidentStatus struct {
+	// continuedPullFingerprint identifies the container and spec image of a pull that continued
+	// across an analyzer upgrade. The analyzer sets it when a stored waiting occurrence matches.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	// +optional
+	ContinuedPullFingerprint string `json:"continuedPullFingerprint,omitempty"`
+
 	// phase summarizes the incident.
 	// +optional
 	Phase IncidentPhase `json:"phase,omitempty"`

@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -1194,18 +1195,18 @@ func TestStopOnMovedBaseSaysTheCheckWasNotFailed(t *testing.T) {
 // #925 case 2: deleting a request after the configured target branch changed closes its pull request by number and by
 // marker, on the recorded target branch and on the base it was moved to, instead of letting the finalizer go with
 // "target branch changed" before the Git host is asked. A pull request from the branch without the marker stays open.
-// When the repository is no longer in the settings nothing can be closed, and the deletion says so with a Warning
-// Event PullRequestLeftOpen. On main both pull requests stayed open and no Event was recorded.
+// When the repository entry or the RemediationSettings object itself is missing, the cleanup fails under
+// CleanupFailing (reason RepositoryUnavailable or SettingsNotFound) until the settings reach the repository again or
+// the 24 hour bound passes (#877, #925).
 func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 	const entryGone, settingsGone = "entry gone", "settings object gone"
 	for _, mode := range []string{"settings reach it", entryGone, settingsGone} {
 		t.Run(mode, func(t *testing.T) {
-			gone := mode == entryGone
 			var kept *api.RemediationSettings
 			// settlementWorld leaves the settings naming freshOtherBranch, not the recorded main.
 			r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
 			ctx := context.Background()
-			recorder := record.NewFakeRecorder(10)
+			recorder := record.NewFakeRecorder(20)
 			r.Recorder = recorder
 			n := rr.Status.PullRequest.Number
 			head, err := g.BranchHead(ctx, mainBranch)
@@ -1225,6 +1226,10 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 			}
 			switch mode {
 			case entryGone:
+				kept = &api.RemediationSettings{}
+				if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, kept); err != nil {
+					t.Fatal(err)
+				}
 				dropRepository(t, r)
 			case settingsGone:
 				kept = &api.RemediationSettings{}
@@ -1249,12 +1254,34 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 			}
 			key := client.ObjectKeyFromObject(rr)
 			for i := range 3 {
-				if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+				res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+				if kept != nil && (err != nil || res.RequeueAfter <= 0) {
+					t.Fatalf("Reconcile %d while settings cannot reach the repository = %+v, %v; want a paced wait and no error",
+						i, res, err)
+				}
+				if err != nil {
 					t.Logf("Reconcile %d: %v", i, err)
 				}
 			}
-			if kept != nil {
-				settingsBackCloses(t, r, g, recorder, key, n, kept)
+			switch mode {
+			case entryGone:
+				settingsBackCloses(t, r, g, recorder, key, n, reasonRepositoryUnavailable, func() {
+					live := &api.RemediationSettings{}
+					if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, live); err != nil {
+						t.Fatal(err)
+					}
+					live.Spec.Repositories = kept.Spec.Repositories
+					if err := r.Update(ctx, live); err != nil {
+						t.Fatal(err)
+					}
+				})
+			case settingsGone:
+				settingsBackCloses(t, r, g, recorder, key, n, ReasonSettingsNotFound, func() {
+					kept.ResourceVersion = ""
+					if err := r.Create(ctx, kept); err != nil {
+						t.Fatal(err)
+					}
+				})
 			}
 			if err := r.Get(ctx, key, &api.RemediationRequest{}); !apierrors.IsNotFound(err) {
 				t.Fatalf("the request is still there (%v)", err)
@@ -1262,21 +1289,6 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 			crs := g.ChangeRequests()
 			if crs[foreign-1].State != providers.ChangeRequestOpen {
 				t.Errorf("pull request #%d without the marker is %s: want it left open", foreign, crs[foreign-1].State)
-			}
-			if gone {
-				var events []string
-				for len(recorder.Events) > 0 {
-					events = append(events, <-recorder.Events)
-				}
-				if len(events) != 1 || !strings.Contains(events[0], EventPullRequestLeftOpen) ||
-					!strings.Contains(events[0], fmt.Sprintf("#%d", n)) {
-					t.Fatalf("events %q: want one Warning Event %s naming #%d", events, EventPullRequestLeftOpen, n)
-				}
-				// The Event says what is missing: the entry of the repository.
-				if says := "no entry for the repository"; !strings.Contains(events[0], says) {
-					t.Fatalf("event %q: want it saying %q", events[0], says)
-				}
-				return
 			}
 			for _, m := range []int64{n, second} {
 				if crs[m-1].State != providers.ChangeRequestClosed {
@@ -1288,35 +1300,122 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 	}
 }
 
-// settingsBackCloses checks a deleted request whose RemediationSettings object is missing: a failure of the cleanup,
-// not a repository that left the settings, so the request stays with CleanupFailing (SettingsNotFound), its pull
-// request #n open and nothing says it was left open (#925). It then creates kept again and reconciles, so the
+// settingsBackCloses checks a deleted request whose settings cannot reach the repository (the repository entry or the
+// RemediationSettings object is missing): a failure of the cleanup, so the request keeps its finalizer and target lock
+// with CleanupFailing, PullRequestUnreadable (both carrying wantReason) and GitReadRetry, its pull request #n stays
+// open and no PullRequestLeftOpen Event is recorded (#877, #925, #1057). It then calls restore and reconciles, so the
 // deletion closes the pull requests and goes.
 func settingsBackCloses(t *testing.T, r *RemediationRequestReconciler, g *fakegit.Git,
-	recorder *record.FakeRecorder, key client.ObjectKey, n int64, kept *api.RemediationSettings) {
+	recorder *record.FakeRecorder, key client.ObjectKey, n int64, wantReason string, restore func()) {
 	t.Helper()
 	ctx := context.Background()
 	got := &api.RemediationRequest{}
 	if err := r.Get(ctx, key, got); err != nil {
-		t.Fatalf("the request was let go with RemediationSettings missing: %v", err)
+		t.Fatalf("the request was let go with %s: %v", wantReason, err)
 	}
-	c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionCleanupFailing)
-	if c == nil || c.Reason != ReasonSettingsNotFound {
-		t.Fatalf("condition CleanupFailing %+v: want reason %s", c, ReasonSettingsNotFound)
+	if !ptr.Deref(got.Status.HoldsTarget, false) {
+		t.Fatalf("status.holdsTarget = %v: want the target lock kept while cleanup fails", got.Status.HoldsTarget)
+	}
+	for _, cond := range []string{api.ConditionCleanupFailing, api.ConditionPullRequestUnreadable} {
+		c := meta.FindStatusCondition(got.Status.Conditions, cond)
+		if c == nil || c.Status != metav1.ConditionTrue || c.Reason != wantReason {
+			t.Fatalf("condition %s = %+v: want True with reason %s", cond, c, wantReason)
+		}
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionGitReadRetry); c == nil ||
+		c.Status != metav1.ConditionTrue {
+		t.Fatalf("condition %s = %+v: want True for the paced retry", api.ConditionGitReadRetry, c)
 	}
 	if st := g.ChangeRequests()[n-1].State; st != providers.ChangeRequestOpen {
-		t.Fatalf("pull request #%d is %s while the settings are missing: want it open", n, st)
+		t.Fatalf("pull request #%d is %s while %s: want it open", n, st, wantReason)
 	}
 	if left := warningsOf(recorder, EventPullRequestLeftOpen); left != 0 {
 		t.Fatalf("%d Warning Events %s while the cleanup is retried", left, EventPullRequestLeftOpen)
 	}
-	kept.ResourceVersion = ""
-	if err := r.Create(ctx, kept); err != nil {
-		t.Fatal(err)
-	}
+	restore()
 	for i := range 3 {
 		if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
 			t.Logf("Reconcile %d after the settings came back: %v", i, err)
 		}
+	}
+}
+
+// #877: deleting a request whose repository entry is gone for good holds the finalizer and the target lock under
+// CleanupFailing (RepositoryUnavailable) for cleanupFailingBound (24 hours), then lets the request go with a Warning
+// Event PullRequestLeftOpen naming the reason and the pull request.
+func TestDeletionWithMissingRepositoryLetsGoAfterBound(t *testing.T) {
+	r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+	clock := clockOf(r)
+	ctx := context.Background()
+	recorder := record.NewFakeRecorder(20)
+	r.Recorder = recorder
+	n := rr.Status.PullRequest.Number
+	dropRepository(t, r)
+	if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
+		return []string{obj.(*api.RemediationRequest).Status.BreakerClearedBy}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rr.Finalizers = append(rr.Finalizers, FinalizerName)
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKeyFromObject(rr)
+	deleted := clock.at
+
+	res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	if err != nil || res.RequeueAfter <= 0 {
+		t.Fatalf("first reconcile = %+v, %v; want a paced retry and no error", res, err)
+	}
+	got := &api.RemediationRequest{}
+	if err := r.Get(ctx, key, got); err != nil {
+		t.Fatalf("request let go before the 24 hour bound: %v", err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, api.ConditionCleanupFailing); c == nil ||
+		c.Reason != reasonRepositoryUnavailable {
+		t.Fatalf("CleanupFailing = %+v, want reason %s", c, reasonRepositoryUnavailable)
+	}
+	if left := warningsOf(recorder, EventPullRequestLeftOpen); left != 0 {
+		t.Fatalf("%d Warning Events %s before the bound", left, EventPullRequestLeftOpen)
+	}
+
+	// At the bound from the persisted second: held one second more (boundLeft).
+	clock.at = deleted.Add(cleanupFailingBound)
+	res, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	if err != nil || res.RequeueAfter > time.Second {
+		t.Fatalf("reconcile at the bound = %+v, %v; want requeue <= 1s and no error", res, err)
+	}
+	if err := r.Get(ctx, key, &api.RemediationRequest{}); err != nil {
+		t.Fatalf("request let go before the bound passed: %v", err)
+	}
+	if left := warningsOf(recorder, EventPullRequestLeftOpen); left != 0 {
+		t.Fatalf("%d Warning Events %s at the bound", left, EventPullRequestLeftOpen)
+	}
+
+	// Past the bound: let go with PullRequestLeftOpen naming RepositoryUnavailable and #n.
+	clock.at = deleted.Add(cleanupFailingBound + time.Second)
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile past the bound failed: %v", err)
+	}
+	if err := r.Get(ctx, key, &api.RemediationRequest{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("request still present past the 24 hour bound: %v", err)
+	}
+	if st := g.ChangeRequests()[n-1].State; st != providers.ChangeRequestOpen {
+		t.Fatalf("pull request #%d is %s, want open", n, st)
+	}
+	var left []string
+	for len(recorder.Events) > 0 {
+		ev := <-recorder.Events
+		if strings.Contains(ev, EventPullRequestLeftOpen) {
+			left = append(left, ev)
+		}
+	}
+	if len(left) != 1 || !strings.Contains(left[0], reasonRepositoryUnavailable) ||
+		!strings.Contains(left[0], fmt.Sprintf("#%d", n)) || !strings.Contains(left[0], "24 hours") {
+		t.Fatalf("PullRequestLeftOpen events = %q; want one naming %s, #%d and 24 hours", left,
+			reasonRepositoryUnavailable, n)
 	}
 }

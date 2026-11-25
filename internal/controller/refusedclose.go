@@ -377,21 +377,25 @@ func (r *RemediationRequestReconciler) refusedEvent(rr *remediationv1alpha1.Reme
 }
 
 // cleanupFailingCondition is condition CleanupFailing for err, a failure of a deleted request's cleanup. The reason
-// is the refusal's (GitForbidden, GitRejected), RecordedMissingOtherListed for that read, RepositoryUnusable for a
-// settings entry that cannot be used, SettingsNotFound for a missing RemediationSettings object, or CleanupFailed. The message names the step and the recorded pull request,
+// is the refusal's (GitForbidden, GitRejected), RecordedMissingOtherListed for that read, RepositoryUnavailable for a
+// repository missing from the settings, RepositoryUnusable for a settings entry that cannot be used, SettingsNotFound
+// for a missing RemediationSettings object, or CleanupFailed. The message names the step and the recorded pull request,
 // never the Git host's answer.
 func cleanupFailingCondition(rr *remediationv1alpha1.RemediationRequest, err error) metav1.Condition {
 	reason, _, ok := refusal(err)
 	if !ok {
-		reason = ReasonCleanupFailed
-		if _, listed := errors.AsType[*ownListedError](err); listed {
-			reason = ReasonRecordedMissingOtherListed
-		}
-		if errors.Is(err, freshness.ErrRepositoryUnusable) {
-			reason = reasonRepositoryUnusable
-		}
-		if errors.Is(err, errNoSettings) {
+		switch {
+		case errors.Is(err, errNoSettings):
 			reason = ReasonSettingsNotFound
+		case errors.Is(err, errRepositoryGone):
+			reason = reasonRepositoryUnavailable
+		case errors.Is(err, freshness.ErrRepositoryUnusable):
+			reason = reasonRepositoryUnusable
+		default:
+			reason = ReasonCleanupFailed
+			if _, listed := errors.AsType[*ownListedError](err); listed {
+				reason = ReasonRecordedMissingOtherListed
+			}
 		}
 	}
 	return metav1.Condition{
@@ -425,11 +429,11 @@ type cleanupRelease struct {
 //
 // Then release is non-nil and the caller reports it (leftOpen, gaveUp) before it removes the finalizer. Until then
 // a refusal is tried again every closeRefusedRetry and any other failure as waitOrFail says, never later than the
-// end of the bound. Settings that cannot reach the repository (an entry that cannot be used, a missing settings
-// object) never go to the error backoff, where they would be retried with nothing but CleanupFailing shown (#1057):
-// they also set condition PullRequestUnreadable as the other looks set it (repositoryRead) and are retried as a failed
-// open of the repository (recoveryRead, retryGitRead). The caller's cancellation records nothing and is returned. A
-// failed status write is returned for a retry and starts nothing.
+// end of the bound. Settings that cannot reach the repository (a missing entry, an entry that cannot be used, a
+// missing settings object) never go to the error backoff, where they would be retried with nothing but CleanupFailing
+// shown (#877, #1057): they also set condition PullRequestUnreadable as the other looks set it (repositoryRead) and
+// are retried as a failed open of the repository (recoveryRead, retryGitRead). The caller's cancellation records
+// nothing and is returned. A failed status write is returned for a retry and starts nothing.
 func (r *RemediationRequestReconciler) cleanupFailedOnDelete(ctx context.Context,
 	rr *remediationv1alpha1.RemediationRequest, err error) (reconcile.Result, *cleanupRelease, error) {
 	if ctx.Err() != nil {
@@ -588,25 +592,4 @@ func (r *RemediationRequestReconciler) leftOpen(ctx context.Context, rr *remedia
 	logf.FromContext(ctx).Info("Gave up the cleanup of a deleted RemediationRequest after the Git host kept "+
 		"refusing it", "remediationRequest", client.ObjectKeyFromObject(rr), "step", stepText(rr, s),
 		"reason", s.reason)
-}
-
-// leftUnreachable reports a deleted request that the finalizer lets go because err says the repository of its plan
-// left the settings (errRepositoryGone), so its pull requests could not be read or closed (#925): a Warning Event
-// PullRequestLeftOpen and a log line saying so, and that the state of the recorded pull request, or of any pull
-// request of its branch, is not known and that it may be open. A missing settings object or an entry that cannot be
-// used is a failure of the cleanup instead (cleanupDone), reported at the end of its bound (gaveUp).
-func (r *RemediationRequestReconciler) leftUnreachable(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	_ error) {
-	which := "any pull request of branch " + freshness.BranchName(rr)
-	if pr := rr.Status.PullRequest; pr != nil {
-		which = "pull request " + pullRequestName(pr.Number, pr.URL)
-	}
-	message := fmt.Sprintf("The settings hold no entry for the repository of the deleted request any more, so nothing "+
-		"could be read or closed; the deleted request was let go: the state of %s is not known and it may be open, "+
-		"check it and close it by hand", which)
-	if r.Recorder != nil {
-		r.Recorder.Event(rr, corev1.EventTypeWarning, EventPullRequestLeftOpen, message)
-	}
-	logf.FromContext(ctx).Info("Let a deleted RemediationRequest go without a cleanup: its repository is not in "+
-		"the settings", "remediationRequest", client.ObjectKeyFromObject(rr))
 }

@@ -435,8 +435,10 @@ const (
 	ConditionCleanupRefused = "CleanupRefused"
 	// ConditionCleanupFailing is True once a step of the cleanup of a deleted request failed, whatever the class of
 	// the failure (a refusal, a failure worth a retry, a token the Git App cannot get, a signer that cannot sign, a
-	// 404). The reason is GitForbidden or GitRejected for a refusal, RecordedMissingOtherListed for that read and
-	// CleanupFailed for anything else; the message names the step and the recorded pull request, if any, never the
+	// 404, or settings that cannot reach the repository). The reason is GitForbidden or GitRejected for a refusal,
+	// RecordedMissingOtherListed for that read, RepositoryUnavailable, RepositoryUnusable or SettingsNotFound when
+	// settings cannot reach the repository, and CleanupFailed for anything else; the message names the step and the
+	// recorded pull request, if any, never the
 	// Git host's answer. It is set while the request is being deleted, so its lastTransitionTime is the first
 	// failure after the deletion began, on the executor's clock, and it is kept while failures go on; it is removed
 	// only when the cleanup finishes. 24 hours after lastTransitionTime the finalizer lets the request go with a

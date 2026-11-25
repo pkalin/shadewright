@@ -2258,9 +2258,8 @@ func (r *RemediationRequestReconciler) closeOwn(ctx context.Context, rr *remedia
 	settings := &remediationv1alpha1.RemediationSettings{}
 	switch err := r.getLive(ctx, types.NamespacedName{Name: remediationv1alpha1.SettingsName}, settings); {
 	case apierrors.IsNotFound(err) && deleting:
-		// A failure of the cleanup for the finalizer (cleanupDone), not a repository that left the settings: the object
-		// may come back, and the request's pull request may be open (#925). CleanupFailing says so with reason
-		// SettingsNotFound until the object is back or the bound of the cleanup ends.
+		// Distinct from errRepositoryGone so CleanupFailing and PullRequestUnreadable report SettingsNotFound
+		// instead of RepositoryUnavailable until the settings object returns or the bound ends (#925).
 		return false, errNoSettings
 	case apierrors.IsNotFound(err):
 		return false, errRepositoryGone

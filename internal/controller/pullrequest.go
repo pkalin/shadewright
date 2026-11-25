@@ -2552,14 +2552,13 @@ func (r *RemediationRequestReconciler) beginFinalize(ctx context.Context, rr *re
 }
 
 // finalize closes the request's pull request when the request is deleted, then removes the finalizer. It
-// never touches the cluster. A repository that left the settings does not block the deletion: there is nothing this
-// executor can close there. One whose entry names another target branch now is closed on the branch the plan recorded
-// (closeOwn). An entry that cannot be used (a bad key, client ID or installation) is a failure of the cleanup within
-// the bound of CleanupFailing, since the pull request may be open and the entry may be fixed (#786, third round). A
-// request that stopped (NeedsIntervention,
-// Expired) may still have an open pull request of its own, so it is closed too, and so is the one of any
-// request that holds the lock on its target (status.holdsTarget), whatever its phase, except a merged request
-// that holds it only while its outcome is verified (heldForVerification, #719); a merged one refuses the
+// never touches the cluster. A repository entry whose target branch changed is closed on the branch the plan recorded
+// (closeOwn). Settings that cannot reach the repository (a missing RemediationSettings object, a repository that left
+// the settings, or an entry that cannot be used) are failures of the cleanup within the bound of CleanupFailing, since
+// the pull request may be open and the settings may come back (#786, third round; #877; #925; #1057). A request that
+// stopped (NeedsIntervention, Expired) may still have an open pull request of its own, so it is closed too, and so is
+// the one of any request that holds the lock on its target (status.holdsTarget), whatever its phase, except a merged
+// request that holds it only while its outcome is verified (heldForVerification, #719); a merged one refuses the
 // close with a conflict, and one without this request's marker is left alone. With a pull request recorded, every
 // open pull request of the branch that carries this request's marker is closed too, whatever its number. A 404 on
 // the recorded number that the branch does not confirm, an answer about another pull request or any failed read
@@ -2604,7 +2603,6 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 		defer freeSlot()
 	}
 	var left *cleanupRelease
-	var unreachable error
 	if closes {
 		cleanCtx, cancel := bound(ctx, r.CleanupTimeout, DefaultCleanupTimeout)
 		err := r.closeOnDeleteOf(cleanCtx, rr)
@@ -2621,14 +2619,11 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 			}
 			left = release
 		case cleanupDone(err):
-			// Closed, nothing reachable to close (a repository that left the settings, said by leftUnreachable below,
-			// #925), the open ones closed and a merged one read as merged, or not ours to close. A close refused as a
-			// conflict is not a merge until a read says so: it is retried. An entry that cannot be used
-			// (freshness.ErrRepositoryUnusable) and a missing RemediationSettings object (errNoSettings) are not among
-			// them: the repository may still be reached once the entry is fixed or the object is back, and its pull
-			// request may be open, so each is a failure of the cleanup, retried within the bound of CleanupFailing like
-			// any other (#786, third round; #925).
-			unreachable = unreachableCleanup(err)
+			// Closed, the open ones closed and a merged one read as merged, or not ours to close. A close refused as a
+			// conflict is not a merge until a read says so: it is retried. Settings that cannot reach the repository
+			// (freshness.ErrRepositoryUnusable, errRepositoryGone, errNoSettings) are not among them: the repository
+			// may come back and its pull request may be open, so each is a failure of the cleanup, retried within the
+			// bound of CleanupFailing like any other (#786, third round; #877; #925).
 			if err := r.clearCleanupConditions(ctx, rr); err != nil {
 				return reconcile.Result{}, err
 			}
@@ -2655,7 +2650,9 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	}
 	// Before the patch, so a patch that finds the request gone, or a restart right after it, loses neither the Event
 	// nor the log line. A failed patch is retried and reports it again: at least once, maybe twice.
-	r.reportLetGo(ctx, rr, left, unreachable)
+	if left != nil {
+		r.reportRelease(ctx, rr, *left)
+	}
 	base := rr.DeepCopy()
 	controllerutil.RemoveFinalizer(rr, FinalizerName)
 	if err := r.Patch(ctx, rr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -2665,36 +2662,12 @@ func (r *RemediationRequestReconciler) finalize(ctx context.Context, rr *remedia
 	return reconcile.Result{}, nil
 }
 
-// reportLetGo reports a deleted request the finalizer lets go without a finished cleanup: left, when a bound of the
-// cleanup released it (reportRelease), or unreachable, the answer of the close when the settings object is missing or
-// its repository has no usable entry in it (leftUnreachable). It does nothing for a cleanup that finished.
-func (r *RemediationRequestReconciler) reportLetGo(ctx context.Context, rr *remediationv1alpha1.RemediationRequest,
-	left *cleanupRelease, unreachable error) {
-	switch {
-	case left != nil:
-		r.reportRelease(ctx, rr, *left)
-	case unreachable != nil:
-		r.leftUnreachable(ctx, rr, unreachable)
-	}
-}
-
-// unreachableCleanup returns err, from the finalizer's close (closeOnDeleteOf), when it says the repository of the
-// plan left the settings (errRepositoryGone), nil otherwise. A missing settings object is not such an answer: it is a
-// failure of the cleanup (cleanupDone).
-func unreachableCleanup(err error) error {
-	if errors.Is(err, errRepositoryGone) && !errors.Is(err, errNoSettings) {
-		return err
-	}
-	return nil
-}
-
 // cleanupDone reports whether err, from the finalizer's close (closeOnDeleteOf), lets the finalizer go: nil, or an
-// answer that leaves nothing to close or nothing reachable (the plan's repository gone from the settings, a merge read
-// as merged, a pull request not the request's). An entry that cannot be used and a missing settings object are
-// failures of the cleanup, retried within its bound (cleanupFailedOnDelete).
+// answer that leaves nothing to close (a merge read as merged, a pull request not the request's). Settings that cannot
+// reach the repository (a missing entry, an entry that cannot be used, a missing settings object) are failures of the
+// cleanup, retried within its bound (cleanupFailedOnDelete).
 func cleanupDone(err error) bool {
-	return err == nil || unreachableCleanup(err) != nil || isMergedUnrecorded(err) ||
-		errors.Is(err, errChangeRequestNotOurs)
+	return err == nil || isMergedUnrecorded(err) || errors.Is(err, errChangeRequestNotOurs)
 }
 
 // closeOnDelete reports whether deleting a request in phase p closes its pull request: before merge, and

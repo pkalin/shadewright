@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package redact
+package modules
 
 import "regexp"
 
@@ -22,11 +22,9 @@ import "regexp"
 // name, "@", then "sha1:" and exactly 40 lower-case hex digits ("main@sha1:1f3c...", "refs/heads/main@sha1:...").
 var fluxRevision = regexp.MustCompile(`^(?:[A-Za-z0-9._/-]{1,255}@)?sha1:[0-9a-f]{40}$`)
 
-// IsFluxRevision reports whether the whole of s is a Flux Git revision. [String] still redacts the commit
-// hash wherever it appears in text, because an attacker who writes "sha1:" in front of a secret in a message
-// must not be able to keep the secret. A caller that reads a value from a revision field (such as
-// status.lastAppliedRevision) may keep that value unredacted when this returns true: the value is then only
-// a reference name and a commit, and holds nothing else.
+// IsFluxRevision reports whether the whole of s is a Flux Git revision. [BoundValue] keeps such a value
+// as evidence. The core redactor still hides the commit hash in free text, including when a message
+// contains a valid revision.
 func IsFluxRevision(s string) bool {
 	return fluxRevision.MatchString(s)
 }

@@ -51,6 +51,7 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/modules/kyverno"
 	"github.com/shadewright-labs/shadewright/internal/modules/secretsstore"
 	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redactadapter"
 )
 
 var (
@@ -128,7 +129,7 @@ func main() {
 		os.Exit(1)
 	}
 	// A memory limit under the one redaction's heap limit was measured for: one warning, no other change.
-	redact.WarnIfMemoryUnderMeasured(setupLog)
+	redactadapter.WarnIfMemoryUnderMeasured(setupLog)
 	analyzer.SetWatchedNamespaces(len(watched))
 	if len(watched) == 0 {
 		setupLog.Info("Watching no namespaces: no events or pods are read and no Incident is recorded; "+

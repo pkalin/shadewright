@@ -32,6 +32,9 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
+// maskedPassword is what the redactor leaves of "before password=<secret>".
+const maskedPassword = "before password=***"
+
 func sample() (Mapping, Candidate) {
 	start := time.Date(2026, 11, 25, 9, 0, 0, 0, time.UTC)
 	end := start.Add(time.Minute)
@@ -242,11 +245,11 @@ func TestSnapshotFreeText(t *testing.T) {
 		name, raw, want string
 		excerpt         bool
 	}{
-		{"secret in context", "before password=abcdef", "before password=***", true},
+		{"secret in context", "before password=abcdef", maskedPassword, true},
 		{"controls", "left\x00\n\u0085\u2028\u2029right", "leftright", false},
 		{"format controls", "left\u202eright", "leftright", false},
-		{"joined secret", "before pass\x00word=abcdef", "before password=***", false},
-		{"joined across newline", "before pass\nword=abcdef", "before password=***", false},
+		{"joined secret", "before pass\x00word=abcdef", maskedPassword, false},
+		{"joined across newline", "before pass\nword=abcdef", maskedPassword, false},
 		{"1024 bytes", strings.Repeat("é", 512), strings.Repeat("é", 512), false},
 		{"1025 bytes", strings.Repeat("é", 512) + "x", "", false},
 	} {

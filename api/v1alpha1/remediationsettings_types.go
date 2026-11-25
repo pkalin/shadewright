@@ -285,7 +285,7 @@ type AnalysisModels struct {
 
 // ModelProvider names the API a model deployment's adapter speaks (ADR-0037), not the model family: a Claude
 // model served by Microsoft Foundry is still Foundry.
-// +kubebuilder:validation:Enum=Foundry;Anthropic;OpenAICompatible
+// +kubebuilder:validation:Enum=Foundry;Anthropic;OpenAICompatible;VertexAI
 type ModelProvider string
 
 // The model providers.
@@ -297,6 +297,9 @@ const (
 	ModelProviderAnthropic ModelProvider = "Anthropic"
 	// ModelProviderOpenAICompatible is an operator-allowed OpenAI-format HTTPS endpoint (ADR-0042).
 	ModelProviderOpenAICompatible ModelProvider = "OpenAICompatible"
+	// ModelProviderVertexAI is Google Vertex AI generateContent at an EU regional endpoint (ADR-0050). The
+	// endpoint carries the API version, project and location, so apiVersion and inferenceAPI are forbidden.
+	ModelProviderVertexAI ModelProvider = "VertexAI"
 )
 
 // InferenceAPI names the inference API a Foundry or OpenAICompatible deployment is called through.
@@ -319,11 +322,13 @@ const AnthropicEndpoint = "https://api.anthropic.com"
 // another provider can be sent to that host. TestAnthropicEndpointInRules checks that the rules name
 // AnthropicEndpoint and its host.
 //
-// apiVersion is required for Foundry, optional for Anthropic and forbidden for OpenAICompatible.
+// apiVersion is required for Foundry, optional for Anthropic and forbidden for OpenAICompatible and VertexAI.
+// The rules that name googleapis.com and VertexAI only refuse new values of a provider that did not exist
+// before, or a host no Foundry or compatible deployment is expected to use (ADR-0050 decision 1).
 
 // ModelDeployment is one model deployment behind an inference endpoint, for example in Microsoft Foundry
 // (ADR-0016), or a model of the Anthropic API (ADR-0037). It holds no key, token or other credential.
-// +kubebuilder:validation:XValidation:rule="has(self.apiVersion) || (has(self.provider) && self.provider in ['Anthropic', 'OpenAICompatible'])",message="a Foundry deployment needs apiVersion",fieldPath=".apiVersion"
+// +kubebuilder:validation:XValidation:rule="has(self.apiVersion) || (has(self.provider) && self.provider in ['Anthropic', 'OpenAICompatible', 'VertexAI'])",message="a Foundry deployment needs apiVersion",fieldPath=".apiVersion"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'Anthropic' || self.endpoint == 'https://api.anthropic.com'",message="a deployment with provider Anthropic must have the endpoint https://api.anthropic.com"
 // +kubebuilder:validation:XValidation:rule="(has(self.provider) && self.provider == 'Anthropic') || !isURL(self.endpoint) || url(self.endpoint).getHostname() != 'api.anthropic.com'",message="the host api.anthropic.com is only for a deployment with provider Anthropic"
 // +kubebuilder:validation:XValidation:rule="!has(self.inferenceAPI) || !has(self.provider) || self.provider in ['Foundry', 'OpenAICompatible']",message="inferenceAPI is only for a deployment with provider Foundry or OpenAICompatible"
@@ -331,9 +336,12 @@ const AnthropicEndpoint = "https://api.anthropic.com"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'OpenAICompatible' || !has(self.apiVersion)",message="OpenAICompatible does not allow apiVersion"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'OpenAICompatible' || !isURL(self.endpoint) || !['openai.azure.com', 'cognitiveservices.azure.com', 'services.ai.azure.com'].exists(s, url(self.endpoint).getHostname() == s || url(self.endpoint).getHostname().endsWith('.' + s))",message="OpenAICompatible does not allow Azure model hosts"
 // +kubebuilder:validation:XValidation:rule="(has(self.provider) && self.provider != 'Foundry') || !isURL(self.endpoint) || url(self.endpoint).getHostname() != 'api.openai.com'",message="the host api.openai.com needs provider OpenAICompatible"
+// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'VertexAI' || (!has(self.apiVersion) && !has(self.inferenceAPI))",message="VertexAI does not allow apiVersion or inferenceAPI"
+// +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider != 'VertexAI' || (self.endpoint.matches('^https://europe-[a-z0-9-]+-aiplatform[.]googleapis[.]com/v1/projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/europe-[a-z0-9-]+$') && self.endpoint.endsWith('/locations/' + self.endpoint.split('/')[2].replace('-aiplatform.googleapis.com', ”)))",message="a deployment with provider VertexAI must have an EU regional endpoint https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region> with the same location in host and path"
+// +kubebuilder:validation:XValidation:rule="(has(self.provider) && self.provider == 'VertexAI') || !isURL(self.endpoint) || !(url(self.endpoint).getHostname() == 'googleapis.com' || url(self.endpoint).getHostname().endsWith('.googleapis.com'))",message="googleapis.com hosts are only for a deployment with provider VertexAI"
 type ModelDeployment struct {
 	// provider is the API the analyzer's adapter speaks to this deployment: Foundry (the default),
-	// Anthropic or OpenAICompatible (ADR-0042). It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
+	// Anthropic, OpenAICompatible (ADR-0042) or VertexAI (ADR-0050). It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
 	// Anthropic the endpoint must be https://api.anthropic.com, the analyzer reads its API key from the file
 	// of its --anthropic-api-key-file flag (not in this object) and refuses the deployment without it,
 	// deployment must equal the role's --triage-model or --escalation-model value, apiVersion may be left out
@@ -341,6 +349,8 @@ type ModelDeployment struct {
 	// deployment needs the analyzer's Azure workload identity and --model-endpoint-suffixes; an analyzer
 	// started without them refuses it (ProviderNotConfigured). A Foundry deployment may
 	// not name the host api.anthropic.com. There is no fallback between providers.
+	// VertexAI (ADR-0050) needs an EU regional endpoint, https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region>,
+	// and its deployment is the Gemini model ID. It forbids apiVersion and inferenceAPI: the endpoint carries the API version, project and location.
 	// OpenAICompatible matches --openai-compatible-endpoints declarations and their allowed models lists (ModelNotAllowed for an undeclared model), with no Azure identity and an optional API key
 	// read from its endpoint's own mounted file. The key is bound to its full install-time base URL, never an Azure model host
 	// or api.anthropic.com. Without a key it sends no Authorization header. No apiVersion is allowed.

@@ -2251,6 +2251,105 @@ var _ = Describe("RemediationSettings", func() {
 			)
 		})
 
+		Describe("VertexAI (#1165)", func() {
+			const vertexEndpoint = "https://europe-west4-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/europe-west4"
+			vertex := func(m *v1alpha1.ModelDeployment) {
+				m.Provider, m.Endpoint, m.Deployment, m.APIVersion = v1alpha1.ModelProviderVertexAI, vertexEndpoint,
+					"gemini-2.5-flash", ""
+			}
+
+			It("accepts an EU regional endpoint without apiVersion or inferenceAPI", func() {
+				expectAccepted(withModel(vertex))
+			})
+
+			It("accepts VertexAI for one role and Foundry for the other", func() {
+				expectAccepted(withAnalysis(func(a *v1alpha1.AnalysisSettings) {
+					e := strong()
+					vertex(e)
+					a.Models = &v1alpha1.AnalysisModels{Triage: model(), Escalation: e}
+				}))
+			})
+
+			It("still defaults to Foundry and still needs apiVersion for it", func() {
+				s := withModel(func(*v1alpha1.ModelDeployment) {})
+				expectAccepted(s)
+				Expect(s.Spec.Analysis.Models.Triage.Provider).To(Equal(v1alpha1.ModelProviderFoundry))
+				expectRefused(withModel(func(m *v1alpha1.ModelDeployment) { m.APIVersion = "" }),
+					"a Foundry deployment needs apiVersion")
+			})
+
+			It("refuses apiVersion", func() {
+				expectRefused(withModel(func(m *v1alpha1.ModelDeployment) {
+					vertex(m)
+					m.APIVersion = "v1"
+				}), "VertexAI does not allow apiVersion or inferenceAPI")
+			})
+
+			DescribeTable("refuses inferenceAPI",
+				func(api v1alpha1.InferenceAPI) {
+					expectRefused(withModel(func(m *v1alpha1.ModelDeployment) {
+						vertex(m)
+						m.InferenceAPI = api
+					}), "VertexAI does not allow apiVersion or inferenceAPI")
+				},
+				Entry(nil, v1alpha1.InferenceAPIResponses), Entry(nil, v1alpha1.InferenceAPIChatCompletions),
+			)
+
+			DescribeTable("refuses an endpoint that is not an EU regional Vertex base",
+				func(endpoint string) {
+					expectRefused(withModel(func(m *v1alpha1.ModelDeployment) {
+						vertex(m)
+						m.Endpoint = endpoint
+					}), "a deployment with provider VertexAI must have an EU regional endpoint")
+				},
+				Entry("global host", "https://aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/global"),
+				Entry("EU multi-region host",
+					"https://aiplatform.eu.rep.googleapis.com/v1/projects/lab-inference-1/locations/eu"),
+				Entry("non-EU location",
+					"https://us-central1-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/us-central1"),
+				Entry("London, outside the EU",
+					"https://europe-west2-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/europe-west2/"),
+				Entry("path location differs from host",
+					"https://europe-west4-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/europe-west1"),
+				Entry("path location is not EU",
+					"https://europe-west4-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/us-central1"),
+				Entry("another API version", "https://europe-west4-aiplatform.googleapis.com/v2/projects/lab-inference-1/locations/europe-west4"),
+				Entry("project id too short", "https://europe-west4-aiplatform.googleapis.com/v1/projects/lab/locations/europe-west4"),
+				Entry("project id starts with a digit",
+					"https://europe-west4-aiplatform.googleapis.com/v1/projects/1lab-inference/locations/europe-west4"),
+				Entry("no project path", "https://europe-west4-aiplatform.googleapis.com"),
+				Entry("a path below the location",
+					"https://europe-west4-aiplatform.googleapis.com/v1/projects/lab-inference-1/locations/europe-west4/publishers"),
+				Entry("with a port",
+					"https://europe-west4-aiplatform.googleapis.com:443/v1/projects/lab-inference-1/locations/europe-west4"),
+				Entry("another host", "https://example.services.ai.azure.com/"),
+			)
+
+			DescribeTable("refuses googleapis.com hosts for the other providers",
+				func(provider v1alpha1.ModelProvider, endpoint string) {
+					expectRefused(withModel(func(m *v1alpha1.ModelDeployment) {
+						m.Provider, m.Endpoint = provider, endpoint
+						if provider == v1alpha1.ModelProviderOpenAICompatible {
+							m.APIVersion = ""
+						}
+					}), "googleapis.com hosts are only for a deployment with provider VertexAI")
+				},
+				Entry("Foundry", v1alpha1.ModelProviderFoundry, vertexEndpoint),
+				Entry("provider left out", v1alpha1.ModelProvider(""), vertexEndpoint),
+				Entry("Foundry, global host", v1alpha1.ModelProviderFoundry, "https://aiplatform.googleapis.com/v1"),
+				Entry("Foundry, apex host", v1alpha1.ModelProviderFoundry, "https://googleapis.com/v1"),
+				Entry("OpenAICompatible", v1alpha1.ModelProviderOpenAICompatible, vertexEndpoint),
+				Entry("OpenAICompatible, multi-region host", v1alpha1.ModelProviderOpenAICompatible,
+					"https://aiplatform.eu.rep.googleapis.com/v1"),
+			)
+
+			It("does not refuse a host that only ends in the letters", func() {
+				expectAccepted(withModel(func(m *v1alpha1.ModelDeployment) {
+					m.Endpoint = "https://example.notgoogleapis.com/"
+				}))
+			})
+		})
+
 		Describe("inferenceAPI (#501)", func() {
 			It("is left out by default, and the stored object keeps it out", func() {
 				s := withModel(func(*v1alpha1.ModelDeployment) {})

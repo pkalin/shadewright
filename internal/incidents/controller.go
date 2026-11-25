@@ -219,8 +219,9 @@ type Controller struct {
 	// occurrence of any other Incident as counted. It holds at most one entry per fingerprint with a name in
 	// names.
 	absorbedDroppedThrough map[string]time.Time
-	// names are the Incidents that exist or are pending; their number is held to MaxIncidents.
-	names map[string]struct{}
+	// names holds the Incidents that exist or are pending, up to MaxIncidents. A true value
+	// keeps an unverified event series from being redirected onto a verified pull failure.
+	names map[string]bool
 	// uids is, per name in names, the UID of the Incident of that name as last listed or written, so a delete
 	// the informers report is matched to the object this process knows ([Controller.incidentDeleted]) and not
 	// to an older one of the same name. It holds at most one entry per name in names.
@@ -408,7 +409,7 @@ func New(cfg Config) (*Controller, error) {
 		recordsOf:              map[string]map[string]struct{}{},
 		held:                   map[string]*holding{},
 		heldIn:                 map[string]int{},
-		names:                  map[string]struct{}{},
+		names:                  map[string]bool{},
 		uids:                   map[string]types.UID{},
 		deletedOccurrences:     newBoundedSet(deletedOccurrencesRemembered),
 		current:                map[string]int32{},
@@ -635,7 +636,7 @@ func (c *Controller) load(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, inc := range list.Items {
-		c.names[inc.Name] = struct{}{}
+		c.names[inc.Name] = inc.Spec.PullCauseFingerprint != ""
 		c.remember(inc.Spec.Fingerprint, inc.Name, &inc.Status)
 		if inc.HasDerivedName() && inc.Spec.Occurrence() > max(c.current[inc.Spec.Fingerprint], 1) {
 			c.current[inc.Spec.Fingerprint] = inc.Spec.Occurrence()
@@ -766,6 +767,9 @@ func (c *Controller) counted(occurrence string) (int64, bool) {
 func (c *Controller) consume(ctx context.Context, o collector.Observation) bool {
 	o.Began = o.Began.Truncate(time.Second)
 	o.Container = containerName(ctx, o.Container)
+	if cause := pullCauseOf(o); cause != "" {
+		o.Fingerprint = fingerprint.Scoped(o.Fingerprint, o.Container, cause)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	due := c.consumeLocked(ctx, o)
@@ -862,7 +866,8 @@ func (c *Controller) consumeLocked(ctx context.Context, o collector.Observation)
 // second one with a weaker subject. Only an event observation that is not a consequence moves, and only to an
 // Incident that exists (listed or written, not one this process is still opening), is the latest occurrence of
 // its fingerprint, counts no cause (a cause Incident holds events only as absorbed evidence) and would not roll
-// over to its next occurrence. The caller holds mu.
+// over to its next occurrence. A verified pull Failed Incident cannot take an unverified increment.
+// The caller holds mu.
 func (c *Controller) occurrenceIncident(o collector.Observation) (string, bool) {
 	if o.Origin != fingerprint.SourceEvent || o.Class == collector.ClassConsequence {
 		return "", false
@@ -875,7 +880,7 @@ func (c *Controller) occurrenceIncident(o collector.Observation) (string, bool) 
 	if !ok || fp == o.Fingerprint || c.nameOf(fp) != r.incident {
 		return "", false
 	}
-	if _, ok := c.names[r.incident]; !ok {
+	if pullFailed, ok := c.names[r.incident]; !ok || pullFailed {
 		return "", false
 	}
 	if _, ok := c.opening[r.incident]; ok {
@@ -953,7 +958,7 @@ func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
 			c.refuse(ctx, o)
 			return false
 		}
-		c.names[name] = struct{}{}
+		c.names[name] = pullCauseOf(o) != ""
 		// Only this process may create it: once written, one not found was deleted (#893).
 		c.opening[name] = struct{}{}
 		if n := occurrenceOf(name); n >= 2 && n > occurrenceOf(c.nameOf(o.Fingerprint)) {
@@ -970,15 +975,20 @@ func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
 	_, scheduled := c.nextWrite[o.Fingerprint]
 	if _, ok := b.occurrences[o.Occurrence]; !ok {
 		if c.full(o.Fingerprint, o.Source) {
-			b.add(&batch{first: at, last: at})
+			b.add(&batch{first: at, last: at, nonConsequence: o.Class != collector.ClassConsequence})
 			c.overflow(ctx, o.Fingerprint, o.Source)
 			return !scheduled
 		}
 		c.hold(o.Fingerprint, o.Source)
 	}
-	add := &batch{count: n, first: at, last: at, occurrences: map[string]heldOccurrence{
-		o.Occurrence: {counted: counted{total: o.Total, began: o.Began}, source: o.Source},
-	}}
+	add := &batch{
+		count: n, first: at, last: at,
+		consequence:    o.Class == collector.ClassConsequence,
+		nonConsequence: o.Class != collector.ClassConsequence,
+		occurrences: map[string]heldOccurrence{
+			o.Occurrence: {counted: counted{total: o.Total, began: o.Began}, source: o.Source},
+		},
+	}
 	if o.Container != "" {
 		add.containers = []string{o.Container}
 	}
@@ -1125,16 +1135,26 @@ func (c *Controller) notFuture(t time.Time) time.Time {
 	return t
 }
 
+// pullCauseOf identifies the image-pull Failed observations that may open a foldable Incident.
+func pullCauseOf(o collector.Observation) string {
+	if o.Reason == string(remediationv1alpha1.AbsorbedFailed) && o.Origin == fingerprint.SourceEvent &&
+		o.Class == collector.ClassConsequence && o.Container != "" {
+		return o.CauseFingerprint
+	}
+	return ""
+}
+
 // specOf returns the spec of the Incident an observation belongs to. It holds the fingerprint, the subject
 // and the normalized, redacted symptom, nothing else from the cluster.
 func specOf(o collector.Observation) remediationv1alpha1.IncidentSpec {
 	return remediationv1alpha1.IncidentSpec{
-		Fingerprint:         o.Fingerprint,
-		Subject:             o.Subject,
-		Reason:              o.Reason,
-		Type:                o.Type,
-		ReportingController: o.ReportingController,
-		Symptom:             o.Symptom,
+		Fingerprint:          o.Fingerprint,
+		PullCauseFingerprint: pullCauseOf(o),
+		Subject:              o.Subject,
+		Reason:               o.Reason,
+		Type:                 o.Type,
+		ReportingController:  o.ReportingController,
+		Symptom:              o.Symptom,
 	}
 }
 
@@ -1372,7 +1392,7 @@ func (c *Controller) dropDeleted(ctx context.Context, fp, name string, batches [
 		case deleted.latest != nil:
 			latest = deleted.latest.Spec.Occurrence()
 			// It exists, so it counts under the cap whether or not this process knew it.
-			c.names[deleted.latest.Name] = struct{}{}
+			c.names[deleted.latest.Name] = deleted.latest.Spec.PullCauseFingerprint != ""
 			c.noteState(deleted.latest)
 		case deleted.latestN >= 1:
 			latest = deleted.latestN
@@ -1711,7 +1731,14 @@ func (c *Controller) write(ctx context.Context, name string, create bool, batche
 				res.escalated = true
 			}
 		}
-		if err = c.client.Status().Update(ctx, res.inc); apierrors.IsInvalid(err) {
+		err = c.client.Status().Update(ctx, res.inc)
+		if apierrors.IsInvalid(err) && omitUnsupportedFailed(err, res.inc, res.stored) {
+			// The old enum refuses this tally. Keep its occurrence records so a lost response
+			// or a replay cannot count the rest of the batch twice.
+			logf.FromContext(ctx).Info("Retried an Incident status write without the unsupported Failed tally", "incident", name)
+			err = c.client.Status().Update(ctx, res.inc)
+		}
+		if apierrors.IsInvalid(err) {
 			return &refusedError{exists: true, err: err}
 		} else if apierrors.IsNotFound(err) {
 			// Deleted since the read: the next attempt reads it again and finds it gone ([deletedError]).
@@ -1723,6 +1750,23 @@ func (c *Controller) write(ctx context.Context, name string, create bool, batche
 		return res, fmt.Errorf("writing Incident %s: %w", key.Name, err)
 	}
 	return res, nil
+}
+
+// omitUnsupportedFailed removes only a newly added Failed tally that the API server explicitly
+// rejected as an unsupported enum value. Other validation errors keep their usual handling.
+func omitUnsupportedFailed(err error, inc *remediationv1alpha1.Incident, stored *remediationv1alpha1.IncidentStatus) bool {
+	isFailed := func(t remediationv1alpha1.AbsorbedTally) bool { return t.Reason == remediationv1alpha1.AbsorbedFailed }
+	i := slices.IndexFunc(inc.Status.Absorbed, isFailed)
+	if i < 0 || slices.ContainsFunc(stored.Absorbed, isFailed) {
+		return false
+	}
+	field := fmt.Sprintf("status.absorbed[%d].reason", i)
+	refusal, ok := apierrors.StatusCause(err, metav1.CauseTypeFieldValueNotSupported)
+	if !ok || refusal.Field != field {
+		return false
+	}
+	inc.Status.Absorbed = slices.Delete(inc.Status.Absorbed, i, i+1)
+	return true
 }
 
 // refusedError is a write that can never succeed: the API server refuses the object as invalid, or the

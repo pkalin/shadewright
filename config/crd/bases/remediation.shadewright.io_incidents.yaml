@@ -107,6 +107,16 @@ spec:
                 maxLength: 80
                 pattern: ^incident-[0-9a-f]{64}(-([2-9]|[1-9][0-9]{1,5}))?$
                 type: string
+              pullCauseFingerprint:
+                description: |-
+                  pullCauseFingerprint identifies the pull cause for a kubelet Failed event on a verified container
+                  currently in an image-pull wait. Only the exact notes "Error: ErrImagePull", "Error: ImagePullBackOff"
+                  and "Error: InvalidImageName" qualify. The cause key uses the image from the pod spec byte for byte.
+                  The analyzer folds this Incident only into a cause with this fingerprint. Detailed "Failed to pull image"
+                  events have no link and stay separate.
+                maxLength: 71
+                pattern: ^sha256:[0-9a-f]{64}$
+                type: string
               reason:
                 description: reason is the event reason or status reason, for example
                   FailedScheduling or OOMKilled.
@@ -217,6 +227,7 @@ spec:
                       enum:
                       - BackOff
                       - Unhealthy
+                      - Failed
                       type: string
                   required:
                   - count
@@ -297,8 +308,10 @@ spec:
                   kubelet wrote: an OOM kill, a non-zero exit (not of a pod being deleted, nor of one whose status.reason is
                   set, such as an evicted pod) or a waiting reason (ADR-0039 points 3 and 8, point 3 amended 2026-11-20 and
                   narrowed 2026-11-21). Only such an Incident takes the evidence of a consequence or folds a consequence
-                  Incident: a non-zero exit's takes BackOff only, an OOM kill's or a wait's BackOff and Unhealthy. An Event
-                  never sets it. Once true it stays true, and the status cannot be removed while it is.
+                  Incident: a non-zero exit's takes BackOff only, an OOM kill's or a configuration wait's BackOff and Unhealthy,
+                  and an image-pull wait's (ImagePullBackOff, ErrImagePull, InvalidImageName) BackOff, Unhealthy and
+                  qualifying Failed events (point 12). An Event never sets it. Once true it stays true,
+                  and the status cannot be removed while it is.
                 type: boolean
               conditions:
                 description: conditions explain the phase.
@@ -360,6 +373,11 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              consequence:
+                description: |-
+                  consequence records that the analyzer classified all observations counted here as consequences.
+                  Older status writers may omit it. The late fold matches spec.pullCauseFingerprint.
+                type: boolean
               containers:
                 description: |-
                   containers are the names of the containers whose observations this Incident counted, at most 8 (ADR-0039
@@ -607,6 +625,8 @@ spec:
             - message: cause cannot change from true to false
               rule: '!(has(oldSelf.cause) && oldSelf.cause) || (has(self.cause) &&
                 self.cause)'
+            - message: cause and consequence cannot both be true
+              rule: '!(has(self.cause) && self.cause && has(self.consequence) && self.consequence)'
             - message: absorbed is allowed only when cause is true
               rule: '!has(self.absorbed) || size(self.absorbed) == 0 || (has(self.cause)
                 && self.cause)'

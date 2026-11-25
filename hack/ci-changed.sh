@@ -14,7 +14,9 @@ set -euo pipefail
 # What the binaries and the images are built from; each group below that builds or runs them includes it.
 build_paths='.*\.go|go\.mod|go\.sum|api/.*|cmd/.*|internal/.*|Dockerfile|\.dockerignore|Makefile|PROJECT'
 go_paths="${build_paths}|config/.*|test/.*|hack/.*|\.golangci[^/]*|\.custom-gcl\.yml|docs/reference/.*"
-go_re="^(${go_paths})$"
+# Direct Go workflows not called by ci.yml are checked by make lint (check-go-build-settings).
+go_workflows='\.github/workflows/(evaluation|fuzz|copilot-setup-steps|release-plugin)\.yml'
+go_re="^(${go_paths}|${go_workflows})$"
 # The image build context also takes the licence files (see .dockerignore).
 images_re="^(${go_paths}|LICENSE|NOTICE)$"
 # The chart is compared with config/default, rendered by Go tests and installed by scripts in hack/; Trivy scans it

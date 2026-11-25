@@ -98,11 +98,13 @@ fi
 # Under the repository Makefile (even with GOWORK explicitly set in the caller env),
 # the parent go.work is ignored.
 cat > "${tmp}/build-probe.mk" <<'EOF'
-.PHONY: __build-probe __gomodver-probe
+.PHONY: __build-probe __gomodver-probe __env-probe
 __build-probe:
 	go build -o "$(OUT)" .
 __gomodver-probe:
 	@printf '%s\n' '$(call gomodver,example.com/dep)'
+__env-probe:
+	@printf 'GOFLAGS=%s\nGOWORK=%s\n' "$$GOFLAGS" "$$GOWORK"
 EOF
 make_bin="${tmp}/make-gowork"
 env GOWORK="${ws}/go.work" GOFLAGS=-mod=mod make -s -C "${ws}/app" \
@@ -112,6 +114,39 @@ if [ "${make_out}" = "gomod" ]; then
   echo "ok: Makefile build ignores parent go.work replacement"
 else
   echo "FAIL: Makefile build produced '${make_out}', want 'gomod'" >&2
+  fail=1
+fi
+
+# Command-line Make overrides (make GOFLAGS=... GOWORK=...) must not bypass the settings,
+# and unrelated caller GOFLAGS (like -p=1) must be preserved in both env and CLI forms.
+make_cli_bin="${tmp}/make-gowork-cli"
+make -s -C "${ws}/app" -f "${repo}/Makefile" -f "${tmp}/build-probe.mk" \
+  GOFLAGS="-p=1 -mod=mod" GOWORK="${ws}/go.work" OUT="${make_cli_bin}" __build-probe
+make_cli_out="$("${make_cli_bin}")"
+if [ "${make_cli_out}" = "gomod" ]; then
+  echo "ok: Makefile ignores command-line GOWORK and GOFLAGS overrides"
+else
+  echo "FAIL: Makefile CLI override produced '${make_cli_out}', want 'gomod'" >&2
+  fail=1
+fi
+
+env_probe="$(env GOFLAGS=-p=1 make -s -C "${repo}" -f "${repo}/Makefile" -f "${tmp}/build-probe.mk" __env-probe)"
+env_probe_goflags="$(printf '%s\n' "${env_probe}" | sed -n 's/^GOFLAGS=//p' | tail -n1)"
+env_probe_gowork="$(printf '%s\n' "${env_probe}" | sed -n 's/^GOWORK=//p' | tail -n1)"
+if [ "${env_probe_goflags}" = "-p=1 -mod=readonly" ] && [ "${env_probe_gowork}" = "off" ]; then
+  echo "ok: Makefile preserves unrelated env GOFLAGS=-p=1"
+else
+  echo "FAIL: Makefile env GOFLAGS=-p=1 got GOFLAGS='${env_probe_goflags}' GOWORK='${env_probe_gowork}'" >&2
+  fail=1
+fi
+
+cli_probe="$(make -s -C "${repo}" -f "${repo}/Makefile" -f "${tmp}/build-probe.mk" GOFLAGS="-p=1 -mod=mod" GOWORK=auto __env-probe)"
+cli_probe_goflags="$(printf '%s\n' "${cli_probe}" | sed -n 's/^GOFLAGS=//p' | tail -n1)"
+cli_probe_gowork="$(printf '%s\n' "${cli_probe}" | sed -n 's/^GOWORK=//p' | tail -n1)"
+if [ "${cli_probe_goflags}" = "-p=1 -mod=readonly" ] && [ "${cli_probe_gowork}" = "off" ]; then
+  echo "ok: Makefile overrides CLI GOFLAGS=-mod=mod GOWORK=auto while preserving -p=1"
+else
+  echo "FAIL: Makefile CLI override got GOFLAGS='${cli_probe_goflags}' GOWORK='${cli_probe_gowork}'" >&2
   fail=1
 fi
 
@@ -152,6 +187,10 @@ cp "${ro}/app/go.mod" "${tmp}/ro.go.mod.before"
 pass_or_fail refuse "Makefile build refuses missing require in go.mod" \
   env GOFLAGS=-mod=mod GOWORK=off make -s -C "${ro}/app" \
   -f "${repo}/Makefile" -f "${tmp}/build-probe.mk" OUT="${tmp}/ro-bin" __build-probe
+
+pass_or_fail refuse "Makefile CLI override refuses missing require in go.mod" \
+  make -s -C "${ro}/app" -f "${repo}/Makefile" -f "${tmp}/build-probe.mk" \
+  GOFLAGS=-mod=mod GOWORK=auto OUT="${tmp}/ro-cli-bin" __build-probe
 
 if cmp -s "${tmp}/ro.go.mod.before" "${ro}/app/go.mod"; then
   echo "ok: refused build leaves go.mod untouched"
@@ -197,14 +236,21 @@ else
   fail=1
 fi
 
+# 4b. Runtime test: direct invocation of hack/check-plugin-deps.sh ignores hostile caller GOWORK/GOFLAGS.
+pass_or_fail pass "check-plugin-deps.sh ignores hostile caller GOWORK and GOFLAGS" \
+  env GOWORK=/nonexistent/go.work GOFLAGS=-mod=mod PLUGIN_DEPS_FILE=/dev/null PLUGIN_SIZE=1 \
+  "${repo}/hack/check-plugin-deps.sh"
+
 # 5. Negative fixture tests for hack/check-go-build-settings.sh.
 make_fixture() {
   local dir="$1"
   rm -rf "${dir}"
-  mkdir -p "${dir}/hack" "${dir}/.github/workflows"
+  mkdir -p "${dir}/hack/load" "${dir}/.github/workflows"
   cp "${repo}/Makefile" "${dir}/Makefile"
   cp "${repo}/Dockerfile" "${dir}/Dockerfile"
   cp "${repo}/hack/package-plugin.sh" "${dir}/hack/package-plugin.sh"
+  cp "${repo}/hack/check-plugin-deps.sh" "${dir}/hack/check-plugin-deps.sh"
+  cp "${repo}/hack/load/measure.sh" "${dir}/hack/load/measure.sh"
   cp "${repo}/.github/workflows/"*.yml "${dir}/.github/workflows/"
 }
 
@@ -214,28 +260,56 @@ make_fixture "${fx}"
 pass_or_fail pass "fixture copy passes" "${script}" "${fx}"
 
 make_fixture "${fx}"
-sed -i.bak 's/^export GOFLAGS := -mod=readonly$/# removed/' "${fx}/Makefile"
+sed -i.bak 's/^override GOFLAGS :=.*$/# removed/' "${fx}/Makefile"
 pass_or_fail refuse "Makefile without GOFLAGS fails" "${script}" "${fx}"
 
 make_fixture "${fx}"
-sed -i.bak 's/^export GOFLAGS := -mod=readonly$/export GOFLAGS ?= -mod=readonly/' "${fx}/Makefile"
+sed -i.bak 's/^override GOFLAGS :=.*$/export GOFLAGS ?= -mod=readonly/' "${fx}/Makefile"
 pass_or_fail refuse "Makefile with weak GOFLAGS ?= fails" "${script}" "${fx}"
 
 make_fixture "${fx}"
-sed -i.bak 's/^export GOWORK := off$/# removed/' "${fx}/Makefile"
+sed -i.bak 's/^override GOFLAGS :=.*$/GOFLAGS := -mod=readonly/' "${fx}/Makefile"
+pass_or_fail refuse "Makefile without override on GOFLAGS fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
+sed -i.bak 's/^override GOFLAGS :=.*$/override GOFLAGS := -mod=readonly/' "${fx}/Makefile"
+pass_or_fail refuse "Makefile dropping unrelated caller GOFLAGS fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
+sed -i.bak 's/^override GOWORK := off$/# removed/' "${fx}/Makefile"
 pass_or_fail refuse "Makefile without GOWORK=off fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
+sed -i.bak 's/^override GOWORK := off$/GOWORK := off/' "${fx}/Makefile"
+pass_or_fail refuse "Makefile without override on GOWORK fails" "${script}" "${fx}"
 
 make_fixture "${fx}"
 sed -i.bak 's/GOFLAGS="[^"]*" GOWORK="[^"]*" go list/go list/' "${fx}/Makefile"
 pass_or_fail refuse "Makefile shell go call without GOFLAGS/GOWORK fails" "${script}" "${fx}"
 
 make_fixture "${fx}"
+sed -i.bak 's/GOWORK="\$(GOWORK)" go list/GOWORK=auto go list/' "${fx}/Makefile"
+pass_or_fail refuse "Makefile shell go list with GOWORK=auto fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
+sed -i.bak 's/GOFLAGS="\$(GOFLAGS)" GOWORK="\$(GOWORK)" go list/GOFLAGS="-mod=readonly -mod=mod" GOWORK="$(GOWORK)" go list/' "${fx}/Makefile"
+pass_or_fail refuse "Makefile shell go list with GOFLAGS=-mod=readonly -mod=mod fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
 sed -i.bak 's/GOFLAGS=-mod=readonly/GOFLAGS=/' "${fx}/Dockerfile"
 pass_or_fail refuse "Dockerfile without GOFLAGS=-mod=readonly fails" "${script}" "${fx}"
 
 make_fixture "${fx}"
+sed -i.bak 's/GOFLAGS=-mod=readonly/GOFLAGS="-mod=readonly -mod=mod"/' "${fx}/Dockerfile"
+pass_or_fail refuse "Dockerfile with GOFLAGS=-mod=readonly -mod=mod fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
 sed -i.bak 's/GOWORK=off/GOWORK=auto/' "${fx}/Dockerfile"
 pass_or_fail refuse "Dockerfile without GOWORK=off fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
+sed -i.bak 's/^RUN go mod download$/RUN GOFLAGS=-mod=mod go mod download/' "${fx}/Dockerfile"
+pass_or_fail refuse "Dockerfile RUN with inline GOFLAGS=-mod=mod fails" "${script}" "${fx}"
 
 make_fixture "${fx}"
 python3 -I - "${fx}/Dockerfile" <<'PY'
@@ -255,6 +329,30 @@ sed -i.bak 's/GOFLAGS: -mod=readonly/# removed/' "${fx}/.github/workflows/evalua
 pass_or_fail refuse "direct Go workflow missing GOFLAGS fails" "${script}" "${fx}"
 
 make_fixture "${fx}"
+sed -i.bak 's/run: go test -c -o \/dev\/null \.\/test\/eval/run: GOFLAGS=-mod=mod GOWORK=auto go test -c -o \/dev\/null .\/test\/eval/' "${fx}/.github/workflows/evaluation.yml"
+pass_or_fail refuse "direct Go workflow inline override fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
+sed -i.bak 's/run: go test -c -o \/dev\/null \.\/test\/eval/run: go test -mod=mod -c -o \/dev\/null .\/test\/eval/' "${fx}/.github/workflows/evaluation.yml"
+pass_or_fail refuse "direct Go workflow CLI -mod=mod override fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
+python3 -I - "${fx}/.github/workflows/copilot-setup-steps.yml" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+p.write_text(
+    p.read_text(encoding="utf-8").replace(
+        "          go mod download",
+        "          export GOWORK=auto\n          go mod download",
+        1,
+    ),
+    encoding="utf-8",
+)
+PY
+pass_or_fail refuse "direct Go workflow export GOWORK=auto override fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
 sed -i.bak 's/GOWORK: off/# removed/' "${fx}/.github/workflows/codeql.yml"
 pass_or_fail refuse "CodeQL autobuild workflow missing GOWORK fails" "${script}" "${fx}"
 
@@ -265,5 +363,13 @@ pass_or_fail refuse "CI workflow running go mod tidy without -diff fails" "${scr
 make_fixture "${fx}"
 sed -i.bak 's/make build-plugin/go build .\/cmd\/kubectl-shadewright/' "${fx}/hack/package-plugin.sh"
 pass_or_fail refuse "package-plugin.sh bypassing make build-plugin fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
+sed -i.bak 's/^export GOWORK=off$/# removed/' "${fx}/hack/check-plugin-deps.sh"
+pass_or_fail refuse "check-plugin-deps.sh missing GOWORK=off fails" "${script}" "${fx}"
+
+make_fixture "${fx}"
+sed -i.bak 's/^export GOFLAGS=-mod=readonly$/# removed/' "${fx}/hack/load/measure.sh"
+pass_or_fail refuse "load/measure.sh missing GOFLAGS=-mod=readonly fails" "${script}" "${fx}"
 
 exit "${fail}"

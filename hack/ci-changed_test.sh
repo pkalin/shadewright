@@ -55,6 +55,10 @@ check "licence runs images only" "false true false false false" $pr LICENSE
 check "ci.yml runs everything" "true true true true true" $pr .github/workflows/ci.yml
 check "a called workflow runs everything" "true true true true true" $pr .github/workflows/lint.yml
 check "a workflow only runs codeql" "false false false false true" $pr .github/workflows/docs.yml
+check "evaluation workflow runs go and codeql" "true false false false true" $pr .github/workflows/evaluation.yml
+check "fuzz workflow runs go and codeql" "true false false false true" $pr .github/workflows/fuzz.yml
+check "copilot setup workflow runs go and codeql" "true false false false true" $pr .github/workflows/copilot-setup-steps.yml
+check "release plugin workflow runs go and codeql" "true false false false true" $pr .github/workflows/release-plugin.yml
 check "docs workflow runs everything" "true true true true true" $pr .github/workflows/docs-check.yml
 check "reasons check script runs all but codeql" "true true true true false" $pr hack/docs-reasons-check.py
 check "zensical config runs docs only" "false false false true false" $pr zensical.toml

@@ -15,9 +15,10 @@ endif
 endif
 
 # Enforce read-only module resolution and disable Go workspaces in every Make recipe
-# and $(shell go ...) call (ADR-0048).
-export GOFLAGS := -mod=readonly
-export GOWORK := off
+# and $(shell go ...) call (ADR-0048), preserving unrelated caller GOFLAGS.
+override GOFLAGS := $(strip $(filter-out -mod -mod=% --mod --mod=%,$(GOFLAGS)) -mod=readonly)
+override GOWORK := off
+export GOFLAGS GOWORK
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell GOFLAGS="$(GOFLAGS)" GOWORK="$(GOWORK)" go env GOBIN))

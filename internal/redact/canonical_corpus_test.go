@@ -20,12 +20,13 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"math/rand/v2"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // The canonical view corpus (canonical_gen_test.go) leaks today: #845 is the fix, and this slice adds only
@@ -49,29 +50,19 @@ const CanonEntryLeaks = "testdata/canonical-leaks-entry.tsv"
 // main has; its first lines name the commit and list the entry points.
 const CanonMainEntryLeaks = "testdata/canonical-main-entry.tsv"
 
-// canonSampleDivisor is the share of the corpus checked in short mode: one input in 32, chosen with a fixed seed.
-// Under the race detector it is one in 2*raceSampleEvery (decision of 2026-11-21 on #873). The full corpus runs in
-// the pass without -race (make test).
-const canonSampleDivisor = 32
+const canonSampleDivisor = redacttest.CanonSampleDivisor
 
-// canonSample returns cases, or under the race detector and in short mode a seeded sample of them, and
-// whether it is a sample.
 func canonSample(cases []canonCase) ([]canonCase, bool) {
-	if !raceDetector && !testing.Short() {
-		return cases, false
-	}
-	divisor := canonSampleDivisor
-	if raceDetector {
-		divisor = 2 * raceSampleEvery
-	}
-	rng := rand.New(rand.NewPCG(845, 8)) //nolint:gosec // a fixed seed keeps the sample the same on every run
-	var out []canonCase
+	sources := make([]redacttest.CanonSource, 0, len(cases))
 	for _, c := range cases {
-		if rng.IntN(divisor) == 0 {
-			out = append(out, c)
-		}
+		sources = append(sources, canonSourceFrom(c))
 	}
-	return out, true
+	selected, sampled := redacttest.SampleCanon(sources)
+	out := make([]canonCase, 0, len(selected))
+	for _, c := range selected {
+		out = append(out, canonCaseFrom(c))
+	}
+	return out, sampled
 }
 
 // CanonLeak is one leak of one piece: the check (an entry point, or "secret" or "kept" for String), the
@@ -96,20 +87,15 @@ func parseCanonItem(item string) (byte, int, bool) {
 	return item[0], i, true
 }
 
-// CanonInput is what a leak table may name of an input of the full corpus: its name and the number of its
-// secret and kept pieces.
-type CanonInput struct {
-	Name          string
-	Secrets, Keep int
-}
+// CanonInput is the shared index entry used by leak tables.
+type CanonInput = redacttest.CanonInput
 
-// canonIndexOf returns the CanonInput of each case, by hash.
 func canonIndexOf(cases []canonCase) map[string]CanonInput {
-	idx := make(map[string]CanonInput, len(cases))
+	sources := make([]redacttest.CanonSource, 0, len(cases))
 	for _, c := range cases {
-		idx[canonHash(c)] = CanonInput{Name: c.name, Secrets: len(c.secrets), Keep: len(c.keep)}
+		sources = append(sources, canonSourceFrom(c))
 	}
-	return idx
+	return redacttest.CanonIndexOf(sources)
 }
 
 // An expected leak table has one line per piece that leaks: "hash<TAB>form<TAB>item<TAB>checks", the checks

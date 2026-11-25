@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package redact
+package redacttest
 
 import (
 	"fmt"
@@ -24,8 +24,7 @@ import (
 // The forms of the fifth round of #845 (second decision of 2026-11-18), each drawn from a class, not from the
 // inputs a review found: a separator with blanks of any length around its marks, a value that is itself a
 // secret key with a separator, the look-alikes of "=" and the arrows, and a URL in angle brackets whose
-// password is digits, letters or punctuation. Like canonical_gen_test.go, this file uses only String and the
-// redactor's spans, so it runs unchanged in a checkout of main. Its cases come after every earlier form.
+// password is digits, letters or punctuation. The generator is independent of the redactor. Its cases come after every earlier form.
 
 const (
 	// canonFormSepBlanks is a secret key, blanks of any length, a separator and blanks again, then the value.
@@ -88,10 +87,10 @@ func (g *canonGen) sepBlanksCases() {
 				key := canonSepKeys[(mi+bi+ai)%len(canonSepKeys)]
 				nl := canonNLs[(mi+bi+ai)%len(canonNLs)]
 				pre, post := g.pad(before), g.pad(after)
-				g.add(canonFormSepBlanks, fmt.Sprintf("key %s, %d blanks, separator %q, %d blanks, line end %q", key, before, mark, after, nl), func(w *canonWriter) {
-					w.kept(key)
-					w.text(pre + mark + post)
-					w.secret()
+				g.add(canonFormSepBlanks, fmt.Sprintf("key %s, %d blanks, separator %q, %d blanks, line end %q", key, before, mark, after, nl), func(w *CanonWriter) {
+					w.Kept(key)
+					w.Text(pre + mark + post)
+					w.Secret()
 					w.next(nl)
 				})
 			}
@@ -101,7 +100,7 @@ func (g *canonGen) sepBlanksCases() {
 
 // canonOuterKeys are the keys in front of a secret key that stands as their value: bare short keys, other keys
 // and secret keys.
-var canonOuterKeys = []string{"auth", "pass", "config", "spec", "msg", passwordKey, canonTokenKey, "env"}
+var canonOuterKeys = []string{"auth", passKey, "config", "spec", "msg", passwordKey, canonTokenKey, "env"}
 
 // canonInnerSeps are the separators between the inner secret key and its value, and canonOuterSeps those after
 // the outer key.
@@ -120,12 +119,12 @@ func (g *canonGen) keyValueCases() {
 			for ii, isep := range canonInnerSeps {
 				inner := canonGlyphKeys[(oi+si+ii)%len(canonGlyphKeys)]
 				nl := canonNLs[(oi+si+ii)%len(canonNLs)]
-				g.add(canonFormKeyValue, fmt.Sprintf("%s%q%s%q, line end %q", outer, osep, inner, isep, nl), func(w *canonWriter) {
-					w.kept(outer)
-					w.text(osep)
-					w.kept(inner)
-					w.text(isep)
-					w.secret()
+				g.add(canonFormKeyValue, fmt.Sprintf("%s%q%s%q, line end %q", outer, osep, inner, isep, nl), func(w *CanonWriter) {
+					w.Kept(outer)
+					w.Text(osep)
+					w.Kept(inner)
+					w.Text(isep)
+					w.Secret()
 					w.next(nl)
 				})
 			}
@@ -140,27 +139,27 @@ func (g *canonGen) equalsArrowCases() {
 		for v := range 4 {
 			key := canonSepKeys[(ci+v)%len(canonSepKeys)]
 			nl := canonNLs[(ci+v)%len(canonNLs)]
-			g.add(canonFormEqualsArrow, fmt.Sprintf("key %s, separator %q, shape %d, line end %q", key, c, v, nl), func(w *canonWriter) {
+			g.add(canonFormEqualsArrow, fmt.Sprintf("key %s, separator %q, shape %d, line end %q", key, c, v, nl), func(w *CanonWriter) {
 				switch v {
 				case 0:
-					w.kept(key)
-					w.text(c)
-					w.secret()
+					w.Kept(key)
+					w.Text(c)
+					w.Secret()
 				case 1:
-					w.kept(key)
-					w.text(" " + c + " ")
-					w.secret()
+					w.Kept(key)
+					w.Text(" " + c + " ")
+					w.Secret()
 				case 2:
-					w.text("- ")
-					w.kept(key)
-					w.text(c + " ")
-					w.secret()
+					w.Text("- ")
+					w.Kept(key)
+					w.Text(c + " ")
+					w.Secret()
 				case 3:
-					w.text(`{"`)
-					w.kept(key)
-					w.text(`"` + c + ` "`)
-					w.secret()
-					w.text(`"}`)
+					w.Text(`{"`)
+					w.Kept(key)
+					w.Text(`"` + c + ` "`)
+					w.Secret()
+					w.Text(`"}`)
 				}
 				w.next(nl)
 			})
@@ -171,23 +170,23 @@ func (g *canonGen) equalsArrowCases() {
 // secretOf writes a secret of the given alphabet, made unique by the counter, and records its range: digits
 // only, letters only, or letters, digits and the punctuation a URL's user info may hold unencoded, 11 bytes as
 // every generated secret.
-func (w *canonWriter) secretOf(alphabet int) {
-	*w.n++
-	start := w.b.Len()
+func (w *CanonWriter) secretOf(alphabet int) {
+	*w.N++
+	start := w.B.Len()
 	switch alphabet {
 	case 0:
-		fmt.Fprintf(&w.b, "%011d", 70000000000+*w.n)
+		fmt.Fprintf(&w.B, "%011d", 70000000000+*w.N)
 	case 1:
-		n := *w.n
-		w.b.WriteString("Qz")
+		n := *w.N
+		w.B.WriteString("Qz")
 		for range 9 {
-			w.b.WriteByte(byte('a' + n%26))
+			w.B.WriteByte(byte('a' + n%26))
 			n /= 26
 		}
 	default:
-		fmt.Fprintf(&w.b, "Q!%05d$x*w", 20000+*w.n)
+		fmt.Fprintf(&w.B, "Q!%05d$x*w", 20000+*w.N)
 	}
-	w.c.secrets = append(w.c.secrets, [2]int{start, w.b.Len()})
+	w.C.Secrets = append(w.C.Secrets, [2]int{start, w.B.Len()})
 }
 
 // autolinkPasswordCases writes "<scheme://user:password>" closed by ">,<" or ">;<" before a second link with an
@@ -200,10 +199,10 @@ func (g *canonGen) autolinkPasswordCases() {
 			for vi, second := range seconds {
 				for alphabet := range 3 {
 					nl := canonNLs[(si+ci+vi+alphabet)%len(canonNLs)]
-					g.add(canonFormAutolink, fmt.Sprintf("%s, %q, %q, alphabet %d, line end %q", scheme, closer, second, alphabet, nl), func(w *canonWriter) {
-						w.text("<" + scheme + "://alice:")
+					g.add(canonFormAutolink, fmt.Sprintf("%s, %q, %q, alphabet %d, line end %q", scheme, closer, second, alphabet, nl), func(w *CanonWriter) {
+						w.Text("<" + scheme + "://alice:")
 						w.secretOf(alphabet)
-						w.text(closer + second)
+						w.Text(closer + second)
 						w.next(nl)
 					})
 				}

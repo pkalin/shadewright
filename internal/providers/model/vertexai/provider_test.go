@@ -743,7 +743,7 @@ func TestLateResponseIsNotRead(t *testing.T) {
 	late := func(r *http.Request) (*http.Response, error) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		<-r.Context().Done()
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {mimeJSON}},
+		return &http.Response{StatusCode: http.StatusOK, Header: jsonHeader(),
 			Body: io.NopCloser(strings.NewReader(replyJSON(`[{"text":"{}"}]`))), Request: r}, nil
 	}
 	t.Run("after the attempt deadline", func(t *testing.T) {
@@ -985,7 +985,7 @@ func TestReadsAreBounded(t *testing.T) {
 		body := &endless{}
 		p := newProviderWith(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: tc.status, ContentLength: -1, Body: body, Request: r,
-				Header: http.Header{"Content-Type": {mimeJSON}}}, nil
+				Header: jsonHeader()}, nil
 		}), func(c *Config) { c.MaxResponseBytes = 2048 })
 		_, err := p.Complete(t.Context(), structuredRequest())
 		// The reader hands out whole buffers, so the count may pass the limit by at most one buffer.

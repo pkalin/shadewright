@@ -862,7 +862,8 @@ func FuzzParseResponse(f *testing.F) {
 		// What the parser accepts, the replay check accepts back, as parsed and as the caller stores it.
 		for _, comp := range []providers.Completion{c, providers.WithoutControls(c)} {
 			msgs := []providers.Message{{Role: providers.RoleUser, Content: ctxText},
-				{Role: providers.RoleAssistant, ToolCalls: comp.ToolCalls, ProviderBlocks: comp.ProviderBlocks}}
+				{Role: providers.RoleAssistant, Content: comp.Content, ToolCalls: comp.ToolCalls,
+					ProviderBlocks: comp.ProviderBlocks}}
 			for _, tc := range comp.ToolCalls {
 				msgs = append(msgs, providers.Message{Role: providers.RoleTool, ToolCallID: tc.ID, Content: "r"})
 			}

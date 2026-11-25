@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/model/openaicompatible"
 	"github.com/shadewright-labs/shadewright/internal/providers/model/openaiwire"
 	"github.com/shadewright-labs/shadewright/internal/providers/retryafter"
 )
@@ -222,10 +223,8 @@ func newProvider(cfg Config, h testHooks) (*Provider, error) {
 	if err := checkModel(cfg.Model, location); err != nil {
 		return nil, invalid(err.Error())
 	}
-	for _, p := range cfg.InClusterRanges {
-		if !p.IsValid() || p != p.Masked() {
-			return nil, invalid("an in-cluster range is not a valid CIDR")
-		}
+	if err := openaicompatible.ValidateInClusterRanges(cfg.InClusterRanges); err != nil {
+		return nil, invalid("an in-cluster range is not accepted")
 	}
 	if cfg.MaxOutputTokens < 0 || cfg.MaxOutputTokens > MaxOutputTokens {
 		return nil, invalid("the output token limit is out of range")
@@ -420,6 +419,12 @@ func (p *Provider) complete(ctx context.Context, req providers.CompletionRequest
 		sent = sent || attemptSent
 		if err == nil {
 			c, perr := parseResponse(data, p.model, offered, len(req.ResponseSchema) > 0)
+			if bound := p.OutputSpend(req.MaxOutputTokens); perr == nil && c.Usage.OutputTokens > int64(bound) {
+				// One billed cap covers candidate and thinking tokens (ADR-0050 decision 6): a reply that
+				// reports more broke it. Its usage stays on the completion, so that it is still charged.
+				perr = fmt.Errorf("vertexai: the reply reports more output tokens than the call allowed: %w",
+					providers.ErrMalformedOutput)
+			}
 			return done(c, attempt+1, perr)
 		}
 		var c providers.Completion
@@ -482,7 +487,7 @@ func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed, 
 	resp, err := p.client.Do(req)
 	if err != nil {
 		// The error of http.Client.Do holds the URL and possibly response-controlled text: replace it.
-		return nil, false, true, transportError(ctx, err)
+		return nil, false, !dialFailed(err), transportError(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if actx.Err() != nil {
@@ -493,6 +498,9 @@ func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed, 
 	if resp.StatusCode != http.StatusOK {
 		// The body of an error may quote the request: it is drained, never read into an error.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrain))
+		if actx.Err() != nil {
+			return nil, false, true, transportError(ctx, actx.Err())
+		}
 		return nil, false, true, statusError(resp, p.now())
 	}
 	// A 200 was billed. An oversized body is not parsed (a cut JSON body has no reliable usage).
@@ -503,6 +511,10 @@ func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed, 
 	data, err = io.ReadAll(io.LimitReader(resp.Body, p.maxBody+1))
 	if err != nil {
 		return nil, true, true, transportError(ctx, err)
+	}
+	if actx.Err() != nil {
+		// The deadline or the cancellation came while the body was read: the reply is not trusted whole.
+		return nil, true, true, transportError(ctx, actx.Err())
 	}
 	if int64(len(data)) > p.maxBody {
 		return nil, true, true, tooLarge
@@ -581,6 +593,19 @@ func tokenError(ctx context.Context, err error) error {
 		return &providers.RetryableError{RetryAfter: after, Err: errors.New(msg)}
 	}
 	return errors.New(msg)
+}
+
+// dialFailed reports a failure before a connection was made: the address guard refused the address, the name
+// did not resolve, or the dial failed. Nothing of the request left, so nothing was billed.
+func dialFailed(err error) bool {
+	if errors.Is(err, openaiwire.ErrDialRefused) {
+		return true
+	}
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
+		return true
+	}
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
 }
 
 // ctxError reports the end of the call's context. A deadline is retryable (a later attempt may finish); a

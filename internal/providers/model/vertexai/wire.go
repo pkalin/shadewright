@@ -358,6 +358,10 @@ func (b *turnBuilder) assistant(m providers.Message) error {
 	if m.ToolCallID != "" {
 		return errors.New("an assistant message has a tool call ID")
 	}
+	if n := len(b.out); n > 0 && b.out[n-1].Role == roleModel {
+		// Only user-side messages merge: text must never join a replayed turn, whose parts are signed.
+		return errors.New("an assistant message follows another assistant message")
+	}
 	if len(m.ToolCalls) == 0 {
 		if m.Content == "" || !m.ProviderBlocks.IsZero() {
 			return errors.New("an assistant message without tool calls is empty or carries provider blocks")
@@ -384,7 +388,7 @@ func (b *turnBuilder) assistant(m providers.Message) error {
 // reply. Error text is fixed and never quotes the blocks.
 func replayParts(m providers.Message, model string) ([]part, []bool, error) {
 	invalid := errors.New("the provider blocks of an assistant message do not match its tool calls")
-	if m.Content != "" || m.ProviderBlocks.IsZero() || len(m.ToolCalls) > maxToolCalls {
+	if m.ProviderBlocks.IsZero() || len(m.ToolCalls) > maxToolCalls {
 		return nil, nil, invalid
 	}
 	raw := m.ProviderBlocks.Bytes()
@@ -398,12 +402,16 @@ func replayParts(m providers.Message, model string) ([]part, []bool, error) {
 		return nil, nil, invalid
 	}
 	parts := make([]part, 0, len(b.Parts))
+	var text strings.Builder
 	wire := make([]bool, 0, len(m.ToolCalls))
 	seen := map[string]bool{}
 	for _, r := range b.Parts {
 		pt, err := decodePart(r)
 		if err != nil {
 			return nil, nil, invalid
+		}
+		if pt.FunctionCall == nil && (pt.Thought == nil || !*pt.Thought) {
+			text.WriteString(*pt.Text)
 		}
 		if pt.FunctionCall != nil {
 			k := len(wire)
@@ -422,7 +430,9 @@ func replayParts(m providers.Message, model string) ([]part, []bool, error) {
 		}
 		parts = append(parts, part{raw: r})
 	}
-	if len(wire) != len(m.ToolCalls) {
+	// The message's text is the reply's text: the caller may hold it without control characters.
+	if len(wire) != len(m.ToolCalls) ||
+		providers.StripControls(m.Content) != providers.StripControls(text.String()) {
 		return nil, nil, invalid
 	}
 	return parts, wire, nil
@@ -651,7 +661,7 @@ func callOf(fc *functionCall, k int) (providers.ToolCall, bool, error) {
 	if fc.ID != nil {
 		id = *fc.ID
 	}
-	fromWire := id != ""
+	fromWire := fc.ID != nil
 	switch {
 	case strings.ContainsFunc(fc.Name, unicode.IsControl):
 		return providers.ToolCall{}, false, errors.New("a function call name holds a control character")

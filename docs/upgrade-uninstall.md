@@ -157,7 +157,7 @@ helm upgrade shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --ver
   --namespace shadewright-system -f my-values.yaml --wait --timeout 10m
 ```
 
-For Flux, update the source URL to `oci://ghcr.io/shadewright-labs/charts/shadewright` and pin the chart to tag `0.7.0`.
+For Flux installations that use an OCI chart source, update the source URL to `oci://ghcr.io/shadewright-labs/charts/shadewright` and pin the chart to tag `0.7.0`. The reference lab vendors `config/default`, so upgrade it by regenerating the vendored copy and opening a pull request, as described in [Flux delivers the install](#flux-delivers-the-install).
 
 Verify v0.7.0 images and chart with the commands in [Verify a release](#verify-a-release). Their cosign identities and GitHub provenance name `shadewright-labs/shadewright` and the `images.yml` or `chart.yml` workflow. The `kubectl-shadewright` archives are attached to the release in `shadewright-labs/shadewright`; download and verify them as described in [Install the kubectl plugin](how-to/check-status.md#install), which uses the `release-plugin.yml` signer identity. The Homebrew tap is now `shadewright-labs/homebrew-tap`.
 
@@ -165,7 +165,7 @@ The Go module is now `github.com/shadewright-labs/shadewright`. If your Go code 
 
 The move does not change the CRDs or the API group `remediation.shadewright.io`. It does not reset `RemediationSettings`, Incident history, or open pull requests. The chart upgrade applies the new CRDs and Deployments to the existing cluster objects. Keep the same `clusterId` and values file as for other upgrades.
 
-Releases through v0.6.0 remain at `ghcr.io/pkalin` and keep their existing signing identity. Verify them with the commands under [Releases from before the move](#releases-from-before-the-move): cosign uses the release-era workflow identity, and GitHub attestations use registry bundles for images and charts or `--owner` for plugin archives.
+Releases through v0.6.0 remain at `ghcr.io/pkalin` and keep their existing signing identity. Verify them with the commands under [Releases from before the move](#releases-from-before-the-move): cosign uses the release-era workflow identity, and GitHub attestations use registry bundles for images and charts or `--owner` for plugin archives. v0.1.0 images are unsigned, and charts before v0.6.0 have no provenance attestation; see [Verify a release](#verify-a-release) for these exceptions.
 
 ## Upgrade
 

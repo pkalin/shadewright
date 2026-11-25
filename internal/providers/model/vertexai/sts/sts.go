@@ -141,6 +141,18 @@ type exchangeCall struct {
 	err     error
 }
 
+const redactedSource = "[redacted Google STS token source]"
+
+// String returns a placeholder: a Source holds a cached access token and the token file path, and fmt does
+// not call a method on unexported fields.
+func (*Source) String() string { return redactedSource }
+
+// GoString returns a placeholder, for %#v.
+func (*Source) GoString() string { return "sts.Source{[redacted]}" }
+
+// Format prints a placeholder for every verb, without reading any field.
+func (s *Source) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(s.String())) }
+
 // New checks cfg and returns a Source. It makes no network call and does not read the token file.
 func New(cfg Config) (*Source, error) {
 	return newSource(cfg, nil)
@@ -381,12 +393,12 @@ func (s *Source) exchange(ctx context.Context) (string, time.Time, error) {
 			code, providers.ErrForbidden)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponse+1))
+	if ctx.Err() != nil {
+		// The end of the exchange interrupted the read: report that end, not a read error.
+		return "", time.Time{}, ctxError(ctx)
+	}
 	if err != nil || len(data) > maxTokenResponse {
 		return "", time.Time{}, &providers.RetryableError{Err: errors.New("sts: the answer of Google STS could not be read")}
-	}
-	if ctx.Err() != nil {
-		// A body read whole after the end is not taken either.
-		return "", time.Time{}, ctxError(ctx)
 	}
 	var body struct {
 		AccessToken     string `json:"access_token"`
@@ -401,12 +413,15 @@ func (s *Source) exchange(ctx context.Context) (string, time.Time, error) {
 	}
 	lifetime := time.Duration(min(body.ExpiresIn, int64(maxLifetime/time.Second))) * time.Second
 	refreshAt := start.Add(lifetime - refreshMargin(lifetime))
-	if !s.now().Before(refreshAt) {
+	projRefresh := projectionRefreshAt(start, projectionExp, hasProjectionExp)
+	if !s.now().Before(refreshAt) || (projRefresh.After(start) && !s.now().Before(projRefresh)) {
 		// The lifetime counts from the request, so a slow answer has used part of it: a token already expired
-		// or inside its refresh margin is not handed out.
+		// or inside its refresh margin is not handed out. The same holds for the projected token it was
+		// exchanged for, when that was still usable at the request: its expiry is a bound too. A projection
+		// already expired at the request is left to STS and is never cached.
 		return "", time.Time{}, &providers.RetryableError{Err: errors.New("sts: the access token was stale when it arrived")}
 	}
-	return body.AccessToken, earlier(refreshAt, projectionRefreshAt(start, projectionExp, hasProjectionExp)), nil
+	return body.AccessToken, earlier(refreshAt, projRefresh), nil
 }
 
 func earlier(a, b time.Time) time.Time {
@@ -428,22 +443,16 @@ func projectionRefreshAt(start, exp time.Time, hasExp bool) time.Time {
 }
 
 // projectionExpiry reads the exp claim of the projected token without verifying the token (STS does that).
-// The payload has already been bounded by the size of the token file. An exp that is missing, not a number
+// It reads the same strict parse as the subject and audience checks, so the exact name exp is the one used. An exp that is missing, not a number
 // or not finite is not readable. Nothing of the token is returned in an error or logged.
 func projectionExpiry(tok string) (time.Time, bool) {
-	payload, ok := jwtPayload(tok)
-	if !ok {
-		return time.Time{}, false
-	}
-	var claims struct {
-		Exp *float64 `json:"exp"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == nil ||
-		math.IsNaN(*claims.Exp) || math.IsInf(*claims.Exp, 0) {
+	_, _, exp, ok := decodeAllClaims(tok)
+	secs, isNumber := exp.(float64)
+	if !ok || !isNumber || math.IsNaN(secs) || math.IsInf(secs, 0) {
 		return time.Time{}, false
 	}
 	// Clamped to a range time.Unix and Duration arithmetic hold: 0 (1970) to about 36000 years.
-	secs := min(max(*claims.Exp, 0), 1<<40)
+	secs = min(max(secs, 0), 1<<40)
 	return time.Unix(int64(secs), 0), true
 }
 
@@ -470,13 +479,20 @@ func (s *Source) checkAssertion(tok string) error {
 // padding. The payload must be one JSON object with no repeated name; names are matched exactly, so no
 // spelling another parser would read differently is taken. aud is a string or an array of strings.
 func decodeClaims(tok string) (sub string, auds []string, ok bool) {
+	sub, auds, _, ok = decodeAllClaims(tok)
+	return sub, auds, ok
+}
+
+// decodeAllClaims is decodeClaims that also returns the value of the exact name exp (nil when absent or
+// null), read by the same strict parse, so the expiry the cache follows is the one that was checked.
+func decodeAllClaims(tok string) (sub string, auds []string, exp any, ok bool) {
 	payload, ok := jwtPayload(tok)
 	if !ok {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	dec := json.NewDecoder(bytes.NewReader(payload))
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	seen := map[string]bool{}
 	var haveSub bool
@@ -484,31 +500,33 @@ func decodeClaims(tok string) (sub string, auds []string, ok bool) {
 		t, err := dec.Token()
 		name, isName := t.(string)
 		if err != nil || !isName || seen[name] {
-			return "", nil, false
+			return "", nil, nil, false
 		}
 		seen[name] = true
 		var v any
 		if err := dec.Decode(&v); err != nil {
-			return "", nil, false
+			return "", nil, nil, false
 		}
 		switch name {
 		case "sub":
 			if sub, haveSub = v.(string); !haveSub {
-				return "", nil, false
+				return "", nil, nil, false
 			}
+		case "exp":
+			exp = v
 		case "aud":
 			if auds, ok = audiences(v); !ok {
-				return "", nil, false
+				return "", nil, nil, false
 			}
 		}
 	}
 	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return "", nil, false
+		return "", nil, nil, false
 	}
-	return sub, auds, haveSub
+	return sub, auds, exp, haveSub
 }
 
 // jwtPayload returns the decoded payload of a compact JWT, whose bytes are all base64url or dots.

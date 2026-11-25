@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -474,11 +475,28 @@ func TestClientRefusesProxiesRedirectsAndPrivateAddresses(t *testing.T) {
 		}
 	}
 
-	// End to end: the real client sends nothing to a loopback server.
+	// End to end: the real client sends nothing to a loopback server. The server's certificate is trusted, so
+	// the dial guard is what stops the request: with the guard removed the same client reaches the handler.
 	var n atomic.Int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { n.Add(1) }))
 	defer srv.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	tr.TLSClientConfig.RootCAs = pool
 	s.tokenURL = srv.URL + "/v1/token"
+
+	unguarded := tr.Clone()
+	unguarded.DialContext = nil
+	probe, err := newSource(cfg, unguarded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe.tokenURL = s.tokenURL
+	if _, err := probe.Token(context.Background()); n.Load() != 1 {
+		t.Fatalf("control: the unguarded client sent %d requests (err %v), so this test cannot show the guard", n.Load(), err)
+	}
+	n.Store(0)
+
 	_, err = s.Token(context.Background())
 	if !providers.IsRetryable(err) || n.Load() != 0 {
 		t.Errorf("err = %v, %d requests reached a loopback address", err, n.Load())
@@ -920,16 +938,24 @@ func TestNothingLeaksToErrorsOrLogs(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags); slog.SetDefault(prevSlog) })
 
 	var status atomic.Int64
-	s, _, cfg := harness(t, func(rw http.ResponseWriter, r *http.Request) {
+	var valid atomic.Bool
+	s, n, cfg := harness(t, func(rw http.ResponseWriter, r *http.Request) {
 		echo := r.PostFormValue("subject_token")
+		if valid.Load() {
+			_, _ = io.WriteString(rw, stsAnswer(3600))
+			return
+		}
 		rw.WriteHeader(int(status.Load()))
 		_, _ = io.WriteString(rw, bodyMark+" "+echo+" "+issuedMark)
 	})
-	for _, code := range []int{400, 401, 403, 404, 408, 429, 500, 502, 200} {
+	for i, code := range []int{400, 401, 403, 404, 408, 429, 500, 502, 200} {
 		status.Store(int64(code))
 		_, err := s.Token(context.Background())
 		if err == nil {
 			t.Fatalf("status %d: no error", code)
+		}
+		if int(n.Load()) != i+1 {
+			t.Fatalf("status %d: %d requests reached the server, want %d", code, n.Load(), i+1)
 		}
 		assertNoLeak(t, err, cfg)
 	}
@@ -939,6 +965,19 @@ func TestNothingLeaksToErrorsOrLogs(t *testing.T) {
 	_ = os.Remove(cfg.TokenFile)
 	_, err = s.Token(context.Background())
 	assertNoLeak(t, err, cfg)
+
+	// A valid answer: the token is returned and cached, and nothing is logged.
+	writeFile(t, cfg.TokenFile, goodJWT())
+	valid.Store(true)
+	before := n.Load()
+	for range 2 {
+		if tok, err := s.Token(context.Background()); err != nil || tok != issuedMark {
+			t.Fatalf("valid answer: %q, %v", tok, err)
+		}
+	}
+	if n.Load() != before+1 {
+		t.Errorf("valid answer: %d requests, want 1", n.Load()-before)
+	}
 
 	if logs.Len() != 0 {
 		t.Errorf("the token source wrote to a log: %d bytes", logs.Len())
@@ -1249,7 +1288,7 @@ func (b *stallBody) Close() error { return nil }
 // A deadline or a cancellation that ends the read of a refusal body is reported as that end, not as the
 // refusal.
 func TestEndDuringRefusalBodyIsNotTheRefusal(t *testing.T) {
-	for _, code := range []int{http.StatusForbidden, http.StatusBadRequest, http.StatusServiceUnavailable} {
+	for _, code := range []int{http.StatusOK, http.StatusForbidden, http.StatusBadRequest, http.StatusServiceUnavailable} {
 		t.Run(fmt.Sprint(code, " deadline"), func(t *testing.T) {
 			s, err := newSource(testConfig(t), rtFunc(func(r *http.Request) (*http.Response, error) {
 				return okResponse(r, code, &stallBody{ctx: r.Context(), reading: make(chan struct{})})
@@ -1341,5 +1380,147 @@ func TestOversizedAnswerIsStoppedByTheReadLimit(t *testing.T) {
 	}
 	if tok, err := serve(t, maxTokenResponse); err != nil || tok != issuedMark {
 		t.Errorf("an answer of exactly the limit: Token = %q, %v", tok, err)
+	}
+}
+
+// The cache follows the exp this package read with the exact name, not one that encoding/json would take
+// for another spelling: a later EXP, valid or not, must not lengthen the life of the cached token.
+func TestExpiryIsReadByExactNameOnly(t *testing.T) {
+	start := time.Now().Truncate(time.Second)
+	short := start.Add(30 * time.Second).Unix()
+	for name, tc := range map[string]struct {
+		payload string
+		refresh time.Duration
+	}{
+		"exp then EXP":   {fmt.Sprintf(`{"sub":%q,"aud":[%q],"exp":%d,"EXP":%d}`, testSubject, testProjection, short, start.Add(2*time.Hour).Unix()), 15 * time.Second},
+		"EXP not a time": {fmt.Sprintf(`{"sub":%q,"aud":[%q],"exp":%d,"EXP":"x"}`, testSubject, testProjection, short), 15 * time.Second},
+		"lone Exp":       {fmt.Sprintf(`{"sub":%q,"aud":[%q],"Exp":%d}`, testSubject, testProjection, start.Add(2*time.Hour).Unix()), unknownProjectionLifetime},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, n := countingSource(t, 3600, encodeJWT(tc.payload))
+			now := start
+			s.now = func() time.Time { return now }
+			if _, err := s.Token(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			now = start.Add(tc.refresh - time.Nanosecond)
+			if _, err := s.Token(context.Background()); err != nil || n.Load() != 1 {
+				t.Fatalf("replaced early: requests %d, err %v", n.Load(), err)
+			}
+			now = start.Add(tc.refresh)
+			if _, err := s.Token(context.Background()); err != nil || n.Load() != 2 {
+				t.Errorf("not replaced at %v: requests %d, err %v", tc.refresh, n.Load(), err)
+			}
+		})
+	}
+}
+
+// A projection that expires while the answer is on the way gives no token, whatever lifetime STS names.
+func TestTokenIsRefusedWhenTheProjectionExpiredInTransit(t *testing.T) {
+	base := time.Now().Truncate(time.Second)
+	var elapsed atomic.Int64
+	cfg := testConfig(t)
+	writeFile(t, cfg.TokenFile, jwtExpiringAt(base.Add(10*time.Second).Unix()))
+	s, err := newSource(cfg, rtFunc(func(r *http.Request) (*http.Response, error) {
+		elapsed.Store(int64(15 * time.Second))
+		return okResponse(r, http.StatusOK, io.NopCloser(strings.NewReader(stsAnswer(3600))))
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return base.Add(time.Duration(elapsed.Load())) }
+	tok, err := s.Token(context.Background())
+	if tok != "" || !providers.IsRetryable(err) {
+		t.Fatalf("Token = %q, %v, want an empty token and a retryable error", tok, err)
+	}
+	assertNoLeak(t, err, cfg)
+	s.mu.Lock()
+	cached := s.token
+	s.mu.Unlock()
+	if cached != "" {
+		t.Error("a token for an expired projection was cached")
+	}
+}
+
+// Formatting a Source never shows the cached token or the file path, in any verb, and does not read the
+// fields a refresh writes.
+func TestSourceFormatsAsAPlaceholder(t *testing.T) {
+	s, _, cfg := harness(t, func(rw http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(rw, stsAnswer(3600)) })
+	if _, err := s.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	logger.Info("source", "source", s)
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x"} {
+		out := fmt.Sprintf(verb, s) + " " + logs.String()
+		for _, secret := range []string{issuedMark, cfg.TokenFile} {
+			if strings.Contains(out, secret) {
+				t.Errorf("%s shows %q", verb, secret)
+			}
+		}
+	}
+}
+
+// The token file is read at each exchange: a kubelet rotation (the ..data symlink swapped to a new
+// directory) is what the next exchange sends.
+func TestRotatedTokenFileIsUsedByTheNextExchange(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"v1", "v2"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jwt1 := encodeJWT(claimsWithExp(time.Now().Add(24 * time.Hour).Unix()))
+	jwt2 := encodeJWT(strings.Replace(claimsWithExp(time.Now().Add(24*time.Hour).Unix()), claimMark, "SECOND", 1))
+	if jwt1 == jwt2 {
+		t.Fatal("the two projected tokens are equal")
+	}
+	writeFile(t, filepath.Join(dir, "v1", "token"), jwt1)
+	writeFile(t, filepath.Join(dir, "v2", "token"), jwt2)
+	swap := func(to string) {
+		tmp := filepath.Join(dir, "..data_tmp")
+		_ = os.Remove(tmp)
+		if err := os.Symlink(to, tmp); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, filepath.Join(dir, "..data")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	swap("v1")
+	if err := os.Symlink(filepath.Join("..data", "token"), filepath.Join(dir, "token")); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var sent []string
+	cfg := testConfig(t)
+	cfg.TokenFile = filepath.Join(dir, "token")
+	s, err := newSource(cfg, rtFunc(func(r *http.Request) (*http.Response, error) {
+		_ = r.ParseForm()
+		mu.Lock()
+		sent = append(sent, r.PostForm.Get("subject_token"))
+		mu.Unlock()
+		return okResponse(r, http.StatusOK, io.NopCloser(strings.NewReader(stsAnswer(3600))))
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	if _, err := s.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	swap("v2")
+	now = now.Add(time.Minute)
+	if _, err := s.Token(context.Background()); err != nil || len(sent) != 1 {
+		t.Fatalf("the cache was not served inside its life: %d exchanges, err %v", len(sent), err)
+	}
+	now = now.Add(time.Hour)
+	if _, err := s.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 || sent[0] != jwt1 || sent[1] != jwt2 {
+		t.Errorf("exchanges sent the projected tokens %v, want the first then the rotated one", len(sent))
 	}
 }

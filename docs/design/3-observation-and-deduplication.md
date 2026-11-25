@@ -606,12 +606,12 @@ flowchart TD
 
 <span class="sw-status sw-built">built</span> in the analysis loop, which the analyzer starts with `--triage-model` and runs with `--escalation-model` ([#76](https://github.com/shadewright-labs/shadewright/issues/76)). Escalation runs on deterministic signals only:
 
-- the context builder truncated the context or could not fetch a source; or
+- the context builder truncated the context, the analyzer truncated appended text, or a source could not be fetched; or
 - the small model's output failed schema validation after one retry.
 
 The stronger model then gets the read tools, within the same budgets. Since an Incident is analyzed at most once per cooldown and an analysis escalates at most once, that is at most once per incident fingerprint per cooldown window. Each tool call is bound to the namespace of the Incident's subject: a call that names another namespace is refused before the tool reads. `get_delivery_status` is not offered yet: it reads Flux objects only in watched namespaces, with the Flux module's grant ([#562](https://github.com/shadewright-labs/shadewright/issues/562)), and a call bound to the subject's namespace would reach only a unit kept there. An answer about a pod that the context builder did not attribute to the subject is labelled `pod outside the incident's attributed pods`, so a neighbour's data is not read as the target's evidence. An invalid escalated result is handed off, never retried.
 
 What does not count, because the signal is controlled by someone who can write to a watched namespace:
 
-- "Truncated" means the context builder's own bound on the whole context only. A source excerpt cut to its own bound, such as a log excerpt marked truncated or with its end missing (section 4), does not count, because the volume of logs is controlled by anyone who can write logs in a watched namespace.
+- "Truncated" means the context builder's bound on the whole context or the analyzer's cut of appended text. A source excerpt cut to its own bound, such as a log excerpt marked truncated or with its end missing (section 4), does not count, because the volume of logs is controlled by anyone who can write logs in a watched namespace.
 - A log excerpt marked uncertain about the pod or container instance it came from (section 4) does not count either: restarts and recreation are controlled by whoever runs workloads there.

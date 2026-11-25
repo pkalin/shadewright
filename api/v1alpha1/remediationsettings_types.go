@@ -223,8 +223,8 @@ type AnalysisSettings struct {
 	// sent to the model in one analysis. 4096 to 49152; the default and maximum of 49152 (48 KiB) is roughly
 	// 12,000 tokens. The section bounds (summary, status, logs, metrics, Git, policy) stay fixed and add up
 	// to 48 KiB of block text; when the rendered message exceeds maxContextBytes (from a lower bound, escaping
-	// or block tags), the builder cuts the context to fit and marks it truncated, which is an escalation
-	// trigger (ADR-0023).
+	// or block tags), a cut by the context builder or by the analyzer while appending a reviewer hint or
+	// readiness notice marks the context truncated, which is an escalation trigger (ADR-0023).
 	// +kubebuilder:validation:Minimum=4096
 	// +kubebuilder:validation:Maximum=49152
 	// +kubebuilder:default=49152

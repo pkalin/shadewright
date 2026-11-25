@@ -88,6 +88,7 @@ The analyzer is the only component that talks to a model, and everything it send
 
 ## Amendments
 
+- 2026-11-25 (#1054): Truncation by the analyzer of text appended after the context builder counts as the same escalation trigger as truncation by the builder.
 - 2026-11-04: [ADR-0003](0003-gitops-only-typed-remediation.md) links here and no longer lists `submit_remediation_proposal` among the model's tools. Nothing in this ADR changed ([#244](https://github.com/shadewright-labs/shadewright/issues/244)).
 - 2026-11-04: Decision 8 now says the Foundry adapters are planned; only the interface and a fake exist. Nothing else changed ([#245](https://github.com/shadewright-labs/shadewright/issues/245)).
 - 2026-11-04: Decides the unit that decision 9 left open: the daily spend limit is a count of tokens per model deployment and UTC day, set in `RemediationSettings`; where the spend is counted is still open (#208). Decision 6 now states the call bound it implied (at most `maxToolSteps` + 1 escalated turns, no retry of an invalid escalated result, so at most 3 + `maxToolSteps` calls per analysis). Nothing is enforced by this, and nothing else changed ([#68](https://github.com/shadewright-labs/shadewright/issues/68)).

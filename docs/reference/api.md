@@ -42,7 +42,7 @@ Validation rules:
 | --- | --- | --- | --- |
 | `metadata` | [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta) | No | Standard object metadata. |
 | `spec` | [IncidentSpec](#incidentspec) | Yes | spec identifies the incident.<br>Rule: spec is immutable; a different symptom is a new Incident<br>Rule: occurrenceNumber and previousIncident are set together<br>Rule: previousIncident must be the occurrence before this one of the same fingerprint |
-| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved<br>Rule: cause cannot change from true to false<br>Rule: absorbed is allowed only when cause is true<br>Rule: absorbedOccurrences is allowed only when cause is true<br>Rule: occurrencesDroppedThrough only moves forward<br>Rule: absorbedOccurrencesDroppedThrough only moves forward<br>Rule: revertsProposed only grows: an entry is never removed, its state only moves from Pending to Created or Abandoned, and its reason never changes<br>Rule: foldedInto is allowed only in phase Resolved<br>Rule: foldedInto cannot change to another Incident: once set it may only be cleared<br>Rule: foldedInto is cleared only together with a move to a phase other than Resolved<br>Rule: folded cannot change from true to false |
+| `status` | [IncidentStatus](#incidentstatus) | No | status is the deduplication state.<br>Rule: resolvedTime cannot change while the phase stays Resolved<br>Rule: cause cannot change from true to false<br>Rule: cause and consequence cannot both be true<br>Rule: absorbed is allowed only when cause is true<br>Rule: absorbedOccurrences is allowed only when cause is true<br>Rule: occurrencesDroppedThrough only moves forward<br>Rule: absorbedOccurrencesDroppedThrough only moves forward<br>Rule: revertsProposed only grows: an entry is never removed, its state only moves from Pending to Created or Abandoned, and its reason never changes<br>Rule: foldedInto is allowed only in phase Resolved<br>Rule: foldedInto cannot change to another Incident: once set it may only be cleared<br>Rule: foldedInto is cleared only together with a move to a phase other than Resolved<br>Rule: folded cannot change from true to false |
 
 ## RemediationPolicy
 
@@ -176,7 +176,7 @@ opening one of their own (ADR-0039 point 16). The values come from the fixed tab
 the cluster, so the tally carries no text an Event or a pod writes.
 
 - Underlying type: string
-- One of `BackOff`, `Unhealthy`
+- One of `BackOff`, `Unhealthy`, `Failed`
 
 Used by: [AbsorbedTally](#absorbedtally).
 
@@ -184,6 +184,7 @@ Used by: [AbsorbedTally](#absorbedtally).
 | --- | --- |
 | `BackOff` | AbsorbedBackOff is a kubelet BackOff of a container whose pod status shows a cause. |
 | `Unhealthy` | AbsorbedUnhealthy is a kubelet probe failure of a container whose pod status shows a cause. |
+| `Failed` | AbsorbedFailed counts kubelet Failed events with a short pull error on a verified container in a current image-pull wait. See IncidentSpec.PullCauseFingerprint for the exact notes. |
 
 ### AbsorbedTally
 
@@ -195,7 +196,7 @@ Used by: [IncidentStatus](#incidentstatus).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `reason` | [AbsorbedReason](#absorbedreason) | Yes | reason is the consequence reason counted.<br>One of `BackOff`, `Unhealthy` |
+| `reason` | [AbsorbedReason](#absorbedreason) | Yes | reason is the consequence reason counted.<br>One of `BackOff`, `Unhealthy`, `Failed` |
 | `count` | integer | Yes | count is the number of occurrences of the reason counted on this Incident, counting event series increments like status.count. It saturates at 1,000,000.<br>Maximum: 1000000<br>Minimum: 0 |
 | `lastSeen` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | Yes | lastSeen is when the latest observation of the reason arrived. |
 
@@ -797,6 +798,7 @@ Used by: [Incident](#incident).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `fingerprint` | string | Yes | fingerprint is the hash of cluster, namespace, owner, reason, action, type, reporting controller and normalized symptom.<br>Maximum length: 71<br>Pattern: `^sha256:[0-9a-f]{64}$` |
+| `pullCauseFingerprint` | string | No | pullCauseFingerprint identifies the pull cause for a kubelet Failed event on a verified container currently in an image-pull wait. Only the exact notes "Error: ErrImagePull", "Error: ImagePullBackOff" and "Error: InvalidImageName" qualify. The cause key uses the image from the pod spec byte for byte. The analyzer folds this Incident only into a cause with this fingerprint. Detailed "Failed to pull image" events have no link and stay separate.<br>Maximum length: 71<br>Pattern: `^sha256:[0-9a-f]{64}$` |
 | `subject` | [ObjectRef](#objectref) | Yes | subject is the object the symptoms are correlated to: the owning workload when there is one. |
 | `reason` | string | Yes | reason is the event reason or status reason, for example FailedScheduling or OOMKilled.<br>Maximum length: 128<br>Minimum length: 1 |
 | `type` | string | No | type is the event type.<br>Default: `Warning`<br>One of `Normal`, `Warning` |
@@ -814,6 +816,7 @@ Validation rules:
 
 - resolvedTime cannot change while the phase stays Resolved: `!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)`
 - cause cannot change from true to false: `!(has(oldSelf.cause) && oldSelf.cause) || (has(self.cause) && self.cause)`
+- cause and consequence cannot both be true: `!(has(self.cause) && self.cause && has(self.consequence) && self.consequence)`
 - absorbed is allowed only when cause is true: `!has(self.absorbed) || size(self.absorbed) == 0 || (has(self.cause) && self.cause)`
 - absorbedOccurrences is allowed only when cause is true: `!has(self.absorbedOccurrences) || size(self.absorbedOccurrences) == 0 || (has(self.cause) && self.cause)`
 - occurrencesDroppedThrough only moves forward: `!has(oldSelf.occurrencesDroppedThrough) || (has(self.occurrencesDroppedThrough) && self.occurrencesDroppedThrough >= oldSelf.occurrencesDroppedThrough)`
@@ -835,7 +838,8 @@ Used by: [Incident](#incident).
 | `occurrences` | [OccurrenceRecord](#occurrencerecord) array | No | occurrences are the newest occurrences counted for this incident, newest first, at most 32: for each, the highest total the cluster reported that was counted, and when it began. After a restart the analyzer reads them to count only what is new. Older ones are dropped.<br>Maximum items: 32<br>List type: atomic |
 | `occurrencesDroppedThrough` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | occurrencesDroppedThrough is when the newest occurrence dropped from occurrences began. An occurrence with no record that began no later than this is treated as counted in full, so the bound never counts one twice. It only moves forward. |
 | `containers` | [Name](#name) array | No | containers are the names of the containers whose observations this Incident counted, at most 8 (ADR-0039 point 8), written in the status write that counts an observation naming one. A name that is not a DNS label, or one past the eighth, is left out and logged. The late-cause fold compares them between a consequence Incident and its cause's Incident.<br>Maximum items: 8<br>Maximum length: 63<br>Minimum length: 1<br>Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`<br>List type: set |
-| `cause` | boolean | No | cause is true when the Incident was opened or counted by a pod-status observation of class cause, which the kubelet wrote: an OOM kill, a non-zero exit (not of a pod being deleted, nor of one whose status.reason is set, such as an evicted pod) or a waiting reason (ADR-0039 points 3 and 8, point 3 amended 2026-11-20 and narrowed 2026-11-21). Only such an Incident takes the evidence of a consequence or folds a consequence Incident: a non-zero exit's takes BackOff only, an OOM kill's or a wait's BackOff and Unhealthy. An Event never sets it. Once true it stays true, and the status cannot be removed while it is. |
+| `cause` | boolean | No | cause is true when the Incident was opened or counted by a pod-status observation of class cause, which the kubelet wrote: an OOM kill, a non-zero exit (not of a pod being deleted, nor of one whose status.reason is set, such as an evicted pod) or a waiting reason (ADR-0039 points 3 and 8, point 3 amended 2026-11-20 and narrowed 2026-11-21). Only such an Incident takes the evidence of a consequence or folds a consequence Incident: a non-zero exit's takes BackOff only, an OOM kill's or a configuration wait's BackOff and Unhealthy, and an image-pull wait's (ImagePullBackOff, ErrImagePull, InvalidImageName) BackOff, Unhealthy and qualifying Failed events (point 12). An Event never sets it. Once true it stays true, and the status cannot be removed while it is. |
+| `consequence` | boolean | No | consequence records that the analyzer classified all observations counted here as consequences. Older status writers may omit it. The late fold matches spec.pullCauseFingerprint. |
 | `absorbed` | [AbsorbedTally](#absorbedtally) array | No | absorbed is the tally of the consequence observations this Incident took as evidence of its cause, one entry per reason, at most 8 (ADR-0039 point 16). They change neither count nor lastSeen, and the analysis trigger and the quiet rule do not read them. Allowed only when cause is true.<br>Maximum items: 8<br>List type: map<br>List key: `reason` |
 | `absorbedOccurrences` | [OccurrenceRecord](#occurrencerecord) array | No | absorbedOccurrences are the newest occurrences counted in absorbed, newest first, at most 32, kept apart from occurrences so that an absorbed observation never makes the Incident due for analysis (ADR-0039 point 16). After a restart they keep an absorbed occurrence from being counted twice. Older ones are dropped. Allowed only when cause is true.<br>Maximum items: 32<br>List type: atomic |
 | `absorbedOccurrencesDroppedThrough` | [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#time-v1-meta) | No | absorbedOccurrencesDroppedThrough is when the newest occurrence dropped from absorbedOccurrences began, the drop mark of occurrencesDroppedThrough for the absorbed list. It answers only for consequences linked to this Incident's fingerprint, and only moves forward. |

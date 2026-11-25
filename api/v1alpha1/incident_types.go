@@ -34,6 +34,16 @@ type IncidentSpec struct {
 	// +required
 	Fingerprint string `json:"fingerprint"`
 
+	// pullCauseFingerprint identifies the pull cause for a kubelet Failed event on a verified container
+	// currently in an image-pull wait. Only the exact notes "Error: ErrImagePull", "Error: ImagePullBackOff"
+	// and "Error: InvalidImageName" qualify. The cause key uses the image from the pod spec byte for byte.
+	// The analyzer folds this Incident only into a cause with this fingerprint. Detailed "Failed to pull image"
+	// events have no link and stay separate.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	// +optional
+	PullCauseFingerprint string `json:"pullCauseFingerprint,omitempty"`
+
 	// subject is the object the symptoms are correlated to: the owning workload when there is one.
 	// +required
 	Subject ObjectRef `json:"subject"`
@@ -141,13 +151,13 @@ type OccurrenceRecord struct {
 const MaxIncidentContainers = 8
 
 // MaxAbsorbedReasons is the most entries an Incident's status.absorbed keeps, one per consequence reason
-// (ADR-0039 point 16). Two reasons are used now.
+// (ADR-0039 point 16). Three reasons are used now.
 const MaxAbsorbedReasons = 8
 
 // AbsorbedReason is a consequence reason whose observations count on the Incident of their cause instead of
 // opening one of their own (ADR-0039 point 16). The values come from the fixed table of the rule, never from
 // the cluster, so the tally carries no text an Event or a pod writes.
-// +kubebuilder:validation:Enum=BackOff;Unhealthy
+// +kubebuilder:validation:Enum=BackOff;Unhealthy;Failed
 type AbsorbedReason string
 
 // The consequence reasons of ADR-0039, one per value of the AbsorbedReason enum.
@@ -156,6 +166,9 @@ const (
 	AbsorbedBackOff AbsorbedReason = "BackOff"
 	// AbsorbedUnhealthy is a kubelet probe failure of a container whose pod status shows a cause.
 	AbsorbedUnhealthy AbsorbedReason = "Unhealthy"
+	// AbsorbedFailed counts kubelet Failed events with a short pull error on a verified container in a current
+	// image-pull wait. See IncidentSpec.PullCauseFingerprint for the exact notes.
+	AbsorbedFailed AbsorbedReason = "Failed"
 )
 
 // AbsorbedTally counts the observations of one consequence reason that a cause's Incident took as evidence
@@ -180,6 +193,7 @@ type AbsorbedTally struct {
 // IncidentStatus holds the deduplication state that must survive restarts (ADR-0007). No logs or transcripts.
 // +kubebuilder:validation:XValidation:rule="!(has(oldSelf.phase) && oldSelf.phase == 'Resolved' && has(oldSelf.resolvedTime) && has(self.phase) && self.phase == 'Resolved') || (has(self.resolvedTime) && self.resolvedTime == oldSelf.resolvedTime)",message="resolvedTime cannot change while the phase stays Resolved"
 // +kubebuilder:validation:XValidation:rule="!(has(oldSelf.cause) && oldSelf.cause) || (has(self.cause) && self.cause)",message="cause cannot change from true to false"
+// +kubebuilder:validation:XValidation:rule="!(has(self.cause) && self.cause && has(self.consequence) && self.consequence)",message="cause and consequence cannot both be true"
 // +kubebuilder:validation:XValidation:rule="!has(self.absorbed) || size(self.absorbed) == 0 || (has(self.cause) && self.cause)",message="absorbed is allowed only when cause is true"
 // +kubebuilder:validation:XValidation:rule="!has(self.absorbedOccurrences) || size(self.absorbedOccurrences) == 0 || (has(self.cause) && self.cause)",message="absorbedOccurrences is allowed only when cause is true"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.occurrencesDroppedThrough) || (has(self.occurrencesDroppedThrough) && self.occurrencesDroppedThrough >= oldSelf.occurrencesDroppedThrough)",message="occurrencesDroppedThrough only moves forward"
@@ -237,10 +251,17 @@ type IncidentStatus struct {
 	// kubelet wrote: an OOM kill, a non-zero exit (not of a pod being deleted, nor of one whose status.reason is
 	// set, such as an evicted pod) or a waiting reason (ADR-0039 points 3 and 8, point 3 amended 2026-11-20 and
 	// narrowed 2026-11-21). Only such an Incident takes the evidence of a consequence or folds a consequence
-	// Incident: a non-zero exit's takes BackOff only, an OOM kill's or a wait's BackOff and Unhealthy. An Event
-	// never sets it. Once true it stays true, and the status cannot be removed while it is.
+	// Incident: a non-zero exit's takes BackOff only, an OOM kill's or a configuration wait's BackOff and Unhealthy,
+	// and an image-pull wait's (ImagePullBackOff, ErrImagePull, InvalidImageName) BackOff, Unhealthy and
+	// qualifying Failed events (point 12). An Event never sets it. Once true it stays true,
+	// and the status cannot be removed while it is.
 	// +optional
 	Cause bool `json:"cause,omitempty"`
+
+	// consequence records that the analyzer classified all observations counted here as consequences.
+	// Older status writers may omit it. The late fold matches spec.pullCauseFingerprint.
+	// +optional
+	Consequence bool `json:"consequence,omitempty"`
 
 	// absorbed is the tally of the consequence observations this Incident took as evidence of its cause, one
 	// entry per reason, at most 8 (ADR-0039 point 16). They change neither count nor lastSeen, and the analysis

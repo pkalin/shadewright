@@ -41,7 +41,9 @@ const (
 	// or a non-zero exit) or a waiting reason of [WaitingCauseReasons] (ADR-0039 point 3, amended 2026-11-20).
 	// Only an observation with [fingerprint.SourcePodStatus] has it.
 	ClassCause Class = "cause"
-	// ClassConsequence is a kubelet BackOff or Unhealthy event about a named container of the verified pod.
+	// ClassConsequence is a kubelet BackOff or Unhealthy event about a verified container, or a kubelet
+	// Failed event with a short pull error on a verified container that currently waits for its image
+	// (ADR-0039 points 2 and 12).
 	ClassConsequence Class = "consequence"
 )
 
@@ -64,6 +66,20 @@ var consequenceReasons = []string{reasonBackOff, ReasonUnhealthy}
 
 // reasonBackOff is the kubelet's reason for a container it waits to restart, or an image it waits to pull.
 const reasonBackOff = "BackOff"
+
+// reasonFailed is the kubelet's reason for a failed container action, including a failed image pull.
+const reasonFailed = "Failed"
+
+// isImagePullFailedNote reports whether the note is one of the three short pull errors
+// in ADR-0039 point 12.
+func isImagePullFailedNote(note string) bool {
+	switch note {
+	case "Error: ErrImagePull", "Error: ImagePullBackOff", "Error: InvalidImageName":
+		return true
+	default:
+		return false
+	}
+}
 
 // maxFieldPath bounds the regarding field path the collector parses: the longest valid form is
 // "spec.initContainers{" plus a 63 byte label and "}".
@@ -96,6 +112,25 @@ func namedContainer(reg corev1.ObjectReference, pod *corev1.Pod) (string, bool) 
 	return m[2], init
 }
 
+// specPullImage identifies the requested pull even when status still reports a previous image.
+func specPullImage(spec []corev1.Container, st corev1.ContainerStatus) string {
+	if w := st.State.Waiting; w != nil && causereason.IsImagePull(w.Reason) {
+		for _, c := range spec {
+			if c.Name == st.Name {
+				return c.Image
+			}
+		}
+	}
+	return ""
+}
+
+func containerSpec(pod *corev1.Pod, init bool) []corev1.Container {
+	if init {
+		return pod.Spec.InitContainers
+	}
+	return pod.Spec.Containers
+}
+
 // kubeletTime is the event's own time as its reporter wrote it (lastOccurrence without its last fallback),
 // and false when it has none: the creation timestamp is the API server's, another clock, so it does not
 // count for the kill window (ADR-0039 point 5).
@@ -111,13 +146,23 @@ func kubeletTime(ev *eventsv1.Event) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// eventClass is the class of an event observation: a consequence when the kubelet reports BackOff or Unhealthy
-// on a named container, else none. An event is never a cause, whatever its reason (ADR-0039 point 2).
-func eventClass(ev *eventsv1.Event, container string) Class {
-	if container == "" || ev.ReportingController != reportingKubelet || !slices.Contains(consequenceReasons, ev.Reason) {
+// eventClass is the class of an event observation: a consequence when the kubelet reports BackOff, Unhealthy or
+// a Failed event with a short pull error on a named container currently in an image-pull wait. An event is
+// never a cause (ADR-0039 points 2 and 12).
+func eventClass(ev *eventsv1.Event, pod *corev1.Pod, container string, init bool) Class {
+	if container == "" || ev.ReportingController != reportingKubelet {
 		return ClassNone
 	}
-	return ClassConsequence
+	if slices.Contains(consequenceReasons, ev.Reason) {
+		return ClassConsequence
+	}
+	if ev.Reason == reasonFailed && isImagePullFailedNote(ev.Note) {
+		st, _ := containerStatus(pod, container, init)
+		if specPullImage(containerSpec(pod, init), st) != "" {
+			return ClassConsequence
+		}
+	}
+	return ClassNone
 }
 
 // terminationNote is the symptom of a container termination read from pod status.
@@ -149,6 +194,25 @@ func (c *Collector) podStatusInput(pod *corev1.Pod, owner, reason, note string) 
 	}
 }
 
+// pullWaitReason groups the initial failure and the back-off for the same image.
+func pullWaitReason(reason string) string {
+	if reason == "ErrImagePull" {
+		return "ImagePullBackOff"
+	}
+	return reason
+}
+
+// waitingFingerprint groups the two phases of a pull by container and the exact spec image.
+// The observation keeps the reason and symptom the kubelet reported.
+func waitingFingerprint(input fingerprint.Observation, container, image string) string {
+	if image == "" {
+		return fingerprint.Fingerprint(input)
+	}
+	input.Reason = pullWaitReason(input.Reason)
+	input.Note = waitingNote(container, input.Reason)
+	return fingerprint.Scoped(fingerprint.Fingerprint(input), container, image)
+}
+
 // causeFingerprint returns the fingerprint of the cause pod's status shows for the named container (init or
 // not), as main reads it, or "" when it shows none (ADR-0039 point 3): a current waiting reason of
 // WaitingCauseReasons first, because it is what the container does now; otherwise an OOM kill, current or last,
@@ -166,23 +230,30 @@ func (c *Collector) podStatusInput(pod *corev1.Pod, owner, reason, note string) 
 // it went. The exits are those terminations offers with class cause (termination.class): a pod whose status.reason
 // is set offers none, and a pod being deleted offers none either (#966).
 //
+// An image-pull Failed event (reason == reasonFailed) links only to a current image-pull waiting reason of its
+// container (causereason.IsImagePull: ImagePullBackOff, ErrImagePull or InvalidImageName), never to a
+// configuration error, an OOM kill or a non-zero exit (ADR-0039 point 12, amended 2026-11-21 on #1066).
+//
 // No clock of the collector takes part. owner is the pod's verified owner UID, as for the pod's own observations,
 // and each fingerprint is the one of that cause's own observation. The terminations are matched on the
 // container's name alone, across init and app containers: the API server refuses a pod whose init and app
 // containers share a name, so a name picks one container of either list.
 func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, init bool, at time.Time,
-	hasAt, backOff bool) (fp, exit string) {
-	statuses := pod.Status.ContainerStatuses
-	if init {
-		statuses = pod.Status.InitContainerStatuses
-	}
-	i := slices.IndexFunc(statuses, func(s corev1.ContainerStatus) bool { return s.Name == container })
-	if i < 0 {
+	hasAt bool, reason string) (fp, exit string) {
+	st, found := containerStatus(pod, container, init)
+	if !found {
 		return "", ""
 	}
-	st := statuses[i]
 	if w := st.State.Waiting; w != nil && causereason.IsWaiting(w.Reason) {
-		return fingerprint.Fingerprint(c.podStatusInput(pod, owner, w.Reason, waitingNote(container, w.Reason))), ""
+		image := specPullImage(containerSpec(pod, init), st)
+		if reason == reasonFailed && image == "" {
+			return "", ""
+		}
+		input := c.podStatusInput(pod, owner, w.Reason, waitingNote(container, w.Reason))
+		return waitingFingerprint(input, container, image), ""
+	}
+	if reason == reasonFailed {
+		return "", ""
 	}
 	if !hasAt {
 		return "", ""
@@ -192,7 +263,7 @@ func (c *Collector) causeFingerprint(pod *corev1.Pod, owner, container string, i
 		fp = fingerprint.Fingerprint(c.podStatusInput(pod, owner, ReasonOOMKilled,
 			terminationNote(container, kill.ExitCode)))
 	}
-	if !backOff {
+	if reason != reasonBackOff {
 		return fp, ""
 	}
 	var newest *termination

@@ -27,9 +27,26 @@ import "slices"
 // point 3) whose Incident shows its absorbed tally (point 18).
 const OOMKilled = "OOMKilled"
 
+// imagePull are the waiting reasons of a container that cannot get its image (ADR-0039 points 3 and 12,
+// amended 2026-11-21 on #1066): a subset of waiting. Configuration errors (CreateContainerConfigError,
+// CreateContainerError) are not image pulls.
+var imagePull = [...]string{
+	"ImagePullBackOff", "ErrImagePull", "InvalidImageName",
+}
+
 // waiting are the waiting reasons of Waiting, in that order.
 var waiting = [...]string{
 	"ImagePullBackOff", "ErrImagePull", "InvalidImageName", "CreateContainerConfigError", "CreateContainerError",
+}
+
+// ImagePull returns a copy of the waiting reasons of a container that cannot get its image.
+func ImagePull() []string {
+	return slices.Clone(imagePull[:])
+}
+
+// IsImagePull reports whether reason is one of ImagePull.
+func IsImagePull(reason string) bool {
+	return slices.Contains(imagePull[:], reason)
 }
 
 // Waiting returns a copy of the waiting reasons of a container's status that are a cause (ADR-0039 point 3): an

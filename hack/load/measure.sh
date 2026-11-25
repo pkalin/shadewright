@@ -50,6 +50,8 @@ NS=shadewright-system
 REL=shadewright
 CTX="kind-${CLUSTER}"
 export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.4}"
+export GOFLAGS=-mod=readonly
+export GOWORK=off
 export KUBECONFIG="${WORK}/kubeconfig"
 
 make kind >/dev/null

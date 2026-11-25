@@ -26,6 +26,10 @@ on:
 
 permissions: {}
 
+env:
+  GOFLAGS: -mod=readonly
+  GOWORK: off
+
 concurrency:
   group: evaluation
   cancel-in-progress: false

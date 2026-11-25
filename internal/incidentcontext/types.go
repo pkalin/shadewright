@@ -28,7 +28,7 @@ import (
 // build the total from maxContextBytes of RemediationSettings ([Builder.BuildWithin], #981); making the
 // section bounds settings is #372.
 const (
-	// DefaultTotalBytes bounds the whole context, the sum of the text of every block.
+	// DefaultTotalBytes bounds the whole rendered context message (preamble, tags, notices and escaped text).
 	DefaultTotalBytes = 48 << 10
 	// DefaultSummaryBytes bounds the summary section.
 	DefaultSummaryBytes = 2 << 10
@@ -54,8 +54,9 @@ const (
 	MaxLimitBytes   = 256 << 10
 )
 
-// Limits are the byte bounds of the context and of each section. They count the bytes of the blocks' text,
-// not the fixed labels or the delimiters the prompt puts around the blocks.
+// Limits are the byte bounds of the context and of each section. The section bounds count the text of each
+// section's blocks; [Limits.Total] counts the rendered context message sent to the model ([Context.Size]):
+// the preamble, the tags and notices of every block, and each block's escaped text (#1054).
 type Limits struct {
 	Total   int
 	Summary int
@@ -66,9 +67,9 @@ type Limits struct {
 	Policy  int
 }
 
-// DefaultLimits returns the default bounds. The sections, Git and policy bounds included, add up to the total, so with these
-// bounds the total cut is a backstop; it marks the context truncated when a smaller total (maxContextBytes) or
-// sections that add up to more are configured.
+// DefaultLimits returns the default bounds. The section bounds, Git and policy bounds included, add up to
+// [DefaultTotalBytes] of block text; the total cut marks the context truncated when the rendered message
+// exceeds [Limits.Total] (because of a smaller maxContextBytes, escaping or wrapping, or larger section bounds).
 func DefaultLimits() Limits {
 	return Limits{
 		Total: DefaultTotalBytes, Summary: DefaultSummaryBytes, Status: DefaultStatusBytes,
@@ -199,6 +200,8 @@ type Block struct {
 	Values []string
 	// headLen is the length of the header lines at the start of Text that a cut keeps (log blocks).
 	headLen int
+	// requiredText is the redacted title, if any, and notice that survive a cut when redaction withheld a read.
+	requiredText string
 	// unitAt, when not zero, is where the unit at the end of Text that a cut removes whole starts: the
 	// absorbed tally of a summary (#796).
 	unitAt int
@@ -238,8 +241,8 @@ func (b *Block) addLabel(l Label) {
 type Context struct {
 	// Blocks are in section order: summary, status, logs, metrics, Git, policy bounds.
 	Blocks []Block
-	// Truncated means the builder cut the context to [Limits.Total]: an escalation signal. A section cut to its
-	// own bound does not set it.
+	// Truncated means the context or appended text was cut to fit the message bound, an escalation signal.
+	// A section cut to its own bound does not set it.
 	Truncated bool
 	// FailedSources are the sections whose configured source failed, each once: an escalation signal. A
 	// source that is not configured is not listed.
@@ -260,6 +263,8 @@ type Context struct {
 	// previous maxReplicaCount of a proposal, and whether the scaler is ready (kedaready.Readiness). Only the
 	// fields of the status section are shown to the model, never this object.
 	ScaledObject map[string]any
+	// totalLimit is the rendered byte bound applied during the build.
+	totalLimit int
 }
 
 // TemplateContainer is one container of the subject's pod template, as the API server returned it.
@@ -270,11 +275,12 @@ type TemplateContainer struct {
 	MemoryLimit *resource.Quantity
 }
 
-// Size is the number of bytes [Limits.Total] bounds: the text of every block.
+// Size is the number of bytes [Limits.Total] bounds: the rendered context message ([Context.Render]),
+// preamble, tags, notices and escaped block text included (#1054).
 func (c *Context) Size() int {
-	n := 0
-	for _, b := range c.Blocks {
-		n += len(b.Text)
+	n := len(ContextPreamble)
+	for i, b := range c.Blocks {
+		n += renderedBlockLen(i, b)
 	}
 	return n
 }

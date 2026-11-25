@@ -84,8 +84,8 @@ limitations under the License.
 // a log excerpt keeps its tail, the newest lines, which for a previous instance are the lines just before its
 // termination.
 //
-// Escalation (design 3.3, ADR-0023 decision 6): [Context.Escalate] is true only when the builder cut the whole
-// context to [Limits.Total] ([Context.Truncated]) or a source that is configured failed
+// Escalation (design 3.3, ADR-0023 decision 6): [Context.Escalate] is true when the context or appended text
+// was cut to the total bound ([Context.Truncated]) or a source that is configured failed
 // ([Context.FailedSources]). A section cut to its own bound, a log excerpt the source marked truncated, with
 // its end missing or uncertain about its instance, a partial metrics answer and an uncertain or capped pod set
 // are labels on the evidence only, because whoever runs workloads in a watched namespace controls them. A

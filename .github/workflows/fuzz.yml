@@ -18,6 +18,8 @@ permissions: {}
 
 env:
   FUZZTIME: 4m
+  GOFLAGS: -mod=readonly
+  GOWORK: off
 
 jobs:
   targets:

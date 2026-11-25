@@ -11,6 +11,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+export GOFLAGS=-mod=readonly
+export GOWORK=off
+
 pkg=./cmd/kubectl-shadewright
 module="$(go list -m)"
 

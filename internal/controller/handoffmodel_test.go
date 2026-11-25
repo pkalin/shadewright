@@ -2769,14 +2769,17 @@ func (m *hmWorld) liveness() {
 		return
 	}
 	for _, who := range []string{hmPred, hmRepl} {
-		if x := m.get(who); x != nil && ptr.Deref(x.Status.HoldsTarget, false) {
-			if name := m.keptWhileMissing(who, x); name != "" {
-				m.expectMissingShown(who, x, name)
-				continue
-			}
-			m.failAbout("P6", aboutHolder+who, "%s, and the %s still holds the target lock after the settling run (%s)", why,
-				who, describe(x))
+		x := m.get(who)
+		if x == nil || !ptr.Deref(x.Status.HoldsTarget, false) ||
+			(!x.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(x, FinalizerName)) {
+			continue
 		}
+		if name := m.keptWhileMissing(who, x); name != "" {
+			m.expectMissingShown(who, x, name)
+			continue
+		}
+		m.failAbout("P6", aboutHolder+who, "%s, and the %s still holds the target lock after the settling run (%s)", why,
+			who, describe(x))
 	}
 }
 
@@ -2792,10 +2795,13 @@ func (m *hmWorld) keptWhileMissing(who string, x *api.RemediationRequest) string
 	switch {
 	case m.settings != settingsRemoved || verdictStored(x):
 		return ""
+	case !x.DeletionTimestamp.IsZero():
+		if deletingWithinCleanupBound(x, m.now) {
+			return "deleted holder keeps the lock within its cleanup bound while the repository is missing"
+		}
+		return ""
 	case m.waitingAtRemoval[who]:
 		return "holder waiting for the merge record keeps the lock while the repository is missing"
-	case deletingWithinCleanupBound(x, m.now):
-		return "deleted holder keeps the lock within its cleanup bound while the repository is missing"
 	case m.stopped(x):
 		return "stopped holder keeps the lock while the repository is missing"
 	}
@@ -3281,6 +3287,79 @@ func TestHandoffModelDeletionWithAMissingRepository(t *testing.T) {
 	settled := hmDirected(t, hmStartPushed, append(steps, hmStep{Kind: hSettings, Variant: settingsRestored}))
 	if st := settled.pr().State; st != providers.ChangeRequestClosed {
 		t.Fatalf("the pull request is %s after the repository returned, want closed", st)
+	}
+}
+
+func TestHandoffModelPredecessorCleansUpAfterReplacementFinalizes(t *testing.T) {
+	m := newHMWorld(t, requestStatusSchema(t), hmStartIntent)
+	ctx := context.Background()
+	repl := m.get(hmRepl)
+	const otherFinalizer = "example.com/replacement"
+	repl.Finalizers = append(repl.Finalizers, otherFinalizer)
+	if err := m.base.Update(ctx, repl); err != nil {
+		t.Fatal(err)
+	}
+	m.changeSettings(settingsRemoved)
+	m.deleteRequest(hmPred)
+	m.deleteRequest(hmRepl)
+	m.reconcile(hmRepl)
+	m.reconcile(hmPred)
+	if got := m.lastRes[hmPred].RequeueAfter; got != m.r.pullRequestPollInterval() {
+		t.Errorf("predecessor retries after %v while replacement finalizes, want %v", got, m.r.pullRequestPollInterval())
+	}
+	m.now = m.now.Add(cleanupFailingBound + time.Second)
+	m.reconcile(hmRepl)
+	repl = m.get(hmRepl)
+	if repl == nil || !slices.Equal(repl.Finalizers, []string{otherFinalizer}) ||
+		repl.Status.Phase != api.PhasePolicyChecked {
+		t.Fatalf("expected a terminating PolicyChecked replacement with only %s, got %+v", otherFinalizer, repl)
+	}
+	m.reconcile(hmPred)
+	pred := m.get(hmPred)
+	if pred == nil || intent(pred) != nil || !ptr.Deref(pred.Status.HoldsTarget, false) ||
+		!controllerutil.ContainsFinalizer(pred, FinalizerName) {
+		t.Fatalf("expected the predecessor to abort the handoff and keep its lock and finalizer: %s", describe(pred))
+	}
+	c := meta.FindStatusCondition(pred.Status.Conditions, api.ConditionCleanupFailing)
+	if c == nil || c.Reason != reasonRepositoryUnavailable || !c.LastTransitionTime.Time.Equal(m.now) {
+		t.Fatalf("predecessor CleanupFailing = %+v, want %s starting at %s", c, reasonRepositoryUnavailable, m.now)
+	}
+	m.now = m.now.Add(cleanupFailingBound + time.Second)
+	m.reconcile(hmPred)
+	if pred := m.get(hmPred); pred != nil {
+		t.Fatalf("predecessor still exists past its cleanup bound: %s", describe(pred))
+	}
+	m.liveness()
+	if len(m.violations) != 0 {
+		t.Fatalf("neither request should still hold the target lock: %v", m.violations)
+	}
+}
+
+func TestHandoffModelFlagsExpiredDeletionLock(t *testing.T) {
+	m := newHMWorld(t, requestStatusSchema(t), hmStartIntent)
+	m.changeSettings(settingsRemoved)
+	m.deleteRequest(hmPred)
+	pred := m.get(hmPred)
+	pred.Status.Phase = api.PhaseNeedsIntervention
+	for _, kind := range []string{api.ConditionCleanupFailing, api.ConditionPullRequestUnreadable} {
+		meta.SetStatusCondition(&pred.Status.Conditions, metav1.Condition{
+			Type: kind, Status: metav1.ConditionTrue, Reason: reasonRepositoryUnavailable,
+			LastTransitionTime: metav1.NewTime(m.now),
+		})
+	}
+	if err := m.base.Status().Update(context.Background(), pred); err != nil {
+		t.Fatal(err)
+	}
+	m.deleteRequest(hmRepl)
+	repl := m.get(hmRepl)
+	controllerutil.RemoveFinalizer(repl, FinalizerName)
+	if err := m.base.Update(context.Background(), repl); err != nil {
+		t.Fatal(err)
+	}
+	m.now = m.now.Add(cleanupFailingBound + time.Second)
+	m.liveness()
+	if !slices.ContainsFunc(m.violations, func(v string) bool { return strings.HasPrefix(v, "P6:") }) {
+		t.Fatalf("a deletion lock held past its cleanup bound must violate P6, got %v", m.violations)
 	}
 }
 

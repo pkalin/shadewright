@@ -204,21 +204,23 @@ func wholeWait(tmpl api.GitWait, op string, now time.Time) (api.GitWait, bool) {
 
 // applies reports whether an entry of kind k still has something to end on rr: the request deadline only in
 // PolicyChecked before a stale plan's cleanup or a handoff, the handoff grace only while the handoff is recovered,
-// the merge waits only while the merge is not recorded and the request is not being deleted (#878: the finalizer
-// records no merge, and its cleanup is bounded on its own, so the entry would only stand past its end).
+// and the merge waits only before the merge is recorded. All bounded waits end on deletion: the finalizer records
+// no merge and its cleanup has its own bound (#786, #877, #878).
 func (k waitKind) applies(rr *api.RemediationRequest) bool {
+	if !rr.DeletionTimestamp.IsZero() {
+		return false
+	}
 	switch k {
 	case waitRequestDeadline:
 		return rr.Status.Phase == api.PhasePolicyChecked && staleMark(rr) == nil && intent(rr) == nil &&
 			!recoveringHandoff(rr)
 	case waitHandoffGrace:
-		// The grace bounds a standing intent; a refusal aborted it (third decision of 2026-11-18 on #786). Neither
-		// handoff wait applies to a request being deleted: its finalizer removes them (#786).
-		return recoveringHandoff(rr) && gitWait(rr, waitHandoffRecovery) == nil && rr.DeletionTimestamp.IsZero()
+		// The grace bounds a standing intent; a refusal aborted it (third decision of 2026-11-18 on #786).
+		return recoveringHandoff(rr) && gitWait(rr, waitHandoffRecovery) == nil
 	case waitHandoffRecovery:
-		return recoveringHandoff(rr) && rr.DeletionTimestamp.IsZero()
+		return recoveringHandoff(rr)
 	case waitMergeCheck, waitMergeContent:
-		return !mergeRecorded(rr) && !settledByOther(rr) && rr.DeletionTimestamp.IsZero()
+		return !mergeRecorded(rr) && !settledByOther(rr)
 	}
 	return false
 }

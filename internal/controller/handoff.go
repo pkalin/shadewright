@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -1929,9 +1930,9 @@ const (
 // handoffHolds is the finalizer's look at a request with an outgoing handoff (ADR-0028 section 4 item 8): keep
 // is true when its pull request is its replacement's (handed over, or the replacement took it over and has not
 // ended this request yet), so it must not be closed; wait is true while the replacement may still take it over.
-// When the replacement is gone or ended without taking over, the abort of the intent is stored (abortStandingIntent)
-// and the close goes on as for any request: the close reads rr again right before it (stillOwns), and an abort kept in
-// memory only would fail that read and start the bound of the cleanup on a failure of this request's own making (the
+// When the replacement cannot take over, including after it loses its finalizer during deletion, the predecessor
+// stores the abort (abortStandingIntent) and proceeds with cleanup. Before closing, stillOwns reads the request
+// again. An abort held only in memory would fail that check and start the cleanup bound prematurely (the
 // close it held back could later be refused past the bound, with the pull request left open; second round of #786).
 // A failed write is returned for a retry.
 func (r *RemediationRequestReconciler) handoffHolds(ctx context.Context, rr *remediationv1alpha1.RemediationRequest) (
@@ -1951,11 +1952,12 @@ func (r *RemediationRequestReconciler) handoffHolds(ctx context.Context, rr *rem
 	case repl.UID != types.UID(to.UID):
 	case tookOver(repl):
 		return true, false, nil
+	case !repl.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(repl, FinalizerName):
 	case !ended(repl.Status.Phase) && !abortedOnRefusal(repl):
 		return false, true, nil
 	}
-	if err := r.abortStandingIntent(ctx, rr, "it is being deleted, and its replacement is gone or ended without "+
-		"taking the pull request over"); err != nil {
+	if err := r.abortStandingIntent(ctx, rr, "it is being deleted, and its replacement can no longer take over "+
+		"the pull request"); err != nil {
 		return false, false, err
 	}
 	return false, false, nil

@@ -1195,12 +1195,10 @@ func TestStopOnMovedBaseSaysTheCheckWasNotFailed(t *testing.T) {
 // #925 case 2: deleting a request after the configured target branch changed closes its pull request by number and by
 // marker, on the recorded target branch and on the base it was moved to, instead of letting the finalizer go with
 // "target branch changed" before the Git host is asked. A pull request from the branch without the marker stays open.
-// When the repository entry or the RemediationSettings object itself is missing, the cleanup fails under
-// CleanupFailing (reason RepositoryUnavailable or SettingsNotFound) until the settings reach the repository again or
-// the 24 hour bound passes (#877, #925).
+// A missing repository entry keeps the deletion under CleanupFailing until it returns or the 24 hour bound passes.
 func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
-	const entryGone, settingsGone = "entry gone", "settings object gone"
-	for _, mode := range []string{"settings reach it", entryGone, settingsGone} {
+	const entryGone = "entry gone"
+	for _, mode := range []string{"settings reach it", entryGone} {
 		t.Run(mode, func(t *testing.T) {
 			var kept *api.RemediationSettings
 			// settlementWorld leaves the settings naming freshOtherBranch, not the recorded main.
@@ -1224,21 +1222,12 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			switch mode {
-			case entryGone:
+			if mode == entryGone {
 				kept = &api.RemediationSettings{}
 				if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, kept); err != nil {
 					t.Fatal(err)
 				}
 				dropRepository(t, r)
-			case settingsGone:
-				kept = &api.RemediationSettings{}
-				if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, kept); err != nil {
-					t.Fatal(err)
-				}
-				if err := r.Delete(ctx, &api.RemediationSettings{ObjectMeta: metav1.ObjectMeta{Name: api.SettingsName}}); err != nil {
-					t.Fatal(err)
-				}
 			}
 			if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
 				return []string{obj.(*api.RemediationRequest).Status.BreakerClearedBy}
@@ -1263,8 +1252,7 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 					t.Logf("Reconcile %d: %v", i, err)
 				}
 			}
-			switch mode {
-			case entryGone:
+			if mode == entryGone {
 				settingsBackCloses(t, r, g, recorder, key, n, reasonRepositoryUnavailable, func() {
 					live := &api.RemediationSettings{}
 					if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, live); err != nil {
@@ -1272,13 +1260,6 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 					}
 					live.Spec.Repositories = kept.Spec.Repositories
 					if err := r.Update(ctx, live); err != nil {
-						t.Fatal(err)
-					}
-				})
-			case settingsGone:
-				settingsBackCloses(t, r, g, recorder, key, n, ReasonSettingsNotFound, func() {
-					kept.ResourceVersion = ""
-					if err := r.Create(ctx, kept); err != nil {
 						t.Fatal(err)
 					}
 				})
@@ -1300,8 +1281,8 @@ func TestDeletionAfterBranchChangeClosesOwnPullRequests(t *testing.T) {
 	}
 }
 
-// settingsBackCloses checks a deleted request whose settings cannot reach the repository (the repository entry or the
-// RemediationSettings object is missing): a failure of the cleanup, so the request keeps its finalizer and target lock
+// settingsBackCloses checks a deleted request whose settings cannot reach the repository: the request keeps its
+// finalizer and target lock
 // with CleanupFailing, PullRequestUnreadable (both carrying wantReason) and GitReadRetry, its pull request #n stays
 // open and no PullRequestLeftOpen Event is recorded (#877, #925, #1057). It then calls restore and reconciles, so the
 // deletion closes the pull requests and goes.
@@ -1344,11 +1325,28 @@ func settingsBackCloses(t *testing.T, r *RemediationRequestReconciler, g *fakegi
 // CleanupFailing (RepositoryUnavailable) for cleanupFailingBound (24 hours), then lets the request go with a Warning
 // Event PullRequestLeftOpen naming the reason and the pull request.
 func TestDeletionWithMissingRepositoryLetsGoAfterBound(t *testing.T) {
-	r, g, rr := settlementWorld(t, api.PhaseAwaitingApproval)
+	r, g, rr := settlementWorld(t, api.PhaseNeedsIntervention)
 	clock := clockOf(r)
 	ctx := context.Background()
 	recorder := record.NewFakeRecorder(20)
 	r.Recorder = recorder
+	r.APIReader = &apiServerReader{Reader: r.Client}
+	settings := &api.RemediationSettings{}
+	if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings.Spec.MaxConcurrentRemediations = 1
+	if err := r.Update(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	blocker := rr.DeepCopy()
+	blocker.Name = "active-request"
+	blocker.UID = "988e38bb-2083-4ecb-8f83-6426643ad2a3"
+	blocker.ResourceVersion = ""
+	blocker.Status.Phase = api.PhaseAwaitingApproval
+	if err := r.Create(ctx, blocker); err != nil {
+		t.Fatal(err)
+	}
 	n := rr.Status.PullRequest.Number
 	dropRepository(t, r)
 	if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
@@ -1417,5 +1415,121 @@ func TestDeletionWithMissingRepositoryLetsGoAfterBound(t *testing.T) {
 		!strings.Contains(left[0], fmt.Sprintf("#%d", n)) || !strings.Contains(left[0], "24 hours") {
 		t.Fatalf("PullRequestLeftOpen events = %q; want one naming %s, #%d and 24 hours", left,
 			reasonRepositoryUnavailable, n)
+	}
+}
+
+func TestDeletionEndsRequestDeadlineWait(t *testing.T) {
+	r, _, rr := settlementWorld(t, api.PhasePolicyChecked)
+	ctx := context.Background()
+	clock := clockOf(r)
+	r.PullRequestPollInterval = 83 * time.Second
+	since := metav1.NewTime(clock.at)
+	deadline := metav1.NewTime(clock.at.Add(time.Minute))
+	rr.Status.Deadline = &deadline
+	rr.Status.GitWaits = []api.GitWait{{Kind: api.GitWaitRequestDeadline, Since: since, Ends: &deadline,
+		Operation: opGet}}
+	gitWaitSummary(rr, clock.at)
+	if err := r.Status().Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	dropRepository(t, r)
+	rr.Finalizers = []string{FinalizerName}
+	if err := r.Update(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Delete(ctx, rr); err != nil {
+		t.Fatal(err)
+	}
+	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}
+	for _, at := range []time.Time{clock.at, deadline.Add(time.Second)} {
+		clock.at = at
+		res, err := r.Reconcile(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Get(ctx, req.NamespacedName, rr); err != nil {
+			t.Fatal(err)
+		}
+		if wait := gitWait(rr, waitRequestDeadline); wait != nil {
+			t.Errorf("at %s, deletion retained the deadline wait: %+v", at, wait)
+		}
+		if res.RequeueAfter != r.PullRequestPollInterval {
+			t.Errorf("at %s, retry after %v, want %v", at, res.RequeueAfter, r.PullRequestPollInterval)
+		}
+	}
+}
+
+func TestUninstallWithMissingRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		phase       api.RemediationPhase
+		terminating bool
+	}{
+		{name: "settings gone", phase: api.PhaseAwaitingApproval},
+		{name: "settings terminating", phase: api.PhaseAwaitingApproval, terminating: true},
+		{name: "settings terminating with a stopped holder", phase: api.PhaseCancelled, terminating: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, g, rr := settlementWorld(t, tc.phase)
+			ctx := context.Background()
+			clock := clockOf(r)
+			recorder := record.NewFakeRecorder(20)
+			r.Recorder = recorder
+			dropRepository(t, r)
+			settings := &api.RemediationSettings{}
+			if err := r.Get(ctx, client.ObjectKey{Name: api.SettingsName}, settings); err != nil {
+				t.Fatal(err)
+			}
+			if tc.terminating {
+				settings.Finalizers = []string{"example.com/settings"}
+				if err := r.Update(ctx, settings); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := r.Delete(ctx, settings); err != nil {
+				t.Fatal(err)
+			}
+			rr.Finalizers = []string{FinalizerName}
+			if err := r.Update(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			if err := clientfake.AddIndex(r.Client, &api.RemediationRequest{}, clearedField, func(obj client.Object) []string {
+				return []string{obj.(*api.RemediationRequest).Status.BreakerClearedBy}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Delete(ctx, rr); err != nil {
+				t.Fatal(err)
+			}
+			req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(rr)}
+			until := clock.at.Add(5 * time.Minute)
+			for clock.at.Before(until) {
+				res, err := r.Reconcile(ctx, req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := r.Get(ctx, req.NamespacedName, &api.RemediationRequest{}); apierrors.IsNotFound(err) {
+					if res.RequeueAfter != 0 {
+						t.Errorf("deleted request was requeued after %v", res.RequeueAfter)
+					}
+					break
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if res.RequeueAfter <= 0 {
+					t.Fatal("request still exists without a retry")
+				}
+				clock.advance(res.RequeueAfter)
+			}
+			if err := r.Get(ctx, req.NamespacedName, &api.RemediationRequest{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("request still present after the five-minute uninstall wait: %v", err)
+			}
+			if left := warningsOf(recorder, EventPullRequestLeftOpen); left != 1 {
+				t.Errorf("got %d Warning Events %s, want one", left, EventPullRequestLeftOpen)
+			}
+			if pr := g.ChangeRequests()[0]; pr.State != providers.ChangeRequestOpen {
+				t.Errorf("pull request #%d is %s, want open", pr.Number, pr.State)
+			}
+		})
 	}
 }

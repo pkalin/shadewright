@@ -256,9 +256,9 @@ func TestCauseFingerprintKillWindow(t *testing.T) {
 	cases := []tc{
 		{"at finishedAt", at(0), true},
 		{"one minute after", at(time.Minute), true},
-		{"ten minutes after", at(KillCauseWindow), true},
+		{"ten minutes after", at(TerminationCauseWindow), true},
 		{"one second before", at(-time.Second), false},
-		{"ten minutes and one second after", at(KillCauseWindow + time.Second), false},
+		{"ten minutes and one second after", at(TerminationCauseWindow + time.Second), false},
 		{"no kubelet time", nil, false},
 	}
 	for _, reason := range []string{reasonBack, ReasonUnhealthy} {
@@ -295,6 +295,34 @@ func TestCauseFingerprintKillWindow(t *testing.T) {
 	}
 }
 
+func TestExitCausePrefersCurrentTerminationOnTie(t *testing.T) {
+	cases := []struct {
+		name          string
+		currentOffset time.Duration
+		wantExit      int32
+	}{
+		{"current finished later", time.Second, 2},
+		{"same finish time", 0, 2},
+		{"last finished later", -time.Second, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, pod := causeHarness(t, func(p *corev1.Pod) {
+				withTermination(p, "containerd://last", reasonError, 1, t0)
+				p.Status.ContainerStatuses[0].State.Terminated = terminated("current", reasonError, 2,
+					t0.Add(tc.currentOffset))
+			})
+			owner := ownerOf(t, h)
+			_, got := h.c.causeFingerprint(pod, owner, containerApp, false, t0, true, true)
+			want := fingerprint.Fingerprint(h.c.podStatusInput(pod, owner, reasonError,
+				terminationNote(containerApp, tc.wantExit)))
+			if got != want {
+				t.Errorf("exit cause = %q, want %q for exit code %d", got, want, tc.wantExit)
+			}
+		})
+	}
+}
+
 // TestCauseFingerprintSeriesTime checks that the time of a series is its last observed time.
 func TestCauseFingerprintSeriesTime(t *testing.T) {
 	finished := t0.Add(-30 * time.Minute)
@@ -304,7 +332,7 @@ func TestCauseFingerprintSeriesTime(t *testing.T) {
 	h.reconcilePod(pod.Name)
 	kill := h.one()
 	ev := consequence("series", reasonBack, "spec.containers{"+containerApp+"}", finished)
-	ev.Series = &eventsv1.EventSeries{Count: 3, LastObservedTime: metav1.NewMicroTime(finished.Add(KillCauseWindow + time.Minute))}
+	ev.Series = &eventsv1.EventSeries{Count: 3, LastObservedTime: metav1.NewMicroTime(finished.Add(TerminationCauseWindow + time.Minute))}
 	h.create(ev)
 	h.reconcileEvent(ev.Name)
 	if got := h.one(); got.CauseFingerprint != "" {
@@ -316,7 +344,7 @@ func TestCauseFingerprintSeriesTime(t *testing.T) {
 // TestWaitingReasonWinsOverAnOlderKill checks that a current waiting reason of the list is the cause even when
 // an OOM kill of the same container is within the window.
 func TestWaitingReasonWinsOverAnOlderKill(t *testing.T) {
-	for _, reason := range WaitingCauseReasons {
+	for _, reason := range WaitingCauseReasons() {
 		t.Run(reason, func(t *testing.T) {
 			h, pod := causeHarness(t, func(p *corev1.Pod) {
 				withTermination(p, "containerd://oom", ReasonOOMKilled, exitOOM, t0.Add(-time.Minute))
@@ -364,21 +392,26 @@ func TestWaitingCauseOfAnInitContainer(t *testing.T) {
 	}
 }
 
-// TestNonZeroExitLinksNothing checks that a crash (a non-zero exit) is an observation as before, of no class,
-// and no cause of a consequence.
-func TestNonZeroExitLinksNothing(t *testing.T) {
-	h, pod := causeHarness(t, func(p *corev1.Pod) {
-		withTermination(p, "containerd://crash", reasonError, 1, t0)
-	})
+// TestNonZeroExitIsACause checks that a crash (a non-zero exit) is a cause read from pod status, and that a
+// BackOff of its container within TerminationCauseWindow links to it (ADR-0039 point 3, amended 2026-11-20, #432)
+// once the Incident controller confirmed it saw the crash (decided 2026-11-21): CauseSeen answers true for it.
+func TestNonZeroExitIsACause(t *testing.T) {
+	d, rs, _ := workload()
+	pod := specPod()
+	withTermination(pod, "containerd://crash", reasonError, 1, t0)
+	book := &causeBook{}
+	h := newHarness(t, Config{CauseSeen: book.fn}, d, rs, pod)
 	h.reconcilePod(pod.Name)
-	if got := h.one(); got.Class != ClassNone || got.Container != containerApp || !strings.HasPrefix(got.Occurrence, "termination:") {
-		t.Errorf("crash: class %q, container %q, occurrence %q", got.Class, got.Container, got.Occurrence)
+	crash := h.one()
+	book.record(crash.Fingerprint)
+	if crash.Class != ClassCause || crash.Container != containerApp || !strings.HasPrefix(crash.Occurrence, "termination:") {
+		t.Errorf("crash: class %q, container %q, occurrence %q", crash.Class, crash.Container, crash.Occurrence)
 	}
 	ev := consequence("c", reasonBack, "spec.containers{"+containerApp+"}", t0)
 	h.create(ev)
 	h.reconcileEvent(ev.Name)
-	if got := h.one(); got.Class != ClassConsequence || got.CauseFingerprint != "" {
-		t.Errorf("BackOff after a crash: class %q, cause %q", got.Class, got.CauseFingerprint)
+	if got := h.one(); got.Class != ClassConsequence || got.CauseFingerprint != crash.Fingerprint {
+		t.Errorf("BackOff after a crash: class %q, cause %q, want %q", got.Class, got.CauseFingerprint, crash.Fingerprint)
 	}
 }
 
@@ -426,7 +459,7 @@ func TestWaitingReasons(t *testing.T) {
 		h.none()
 	}
 	fps := map[string]string{}
-	for _, reason := range WaitingCauseReasons {
+	for _, reason := range WaitingCauseReasons() {
 		for _, msg := range []string{secret, "Back-off pulling image \"registry.example/app:1\"", ""} {
 			h, pod := causeHarness(t, func(p *corev1.Pod) {
 				p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: containerApp, RestartCount: 2,

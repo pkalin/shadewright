@@ -153,8 +153,15 @@ type Observation struct {
 	// holds a consequence with no cause, or whose cause has no Incident yet, before it emits it (hold.go).
 	Class Class
 	// CauseFingerprint is, on a consequence, the fingerprint of the cause its pod's status shows for its
-	// container (Collector.causeFingerprint); empty when the status shows none.
+	// container (Collector.causeFingerprint); empty when the status shows none. On a BackOff it names a non-zero
+	// exit only when Config.CauseSeen confirmed it (decided 2026-11-21 on #432, hold.go).
 	CauseFingerprint string
+
+	// exitCause is, inside the collector only, the non-zero exit a BackOff's pod status offers as its cause
+	// (Collector.causeFingerprint), "" when none: a candidate, never delivered. resolveExit, the one place that
+	// decides it, makes it the cause once Config.CauseSeen confirmed it, and clears it either way before the
+	// observation leaves the collector (hold.go, eventReconciler.emit).
+	exitCause string
 }
 
 // immediateTerminationReasons are the container termination reasons, read from pod status, that open an
@@ -228,7 +235,9 @@ type Config struct {
 	// CauseSeen, when set, is asked whether the Incident controller has seen the cause a consequence names. A
 	// consequence whose cause it has not seen is held (hold.go) until [Collector.ReleaseCause] is called for that
 	// cause, at the latest for ConsequenceGrace, and then emitted with its cause (ADR-0039 point 7). Nil takes
-	// every cause as seen and emits such a consequence at once.
+	// every cause as seen and emits such a consequence at once, except a non-zero exit: with no controller to
+	// confirm it, it is never confirmed, and its BackOff goes on with the cause main links, an OOM kill or a wait,
+	// or none (decided 2026-11-21 on #432).
 	CauseSeen CauseSeenFunc
 	// Modules, when set, returns the modules active now (detection.Detector.Selection). The collector then
 	// also watches the kinds in [SourceKinds] and evaluates on each object the symptom source an active module

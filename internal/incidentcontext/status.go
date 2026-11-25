@@ -90,8 +90,8 @@ const (
 	cutValues
 )
 
-// summaryBlock describes the Incident, most relevant first. A cause Incident with a non-empty absorbed tally
-// gets the tally last and always whole (#796, decided 2026-11-16): the summary keeps room for the longest
+// summaryBlock describes the Incident, most relevant first. A cause Incident of a reason of causereason.Tallied with a
+// non-empty absorbed tally gets the tally last and always whole (#796, decided 2026-11-16): the summary keeps room for the longest
 // tally ([longestTally]) and fits its other lines in what is left. They fit by shortening values, never by
 // removing a line: the symptom, then the reporting controller, then the reason, then the subject's name, each
 // cut at a character boundary and followed by a note of the bytes cut ([fitSummary]). This holds at every
@@ -146,7 +146,9 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 	}
 	blk := Block{Section: SectionSummary, Provenance: ProvenanceIncident, Availability: Available}
 	var t lines
-	absorbedLines(&t, st.Absorbed)
+	if b.tallyShown(s.Reason) {
+		absorbedLines(&t, st.Absorbed)
+	}
 	if t.Len() == 0 {
 		b.fitSummary(&blk, vals, render, b.limits.Summary, red)
 		return blk

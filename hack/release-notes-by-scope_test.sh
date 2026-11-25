@@ -28,6 +28,7 @@ check() { # name
 
 check release-notes-v0.1.0
 check release-notes-edge
+check release-notes-v0.7.0
 
 # Reading from stdin gives the same result as reading a file.
 if ! ./release-notes-by-scope.sh < testdata/release-notes-edge.in.md | diff -q - testdata/release-notes-edge.want.md > /dev/null; then

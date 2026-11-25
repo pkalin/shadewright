@@ -27,8 +27,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
-
 	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
@@ -139,7 +137,17 @@ func TestLoweredBudgetCheckFindsAUse(t *testing.T) {
 // ever lowers the budget.
 func TestLowBudgetWithholdsForWork(t *testing.T) {
 	parallelUnderRace(t)
-	low := redacttest.LowBudget(defaultRedactor)
+	work := 0
+	r, err := New(Hooks{Withheld: func(reason string) {
+		if reason != ReasonWork {
+			t.Errorf("refused because of %q, want work", reason)
+		}
+		work++
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	low := redacttest.LowBudget(r)
 	if low.budgetOf(1) != budgetOf(1) || low.budgetOf(MaxEntry) != redacttest.LowWorkBudget {
 		t.Errorf("budget of 1 byte %d, of MaxEntry %d; want %d and %d", low.budgetOf(1), low.budgetOf(MaxEntry),
 			budgetOf(1), redacttest.LowWorkBudget)
@@ -147,22 +155,21 @@ func TestLowBudgetWithholdsForWork(t *testing.T) {
 	if again := low.WithWorkBudget(1 << 40); again.budgetOf(MaxEntry) != redacttest.LowWorkBudget {
 		t.Errorf("a second WithWorkBudget raised the budget to %d", again.budgetOf(MaxEntry))
 	}
-	if defaultRedactor.lowered {
+	if r.lowered {
 		t.Fatal("LowBudget changed the package's redactor")
 	}
 	over := redacttest.OverLowBudget
 	if _, ok := defaultRedactor.StringChecked(over); !ok {
 		t.Fatal("the package's budget withholds OverLowBudget")
 	}
-	work := withheldTotal.WithLabelValues(ReasonWork)
 	for _, e := range flaggedEntries {
-		before := testutil.ToFloat64(work)
+		before := work
 		out, ok := e.on(low, over)
 		if ok || out[0] != Withheld || strings.Contains(strings.Join(out, ""), "--token,}--token") {
 			t.Errorf("%s on the low budget: ok %v, %.80q; want withheld", e.name, ok, out)
 		}
-		if got := testutil.ToFloat64(work) - before; got < 1 {
-			t.Errorf("%s on the low budget: reason work counted %v times", e.name, got)
+		if got := work - before; got != 1 {
+			t.Errorf("%s on the low budget: reason work counted %d times", e.name, got)
 		}
 		const short = "password: Qz9SecretValue in a short line"
 		got, ok := e.on(low, short)

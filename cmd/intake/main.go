@@ -42,7 +42,7 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/providers/model/anthropic"
 	"github.com/shadewright-labs/shadewright/internal/providers/model/openaicompatible"
-	"github.com/shadewright-labs/shadewright/internal/redact"
+	"github.com/shadewright-labs/shadewright/internal/redactadapter"
 )
 
 // Exit codes: 0 an outcome was written (scored, unjudged, invalid, quarantined or budget), 1 a failed step to
@@ -111,7 +111,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err := fl.Parse(args); err != nil {
 		return exitConfig
 	}
-	red, err := redact.New()
+	red, err := redactadapter.New()
 	if err != nil {
 		log.Error("Failed to build the redactor", "error", err.Error())
 		return exitConfig

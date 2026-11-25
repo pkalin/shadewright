@@ -205,6 +205,7 @@ func (ru *rule) each(wm *meter.Meter, s string, runs [][]longRun, ids *windowIDs
 // Redactor replaces sensitive data in text. It is safe for concurrent use.
 type Redactor struct {
 	rules []rule
+	hooks Hooks
 	// before is the redactor of the release before, with the same extra patterns: the reading kept in package
 	// released (before.go). nil only for a redactor made of some rules alone, in a test.
 	before *released.Redactor
@@ -221,9 +222,17 @@ type Redactor struct {
 
 var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
-// New returns a redactor with the built-in rules plus the given extra patterns. It fails if a pattern has
-// an invalid kind or expression.
-func New(extra ...Pattern) (*Redactor, error) {
+// New returns a redactor with the built-in rules, plus any extra Pattern options and decision Hooks.
+// It skips nil options and fails if a pattern has an invalid kind or expression.
+func New(opts ...Option) (*Redactor, error) {
+	var cfg options
+	for _, opt := range opts {
+		tick(nil, 1)
+		if opt != nil {
+			opt.apply(&cfg)
+		}
+	}
+	extra := cfg.patterns
 	rules := builtinRules(nil)
 	for i, p := range extra {
 		tick(nil, 1)
@@ -253,7 +262,7 @@ func New(extra ...Pattern) (*Redactor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the reading of the release before: %w", err)
 	}
-	r := &Redactor{rules: rules, before: before}
+	r := &Redactor{rules: rules, before: before, hooks: cfg.hooks}
 	for i := range rules {
 		tick(nil, 1)
 		if rules[i].re != nil {
@@ -358,11 +367,7 @@ var ErrWait = errors.New("redaction did not run: its wait for the heap limit end
 // when the wait for the heap limit ended before the check could run. Any other withheld entry (longer than
 // MaxEntry, or over its work budget) is not clean, with no error, as in Clean: checking it again decides the same.
 func (r *Redactor) CleanChecked(s string, keep ...string) (bool, error) {
-	ctx := r.ctx
-	if ctx == nil {
-		ctx = context.Background() // the wait ends after maxHeapWait
-	}
-	clean, why := meteredWhy(ctx, len(s), r.budgetOf(len(s)), func(wm *meter.Meter) bool { return r.clean(wm, s, keep) })
+	clean, why := meteredWhy(r, len(s), r.budgetOf(len(s)), func(wm *meter.Meter) bool { return r.clean(wm, s, keep) })
 	if why == ReasonWait {
 		return false, ErrWait
 	}

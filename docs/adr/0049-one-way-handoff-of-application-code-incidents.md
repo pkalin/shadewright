@@ -1,6 +1,6 @@
 # ADR-0049: One-way handoff of application-code incidents through the coordinator
 
-- Status: Proposed
+- Status: Accepted (2026-11-25)
 - Date: 2026-11-24
 
 ## Context

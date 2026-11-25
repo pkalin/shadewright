@@ -657,7 +657,8 @@ func TestHoldOfAnOlderEventOfTheNameIsDropped(t *testing.T) {
 // holdOutcomeCounts reads shadewright_analyzer_held_consequences_total by outcome.
 func holdOutcomeCounts() map[string]float64 {
 	out := map[string]float64{}
-	for _, o := range []string{holdOpened, holdNotOpened, holdReleased, holdCauseUnseen, holdDropped, holdOverflow} {
+	for _, o := range []string{holdOpened, holdNotOpened, holdReleased, holdCauseUnseen, holdDropped, holdOverflow,
+		holdCauseUnconfirmed, holdCauseUnanswered} {
 		out[o] = testutil.ToFloat64(heldConsequences.WithLabelValues(o))
 	}
 	return out

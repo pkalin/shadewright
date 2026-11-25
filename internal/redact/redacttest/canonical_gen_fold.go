@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package redact
+package redacttest
 
 import (
 	"fmt"
@@ -23,8 +23,8 @@ import (
 // The forms of the third round of #845 (review of 0299401d): the folded view as the strings of a sequence show
 // it (a key with a format character inside it, or a colon look-alike after it or in a string of its own), a
 // format character between a key and its colon, the colon look-alikes of Unicode's confusables list the second
-// round did not write, and an explicit YAML key written as a block scalar. Like canonical_gen_test.go, this
-// file uses only String and the redactor's spans, so it runs unchanged in a checkout of main. Its cases come
+// round did not write, and an explicit YAML key written as a block scalar. The generator
+// is independent of the redactor. Its cases come
 // after every earlier form, so the inputs before them keep their text and their hashes.
 
 // canonMoreColons are the characters Unicode's confusables list (version 18.0.0) maps to one colon or to two,
@@ -56,13 +56,13 @@ func (g *canonGen) foldRoundThreeCases() {
 func (g *canonGen) seqGlyphCases() {
 	k := func(s string) canonSeqPart { return canonSeqPart{kept: s} }
 	x := func(s string) canonSeqPart { return canonSeqPart{text: s} }
-	value := func(w *canonWriter) { w.secret() }
+	value := func(w *CanonWriter) { w.Secret() }
 	n := 0
 	emit := func(items [][]canonSeqPart) {
 		r := n % len(canonSeqRenderings)
 		n++
-		g.add(canonFormGlyph, fmt.Sprintf("sequence %q, rendering %d", canonSeqText(items), r), func(w *canonWriter) {
-			w.sequenceParts(r, items, []func(*canonWriter){value}, "--port=8080")
+		g.add(canonFormGlyph, fmt.Sprintf("sequence %q, rendering %d", canonSeqText(items), r), func(w *CanonWriter) {
+			w.sequenceParts(r, items, []func(*CanonWriter){value}, "--port=8080")
 		})
 	}
 	for fi, f := range canonFlagKeys {
@@ -98,30 +98,30 @@ func (g *canonGen) keyGapCases() {
 			}
 			for v := range 5 {
 				nl := canonNLs[(ki+fi+v)%len(canonNLs)]
-				g.add(canonFormGlyph, fmt.Sprintf("key %s, %q before the colon, shape %d, line end %q", key, run, v, nl), func(w *canonWriter) {
+				g.add(canonFormGlyph, fmt.Sprintf("key %s, %q before the colon, shape %d, line end %q", key, run, v, nl), func(w *CanonWriter) {
 					switch v {
 					case 0:
-						w.kept(key)
-						w.text(run + ": ")
-						w.secret()
+						w.Kept(key)
+						w.Text(run + ": ")
+						w.Secret()
 					case 1:
-						w.kept(key)
-						w.text(run + ": " + canonIndicators[(ki+fi)%len(canonIndicators)] + nl + "  ")
-						w.secret()
+						w.Kept(key)
+						w.Text(run + ": " + canonIndicators[(ki+fi)%len(canonIndicators)] + nl + "  ")
+						w.Secret()
 					case 2:
-						w.kept(key)
-						w.text(run + "=")
-						w.secret()
+						w.Kept(key)
+						w.Text(run + "=")
+						w.Secret()
 					case 3:
-						w.text(`{"`)
-						w.kept(key)
-						w.text(run + `": "`)
-						w.secret()
-						w.text(`"}`)
+						w.Text(`{"`)
+						w.Kept(key)
+						w.Text(run + `": "`)
+						w.Secret()
+						w.Text(`"}`)
 					case 4:
-						w.kept(key)
-						w.text(run + canonAllColons[(ki+fi)%len(canonAllColons)] + " ")
-						w.secret()
+						w.Kept(key)
+						w.Text(run + canonAllColons[(ki+fi)%len(canonAllColons)] + " ")
+						w.Secret()
 					}
 					w.next(nl)
 				})
@@ -139,19 +139,19 @@ func (g *canonGen) moreColonCases() {
 			key := canonGlyphKeys[ki]
 			for v := range 4 {
 				nl := canonNLs[(ki+ci+v)%len(canonNLs)]
-				g.add(canonFormGlyph, fmt.Sprintf("key %s, colon %q, shape %d, line end %q", key, c, v, nl), func(w *canonWriter) {
-					w.kept(key)
+				g.add(canonFormGlyph, fmt.Sprintf("key %s, colon %q, shape %d, line end %q", key, c, v, nl), func(w *CanonWriter) {
+					w.Kept(key)
 					switch v {
 					case 0:
-						w.text(c + " ")
+						w.Text(c + " ")
 					case 1:
-						w.text(c)
+						w.Text(c)
 					case 2:
-						w.text(" " + c + " ")
+						w.Text(" " + c + " ")
 					case 3:
-						w.text(c + " " + canonIndicators[(ki+ci)%len(canonIndicators)] + nl + "  ")
+						w.Text(c + " " + canonIndicators[(ki+ci)%len(canonIndicators)] + nl + "  ")
 					}
-					w.secret()
+					w.Secret()
 					w.next(nl)
 				})
 			}
@@ -168,46 +168,46 @@ func (g *canonGen) explicitBlockKeyCases() {
 		for v := range 7 {
 			nl := canonNLs[(ki+v)%len(canonNLs)]
 			ind := canonIndicators[(ki+v)%len(canonIndicators)]
-			g.add(canonFormExplicit, fmt.Sprintf("block key %s, %q, shape %d, line end %q", key, ind, v, nl), func(w *canonWriter) {
+			g.add(canonFormExplicit, fmt.Sprintf("block key %s, %q, shape %d, line end %q", key, ind, v, nl), func(w *CanonWriter) {
 				switch v {
 				case 0:
-					w.text("? " + ind + nl + "  ")
-					w.kept(key)
-					w.text(nl + ": ")
-					w.secret()
+					w.Text("? " + ind + nl + "  ")
+					w.Kept(key)
+					w.Text(nl + ": ")
+					w.Secret()
 				case 1:
-					w.text("? " + ind + nl + "  ")
-					w.kept(key)
-					w.text(nl + ": " + canonIndicators[(ki+v+1)%len(canonIndicators)] + nl + "  ")
-					w.secret()
+					w.Text("? " + ind + nl + "  ")
+					w.Kept(key)
+					w.Text(nl + ": " + canonIndicators[(ki+v+1)%len(canonIndicators)] + nl + "  ")
+					w.Secret()
 				case 2:
-					w.kept("spec")
-					w.text(":" + nl + "  ? " + ind + nl + "    ")
-					w.kept(key)
-					w.text(nl + "  : ")
-					w.secret()
+					w.Kept("spec")
+					w.Text(":" + nl + "  ? " + ind + nl + "    ")
+					w.Kept(key)
+					w.Text(nl + "  : ")
+					w.Secret()
 				case 3:
-					w.text("- ? " + ind + nl + "    ")
-					w.kept(key)
-					w.text(nl + "  : ")
-					w.secret()
+					w.Text("- ? " + ind + nl + "    ")
+					w.Kept(key)
+					w.Text(nl + "  : ")
+					w.Secret()
 				case 4:
-					w.text("? " + ind + " # ")
-					w.kept("note")
-					w.text(nl + "  ")
-					w.kept(key)
-					w.text(nl + ": ")
-					w.secret()
+					w.Text("? " + ind + " # ")
+					w.Kept("note")
+					w.Text(nl + "  ")
+					w.Kept(key)
+					w.Text(nl + ": ")
+					w.Secret()
 				case 5:
-					w.text("? " + ind + nl + nl + "  ")
-					w.kept(key)
-					w.text(nl + ": ")
-					w.secret()
+					w.Text("? " + ind + nl + nl + "  ")
+					w.Kept(key)
+					w.Text(nl + ": ")
+					w.Secret()
 				case 6:
-					w.text("?" + nl + "  ")
-					w.kept(key)
-					w.text(nl + ": ")
-					w.secret()
+					w.Text("?" + nl + "  ")
+					w.Kept(key)
+					w.Text(nl + ": ")
+					w.Secret()
 				}
 				w.next(nl)
 			})

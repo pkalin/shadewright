@@ -1,0 +1,22 @@
+{#-
+  Adds the Shadewright Labs house line below the copyright notice while keeping the theme's own markup.
+-#}
+<div class="md-copyright">
+  {% if config.copyright %}
+    <div class="md-copyright__highlight">
+      {{ config.copyright }}
+    </div>
+  {% endif %}
+  <div class="sw-footer-house">
+    <a href="https://github.com/shadewright-labs" rel="noopener">
+      <img src="{{ 'assets/brand/shadewright-labs-glyph.svg' | url }}" alt="Shadewright Labs mark" width="18" height="18">
+      <span>by Shadewright Labs</span>
+    </a>
+  </div>
+  {% if not config.extra.generator == false %}
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  {% endif %}
+</div>

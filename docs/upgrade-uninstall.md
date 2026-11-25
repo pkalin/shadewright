@@ -140,6 +140,33 @@ gh attestation verify "kubectl-shadewright_${VERSION}_${OS}_${ARCH}.tar.gz" \
   --signer-workflow pkalin/shadewright/.github/workflows/release-plugin.yml
 ```
 
+## Upgrading from v0.6.0 to v0.7.0
+
+v0.7.0 moves Shadewright's published artifacts to `shadewright-labs`. Existing cluster data stays in place. The chart is now `oci://ghcr.io/shadewright-labs/charts/shadewright`; the executor, analyzer and verifier images are under `ghcr.io/shadewright-labs/shadewright-{executor,analyzer,verifier}`. The v0.7.0 chart pins its matching image digests. A new Helm install uses:
+
+```bash
+helm install shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --version 0.7.0 \
+  --namespace shadewright-system --create-namespace \
+  --set clusterId=my-cluster --set 'analyzer.watchNamespaces={default}'
+```
+
+For an existing Helm release, use the new chart address and version:
+
+```bash
+helm upgrade shadewright oci://ghcr.io/shadewright-labs/charts/shadewright --version 0.7.0 \
+  --namespace shadewright-system -f my-values.yaml --wait --timeout 10m
+```
+
+For Flux, update the source URL to `oci://ghcr.io/shadewright-labs/charts/shadewright` and pin the chart to tag `0.7.0`.
+
+Verify v0.7.0 images and chart with the commands in [Verify a release](#verify-a-release). Their cosign identities and GitHub provenance name `shadewright-labs/shadewright` and the `images.yml` or `chart.yml` workflow. The `kubectl-shadewright` archives are attached to the release in `shadewright-labs/shadewright`; download and verify them as described in [Install the kubectl plugin](how-to/check-status.md#install), which uses the `release-plugin.yml` signer identity. The Homebrew tap is now `shadewright-labs/homebrew-tap`.
+
+The Go module is now `github.com/shadewright-labs/shadewright`. If your Go code imports the API types, update imports such as `github.com/shadewright-labs/shadewright/api/v1alpha1` and run `go mod tidy`.
+
+The move does not change the CRDs or the API group `remediation.shadewright.io`. It does not reset `RemediationSettings`, Incident history, or open pull requests. The chart upgrade applies the new CRDs and Deployments to the existing cluster objects. Keep the same `clusterId` and values file as for other upgrades.
+
+Releases through v0.6.0 remain at `ghcr.io/pkalin` and keep their existing signing identity. Verify them with the commands under [Releases from before the move](#releases-from-before-the-move): cosign uses the release-era workflow identity, and GitHub attestations use registry bundles for images and charts or `--owner` for plugin archives.
+
 ## Upgrade
 
 All three Deployments run one replica by default (the Helm chart can add standbys, see the [configuration reference](reference/configuration.md#standby-replicas-helm-chart-optional)) with leader election and have no state of their own: Incidents, requests, the settings and the budget live in the cluster API. Every step of the executor rebuilds what it knows from Git and the API, and branch names and pull request markers derive from the request UID and the plan digest, so a restart in the middle of a step finds the work already done instead of repeating it.

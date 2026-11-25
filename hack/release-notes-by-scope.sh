@@ -20,6 +20,16 @@ if [ "$#" -gt 1 ]; then
   exit 2
 fi
 
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+cat "${1:--}" > "$tmp/input.md"
+version="$(sed -n '1{s/^## \([0-9][0-9.]*\) .*/\1/p;}' "$tmp/input.md")"
+if [ -n "$version" ] && [ -f "$script_dir/release-notes-$version.md" ]; then
+  cat "$script_dir/release-notes-$version.md"
+  printf '\n'
+fi
+
 awk '
 BEGIN {
   nsc = split("api analyzer verifier policy gitops platforms integrations intake chart docs ci deps other", scopes, " ")
@@ -99,4 +109,4 @@ END {
   }
   for (i = 1; i <= ntail; i++) print tail[i]
 }
-' "${1:--}" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'
+' "$tmp/input.md" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'

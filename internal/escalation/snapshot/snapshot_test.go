@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"slices"
@@ -90,7 +91,7 @@ func TestSnapshotIdentity(t *testing.T) {
 	badDigest := []string{digest[7:], digest + "0", digest[:70], strings.ToUpper(digest), "sha256:" + strings.Repeat("z", 64)}
 	enc := encoder(t)
 	for _, f := range []field{
-		{"UID", func(s string) { c.IncidentUID = s }, []string{c.IncidentUID}, []string{"", c.IncidentUID + "0", c.IncidentUID[1:], strings.ReplaceAll(c.IncidentUID, "-", ""), "g" + c.IncidentUID[1:]}},
+		{"UID", func(s string) { c.IncidentUID = s }, []string{c.IncidentUID}, []string{"", c.IncidentUID + "0", c.IncidentUID[1:], strings.ReplaceAll(c.IncidentUID, "-", ""), "g" + c.IncidentUID[1:], strings.ToUpper(c.IncidentUID), "123E" + c.IncidentUID[4:]}},
 		{"fingerprint", func(s string) { c.Fingerprint = s }, []string{digest}, append(slices.Clone(badDigest), "")},
 		{"image digest", func(s string) { c.ImageDigest = s }, []string{"", digest}, badDigest},
 		{"reason", func(s string) { c.Reason = Reason(s) }, []string{"NonzeroExit", "ContainerBackoff", "FailedReadiness"}, []string{"", "OOMKilled", "free text"}},
@@ -135,6 +136,10 @@ func TestSnapshotRequiredFields(t *testing.T) {
 		{"missing evidence", func(c *Candidate) { c.Evidence = nil }},
 		{"no excerpts", func(c *Candidate) { c.Excerpts = nil }},
 		{"required excerpt withheld upstream", func(c *Candidate) { c.Excerpts[0].Withheld = true }},
+		{"second required excerpt withheld upstream", func(c *Candidate) { c.Excerpts[1].Optional = false }},
+		{"second required excerpt invalid UTF-8", func(c *Candidate) {
+			c.Excerpts[1] = Excerpt{CollectedAt: c.FirstSeen, Text: "\xff"}
+		}},
 		{"only optional usable", func(c *Candidate) { c.Excerpts[0].Optional = true }},
 		{"blank required excerpt", func(c *Candidate) { c.Excerpts[0].Text = " \t\n" }},
 		{"no rules", func(c *Candidate) { c.MatchedRuleIDs = nil }},
@@ -188,6 +193,21 @@ func allRules() []RuleID {
 	return []RuleID{AnalysisEscalated, NoRequest, WorkloadMapped, PolicySourceExcluded, InfrastructureExcluded, DistinctObservations, CurrentFailure, CheckedLogs}
 }
 
+func TestSnapshotRuleOrder(t *testing.T) {
+	enc := encoder(t)
+	m, c := sample()
+	c.MatchedRuleIDs = []RuleID{AnalysisEscalated, NoRequest}
+	want, ok := enc.Encode(t.Context(), m, c)
+	if !ok {
+		t.Fatal("withheld valid rules")
+	}
+	slices.Reverse(c.MatchedRuleIDs)
+	got, ok := enc.Encode(t.Context(), m, c)
+	if !ok || !bytes.Equal(got, want) {
+		t.Fatal("reordering matched rule IDs changed the snapshot")
+	}
+}
+
 // Each of the sixteen lines has 128 bytes. Its fraction has eight digits, so
 // adding one nanosecond to one time adds exactly one byte to the total.
 func limitEvidence(m *Mapping, c *Candidate) {
@@ -226,6 +246,7 @@ func TestSnapshotFreeText(t *testing.T) {
 		{"controls", "left\x00\n\u0085\u2028\u2029right", "leftright", false},
 		{"format controls", "left\u202eright", "leftright", false},
 		{"joined secret", "before pass\x00word=abcdef", "before password=***", false},
+		{"joined across newline", "before pass\nword=abcdef", "before password=***", false},
 		{"1024 bytes", strings.Repeat("é", 512), strings.Repeat("é", 512), false},
 		{"1025 bytes", strings.Repeat("é", 512) + "x", "", false},
 	} {
@@ -366,31 +387,72 @@ func TestSnapshotWireLimit(t *testing.T) {
 	}
 }
 
+var snapshotFields = map[reflect.Type][]string{
+	reflect.TypeFor[payload]():     {"schemaVersion", "verdict", "ruleVersion", "repositoryAlias", "untrusted"},
+	reflect.TypeFor[untrusted]():   {"incidentUID", "fingerprint", "reason", "count", "firstSeen", "lastSeen", "workload", "containerAlias", "imageDigest", "matchedRuleIDs", "evidence", "excerpts", "modelHint"},
+	reflect.TypeFor[Workload]():    {"kind", "namespace", "name"},
+	reflect.TypeFor[wireExcerpt](): {"containerAlias", "collectedAt", "cut", "withheld", "text"},
+}
+
 func TestSnapshotClosedSchema(t *testing.T) {
-	for _, tc := range []struct {
-		value  any
-		fields []string
-	}{
-		{payload{}, []string{"schemaVersion", "verdict", "ruleVersion", "repositoryAlias", "untrusted"}},
-		{untrusted{}, []string{"incidentUID", "fingerprint", "reason", "count", "firstSeen", "lastSeen", "workload", "containerAlias", "imageDigest", "matchedRuleIDs", "evidence", "excerpts", "modelHint"}},
-		{Workload{}, []string{"kind", "namespace", "name"}},
-		{wireExcerpt{}, []string{"containerAlias", "collectedAt", "cut", "withheld", "text"}},
+	for typ := range snapshotFields {
+		if err := checkSnapshotType(typ); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func checkSnapshotType(typ reflect.Type, parents ...reflect.Type) error {
+	marshaler := reflect.TypeFor[json.Marshaler]()
+	if typ.Implements(marshaler) || reflect.PointerTo(typ).Implements(marshaler) {
+		return fmt.Errorf("%v implements json.Marshaler", typ)
+	}
+	if slices.Contains(parents, typ) {
+		return fmt.Errorf("recursive snapshot type %v", typ)
+	}
+	parents = append(parents, typ)
+	switch typ.Kind() {
+	case reflect.Array, reflect.Slice, reflect.Pointer:
+		return checkSnapshotType(typ.Elem(), parents...)
+	case reflect.Struct:
+		names, ok := snapshotFields[typ]
+		if !ok || typ.NumField() != len(names) {
+			return fmt.Errorf("unexpected struct or field count for %v", typ)
+		}
+		for i, want := range names {
+			field := typ.Field(i)
+			name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+			if name != want {
+				return fmt.Errorf("%v.%s has JSON name %q, want %q", typ, field.Name, name, want)
+			}
+			if err := checkSnapshotType(field.Type, parents...); err != nil {
+				return fmt.Errorf("%v.%s: %w", typ, field.Name, err)
+			}
+		}
+	case reflect.Bool, reflect.String, reflect.Int, reflect.Int64:
+	default:
+		return fmt.Errorf("unexpected snapshot type %v", typ)
+	}
+	return nil
+}
+
+type customJSONString string
+
+func (*customJSONString) MarshalJSON() ([]byte, error) { return []byte(`{}`), nil }
+
+func TestSnapshotRejectsOpenTypes(t *testing.T) {
+	for _, typ := range []reflect.Type{
+		reflect.TypeFor[[]any](),
+		reflect.TypeFor[[]map[string]string](),
+		reflect.TypeFor[*map[string]any](),
+		reflect.TypeFor[[2]any](),
+		reflect.TypeFor[json.RawMessage](),
+		reflect.TypeFor[customJSONString](),
+		reflect.TypeFor[[]*struct{ Extra string }](),
 	} {
-		typ := reflect.TypeOf(tc.value)
-		t.Run(typ.Name(), func(t *testing.T) {
-			var got []string
-			for field := range typ.Fields() {
-				name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
-				got = append(got, name)
-				switch field.Type.Kind() {
-				case reflect.Interface, reflect.Map:
-					t.Errorf("open field %s", field.Name)
-				}
-			}
-			if !slices.Equal(got, tc.fields) {
-				t.Errorf("fields %v, want %v", got, tc.fields)
-			}
-		})
+		if checkSnapshotType(typ) == nil {
+			t.Errorf("schema accepted %v", typ)
+		}
 	}
 }
 

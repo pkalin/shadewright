@@ -76,8 +76,9 @@ type Observation struct {
 	ObservedAt time.Time
 }
 
-// Excerpt holds one log excerpt and the collector's metadata. At least one
-// non-optional excerpt must have usable text. Withheld discards Text even when set.
+// Excerpt holds one log excerpt and the collector's metadata. A snapshot needs
+// at least one required excerpt and usable text for every required excerpt.
+// Withheld discards Text even when set.
 type Excerpt struct {
 	CollectedAt time.Time
 	Text        string

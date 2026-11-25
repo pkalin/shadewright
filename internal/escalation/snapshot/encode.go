@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -64,7 +65,7 @@ const (
 )
 
 var (
-	uuid   = regexp.MustCompile(`^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$`)
+	uuid   = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 	digest = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 	alias  = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
 )
@@ -76,11 +77,14 @@ func encode(ctx context.Context, m Mapping, c Candidate, check stringCheck) ([]b
 	}
 
 	u, ok := check.identity(c)
-	if !ok || !check.rules(c.MatchedRuleIDs) {
+	if !ok {
 		return nil, false
 	}
 	u.ContainerAlias = m.ContainerAlias
-	u.MatchedRuleIDs = c.MatchedRuleIDs
+	u.MatchedRuleIDs, ok = check.rules(c.MatchedRuleIDs)
+	if !ok {
+		return nil, false
+	}
 	u.Evidence, ok = check.evidence(c.Evidence, m.ContainerAlias)
 	if !ok {
 		return nil, false
@@ -159,23 +163,26 @@ func (check stringCheck) identity(c Candidate) (untrusted, bool) {
 	return u, true
 }
 
-func (check stringCheck) rules(ids []RuleID) bool {
-	if len(ids) == 0 || len(ids) > 8 {
-		return false
+func (check stringCheck) rules(ids []RuleID) ([]RuleID, bool) {
+	order := [...]RuleID{
+		AnalysisEscalated, NoRequest, WorkloadMapped, PolicySourceExcluded,
+		InfrastructureExcluded, DistinctObservations, CurrentFailure, CheckedLogs,
 	}
-	seen := make(map[RuleID]bool, len(ids))
-	for _, id := range ids {
-		switch id {
-		case AnalysisEscalated, NoRequest, WorkloadMapped, PolicySourceExcluded, InfrastructureExcluded, DistinctObservations, CurrentFailure, CheckedLogs:
-		default:
-			return false
-		}
-		if seen[id] || !check.exact(string(id)) {
-			return false
-		}
-		seen[id] = true
+	if len(ids) == 0 || len(ids) > len(order) {
+		return nil, false
 	}
-	return true
+	matched := make([]RuleID, 0, len(ids))
+	for _, id := range order {
+		if !slices.Contains(ids, id) {
+			continue
+		}
+		if !check.exact(string(id)) {
+			return nil, false
+		}
+		matched = append(matched, id)
+	}
+	// Duplicate and unknown IDs both leave fewer matches than inputs.
+	return matched, len(matched) == len(ids)
 }
 
 func (check stringCheck) evidence(observations []Observation, container string) ([]string, bool) {
@@ -233,8 +240,13 @@ func (check stringCheck) excerpts(entries []Excerpt, container string) ([]wireEx
 			text, ok := check.text(e.Text, maxExcerptBytes)
 			if ok && strings.TrimSpace(text) != "" {
 				ex.Text, ex.Withheld = text, false
-				hasRequired = hasRequired || !e.Optional
 			}
+		}
+		if !e.Optional {
+			if ex.Withheld {
+				return nil, false
+			}
+			hasRequired = true
 		}
 		out = append(out, ex)
 	}

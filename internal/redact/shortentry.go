@@ -71,14 +71,14 @@ func (r *Redactor) ReplaceCheckedShort(s string, repl func(kind, text string) st
 // not in a share of the heap limit. An entry longer than MaxShortEntry is withheld before any work (ReasonSize).
 func meteredShort[T any](r *Redactor, size int, f func(wm *meter.Meter) T) (out T, ok bool) {
 	if size > MaxShortEntry {
-		withheldTotal.WithLabelValues(ReasonSize).Inc()
+		r.hooks.withheld(ReasonSize)
 		return out, false
 	}
 	// A slot is held only for the work of one short entry, which its budget bounds, so this wait always ends and
 	// takes no context.
 	_ = shortEntries.Acquire(context.Background(), 1) // #nosec G104 -- Acquire fails only when its context ends
 	defer shortEntries.Release(1)
-	return onBudget(r.budgetOf(size), f)
+	return onBudget(r, r.budgetOf(size), f)
 }
 
 // StringShort is String for an entry of at most MaxShortEntry bytes, outside the limit on the heap of the

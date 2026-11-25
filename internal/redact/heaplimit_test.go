@@ -18,13 +18,14 @@ package redact
 
 import (
 	"context"
+	"errors"
 	"math"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
-
-	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
@@ -58,12 +59,12 @@ func TestHeapLimitIsNeverOff(t *testing.T) {
 	if l.limit != fallbackHeapLimit || l.sem == nil {
 		t.Fatalf("limit %d bytes without a Go memory limit, want %d", l.limit, fallbackHeapLimit)
 	}
-	held, ok := l.acquire(context.Background(), largestObject)
+	held, ok := l.acquire(context.Background(), largestObject, nil)
 	if !ok {
 		t.Fatal("the first entry did not run")
 	}
 	defer held()
-	if _, ok := l.acquire(ctxDone(), 0); ok {
+	if _, ok := l.acquire(ctxDone(), 0, nil); ok {
 		t.Error("an entry ran beside one that holds the whole limit")
 	}
 }
@@ -181,20 +182,21 @@ func heapShapeNamed(t *testing.T, name string) heapShape {
 // holds its own, without waiting; a third that does not fit waits.
 func TestEntriesThatFitRunTogether(t *testing.T) {
 	l := newHeapLimiter(2 * heapWeight(1<<10))
-	waits := promtest.ToFloat64(heapWaitsTotal)
-	first, ok1 := l.acquire(context.Background(), 1<<10)
-	second, ok2 := l.acquire(ctxDone(), 1<<10) // a done context: it may not wait at all
+	waits := 0
+	onWait := func() { waits++ }
+	first, ok1 := l.acquire(context.Background(), 1<<10, onWait)
+	second, ok2 := l.acquire(ctxDone(), 1<<10, onWait) // a done context cannot wait
 	if !ok1 || !ok2 {
 		t.Fatalf("two entries that fit the limit: ran %v and %v, want both together", ok1, ok2)
 	}
-	if got := promtest.ToFloat64(heapWaitsTotal) - waits; got != 0 {
-		t.Errorf("%v waits counted for two entries that fit, want none", got)
+	if waits != 0 {
+		t.Errorf("%d waits counted for two entries that fit, want none", waits)
 	}
-	if _, ok := l.acquire(ctxDone(), 0); ok {
+	if _, ok := l.acquire(ctxDone(), 0, onWait); ok {
 		t.Error("a third entry ran beside two that hold the whole limit")
 	}
-	if got := promtest.ToFloat64(heapWaitsTotal) - waits; got != 1 {
-		t.Errorf("%v waits counted for the third entry, want 1", got)
+	if waits != 1 {
+		t.Errorf("%d waits counted for the third entry, want 1", waits)
 	}
 	first()
 	second()
@@ -204,9 +206,9 @@ func TestEntriesThatFitRunTogether(t *testing.T) {
 // the ones after it wait for it; no wait is left without an end.
 func TestLargeEntryRunsAlone(t *testing.T) {
 	l := newHeapLimiter(heapWeight(1 << 10))
-	small, _ := l.acquire(context.Background(), 0)
+	small, _ := l.acquire(context.Background(), 0, nil)
 	large := make(chan func())
-	go func() { r, _ := l.acquire(context.Background(), MaxEntry); large <- r }()
+	go func() { r, _ := l.acquire(context.Background(), MaxEntry, nil); large <- r }()
 	select {
 	case <-large:
 		t.Fatal("the large entry ran beside a small one")
@@ -215,7 +217,7 @@ func TestLargeEntryRunsAlone(t *testing.T) {
 	after := make(chan func())
 	go func() {
 		time.Sleep(5 * time.Millisecond) // after the large one in the queue
-		r, _ := l.acquire(context.Background(), 0)
+		r, _ := l.acquire(context.Background(), 0, nil)
 		after <- r
 	}()
 	small()
@@ -229,38 +231,61 @@ func TestLargeEntryRunsAlone(t *testing.T) {
 	(<-after)()
 }
 
-// A wait ends with the redactor's context (WithContext), or after the limiter's longest wait without one: the
-// entry is withheld with the reason wait, nothing of it is returned, and the wait is counted.
-func TestWaitEndsWithTheContext(t *testing.T) {
-	l := newHeapLimiter(heapWeight(1 << 10))
-	l.maxWait = 30 * time.Millisecond
-	held, _ := l.acquire(context.Background(), 0)
-	defer held()
-	reason := func() float64 { return promtest.ToFloat64(withheldTotal.WithLabelValues(ReasonWait)) }
-	withHeapLimiter(l, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		defer cancel()
-		for _, c := range []struct {
-			name string
-			r    *Redactor
-		}{{"a redactor with a context", defaultRedactor.WithContext(ctx)}, {"a redactor without one", defaultRedactor}} {
-			before, waits := reason(), promtest.ToFloat64(heapWaitsTotal)
-			start := time.Now()
-			out, ok := c.r.StringChecked("password=hunter2")
-			if ok || out != Withheld {
-				t.Errorf("%s: ok %v, %q; want withheld", c.name, ok, out)
-			}
-			if took := time.Since(start); took > 5*time.Second {
-				t.Errorf("%s: waited %v", c.name, took)
-			}
-			if got := reason() - before; got != 1 {
-				t.Errorf("%s: %v entries counted with reason wait, want 1", c.name, got)
-			}
-			if got := promtest.ToFloat64(heapWaitsTotal) - waits; got != 1 {
-				t.Errorf("%s: %v waits counted, want 1", c.name, got)
-			}
-		}
-	})
+func TestHeapWaitHooks(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		finish func(release, cancel func())
+		err    error
+	}{
+		{"released", func(release, _ func()) { release() }, nil},
+		{"cancelled", func(_, cancel func()) { cancel() }, ErrWait},
+		{"timed out", func(_, _ func()) {}, ErrWait},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				l := newHeapLimiter(heapWeight(0))
+				l.maxWait = time.Second
+				held, ok := l.acquire(t.Context(), 0, nil)
+				if !ok {
+					t.Fatal("the first entry did not run")
+				}
+				release := sync.OnceFunc(held)
+				defer release()
+				withHeapLimiter(l, func() {
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					var events []string
+					r, err := New(Hooks{
+						Withheld: func(reason string) { events = append(events, reason) },
+						HeapWait: func() { events = append(events, "heap wait") },
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					done := make(chan struct{})
+					var clean bool
+					var checkErr error
+					go func() {
+						defer close(done)
+						clean, checkErr = r.WithContext(ctx).CleanChecked("ordinary text")
+					}()
+					synctest.Wait()
+					c.finish(release, cancel)
+					<-done
+					if clean != (c.err == nil) || !errors.Is(checkErr, c.err) {
+						t.Errorf("clean %v, error %v; want clean %v, error %v", clean, checkErr, c.err == nil, c.err)
+					}
+					want := []string{"heap wait"}
+					if c.err != nil {
+						want = append(want, ReasonWait)
+					}
+					if !slices.Equal(events, want) {
+						t.Errorf("hooks called with %v, want %v", events, want)
+					}
+				})
+			})
+		})
+	}
 }
 
 // The share of an entry is given back when its decision panics, so the limit is whole again.
@@ -269,7 +294,7 @@ func TestShareGivenBackOnPanic(t *testing.T) {
 	withHeapLimiter(l, func() {
 		func() {
 			defer func() { _ = recover() }()
-			meteredOn(context.Background(), 1<<10, budgetOf(1<<10), func(*meter.Meter) string { panic("boom") })
+			meteredOn(defaultRedactor, 1<<10, budgetOf(1<<10), func(*meter.Meter) string { panic("boom") })
 		}()
 	})
 	if !l.sem.TryAcquire(l.limit) {

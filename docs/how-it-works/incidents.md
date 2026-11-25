@@ -26,6 +26,8 @@ A restart of the analyzer loses nothing that matters. First sightings are held i
 
 A crash loop produces many follow-on events (`BackOff`, failing probes). When the pod status already shows the cause, those events are counted on the cause's Incident and open none of their own. The cause is an out-of-memory kill in the 10 minutes before the event, or a wait on an image or a configuration. A `BackOff` with neither counts on a non-zero exit within 10 minutes of it once the exit's Incident is open (a second crash), if the analyzer has room to hold it. Otherwise the `BackOff` can open its own Incident, which the exit's Incident folds if it opens within 15 minutes. A failing probe never counts on an exit: a failed liveness probe is what restarts the container. A pod being deleted, or marked as stopped as a whole (evicted, a node shutdown, a deadline), shows no exit as a cause from then on.
 
+A container that cannot pull its image gets one Incident for the wait (`ErrImagePull` and `ImagePullBackOff` share it for the same container and image). The kubelet's short `Failed` events (`Error: ErrImagePull`, `Error: ImagePullBackOff`, `Error: InvalidImageName`) count on it too, or fold into it if they opened an Incident first. The long `Failed to pull image` event stays separate, so a missing image usually opens two Incidents, not one. An Incident that folded is `Resolved` with `Lifecycle` `FoldedIntoCause`.
+
 ```mermaid
 flowchart LR
     ev[Warning event or pod status] --> red[Redact]

@@ -109,7 +109,8 @@ func TestControllerWritesTheRecord(t *testing.T) {
 }
 
 // A reply from another model leaves no trace of the name it gave in the record, the controller's log lines, the
-// Incident's status or an Event: the record lists no model, as no configured one answered.
+// Incident's status or an Event of the controller or the analyzer: the record lists no model, as no configured one
+// answered.
 func TestControllerKeepsAnUnexpectedModelOutOfTheRecord(t *testing.T) {
 	ns := namespace(t)
 	setSettings(t, 10)
@@ -118,10 +119,11 @@ func TestControllerKeepsAnUnexpectedModelOutOfTheRecord(t *testing.T) {
 	other := reply(validResult)
 	other.c.Model = unexpectedModel
 	f.triage.steps = []step{other}
+	events := record.NewFakeRecorder(8)
+	f.cfg.Recorder = events
 	c, _ := newController(t, ns, f)
 	store := &fake.Store{}
 	c.Store = store
-	events := record.NewFakeRecorder(8)
 	c.Recorder = events
 	var logs strings.Builder
 	ctx := logr.NewContext(t.Context(), funcr.New(func(_, args string) {
@@ -154,6 +156,10 @@ func TestControllerKeepsAnUnexpectedModelOutOfTheRecord(t *testing.T) {
 	var evs strings.Builder
 	for e := range events.Events {
 		evs.WriteString(e)
+	}
+	// Both recorders write here: the controller's (the record's Events) and the analyzer's (the provider change).
+	if !strings.Contains(evs.String(), EventModelProviderChanged) {
+		t.Errorf("the analyzer's Event is not among those checked: %q", evs.String())
 	}
 	tail := unexpectedModel[len(unexpectedModel)-16:]
 	sinks := map[string]string{"log lines": logs.String(), "status": string(status), "events": evs.String()}

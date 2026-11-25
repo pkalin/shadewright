@@ -1,6 +1,6 @@
 # ADR-0048: Redaction moves to a shared module in two stages
 
-- Status: Proposed
+- Status: Accepted (2026-11-24)
 - Date: 2026-11-24
 
 ## Context

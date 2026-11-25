@@ -233,10 +233,12 @@ type IncidentStatus struct {
 	// +optional
 	Containers []Name `json:"containers,omitempty"`
 
-	// cause is true when the Incident was opened or counted by a pod-status observation of class cause, an OOM
-	// kill or a waiting reason the kubelet wrote (ADR-0039 point 8). Only such an Incident takes the evidence of
-	// a consequence or folds a consequence Incident. An Event never sets it. Once true it stays true, and the
-	// status cannot be removed while it is.
+	// cause is true when the Incident was opened or counted by a pod-status observation of class cause, which the
+	// kubelet wrote: an OOM kill, a non-zero exit (not of a pod being deleted, nor of one whose status.reason is
+	// set, such as an evicted pod) or a waiting reason (ADR-0039 points 3 and 8, point 3 amended 2026-11-20 and
+	// narrowed 2026-11-21). Only such an Incident takes the evidence of a consequence or folds a consequence
+	// Incident: a non-zero exit's takes BackOff only, an OOM kill's or a wait's BackOff and Unhealthy. An Event
+	// never sets it. Once true it stays true, and the status cannot be removed while it is.
 	// +optional
 	Cause bool `json:"cause,omitempty"`
 

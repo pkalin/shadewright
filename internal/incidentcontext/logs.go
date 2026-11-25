@@ -177,8 +177,8 @@ type containerReads struct {
 	// oversized), or a read was withheld by redaction. A second read that failed otherwise is only named in
 	// notes.
 	failed bool
-	// withheld: redaction withheld a read whole (#873); its blocks carry LabelWithheld.
-	withheld bool
+	// withheld is the title and notice of a read redaction withheld whole (#873).
+	withheld string
 }
 
 // wantsSecond reports whether the container's other instance is read after its first read: the other
@@ -201,16 +201,18 @@ func (r *containerReads) blocks() []Block {
 		if r.failed {
 			blk.Availability = CouldNotFetch
 		}
-		if r.withheld {
+		if r.withheld != "" {
 			blk.addLabel(LabelWithheld)
+			blk.requiredText = r.withheld
 		}
 		blk.headLen = len(blk.Text)
 		return []Block{blk}
 	}
 	out := slices.Clone(r.out)
 	out[0].Text, out[0].headLen = r.notes.String()+out[0].Text, r.notes.Len()+out[0].headLen
-	if r.withheld {
+	if r.withheld != "" {
 		out[0].addLabel(LabelWithheld)
+		out[0].requiredText = r.withheld
 	}
 	return out
 }
@@ -243,6 +245,14 @@ func (b *Builder) readInstance(ctx context.Context, r *containerReads, previous 
 	read := pick
 	read.previous = previous
 	blk, v := b.renderBlock(read, ex, err, r.left)
+	if v.Read == LogReadWithheld && len(blk.Text) > r.left {
+		// A first read with no excerpt can leave too little room for the second read's notice.
+		// Reclaim room from those earlier notes to keep the withheld title and notice together.
+		notes, _ := keepHead(r.notes.String(), r.notes.Len()+r.left-len(blk.Text))
+		r.left += r.notes.Len() - len(notes)
+		r.notes.Reset()
+		r.notes.WriteString(notes)
+	}
 	r.left -= len(blk.Text)
 	if v.Read == LogReadOK {
 		r.out = append(r.out, blk)
@@ -260,7 +270,7 @@ func (b *Builder) readInstance(ctx context.Context, r *containerReads, previous 
 	if v.Read == LogReadWithheld {
 		// A withheld read is a failed source whichever read it is, as the decision of 2026-11-20 on #873 has
 		// it for every caller of the log source.
-		r.failed, r.withheld = true, true
+		r.failed, r.withheld = true, blk.Text
 	}
 	return nil
 }

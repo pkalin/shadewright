@@ -35,6 +35,14 @@ import (
 // fingerprint must not change with this release (ADR-0039). collectorMainTable holds origin/main's outputs for
 // every input of redacttest.GateCases and a few more, written at a commit of main with COLLECTOR_MAIN_TABLE set to
 // the output path. This file and redacttest/controls.go compile on origin/main as they are.
+//
+// The shown columns (Symptom, Value, BoundValue) changed once since: the text an Incident stores and a module's
+// evidence value are redacted with redact.ReplaceCheckedShortShown, which also reads the controls, shown and printed
+// views, because main showed a secret a control or an escape sequence splits there ("password" ESC "[31m=V" kept
+// V). Their rows were written from that branch; Normalize and the fingerprint were not touched, so every
+// fingerprint stays as at the commit the table names. On the 290 rows that changed, no output shows a part of a
+// secret the main output hid, and 179 no longer show one main showed (TestStoredSymptomOmitsSecretsSplitByControls
+// in package incidents checks the shown paths on a generated corpus).
 
 // collectorMainTable is the table of origin/main's outputs.
 const collectorMainTable = "testdata/controls-collector-main.tsv"
@@ -90,7 +98,8 @@ func TestWriteCollectorMainTable(t *testing.T) {
 	}
 }
 
-// Every collector reading of every input equals origin/main's, the fingerprint included.
+// Every collector reading of every input equals the table: Normalize and the fingerprint as on origin/main, the
+// shown columns as since the shown short entry point.
 func TestCollectorReadingsDecideAsMain(t *testing.T) {
 	f, err := os.Open(collectorMainTable)
 	if err != nil {

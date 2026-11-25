@@ -79,24 +79,30 @@ func TestShortEntryRefusesLongText(t *testing.T) {
 	}
 }
 
-// The heap one short entry holds, on every shape known at MaxShortEntry, is at most ShortEntryHeap: the figure the
-// room next to the heap limit counts for each of its slots.
+// The heap one short entry holds, at each short entry point and on every shape known at MaxShortEntry, is at most
+// ShortEntryHeap: the figure the room next to the heap limit counts for each of its slots.
 func TestHeapOfAShortEntry(t *testing.T) {
 	if raceDetector {
 		t.Skip("measures the heap of the product build")
 	}
 	worst := uint64(0)
-	for _, sh := range heapShapes {
-		s := sh.text(MaxShortEntry)
-		var ok bool
-		peak := peakLiveHeap(func() { _, ok = ReplaceCheckedShort(s, keep, same) })
-		worst = max(worst, peak)
-		if !ok {
-			t.Errorf("%s: a short entry was withheld", sh.name)
-		}
-		if peak > ShortEntryHeap {
-			t.Errorf("%s: a short entry of %d bytes held %.2f MiB, over ShortEntryHeap (%.2f MiB)", sh.name,
-				MaxShortEntry, mib(peak), mib(ShortEntryHeap))
+	entries := []struct {
+		name string
+		run  func(s string, repl func(kind, text string) string, between func(string) string) (string, bool)
+	}{{"ReplaceCheckedShort", ReplaceCheckedShort}, {"ReplaceCheckedShortShown", ReplaceCheckedShortShown}}
+	for _, e := range entries {
+		for _, sh := range heapShapes {
+			s := sh.text(MaxShortEntry)
+			var ok bool
+			peak := peakLiveHeap(func() { _, ok = e.run(s, keep, same) })
+			worst = max(worst, peak)
+			if !ok {
+				t.Errorf("%s on %s: a short entry was withheld", e.name, sh.name)
+			}
+			if peak > ShortEntryHeap {
+				t.Errorf("%s on %s: a short entry of %d bytes held %.2f MiB, over ShortEntryHeap (%.2f MiB)", e.name,
+					sh.name, MaxShortEntry, mib(peak), mib(ShortEntryHeap))
+			}
 		}
 	}
 	t.Logf("the heaviest short entry of %d bytes held %.3f MiB; %d slots hold at most %.1f MiB", MaxShortEntry,

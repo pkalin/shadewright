@@ -37,9 +37,12 @@ import (
 // what origin/main hides). Each input of redacttest.GateCases is the message of the crashing container (a status
 // message), its previous log, the value and the name of a metric label, and the note the Incident's symptom was
 // made from (fingerprint.Symptom); the four-byte parts of the probe the context shows (redacttest.VisibleGrams)
-// must be among those origin/main's context showed, and the symptom line must be origin/main's, byte for byte
-// (the context's value of the symptom decides as main). buildGateMainTable holds origin/main's answer, written at a commit of main with BUILD_GATE_MAIN_TABLE set to the output path. This
-// file compiles on origin/main as it is.
+// must be among those origin/main's context showed, and the symptom line must be the table's, byte for byte.
+// buildGateMainTable holds origin/main's answer, written at a commit of main with BUILD_GATE_MAIN_TABLE set to the
+// output path. This file compiles on origin/main as it is. Its symptom lines were written again when
+// fingerprint.Symptom moved to redact.ReplaceCheckedShortShown, which hides a secret a control or an escape sequence
+// splits: of the 286 lines that changed, none shows a part of a probe origin/main's line hid, and 179 no longer
+// show one it showed.
 
 // buildGateMainTable is the table of origin/main's answers.
 const buildGateMainTable = "testdata/controls-gate-build-main.tsv"
@@ -130,7 +133,7 @@ func TestWriteBuildGateMainTable(t *testing.T) {
 }
 
 // No context shows a four-byte part of a probe that origin/main's context did not show (decision of 2026-11-22 on
-// #852). Under -race it checks a seeded sample (racesample_test.go).
+// #852), and the symptom line is the table's. Under -race it checks a seeded sample (racesample_test.go).
 func TestBuildGateHidesWhatMainHid(t *testing.T) {
 	f, err := os.Open(buildGateMainTable)
 	if err != nil {
@@ -167,7 +170,7 @@ func TestBuildGateHidesWhatMainHid(t *testing.T) {
 		gotBits, gotSymptom, _ := strings.Cut(got[i], "\t")
 		if gotSymptom != want[i][2] {
 			if symptoms++; symptoms <= 3 {
-				t.Errorf("the symptom line differs from origin/main's on %s:\n got %s\nmain %s", c.Name, gotSymptom, want[i][2])
+				t.Errorf("the symptom line differs from the table's on %s:\n  got %s\ntable %s", c.Name, gotSymptom, want[i][2])
 			}
 		}
 		m, errM := strconv.ParseUint(want[i][1], 16, 64)
@@ -188,7 +191,7 @@ func TestBuildGateHidesWhatMainHid(t *testing.T) {
 		t.Errorf("%d inputs show more than origin/main", shows)
 	}
 	if symptoms > 0 {
-		t.Errorf("%d symptom lines differ from origin/main's", symptoms)
+		t.Errorf("%d symptom lines differ from the table's", symptoms)
 	}
 	if !raceDetector {
 		for _, missing := range redacttest.GateUncovered(cases, built) {

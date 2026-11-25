@@ -207,8 +207,15 @@ const (
 	keepAfterKeyOrWhole
 )
 
+// normalize redacts with redact.ReplaceCheckedShort for the fingerprint input (keepNone), the readings the
+// fingerprint has always been computed from, so a fingerprint stays as it was across an upgrade. The text that is
+// stored or shown ([Symptom], [Value]) is redacted with redact.ReplaceCheckedShortShown, which also hides a secret a
+// control or a terminal escape sequence splits.
 func normalize(o Observation, mode quantityMode) string {
-	return normalizeWith(redact.ReplaceCheckedShort, o, mode)
+	if mode == keepNone {
+		return normalizeWith(redact.ReplaceCheckedShort, o, mode)
+	}
+	return normalizeWith(redact.ReplaceCheckedShortShown, o, mode)
 }
 
 // replaceChecked is the signature of redact.ReplaceCheckedShort.

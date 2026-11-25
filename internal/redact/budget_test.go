@@ -127,6 +127,15 @@ var budgetEntries = []budgetEntry{
 			return strings.Join(defaultRedactor.strings(wm, budgetLines(in)), "\n")
 		},
 		func(in string) string { return strings.Join(Strings(budgetLines(in)), "\n") }},
+	{"ReplaceCheckedShortShown", func(in string) int { return len(in) },
+		func(wm *meter.Meter, in string) string {
+			return defaultRedactor.replaceSpans(wm, in, defaultRedactor.spansShown(wm, in), budgetRepl,
+				func(s string) string { return s })
+		},
+		func(in string) string {
+			out, _ := ReplaceCheckedShortShown(in, budgetRepl, func(s string) string { return s })
+			return out
+		}},
 	{"PiecesWithin", func(in string) int { return piecesSize(budgetPieces(in)) },
 		func(wm *meter.Meter, in string) string {
 			return strings.Join(defaultRedactor.piecesWithin(wm, budgetPieces(in), -1, false, nil), "")
@@ -183,6 +192,7 @@ func corpusShapes(n int) map[string]string {
 	maps.Copy(out, budgetShapes(n))
 	maps.Copy(out, shortFlagShapes(n))
 	out[passwordFlagRun] = strings.Repeat(passwordFlagUnit, n/len(passwordFlagUnit))
+	out[printedRun] = strings.Repeat(printedUnit, n/len(printedUnit))
 	out[`TOKEN="a" before a blank line`] = strings.Repeat(`TOKEN="a"`, n/len(`TOKEN="a"`)) + "\"\n" +
 		strings.Repeat(" ", 4096) + "\"："
 	return out
@@ -190,6 +200,14 @@ func corpusShapes(n int) map[string]string {
 
 // passwordFlagRun names "-password," repeated in corpusShapes.
 const passwordFlagRun = "-password, repeated"
+
+// printedRun names printedUnit repeated in corpusShapes: secrets split by colour sequences, a carriage return and
+// a zero-width character, which the printed view of the shown short entry point reads (printed.go).
+const printedRun = "escape sequences repeated"
+
+// printedUnit is a secret key a colour sequence splits, its value, a zero-width character and a carriage return
+// before a reset sequence.
+const printedUnit = "pass\x1b[31mword=v\u200b\r\x1b[0m "
 
 // The units of the shapes that cost the most per byte before #962, which more than one test builds.
 const (

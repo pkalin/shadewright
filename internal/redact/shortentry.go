@@ -34,9 +34,14 @@ import (
 // once, each holding at most ShortEntryHeap (TestHeapOfAShortEntry measures every shape known at MaxShortEntry).
 // One more short entry waits only for another short entry to finish, never for an analysis.
 //
-// A short entry is decided by the readings of origin/main alone, without the controls view (controls.go, #852,
-// decision of 2026-11-22): its callers redact, change the text and redact again, and the added reading there can
-// show a key's bytes the second reading hid. A secret a control splits in an event note is shown there as before.
+// ReplaceCheckedShort and StringShort decide by the readings of origin/main alone, without the controls view
+// (controls.go, #852, decision of 2026-11-22): the fingerprint is computed from them, and it must not change, so
+// Incident history carries across an upgrade. ReplaceCheckedShortShown is for the text that is stored or shown (the
+// symptom an Incident holds, a module's evidence value), never for a fingerprint: it adds the controls view, the
+// shown view and the printed view (printed.go), so a secret a control or a terminal escape sequence splits is
+// hidden there. It can show a key's bytes that the second redaction of its callers hid on main ("DB_PASS
+// WORD=<redacted>" where main gave "DB_PASS <redacted>"); the collector's table (package modules) checks that no
+// part of a secret main hid is shown.
 
 const (
 	// MaxShortEntry is the longest entry, in bytes, the short entry points take: four times the 1,024 bytes the API
@@ -65,6 +70,33 @@ func (r *Redactor) ReplaceCheckedShort(s string, repl func(kind, text string) st
 		return Withheld, false
 	}
 	return r.replaceSpans(unstopped(), s, spans, repl, between), true
+}
+
+// ReplaceCheckedShortShown is ReplaceCheckedShort for text that is stored or shown, never fingerprinted: it also
+// reads the text without its controls, as it is shown when it is not valid UTF-8, and as a terminal prints it
+// (without its escape sequences and invisible characters), and hides what those readings find (addControlsView,
+// addPrintedView). It runs on the same budget and in the same slots as ReplaceCheckedShort; an entry over its
+// budget, or longer than MaxShortEntry, is withheld.
+func ReplaceCheckedShortShown(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
+	return defaultRedactor.ReplaceCheckedShortShown(s, repl, between)
+}
+
+// ReplaceCheckedShortShown is the package's ReplaceCheckedShortShown with r's rules and work budget.
+func (r *Redactor) ReplaceCheckedShortShown(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
+	spans, ok := meteredShort(r, len(s), func(wm *meter.Meter) []span { return r.spansShown(wm, s) })
+	if !ok {
+		return Withheld, false
+	}
+	return r.replaceSpans(unstopped(), s, spans, repl, between), true
+}
+
+// spansShown is spans with the printed view added: every reading of the text the full entry points take, and the
+// text as a terminal prints it.
+func (r *Redactor) spansShown(wm *meter.Meter, s string) []span {
+	l := r.mainMatches(wm, s)
+	r.addControlsView(wm, s, l)
+	r.addPrintedView(wm, s, l)
+	return settle(wm, s, l.spans(wm))
 }
 
 // meteredShort is metered for a short entry: f runs on r's budget of the entry in one of the short entries' slots,

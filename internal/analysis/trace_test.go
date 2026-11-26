@@ -18,12 +18,16 @@ package analysis
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -31,6 +35,8 @@ import (
 
 	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 	"github.com/shadewright-labs/shadewright/internal/tools"
 )
 
@@ -259,6 +265,91 @@ func TestNoTracerProviderIsNoTracing(t *testing.T) {
 	}
 }
 
+// unexpectedModel is a token-shaped model name a provider could return: it passes the adapters' form check of
+// a reply's model (letters, digits and "._:/-", at most 128 bytes), and the redactor takes it for a key.
+var unexpectedModel = "sk-ant-api03-" + strings.Repeat("Zx9Qw8Er7Ty6Ui5O", 4)
+
+// The model a reply names reaches a span, a log line and the outcome (which the outcome's log line, the root
+// span and the record take) only when it is exactly the configured one. On a mismatch the refusal names the
+// configured model and says the reply named another, without its value.
+func TestReplyModelReachesTelemetryOnlyWhenConfigured(t *testing.T) {
+	if redact.String(unexpectedModel) == unexpectedModel {
+		t.Fatal("the redactor does not take the synthetic model name for a key")
+	}
+	other := reply(validResult)
+	other.c.Model = unexpectedModel
+	billed := step{c: providers.Completion{Model: unexpectedModel, Usage: providers.Usage{InputTokens: 10}},
+		err: providers.ErrMalformedOutput}
+	for name, tc := range map[string]struct {
+		s      step
+		reason Reason
+	}{
+		"another model":                {other, ReasonUnexpectedModel},
+		"malformed from another model": {billed, ReasonUnexpectedModel},
+		"configured model":             {reply(validResult), ReasonProposed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture()
+			rec := tracetest.NewSpanRecorder()
+			f.cfg.TracerProvider = sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+			f.triage.steps = []step{tc.s}
+			var logs strings.Builder
+			ctx := logr.NewContext(t.Context(), funcr.New(func(_, args string) {
+				logs.WriteString(args)
+				logs.WriteByte('\n')
+			}, funcr.Options{}))
+			a, err := New(f.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := a.Analyze(ctx, incident(), testLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.Reason != tc.reason || f.triage.calls() != 1 {
+				t.Fatalf("reason %s after %d calls, want %s after one", out.Reason, f.triage.calls(), tc.reason)
+			}
+
+			matched := tc.reason == ReasonProposed
+			call := spanNamed(t, rec, spanModelCall)
+			if v, ok := attrOf(call, attrResponseModel); ok != matched || (ok && v.AsString() != fakeModel) {
+				t.Errorf("model call response model %q (set %v), want it set to %q only for the configured model",
+					v.AsString(), ok, fakeModel)
+			}
+			wantModels := []string{}
+			if matched {
+				wantModels = []string{fakeModel}
+			}
+			if !slices.Equal(out.Models, wantModels) {
+				t.Errorf("outcome models %v, want %v", out.Models, wantModels)
+			}
+			root := spanNamed(t, rec, spanAnalysis)
+			if v, _ := attrOf(root, attrModels); !slices.Equal(v.AsStringSlice(), wantModels) {
+				t.Errorf("root span models %v, want %v", v.AsStringSlice(), wantModels)
+			}
+
+			spans, err := json.Marshal(tracetest.SpanStubsFromReadOnlySpans(rec.Ended()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tail := unexpectedModel[len(unexpectedModel)-16:]
+			for sink, text := range map[string]string{"spans": string(spans), "log lines": logs.String()} {
+				if strings.Contains(text, tail) {
+					t.Errorf("%s hold the model name the reply named", sink)
+				}
+			}
+			refusal := strings.Contains(logs.String(), "did not name the configured model")
+			if refusal == matched {
+				t.Errorf("refusal logged %v for reason %s:\n%s", refusal, out.Reason, logs.String())
+			}
+			if !matched && (!strings.Contains(logs.String(), `"expected"="`+fakeModel+`"`) ||
+				!strings.Contains(logs.String(), `"replyNamed"="a different model"`)) {
+				t.Errorf("the refusal does not name the configured model and say the reply named another:\n%s", logs.String())
+			}
+		})
+	}
+}
+
 // spanNamed returns the first ended span with the name, failing when there is none.
 func spanNamed(t *testing.T, rec *tracetest.SpanRecorder, name string) sdktrace.ReadOnlySpan {
 	t.Helper()
@@ -348,4 +439,39 @@ func (c cancelingBuilder) BuildWithin(ctx context.Context, inc *remediationv1alp
 	total int) (*incidentcontext.Context, error) {
 	c.cancel()
 	return c.b.BuildWithin(ctx, inc, total)
+}
+
+// A reply whose usage counts pass providers.MaxUsageTokens is charged its upper bound like a reply of unknown
+// usage, and its counts reach neither the span nor the outcome: input plus output would otherwise wrap negative
+// and lower the analysis's spend, letting later calls pass the token bound.
+func TestUsageAboveTheBoundIsChargedTheCeiling(t *testing.T) {
+	for _, u := range []providers.Usage{
+		{InputTokens: math.MaxInt64, OutputTokens: 1},
+		{InputTokens: 1, OutputTokens: math.MaxInt64},
+		{InputTokens: providers.MaxUsageTokens + 1},
+		{InputTokens: -1, OutputTokens: 1},
+	} {
+		f, rec := tracedFixture()
+		s := reply(validResult)
+		s.c.Usage = u
+		f.triage.steps = []step{s}
+		l := testLimits()
+		out := f.analyze(t, l)
+		call := spanNamed(t, rec, spanModelCall)
+		charged, _ := attrOf(call, attrCharged)
+		reqs := f.triage.reqs()
+		if len(reqs) != 1 {
+			t.Fatalf("usage %+v: %d triage requests, want 1", u, len(reqs))
+		}
+		want := estimateInput(reqs[0]) + outputBound(f.triage, l.MaxOutputTokens)
+		if out.Tokens != want || charged.AsInt64() != want {
+			t.Errorf("usage %+v: outcome tokens %d, charged %d, want the ceiling %d", u, out.Tokens,
+				charged.AsInt64(), want)
+		}
+		for _, k := range []attribute.Key{attrInputTokens, attrOutputTokens} {
+			if v, ok := attrOf(call, k); ok {
+				t.Errorf("usage %+v: span sets %s = %d", u, k, v.AsInt64())
+			}
+		}
+	}
 }

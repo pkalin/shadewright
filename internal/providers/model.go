@@ -97,6 +97,21 @@ type Usage struct {
 	OutputTokens      int64
 }
 
+// MaxUsageTokens bounds each count a provider reports. The counts are the provider's text: an adapter refuses
+// a reply with a count above it as malformed output and reports its usage as unknown, so that a sum of counts
+// (input plus output, or the charges of an analysis) cannot overflow.
+const MaxUsageTokens int64 = 1 << 40
+
+// InRange reports whether every count of u is between zero and MaxUsageTokens.
+func (u Usage) InRange() bool {
+	for _, n := range []int64{u.InputTokens, u.CachedInputTokens, u.OutputTokens} {
+		if n < 0 || n > MaxUsageTokens {
+			return false
+		}
+	}
+	return true
+}
+
 // Completion is the model's reply to one call.
 type Completion struct {
 	// Content is the text or structured output; it is untrusted.

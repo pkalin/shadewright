@@ -424,7 +424,9 @@ func (p *Provider) once(ctx context.Context, body []byte) (data []byte, billed, 
 	}
 	actx, cancel := context.WithTimeout(ctx, p.attemptTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(actx, http.MethodPost, p.url, bytes.NewReader(body))
+	// No value of the caller's context reaches the request: a trace hook there would see the API key
+	// (providers.WireContext). The end and the deadline still apply.
+	req, err := http.NewRequestWithContext(providers.WireContext(actx), http.MethodPost, p.url, bytes.NewReader(body))
 	if err != nil {
 		return nil, false, false, errors.New("openai-compatible: could not build the request")
 	}

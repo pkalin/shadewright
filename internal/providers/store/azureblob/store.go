@@ -367,7 +367,9 @@ func (s *Store) try(ctx context.Context, blob *url.URL, data []byte) (time.Durat
 	if err != nil {
 		return 0, s.tokenError(ctx, err)
 	}
-	req, err := http.NewRequestWithContext(tctx, http.MethodPut, blob.String(), bytes.NewReader(data))
+	// No value of the caller's context reaches the request: a trace hook there would see the access token
+	// (providers.WireContext). The end and the deadline still apply.
+	req, err := http.NewRequestWithContext(providers.WireContext(tctx), http.MethodPut, blob.String(), bytes.NewReader(data))
 	if err != nil {
 		return 0, fmt.Errorf("%w: %w", errRejected, providers.ErrRejected)
 	}

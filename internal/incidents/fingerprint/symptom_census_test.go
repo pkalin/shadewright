@@ -17,6 +17,8 @@ limitations under the License.
 package fingerprint
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -79,7 +81,7 @@ func censusNotes(t *testing.T) []string {
 	}
 	for _, root := range []string{"../../analyzer", "../../incidents", "../../modules", "../../incidentcontext", "../../../test/eval"} {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || filepath.Base(path) == "symptom_differential_test.go" {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || isDifferentialFile(path) {
 				return err
 			}
 			f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -117,14 +119,18 @@ func censusNotes(t *testing.T) []string {
 // many notes the stored symptom changes against origin/main's reading, and how many it withholds whole. The
 // reading of origin/main is normalizeWith with redact.ReplaceCheckedShort, which decides as origin/main (the
 // fingerprint tables). A note "holds a marker" when origin/main's symptom holds <redacted>. It logs the counts and
-// at most five examples of each kind; it fails only when it reads too few notes.
+// at most five examples of each kind. It fails when it reads too few notes, when a note without a marker is
+// withheld, when a note without a marker other than censusChanged is changed, and when the count of notes with a
+// marker that are withheld, or of those on several lines, is not the one recorded (censusWithheld,
+// censusWithheldMulti). A new note in the repository that changes these counts updates them in the same change,
+// with the reason.
 func TestStoredSymptomCensus(t *testing.T) {
 	notes := censusNotes(t)
 	if len(notes) < 5000 {
 		t.Fatalf("the census read %d notes, too few", len(notes))
 	}
 	var marker, changed, withheld, withheldMulti, benignWithheld int
-	var exChanged, exWithheld []string
+	var exChanged, exWithheld, unexpected []string
 	for _, s := range notes {
 		o := Observation{Note: s, Reason: "BackOff"}
 		main := normalizeWith(redact.ReplaceCheckedShort, o, keepAfterKey)
@@ -144,6 +150,9 @@ func TestStoredSymptomCensus(t *testing.T) {
 			continue
 		}
 		changed++
+		if !censusChanged[censusHash(s)] {
+			unexpected = append(unexpected, censusHash(s)+" "+strconv.Quote(s)+": "+strconv.Quote(main)+" -> "+strconv.Quote(now))
+		}
 		if now == placeholderRedacted {
 			benignWithheld++
 			if len(exWithheld) < 5 {
@@ -161,4 +170,42 @@ func TestStoredSymptomCensus(t *testing.T) {
 	for _, e := range exWithheld {
 		t.Logf("withheld without a marker: %s", e)
 	}
+	if benignWithheld != 0 {
+		t.Errorf("%d notes without a marker on origin/main are withheld, want 0", benignWithheld)
+	}
+	if changed > len(censusChanged) {
+		t.Errorf("%d notes without a marker on origin/main are changed, want at most %d", changed, len(censusChanged))
+	}
+	for _, u := range unexpected {
+		t.Errorf("a note without a marker on origin/main is changed and is not in censusChanged: %s", u)
+	}
+	if withheld != censusWithheld || withheldMulti != censusWithheldMulti {
+		t.Errorf("%d notes with a marker withheld, %d of them on several lines; want %d and %d", withheld, withheldMulti,
+			censusWithheld, censusWithheldMulti)
+	}
+}
+
+// censusChanged holds the content hashes (censusHash) of the notes without a marker on origin/main whose stored
+// symptom differs from origin/main's: "line one\n\tline\x00two\u200b  end " and "podStatus\x00event\x01", where a
+// removed control no longer reads as a space ("line two" becomes "linetwo").
+var censusChanged = map[string]bool{"665b789f092dcd19": true, "f693a48e94b246a7": true}
+
+const (
+	// censusWithheld is the number of notes with a marker on origin/main that the stored symptom withholds whole.
+	censusWithheld = 40
+	// censusWithheldMulti is how many of them are on several lines.
+	censusWithheldMulti = 38
+)
+
+// censusHash is the first 16 hex digits of the SHA-256 of a note.
+func censusHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:8])
+}
+
+// isDifferentialFile reports whether path is a file of the stored-symptom differential of package modules, whose
+// inputs hold made-up secrets in every form, written to leak.
+func isDifferentialFile(path string) bool {
+	b := filepath.Base(path)
+	return b == "symptom_differential_test.go" || b == "symptom_inputs_test.go"
 }

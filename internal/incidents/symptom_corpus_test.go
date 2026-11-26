@@ -66,8 +66,10 @@ var symptomSeparators = []string{
 const (
 	symptomLogPrefix = "log: "
 	symptomSGRRed    = "\x1b[31m"
-	// csiRemovedText is "left" and "right" around a complete CSI, once the CSI is removed.
-	csiRemovedText = "leftright"
+	// symptomWithheld is the stored text of a note withheld whole.
+	symptomWithheld = "<redacted>"
+	// csiRemovedText is "ready" next to a complete CSI, once the CSI is removed.
+	csiRemovedText = "ready"
 )
 
 // symptomPrefixes are the texts each generated row is placed after.
@@ -275,27 +277,37 @@ func TestFormsLeftOutAreShownInPlainForm(t *testing.T) {
 func TestTerminalStringsWithholdTheStoredSymptom(t *testing.T) {
 	for _, note := range []string{"\x9dtitle\x07ready", "\x9dtitle", "x\u009done\u009dtwo\u009crest\u009cz"} {
 		sym := fingerprint.Symptom(fingerprint.Observation{Note: note, Source: fingerprint.SourceEvent})
-		if sym != "<redacted>" {
+		if sym != symptomWithheld {
 			t.Errorf("Symptom(%q) = %q, want <redacted>", note, sym)
 		}
-		if v := modules.BoundValue(note); v != "<redacted>" {
+		if v := modules.BoundValue(note); v != symptomWithheld {
 			t.Errorf("BoundValue(%q) = %q, want <redacted>", note, v)
 		}
 	}
 }
 
 // A complete CSI with a space as its intermediate byte (CSI 5 SP q, the cursor style) is removed whole by the
-// event symptom, the evidence value and the module evidence value, in both its forms.
+// event symptom, the evidence value and the module evidence value, in both its forms, before or after a word. Between
+// two words it glues them ("left" CSI "right" prints "leftright"), which origin/main's reading ("left (5 qright")
+// does not show: such a note is withheld (fingerprint.showsMoreThan).
 func TestCSIWithASpaceIsRemovedFromTheStoredSymptom(t *testing.T) {
 	for _, note := range []string{"left\x1b[5 qright", "left\u009b5 qright"} {
+		if got := fingerprint.Symptom(fingerprint.Observation{Note: note, Source: fingerprint.SourceEvent}); got != symptomWithheld {
+			t.Errorf("Symptom(%q) = %q, want <redacted>", note, got)
+		}
+		if got := modules.BoundValue(note); got != symptomWithheld {
+			t.Errorf("BoundValue(%q) = %q, want <redacted>", note, got)
+		}
+	}
+	for _, note := range []string{"ready\x1b[5 q", "ready\u009b5 q", "\x1b[5 qready", "\u009b5 qready"} {
 		if got := fingerprint.Symptom(fingerprint.Observation{Note: note, Source: fingerprint.SourceEvent}); got != csiRemovedText {
-			t.Errorf("Symptom(%q) = %q, want leftright", note, got)
+			t.Errorf("Symptom(%q) = %q, want ready", note, got)
 		}
 		if got := fingerprint.Value(note); got != csiRemovedText {
-			t.Errorf("Value(%q) = %q, want leftright", note, got)
+			t.Errorf("Value(%q) = %q, want ready", note, got)
 		}
 		if got := modules.BoundValue(note); got != csiRemovedText {
-			t.Errorf("BoundValue(%q) = %q, want leftright", note, got)
+			t.Errorf("BoundValue(%q) = %q, want ready", note, got)
 		}
 	}
 }

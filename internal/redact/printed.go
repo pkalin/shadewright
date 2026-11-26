@@ -52,8 +52,11 @@ import (
 // removed or collapsed is deleted outright: a run of whitespace is deleted unless it is one ASCII space (a plain
 // single space of the input stays), and every removed character is deleted. The first squeezed text removes each
 // CSI whole, as the printed text does; the second keeps every byte of a CSI after its introducer (the bytes a
-// sequence may have taken from the text after it: "pass" ESC "[1mword").
-// The entry as it was read (the readings of origin/main on it) is the third. When a rule finds in any of them a
+// sequence may have taken from the text after it: "pass" ESC "[1mword"). The spaced text is the printed text with
+// one space for each character and each CSI it removed, as origin/main read a removed control (a separator between
+// a key and its value: "Bearer" SOH "token" prints as "Bearertoken", which no rule reads as a key and value, and
+// the spaced text "Bearer token" shows the value). The entry as it was read (the readings of origin/main on it) is
+// the last. When a rule finds in any of them a
 // secret whose printed bytes the matches of the printed text do not all cover, the entry is withheld whole. It is
 // withheld too when a match of the printed text, other than an address, ends at a run of whitespace other than one
 // ASCII space that more text follows: the run may split the value ("--password abc" CR "def" prints as
@@ -61,6 +64,10 @@ import (
 // invisible character, an invalid byte, a line end or a blank other than one ASCII space splits is either hidden
 // in the printed text or not shown at all. Not in scope: a credential split by plain ASCII spaces alone
 // ("ghp_abc def"), which the printed and the squeezed texts both show as it is.
+//
+// The caller of the stored text (package fingerprint) also compares, after its normalisation, the shown text with
+// origin/main's reading of the entry, which ReplaceCheckedShortShownAndRead returns on the same budget, and
+// withholds the entry when the shown text holds a part of a word origin/main's does not.
 //
 // Cost: each byte is read once to build the texts, which hold at most the bytes of the entry each, and one 32-bit
 // offset for each of their bytes; the rules read each text once, so the work stays linear in the entry, within the
@@ -75,6 +82,11 @@ type shownTexts struct {
 	// their introducers; squeezedAt and bodiesAt give for each of their bytes the byte of printed it is, or -1.
 	squeezed, squeezedBodies string
 	squeezedAt, bodiesAt     []int32
+	// spaced is the printed text with one space for each character and each CSI it removed, the reading origin/main
+	// gave a removed control (it read it as a separator); spacedAt gives for each of its bytes the byte of printed it
+	// is, or -1.
+	spaced   string
+	spacedAt []int32
 	// readAt gives for each byte of the entry the byte of printed it is, or -1 (removed, or a run of whitespace).
 	readAt []int32
 	// collapsed holds, in order, the bytes of printed that stand for a run of whitespace other than one ASCII space.
@@ -85,10 +97,10 @@ type shownTexts struct {
 
 // printedBuilder builds the shown texts of one entry.
 type printedBuilder struct {
-	p, q, f          strings.Builder
-	qAt, fAt, readAt []int32
-	runs, runSpaces  int // the code points of the open run of whitespace, and its ASCII spaces
-	runOpen          bool
+	p, q, f, g            strings.Builder
+	qAt, fAt, gAt, readAt []int32
+	runs, runSpaces       int // the code points of the open run of whitespace, and its ASCII spaces
+	runOpen               bool
 	// collapsed holds the bytes of the printed text that are a run of whitespace other than one ASCII space.
 	collapsed []int32
 }
@@ -100,8 +112,10 @@ func printedTextsOf(wm *meter.Meter, s string) (shownTexts, bool) {
 	b.p.Grow(len(s))
 	b.q.Grow(len(s))
 	b.f.Grow(len(s))
+	b.g.Grow(len(s))
 	b.qAt = make([]int32, 0, len(s))
 	b.fAt = make([]int32, 0, len(s))
+	b.gAt = make([]int32, 0, len(s))
 	for i := range b.readAt {
 		tick(wm, 1)
 		b.readAt[i] = -1
@@ -119,6 +133,7 @@ func printedTextsOf(wm *meter.Meter, s string) (shownTexts, bool) {
 					b.fAt = append(b.fAt, -1)
 				}
 			}
+			b.removed()
 			i += n
 			continue
 		}
@@ -126,6 +141,7 @@ func printedTextsOf(wm *meter.Meter, s string) (shownTexts, bool) {
 		switch {
 		case r == utf8.RuneError && n == 1:
 			// An invalid byte is dropped.
+			b.removed()
 		case r == '\b' || r == 0x7f:
 			return shownTexts{}, false
 		case unicode.IsSpace(r):
@@ -138,6 +154,7 @@ func printedTextsOf(wm *meter.Meter, s string) (shownTexts, bool) {
 			}
 		case !printable(wm, r):
 			// A control, format or invisible character is removed.
+			b.removed()
 		default:
 			b.closeRun()
 			at := int32(b.p.Len()) // #nosec G115 -- an entry is at most MaxEntry bytes
@@ -146,17 +163,26 @@ func printedTextsOf(wm *meter.Meter, s string) (shownTexts, bool) {
 				b.readAt[i+k] = at + int32(k) // #nosec G115 -- n is at most 4
 				b.qAt = append(b.qAt, at+int32(k))
 				b.fAt = append(b.fAt, at+int32(k))
+				b.gAt = append(b.gAt, at+int32(k))
 			}
 			b.p.WriteString(s[i : i+n])
 			b.q.WriteString(s[i : i+n])
 			b.f.WriteString(s[i : i+n])
+			b.g.WriteString(s[i : i+n])
 		}
 		i += n
 	}
 	b.closeRun()
 	p := b.p.String()
 	return shownTexts{printed: p, squeezed: b.q.String(), squeezedBodies: b.f.String(), squeezedAt: b.qAt,
-		bodiesAt: b.fAt, readAt: b.readAt, collapsed: b.collapsed, changed: p != s}, true
+		bodiesAt: b.fAt, spaced: b.g.String(), spacedAt: b.gAt, readAt: b.readAt, collapsed: b.collapsed,
+		changed: p != s}, true
+}
+
+// removed writes the one space of the spaced text that stands for a removed character or CSI.
+func (b *printedBuilder) removed() {
+	b.g.WriteByte(' ')
+	b.gAt = append(b.gAt, -1)
 }
 
 // closeRun writes the open run of whitespace: one space in the printed text, and one in the squeezed texts only
@@ -176,6 +202,8 @@ func (b *printedBuilder) closeRun() {
 		b.collapsed = append(b.collapsed, int32(b.p.Len())) // #nosec G115 -- an entry is at most MaxEntry bytes
 	}
 	b.p.WriteByte(' ')
+	b.g.WriteByte(' ')
+	b.gAt = append(b.gAt, -1)
 }
 
 // printable reports whether r is kept in the printed text: a graphic character (unicode.IsGraphic) that is not
@@ -235,19 +263,27 @@ func csiAt(wm *meter.Meter, s string, i, j int) (n, body int, ok bool) {
 }
 
 // shownSpans returns the printed text of s and the spans of it to replace, and false when s is withheld whole:
-// it cannot be printed with certainty, or a rule finds in a squeezed text or in s as it was read a secret whose
-// printed bytes the spans of the printed text do not all cover.
+// it cannot be printed with certainty, or a rule finds in a squeezed text, in the spaced text or in s as it was
+// read a secret whose printed bytes the spans of the printed text do not all cover.
 func (r *Redactor) shownSpans(wm *meter.Meter, s string) (string, []span, bool) {
+	p, spans, _, ok := r.shownAndReadSpans(wm, s)
+	return p, spans, ok
+}
+
+// shownAndReadSpans is shownSpans, and also returns the spans of s as it was read: origin/main's reading of s,
+// on the same meter.
+func (r *Redactor) shownAndReadSpans(wm *meter.Meter, s string) (string, []span, []span, bool) {
 	t, ok := printedTextsOf(wm, s)
 	if !ok {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	spans := r.spansAsMain(wm, t.printed)
 	if !t.changed {
-		return t.printed, spans, true
+		return t.printed, spans, spans, true
 	}
+	read := r.spansAsMain(wm, s)
 	if continuesPastARun(wm, t, spans) {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	covered := make([]bool, len(t.printed))
 	for _, sp := range spans {
@@ -257,8 +293,8 @@ func (r *Redactor) shownSpans(wm *meter.Meter, s string) (string, []span, bool) 
 			covered[k] = true
 		}
 	}
-	shows := func(text string, at []int32) bool {
-		for _, sp := range r.spansAsMain(wm, text) {
+	shows := func(found []span, at []int32) bool {
+		for _, sp := range found {
 			tick(wm, 1)
 			for k := sp.start; k < sp.end; k++ {
 				tick(wm, 1)
@@ -269,11 +305,12 @@ func (r *Redactor) shownSpans(wm *meter.Meter, s string) (string, []span, bool) 
 		}
 		return false
 	}
-	if shows(t.squeezed, t.squeezedAt) || (t.squeezedBodies != t.squeezed && shows(t.squeezedBodies, t.bodiesAt)) ||
-		shows(s, t.readAt) {
-		return "", nil, false
+	if shows(r.spansAsMain(wm, t.squeezed), t.squeezedAt) ||
+		(t.squeezedBodies != t.squeezed && shows(r.spansAsMain(wm, t.squeezedBodies), t.bodiesAt)) ||
+		(t.spaced != t.printed && shows(r.spansAsMain(wm, t.spaced), t.spacedAt)) || shows(read, t.readAt) {
+		return "", nil, nil, false
 	}
-	return t.printed, spans, true
+	return t.printed, spans, read, true
 }
 
 // continuesPastARun reports whether a match of the printed text other than an address ends right before a run of

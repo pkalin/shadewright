@@ -255,3 +255,27 @@ func TestRawRedactionKeepsPlaceholdersUnforgeable(t *testing.T) {
 		}
 	}
 }
+
+// The guard of the stored text: it withholds a shown text that holds four word characters in a row that
+// origin/main's text does not, read without spaces, "?", characters that are not graphic and placeholders, and
+// keeps one that holds no more.
+func TestShowsMoreThanReadsWordsAsOriginMain(t *testing.T) {
+	for _, c := range []struct {
+		shown, read string
+		want        bool
+	}{
+		{"Bearer " + placeholderRedacted, "Bearer " + placeholderRedacted, false},
+		{"BearerZq8rT2vX9", "Bearer " + placeholderRedacted, true},   // a value main hid, glued to its key
+		{"Zq8rT2vX9 mK4pL7w", "Zq8rT2vX9 <duration> ?mK4pL7w", true}, // main split it with a placeholder
+		{"podStatusevent", "podStatus event", false},                 // main split it with a space alone
+		{"Zq8r T2vX", "Zq8r?T2vX", false},                            // an invalid byte in main's reading
+		{"leftright", "left (5 qright", true},                        // punctuation breaks a word
+		{"abc", "xyz", false},                                        // no four word characters
+		{"<redacted> ok", "password ok", false},                      // a placeholder is no part of a value
+		{"x" + placeholderRedacted + "y", "x y", false},
+	} {
+		if got := showsMoreThan(c.shown, c.read); got != c.want {
+			t.Errorf("showsMoreThan(%q, %q) = %t, want %t", c.shown, c.read, got, c.want)
+		}
+	}
+}

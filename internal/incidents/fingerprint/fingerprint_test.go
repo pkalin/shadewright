@@ -581,17 +581,18 @@ func TestWithheldNoteIsRedacted(t *testing.T) {
 
 // The shown symptom of a note with a secret an escape sequence splits is decided whole or withheld whole, on every
 // budget: below the work it needs it is the placeholder, with nothing of the note; with enough it hides the secret.
-// A fingerprint is computed from the readings of main alone, which the shown readings only add to.
+// A fingerprint is computed from the readings of main alone, which the shown readings only add to. The budget is
+// one for the printed reading and origin/main's reading the guard compares it with.
 func TestShownSymptomWithheldOverItsBudget(t *testing.T) {
 	red, err := redact.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	const secret = "mysecretvalue" // #nosec G101 -- a made-up value the test looks for
-	o := Observation{Note: "log: pass\x1b[31mword=" + secret + "\x1b[0m ok"}
+	o := Observation{Note: "log: password=" + secret[:8] + "\x1b[31m" + secret[8:] + "\x1b[0m ok"}
 	withheld, decided := 0, 0
 	for steps := int64(0); steps <= 1<<24; steps = max(1, steps*2) {
-		got := normalizeWith(red.WithWorkBudget(steps).ReplaceCheckedShortShown, o, keepAfterKey)
+		got := normalizeShown(red.WithWorkBudget(steps).ReplaceCheckedShortShownAndRead, o, keepAfterKey)
 		if strings.Contains(got, secret[:4]) || strings.Contains(got, secret[len(secret)-4:]) {
 			t.Fatalf("with %d steps the shown symptom shows the secret: %q", steps, got)
 		}
@@ -606,6 +607,14 @@ func TestShownSymptomWithheldOverItsBudget(t *testing.T) {
 	}
 	if withheld == 0 || decided == 0 {
 		t.Fatalf("the sweep withheld %d and decided %d budgets: it must reach both", withheld, decided)
+	}
+	// A key an escape sequence splits is withheld on every budget: the spaced text reads "pass word=" and the
+	// printed text does not cover the key.
+	split := Observation{Note: "log: pass\x1b[31mword=" + secret + "\x1b[0m ok"}
+	for steps := int64(0); steps <= 1<<24; steps = max(1, steps*2) {
+		if got := normalizeShown(red.WithWorkBudget(steps).ReplaceCheckedShortShownAndRead, split, keepAfterKey); got != placeholderRedacted {
+			t.Fatalf("with %d steps the shown symptom of a split key is %q, want it withheld", steps, got)
+		}
 	}
 }
 

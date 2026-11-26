@@ -265,8 +265,8 @@ split key=value  filler \xc2\x9b at 1	"pass word=mysecretvalue ok"	"<redacted>"	
 split key=value log: filler \xc2\x9b at 1	"log: pass word=mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:697fcf5c9b79d33851b5e2648193d4a433839d8a41b29481ad76f579843b35e6
 split key=value  filler \xc2\x9f at 1	"pass word=mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:20c494c578fe2e9fb81ee61613154bc16e32d50db338f0fd02f433d02abd497f
 split key=value log: filler \xc2\x9f at 1	"log: pass word=mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:697fcf5c9b79d33851b5e2648193d4a433839d8a41b29481ad76f579843b35e6
-split key=value  filler \x1b[31m at 1	"pass (31mword=mysecretvalue ok"	"password=<redacted>"	"password=<redacted>"	"password=<redacted>"	sha256:d714d70849ff66dcf3f7b4fc1d81f9314622eb0169b983026a6afc6de6a529e5
-split key=value log: filler \x1b[31m at 1	"log: pass (31mword=mysecretvalue ok"	"log: password=<redacted>"	"log: password=<redacted>"	"log: password=<redacted>"	sha256:35bdc1077c9ced18212f6839cd04f0f09858061872e4c018a7359d228646aa07
+split key=value  filler \x1b[31m at 1	"pass (31mword=mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d714d70849ff66dcf3f7b4fc1d81f9314622eb0169b983026a6afc6de6a529e5
+split key=value log: filler \x1b[31m at 1	"log: pass (31mword=mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:35bdc1077c9ced18212f6839cd04f0f09858061872e4c018a7359d228646aa07
 split key=value  filler \xe2\x80\x8b at 1	"pass word=<redacted>"	"password=<redacted>"	"password=<redacted>"	"password=<redacted>"	sha256:0cfe471401fc45e5edb2dae547f1cced816967ef5568dd92e0f9644cdd61b093
 split key=value  filler \xe2\x80\x8c at 1	"pass word=<redacted>"	"password=<redacted>"	"password=<redacted>"	"password=<redacted>"	sha256:0cfe471401fc45e5edb2dae547f1cced816967ef5568dd92e0f9644cdd61b093
 split key=value  filler \xe2\x80\x8d at 1	"pass word=<redacted>"	"password=<redacted>"	"password=<redacted>"	"password=<redacted>"	sha256:0cfe471401fc45e5edb2dae547f1cced816967ef5568dd92e0f9644cdd61b093
@@ -505,8 +505,8 @@ split key: value  filler \xc2\x9b at 1	"pass word: Hunter2Secret9x ok"	"<redacte
 split key: value log: filler \xc2\x9b at 1	"log: pass word: Hunter2Secret9x ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:95042b046db0e51001973058b0df9f9ee623e15711a30fa6d23c39895a77635e
 split key: value  filler \xc2\x9f at 1	"pass word: Hunter2Secret9x ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:6bb1387250aa23c777fd20cae75e6dc5269309c7399655c3db446bff88073852
 split key: value log: filler \xc2\x9f at 1	"log: pass word: Hunter2Secret9x ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:95042b046db0e51001973058b0df9f9ee623e15711a30fa6d23c39895a77635e
-split key: value  filler \x1b[31m at 1	"pass (31mword: Hunter2Secret9x ok"	"password: <redacted>"	"password: <redacted>"	"password: <redacted>"	sha256:6ae6af53bbf74de55539d3ce3b8f104abd515f0f23b0082d070c3d3f4d977baa
-split key: value log: filler \x1b[31m at 1	"log: pass (31mword: Hunter2Secret9x ok"	"log: password: <redacted> ok"	"log: password: <redacted> ok"	"log: password: <redacted> ok"	sha256:e6ef582ae9154e0fb2a48c6e48fd25fe4021b6f952da875854f7dd3534e191f9
+split key: value  filler \x1b[31m at 1	"pass (31mword: Hunter2Secret9x ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:6ae6af53bbf74de55539d3ce3b8f104abd515f0f23b0082d070c3d3f4d977baa
+split key: value log: filler \x1b[31m at 1	"log: pass (31mword: Hunter2Secret9x ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e6ef582ae9154e0fb2a48c6e48fd25fe4021b6f952da875854f7dd3534e191f9
 split key: value  filler \xe2\x80\x8b at 1	"pass word: <redacted>"	"password: <redacted>"	"password: <redacted>"	"password: <redacted>"	sha256:52794a947623e1dcd6ce1f9ade2671302d660a4cdc9de53f361bb6d9b8d43cd0
 split key: value  filler \xe2\x80\x8c at 1	"pass word: <redacted>"	"password: <redacted>"	"password: <redacted>"	"password: <redacted>"	sha256:52794a947623e1dcd6ce1f9ade2671302d660a4cdc9de53f361bb6d9b8d43cd0
 split key: value  filler \xe2\x80\x8d at 1	"pass word: <redacted>"	"password: <redacted>"	"password: <redacted>"	"password: <redacted>"	sha256:52794a947623e1dcd6ce1f9ade2671302d660a4cdc9de53f361bb6d9b8d43cd0
@@ -837,7 +837,7 @@ json member  filler \xc2\x80 at 2	"\"password\": \"<redacted>\" ok"	"<redacted>"
 json member log: filler \xc2\x80 at 2	"log: \"password\": \"mysecretvalue\" ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:f306741ace949cd64650f77fe5e0ba2039238df8fbb960ebcfc96e39b76e276a
 json member  filler \xc2\x85 at 2	"\"password\": \"<redacted>\" ok"	"\"password\": \"<redacted>\" ok"	"\"password\": \"<redacted>\" ok"	"\"password\": \"<redacted>\" ok"	sha256:70b8a399ab7fedfaffae95ba9b374dc574fb7a3304aff5b3506f2c94988fa755
 json member log: filler \xc2\x85 at 2	"log: \"password\": \"mysecretvalue\" ok"	"log: \"password\": \"mysecretvalue\" ok"	"log: \"password\": \"mysecretvalue\" ok"	"log: \"password\": \"mysecretvalue\" ok"	sha256:f306741ace949cd64650f77fe5e0ba2039238df8fbb960ebcfc96e39b76e276a
-json member  filler \xc2\x9b at 2	"\"password\": \"<redacted>\" ok"	"\"password\":<redacted> ok"	"\"password\":<redacted> ok"	"\"password\":<redacted> ok"	sha256:70b8a399ab7fedfaffae95ba9b374dc574fb7a3304aff5b3506f2c94988fa755
+json member  filler \xc2\x9b at 2	"\"password\": \"<redacted>\" ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:70b8a399ab7fedfaffae95ba9b374dc574fb7a3304aff5b3506f2c94988fa755
 json member log: filler \xc2\x9b at 2	"log: \"password\": \"mysecretvalue\" ok"	"log: \"password\":<redacted> ok"	"log: \"password\":<redacted> ok"	"log: \"password\":<redacted> ok"	sha256:f306741ace949cd64650f77fe5e0ba2039238df8fbb960ebcfc96e39b76e276a
 json member  filler \xc2\x9f at 2	"\"password\": \"<redacted>\" ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:70b8a399ab7fedfaffae95ba9b374dc574fb7a3304aff5b3506f2c94988fa755
 json member log: filler \xc2\x9f at 2	"log: \"password\": \"mysecretvalue\" ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:f306741ace949cd64650f77fe5e0ba2039238df8fbb960ebcfc96e39b76e276a
@@ -933,8 +933,8 @@ json member  filler \xc2\x80 at 4	"\"password\":\"mysecretvalue \" ok"	"<redacte
 json member log: filler \xc2\x80 at 4	"log: \"password\":\"mysecretvalue \" ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:57d6de1847af8e064bdcea90327b2860538bba4bdd8aa5d84311cd6ac872fed9
 json member  filler \xc2\x85 at 4	"\"password\":\"mysecretvalue \" ok"	"\"password\":\"mysecretvalue \" ok"	"\"password\":\"mysecretvalue \" ok"	"\"password\":\"mysecretvalue \" ok"	sha256:5f4cb7db2cf51f39d52af95c93a782d663ff7282d73c3144ffded990d7afc499
 json member log: filler \xc2\x85 at 4	"log: \"password\":\"mysecretvalue \" ok"	"log: \"password\":\"mysecretvalue \" ok"	"log: \"password\":\"mysecretvalue \" ok"	"log: \"password\":\"mysecretvalue \" ok"	sha256:57d6de1847af8e064bdcea90327b2860538bba4bdd8aa5d84311cd6ac872fed9
-json member  filler \xc2\x9b at 4	"\"password\":\"mysecretvalue \" ok"	"\"password\":\"mysecretvaluek"	"\"password\":\"mysecretvaluek"	"\"password\":\"mysecretvaluek"	sha256:5f4cb7db2cf51f39d52af95c93a782d663ff7282d73c3144ffded990d7afc499
-json member log: filler \xc2\x9b at 4	"log: \"password\":\"mysecretvalue \" ok"	"log: \"password\":\"mysecretvaluek"	"log: \"password\":\"mysecretvaluek"	"log: \"password\":\"mysecretvaluek"	sha256:57d6de1847af8e064bdcea90327b2860538bba4bdd8aa5d84311cd6ac872fed9
+json member  filler \xc2\x9b at 4	"\"password\":\"mysecretvalue \" ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:5f4cb7db2cf51f39d52af95c93a782d663ff7282d73c3144ffded990d7afc499
+json member log: filler \xc2\x9b at 4	"log: \"password\":\"mysecretvalue \" ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:57d6de1847af8e064bdcea90327b2860538bba4bdd8aa5d84311cd6ac872fed9
 json member  filler \xc2\x9f at 4	"\"password\":\"mysecretvalue \" ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:5f4cb7db2cf51f39d52af95c93a782d663ff7282d73c3144ffded990d7afc499
 json member log: filler \xc2\x9f at 4	"log: \"password\":\"mysecretvalue \" ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:57d6de1847af8e064bdcea90327b2860538bba4bdd8aa5d84311cd6ac872fed9
 json member  filler \x1b[31m at 4	"\"password\":\"mysecretvalue (31m\" ok"	"\"password\":\"mysecretvalue\" ok"	"\"password\":\"mysecretvalue\" ok"	"\"password\":\"mysecretvalue\" ok"	sha256:9a5de278998f8ae8b09e675410e8d8be688c2ee2ce8f0a5fb3aac1e73d3192fa
@@ -1055,10 +1055,10 @@ split flag log: filler \x0d\xe2\x80\x8b at 0	"log: --password <redacted> ok"	"lo
 split flag  filler \x00\xe2\x80\x8b at 0	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:f8686547bb1851604f201ad6a1be1987667c2cf28f07ba744743e5319821b275
 split flag log: filler \x00\xe2\x80\x8b at 0	"log: --password <redacted> ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	sha256:51aa909de13500522d3cf7d35a81811efce822441adb41a51690cfe3e44bcfbd
 split flag  filler \xe2\x80\x8b\x0d\x20 at 0	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:f8686547bb1851604f201ad6a1be1987667c2cf28f07ba744743e5319821b275
-split flag  filler \x00 at 1	"--pass <redacted> mysecretvalue ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
-split flag log: filler \x00 at 1	"log: --pass <redacted> mysecretvalue ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
-split flag  filler \x01 at 1	"--pass <redacted> mysecretvalue ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
-split flag log: filler \x01 at 1	"log: --pass <redacted> mysecretvalue ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
+split flag  filler \x00 at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
+split flag log: filler \x00 at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
+split flag  filler \x01 at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
+split flag log: filler \x01 at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
 split flag  filler \x08 at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
 split flag log: filler \x08 at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
 split flag  filler \x0b at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
@@ -1069,8 +1069,8 @@ split flag  filler \x0d at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"
 split flag log: filler \x0d at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
 split flag  filler \x1b at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
 split flag log: filler \x1b at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
-split flag  filler \x1f at 1	"--pass <redacted> mysecretvalue ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
-split flag log: filler \x1f at 1	"log: --pass <redacted> mysecretvalue ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
+split flag  filler \x1f at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
+split flag log: filler \x1f at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
 split flag  filler \x7f at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
 split flag log: filler \x7f at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
 split flag  filler \xc2\x80 at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
@@ -1081,15 +1081,15 @@ split flag  filler \xc2\x9b at 1	"--pass <redacted> mysecretvalue ok"	"<redacted
 split flag log: filler \xc2\x9b at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
 split flag  filler \xc2\x9f at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
 split flag log: filler \xc2\x9f at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
-split flag  filler \x1b[31m at 1	"--pass <redacted> mysecretvalue ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
-split flag log: filler \x1b[31m at 1	"log: --pass <redacted> mysecretvalue ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
-split flag  filler \xe2\x80\x8b at 1	"--pass <redacted> <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:91e8069b1cca88d56d444469536b480bb4711abf7c745b36da49888087103f7e
-split flag  filler \xe2\x80\x8c at 1	"--pass <redacted> <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:91e8069b1cca88d56d444469536b480bb4711abf7c745b36da49888087103f7e
-split flag  filler \xe2\x80\x8d at 1	"--pass <redacted> <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:91e8069b1cca88d56d444469536b480bb4711abf7c745b36da49888087103f7e
-split flag  filler \xe2\x81\xa0 at 1	"--pass <redacted> <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:91e8069b1cca88d56d444469536b480bb4711abf7c745b36da49888087103f7e
-split flag  filler \xef\xbb\xbf at 1	"--pass <redacted> <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:91e8069b1cca88d56d444469536b480bb4711abf7c745b36da49888087103f7e
-split flag  filler \xff at 1	"--pass?word mysecretvalue ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:6e1a7e63e45f4eab1341d987bf7f4f0b26d79e59ddaf0c1d38da587928f99885
-split flag  filler \xc3 at 1	"--pass?word mysecretvalue ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:6e1a7e63e45f4eab1341d987bf7f4f0b26d79e59ddaf0c1d38da587928f99885
+split flag  filler \x1b[31m at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
+split flag log: filler \x1b[31m at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
+split flag  filler \xe2\x80\x8b at 1	"--pass <redacted> <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:91e8069b1cca88d56d444469536b480bb4711abf7c745b36da49888087103f7e
+split flag  filler \xe2\x80\x8c at 1	"--pass <redacted> <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:91e8069b1cca88d56d444469536b480bb4711abf7c745b36da49888087103f7e
+split flag  filler \xe2\x80\x8d at 1	"--pass <redacted> <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:91e8069b1cca88d56d444469536b480bb4711abf7c745b36da49888087103f7e
+split flag  filler \xe2\x81\xa0 at 1	"--pass <redacted> <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:91e8069b1cca88d56d444469536b480bb4711abf7c745b36da49888087103f7e
+split flag  filler \xef\xbb\xbf at 1	"--pass <redacted> <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:91e8069b1cca88d56d444469536b480bb4711abf7c745b36da49888087103f7e
+split flag  filler \xff at 1	"--pass?word mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:6e1a7e63e45f4eab1341d987bf7f4f0b26d79e59ddaf0c1d38da587928f99885
+split flag  filler \xc3 at 1	"--pass?word mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:6e1a7e63e45f4eab1341d987bf7f4f0b26d79e59ddaf0c1d38da587928f99885
 split flag  filler \x80 at 1	"--pass?word mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:6e1a7e63e45f4eab1341d987bf7f4f0b26d79e59ddaf0c1d38da587928f99885
 split flag  filler \x20 at 1	"--pass <redacted> mysecretvalue ok"	"--pass <redacted> mysecretvalue ok"	"--pass <redacted> mysecretvalue ok"	"--pass <redacted> mysecretvalue ok"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
 split flag  filler \x09 at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
@@ -1100,8 +1100,8 @@ split flag  filler \xc2\xa0 at 1	"--pass <redacted> mysecretvalue ok"	"<redacted
 split flag  filler \xe2\x80\x8b\x0d at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
 split flag  filler \x0d\xe2\x80\x8b at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
 split flag log: filler \x0d\xe2\x80\x8b at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
-split flag  filler \x00\xe2\x80\x8b at 1	"--pass <redacted> mysecretvalue ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
-split flag log: filler \x00\xe2\x80\x8b at 1	"log: --pass <redacted> mysecretvalue ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
+split flag  filler \x00\xe2\x80\x8b at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
+split flag log: filler \x00\xe2\x80\x8b at 1	"log: --pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4a3073c2d7e203236ebda4bfd94e32fefaa16f3459221fa069f746bc626940b4
 split flag  filler \xe2\x80\x8b\x0d\x20 at 1	"--pass <redacted> mysecretvalue ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d9320c993ec59546b40e7d5cb0d1293c52b129dd92dc6f543bf2c3e480f98fe8
 split flag  filler \x00 at 2	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	"--password <redacted> ok"	sha256:f8686547bb1851604f201ad6a1be1987667c2cf28f07ba744743e5319821b275
 split flag log: filler \x00 at 2	"log: --password <redacted> ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	"log: --password <redacted> ok"	sha256:51aa909de13500522d3cf7d35a81811efce822441adb41a51690cfe3e44bcfbd
@@ -1295,10 +1295,10 @@ flag= log: filler \x0d\xe2\x80\x8b at 0	"log: --password=<redacted>"	"log: --pas
 flag=  filler \x00\xe2\x80\x8b at 0	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:4bcaba8397ca8d7deb24e03d31476cbb9ab3a26ddf9bd82dbef11d8c552fccc4
 flag= log: filler \x00\xe2\x80\x8b at 0	"log: --password=<redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	sha256:9a10d151938587d8581e30fdd2ccb954e7024403417a82cadcc4c7a8481733ef
 flag=  filler \xe2\x80\x8b\x0d\x20 at 0	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:4bcaba8397ca8d7deb24e03d31476cbb9ab3a26ddf9bd82dbef11d8c552fccc4
-flag=  filler \x00 at 1	"--password <redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
-flag= log: filler \x00 at 1	"log: --password <redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
-flag=  filler \x01 at 1	"--password <redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
-flag= log: filler \x01 at 1	"log: --password <redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
+flag=  filler \x00 at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
+flag= log: filler \x00 at 1	"log: --password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
+flag=  filler \x01 at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
+flag= log: filler \x01 at 1	"log: --password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
 flag=  filler \x08 at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
 flag= log: filler \x08 at 1	"log: --password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
 flag=  filler \x0b at 1	"--password <redacted>"	"--password <redacted>"	"--password <redacted>"	"--password <redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
@@ -1309,8 +1309,8 @@ flag=  filler \x0d at 1	"--password <redacted> ok"	"--password <redacted>"	"--pa
 flag= log: filler \x0d at 1	"log: --password <redacted> ok"	"log: --password <redacted>"	"log: --password <redacted>"	"log: --password <redacted>"	sha256:51aa909de13500522d3cf7d35a81811efce822441adb41a51690cfe3e44bcfbd
 flag=  filler \x1b at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
 flag= log: filler \x1b at 1	"log: --password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
-flag=  filler \x1f at 1	"--password <redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
-flag= log: filler \x1f at 1	"log: --password <redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
+flag=  filler \x1f at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
+flag= log: filler \x1f at 1	"log: --password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
 flag=  filler \x7f at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
 flag= log: filler \x7f at 1	"log: --password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
 flag=  filler \xc2\x80 at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
@@ -1321,15 +1321,15 @@ flag=  filler \xc2\x9b at 1	"--password <redacted>"	"<redacted> <redacted>"	"<re
 flag= log: filler \xc2\x9b at 1	"log: --password <redacted>"	"log: <redacted> <redacted>"	"log: <redacted> <redacted>"	"log: <redacted> <redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
 flag=  filler \xc2\x9f at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
 flag= log: filler \xc2\x9f at 1	"log: --password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
-flag=  filler \x1b[31m at 1	"--password <redacted> ok"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:f8686547bb1851604f201ad6a1be1987667c2cf28f07ba744743e5319821b275
-flag= log: filler \x1b[31m at 1	"log: --password <redacted> ok"	"log: --password=<redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	sha256:51aa909de13500522d3cf7d35a81811efce822441adb41a51690cfe3e44bcfbd
-flag=  filler \xe2\x80\x8b at 1	"--password <redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
-flag=  filler \xe2\x80\x8c at 1	"--password <redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
-flag=  filler \xe2\x80\x8d at 1	"--password <redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
-flag=  filler \xe2\x81\xa0 at 1	"--password <redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
-flag=  filler \xef\xbb\xbf at 1	"--password <redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
-flag=  filler \xff at 1	"--password?=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:e6f33f1df0a20bb9cd8757a574dc90e7e5be978a3b8ff4562d32bf620b67dd99
-flag=  filler \xc3 at 1	"--password?=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:e6f33f1df0a20bb9cd8757a574dc90e7e5be978a3b8ff4562d32bf620b67dd99
+flag=  filler \x1b[31m at 1	"--password <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:f8686547bb1851604f201ad6a1be1987667c2cf28f07ba744743e5319821b275
+flag= log: filler \x1b[31m at 1	"log: --password <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:51aa909de13500522d3cf7d35a81811efce822441adb41a51690cfe3e44bcfbd
+flag=  filler \xe2\x80\x8b at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
+flag=  filler \xe2\x80\x8c at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
+flag=  filler \xe2\x80\x8d at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
+flag=  filler \xe2\x81\xa0 at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
+flag=  filler \xef\xbb\xbf at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
+flag=  filler \xff at 1	"--password?=<redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e6f33f1df0a20bb9cd8757a574dc90e7e5be978a3b8ff4562d32bf620b67dd99
+flag=  filler \xc3 at 1	"--password?=<redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e6f33f1df0a20bb9cd8757a574dc90e7e5be978a3b8ff4562d32bf620b67dd99
 flag=  filler \x80 at 1	"--password?=<redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e6f33f1df0a20bb9cd8757a574dc90e7e5be978a3b8ff4562d32bf620b67dd99
 flag=  filler \x20 at 1	"--password <redacted>"	"--password <redacted>"	"--password <redacted>"	"--password <redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
 flag=  filler \x09 at 1	"--password <redacted>"	"--password <redacted>"	"--password <redacted>"	"--password <redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
@@ -1340,8 +1340,8 @@ flag=  filler \xc2\xa0 at 1	"--password <redacted>"	"--password <redacted>"	"--p
 flag=  filler \xe2\x80\x8b\x0d at 1	"--password <redacted> ok"	"--password <redacted>"	"--password <redacted>"	"--password <redacted>"	sha256:f8686547bb1851604f201ad6a1be1987667c2cf28f07ba744743e5319821b275
 flag=  filler \x0d\xe2\x80\x8b at 1	"--password <redacted> ok"	"--password <redacted>"	"--password <redacted>"	"--password <redacted>"	sha256:f8686547bb1851604f201ad6a1be1987667c2cf28f07ba744743e5319821b275
 flag= log: filler \x0d\xe2\x80\x8b at 1	"log: --password <redacted> ok"	"log: --password <redacted>"	"log: --password <redacted>"	"log: --password <redacted>"	sha256:51aa909de13500522d3cf7d35a81811efce822441adb41a51690cfe3e44bcfbd
-flag=  filler \x00\xe2\x80\x8b at 1	"--password <redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
-flag= log: filler \x00\xe2\x80\x8b at 1	"log: --password <redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
+flag=  filler \x00\xe2\x80\x8b at 1	"--password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:841e07600802998cffd89ab9084d310ae871a471c0bc27a79d8e0ddab8b74ae6
+flag= log: filler \x00\xe2\x80\x8b at 1	"log: --password <redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e39c94814c84e847f7dcc3690eef00720b745d5ada17784172b5bcd81227e1eb
 flag=  filler \xe2\x80\x8b\x0d\x20 at 1	"--password <redacted> ok"	"--password <redacted>"	"--password <redacted>"	"--password <redacted>"	sha256:f8686547bb1851604f201ad6a1be1987667c2cf28f07ba744743e5319821b275
 flag=  filler \x00 at 2	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	"--password=<redacted>"	sha256:4bcaba8397ca8d7deb24e03d31476cbb9ab3a26ddf9bd82dbef11d8c552fccc4
 flag= log: filler \x00 at 2	"log: --password=<redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	"log: --password=<redacted>"	sha256:9a10d151938587d8581e30fdd2ccb954e7024403417a82cadcc4c7a8481733ef
@@ -1849,8 +1849,8 @@ glued bearer  filler \xc2\x9b at 1	"x Bearer <redacted> ok"	"<redacted>"	"<redac
 glued bearer log: filler \xc2\x9b at 1	"log: x Bearer <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:06248bc94c617390d482fea644d2d8184b4fb3b6b8cacf5a58182e6a5991c2f7
 glued bearer  filler \xc2\x9f at 1	"x Bearer <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e9028f70e5f3f17e144e8622d4522a9f2af5c004e9d18a2510ab64cb00039fd7
 glued bearer log: filler \xc2\x9f at 1	"log: x Bearer <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:06248bc94c617390d482fea644d2d8184b4fb3b6b8cacf5a58182e6a5991c2f7
-glued bearer  filler \x1b[31m at 1	"x (31mBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:6efa31ccc24e2ae6642a0dce60f03e03ca15ed55501246ed31a6543a18bfaa2b
-glued bearer log: filler \x1b[31m at 1	"log: x (31mBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:732205bb79c319424da0498dc6d1fb3a0d36dae4c464703abf6db52d0c3e2309
+glued bearer  filler \x1b[31m at 1	"x (31mBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:6efa31ccc24e2ae6642a0dce60f03e03ca15ed55501246ed31a6543a18bfaa2b
+glued bearer log: filler \x1b[31m at 1	"log: x (31mBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:732205bb79c319424da0498dc6d1fb3a0d36dae4c464703abf6db52d0c3e2309
 glued bearer  filler \xe2\x80\x8b at 1	"x Bearer <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e9028f70e5f3f17e144e8622d4522a9f2af5c004e9d18a2510ab64cb00039fd7
 glued bearer  filler \xe2\x80\x8c at 1	"x Bearer <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e9028f70e5f3f17e144e8622d4522a9f2af5c004e9d18a2510ab64cb00039fd7
 glued bearer  filler \xe2\x80\x8d at 1	"x Bearer <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e9028f70e5f3f17e144e8622d4522a9f2af5c004e9d18a2510ab64cb00039fd7
@@ -1893,12 +1893,12 @@ glued bearer  filler \xc2\x80 at 2	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<
 glued bearer log: filler \xc2\x80 at 2	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
 glued bearer  filler \xc2\x85 at 2	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer log: filler \xc2\x85 at 2	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
-glued bearer  filler \xc2\x9b at 2	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearerq7Kp2Vx9Lm4Wt8R ok"	"xBearerq7Kp2Vx9Lm4Wt8R ok"	"xBearerq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
-glued bearer log: filler \xc2\x9b at 2	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearerq7Kp2Vx9Lm4Wt8R ok"	"log: xBearerq7Kp2Vx9Lm4Wt8R ok"	"log: xBearerq7Kp2Vx9Lm4Wt8R ok"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
+glued bearer  filler \xc2\x9b at 2	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
+glued bearer log: filler \xc2\x9b at 2	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
 glued bearer  filler \xc2\x9f at 2	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer log: filler \xc2\x9f at 2	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
-glued bearer  filler \x1b[31m at 2	"xBearer (<duration> Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:b0b99751e5bbdc169bf12b12b37dd9476745890dffdeb57aaefdaa47a5d7d48e
-glued bearer log: filler \x1b[31m at 2	"log: xBearer (<duration> Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:274d32fb8fede38d77c4280e94009fdd2c7a4faef6576be203cbc9103cc630e1
+glued bearer  filler \x1b[31m at 2	"xBearer (<duration> Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:b0b99751e5bbdc169bf12b12b37dd9476745890dffdeb57aaefdaa47a5d7d48e
+glued bearer log: filler \x1b[31m at 2	"log: xBearer (<duration> Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:274d32fb8fede38d77c4280e94009fdd2c7a4faef6576be203cbc9103cc630e1
 glued bearer  filler \xe2\x80\x8b at 2	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer  filler \xe2\x80\x8c at 2	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer  filler \xe2\x80\x8d at 2	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
@@ -1941,12 +1941,12 @@ glued bearer  filler \xc2\x80 at 3	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<
 glued bearer log: filler \xc2\x80 at 3	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
 glued bearer  filler \xc2\x85 at 3	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer log: filler \xc2\x85 at 3	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
-glued bearer  filler \xc2\x9b at 3	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer q7Kp2Vx9Lm4Wt8R ok"	"xBearer q7Kp2Vx9Lm4Wt8R ok"	"xBearer q7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
-glued bearer log: filler \xc2\x9b at 3	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer q7Kp2Vx9Lm4Wt8R ok"	"log: xBearer q7Kp2Vx9Lm4Wt8R ok"	"log: xBearer q7Kp2Vx9Lm4Wt8R ok"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
+glued bearer  filler \xc2\x9b at 3	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
+glued bearer log: filler \xc2\x9b at 3	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
 glued bearer  filler \xc2\x9f at 3	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer log: filler \xc2\x9f at 3	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
-glued bearer  filler \x1b[31m at 3	"xBearer (31mZq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:7ce6ae8c64ea30cf82f65584705829d610d81914e3f036bbe7ae6858468a9cf6
-glued bearer log: filler \x1b[31m at 3	"log: xBearer (31mZq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:19cf6ce0ef5ba4a57c3ef2d018076c4ffa6b07c5880a84d730ed3d209a97f977
+glued bearer  filler \x1b[31m at 3	"xBearer (31mZq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:7ce6ae8c64ea30cf82f65584705829d610d81914e3f036bbe7ae6858468a9cf6
+glued bearer log: filler \x1b[31m at 3	"log: xBearer (31mZq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:19cf6ce0ef5ba4a57c3ef2d018076c4ffa6b07c5880a84d730ed3d209a97f977
 glued bearer  filler \xe2\x80\x8b at 3	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer  filler \xe2\x80\x8c at 3	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer  filler \xe2\x80\x8d at 3	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
@@ -1989,12 +1989,12 @@ glued bearer  filler \xc2\x80 at 4	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<
 glued bearer log: filler \xc2\x80 at 4	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
 glued bearer  filler \xc2\x85 at 4	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer log: filler \xc2\x85 at 4	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
-glued bearer  filler \xc2\x9b at 4	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8Rk"	"xBearer Zq7Kp2Vx9Lm4Wt8Rk"	"xBearer Zq7Kp2Vx9Lm4Wt8Rk"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
-glued bearer log: filler \xc2\x9b at 4	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8Rk"	"log: xBearer Zq7Kp2Vx9Lm4Wt8Rk"	"log: xBearer Zq7Kp2Vx9Lm4Wt8Rk"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
+glued bearer  filler \xc2\x9b at 4	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
+glued bearer log: filler \xc2\x9b at 4	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
 glued bearer  filler \xc2\x9f at 4	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer log: filler \xc2\x9f at 4	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:4431f7856bb46b354e7a0188d9404f98a00db172593314bf8748427f771b5a7a
-glued bearer  filler \x1b[31m at 4	"xBearer Zq7Kp2Vx9Lm4Wt8R (<duration> ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:09486c19570d8fbae9b9609d1b430100a751b3b18d766428ec6e22b84f96dea3
-glued bearer log: filler \x1b[31m at 4	"log: xBearer Zq7Kp2Vx9Lm4Wt8R (<duration> ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"log: xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:d141b8764b8bea51e09add058a777a6ea8181040fa74f0d6ffdae6f8821edff1
+glued bearer  filler \x1b[31m at 4	"xBearer Zq7Kp2Vx9Lm4Wt8R (<duration> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:09486c19570d8fbae9b9609d1b430100a751b3b18d766428ec6e22b84f96dea3
+glued bearer log: filler \x1b[31m at 4	"log: xBearer Zq7Kp2Vx9Lm4Wt8R (<duration> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d141b8764b8bea51e09add058a777a6ea8181040fa74f0d6ffdae6f8821edff1
 glued bearer  filler \xe2\x80\x8b at 4	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer  filler \xe2\x80\x8c at 4	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
 glued bearer  filler \xe2\x80\x8d at 4	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	"xBearer Zq7Kp2Vx9Lm4Wt8R ok"	sha256:fcc3d87e722b995cd2548c77f3fe65dbd4d87f23774313911ba406006781ddc6
@@ -2591,10 +2591,10 @@ split env log: filler \x0d\xe2\x80\x8b at 0	"log: DB_PASSWORD=<redacted> ok"	"lo
 split env  filler \x00\xe2\x80\x8b at 0	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:ae2b7771cd17c0a769ba9cfb686527e9ecfb7118c5e60bef3cbdcbe8de3c9f49
 split env log: filler \x00\xe2\x80\x8b at 0	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	sha256:db47356d860024fbb95f55167151dd3c224d8fc97c34a42665708b7bcfe65017
 split env  filler \xe2\x80\x8b\x0d\x20 at 0	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:ae2b7771cd17c0a769ba9cfb686527e9ecfb7118c5e60bef3cbdcbe8de3c9f49
-split env  filler \x00 at 1	"DB_PASS <redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
-split env log: filler \x00 at 1	"log: DB_PASS <redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
-split env  filler \x01 at 1	"DB_PASS <redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
-split env log: filler \x01 at 1	"log: DB_PASS <redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
+split env  filler \x00 at 1	"DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
+split env log: filler \x00 at 1	"log: DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
+split env  filler \x01 at 1	"DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
+split env log: filler \x01 at 1	"log: DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
 split env  filler \x08 at 1	"DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
 split env log: filler \x08 at 1	"log: DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
 split env  filler \x0b at 1	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
@@ -2605,8 +2605,8 @@ split env  filler \x0d at 1	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_
 split env log: filler \x0d at 1	"log: DB_PASS <redacted> ok"	"log: DB_PASS <redacted> ok"	"log: DB_PASS <redacted> ok"	"log: DB_PASS <redacted> ok"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
 split env  filler \x1b at 1	"DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
 split env log: filler \x1b at 1	"log: DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
-split env  filler \x1f at 1	"DB_PASS <redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
-split env log: filler \x1f at 1	"log: DB_PASS <redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
+split env  filler \x1f at 1	"DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
+split env log: filler \x1f at 1	"log: DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
 split env  filler \x7f at 1	"DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
 split env log: filler \x7f at 1	"log: DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
 split env  filler \xc2\x80 at 1	"DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
@@ -2617,15 +2617,15 @@ split env  filler \xc2\x9b at 1	"DB_PASS <redacted> ok"	"<redacted>"	"<redacted>
 split env log: filler \xc2\x9b at 1	"log: DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
 split env  filler \xc2\x9f at 1	"DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
 split env log: filler \xc2\x9f at 1	"log: DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
-split env  filler \x1b[31m at 1	"DB_PASS (31mWORD=Hunter2Secret9x ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:eadf103a67daafc890457997823010e616aecf9caf9035e45fb56a203f801908
-split env log: filler \x1b[31m at 1	"log: DB_PASS (31mWORD=Hunter2Secret9x ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	sha256:01e5ff8feb64dc95d2bb82b3a03fd953deec3ea2df0f5eb545843ac2111e93be
-split env  filler \xe2\x80\x8b at 1	"DB_PASS WORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:37ebb90ca138bed192cd9a0415a6ee254bd866c915410053ee77fb3871ba6638
-split env  filler \xe2\x80\x8c at 1	"DB_PASS WORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:37ebb90ca138bed192cd9a0415a6ee254bd866c915410053ee77fb3871ba6638
-split env  filler \xe2\x80\x8d at 1	"DB_PASS WORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:37ebb90ca138bed192cd9a0415a6ee254bd866c915410053ee77fb3871ba6638
-split env  filler \xe2\x81\xa0 at 1	"DB_PASS WORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:37ebb90ca138bed192cd9a0415a6ee254bd866c915410053ee77fb3871ba6638
-split env  filler \xef\xbb\xbf at 1	"DB_PASS WORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:37ebb90ca138bed192cd9a0415a6ee254bd866c915410053ee77fb3871ba6638
-split env  filler \xff at 1	"DB_PASS?WORD=Hunter2Secret9x ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:d841fda8e06589690a33281162124f8f40730efdbf8fb13abf3ec2312604ac57
-split env  filler \xc3 at 1	"DB_PASS?WORD=Hunter2Secret9x ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:d841fda8e06589690a33281162124f8f40730efdbf8fb13abf3ec2312604ac57
+split env  filler \x1b[31m at 1	"DB_PASS (31mWORD=Hunter2Secret9x ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:eadf103a67daafc890457997823010e616aecf9caf9035e45fb56a203f801908
+split env log: filler \x1b[31m at 1	"log: DB_PASS (31mWORD=Hunter2Secret9x ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:01e5ff8feb64dc95d2bb82b3a03fd953deec3ea2df0f5eb545843ac2111e93be
+split env  filler \xe2\x80\x8b at 1	"DB_PASS WORD=<redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:37ebb90ca138bed192cd9a0415a6ee254bd866c915410053ee77fb3871ba6638
+split env  filler \xe2\x80\x8c at 1	"DB_PASS WORD=<redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:37ebb90ca138bed192cd9a0415a6ee254bd866c915410053ee77fb3871ba6638
+split env  filler \xe2\x80\x8d at 1	"DB_PASS WORD=<redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:37ebb90ca138bed192cd9a0415a6ee254bd866c915410053ee77fb3871ba6638
+split env  filler \xe2\x81\xa0 at 1	"DB_PASS WORD=<redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:37ebb90ca138bed192cd9a0415a6ee254bd866c915410053ee77fb3871ba6638
+split env  filler \xef\xbb\xbf at 1	"DB_PASS WORD=<redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:37ebb90ca138bed192cd9a0415a6ee254bd866c915410053ee77fb3871ba6638
+split env  filler \xff at 1	"DB_PASS?WORD=Hunter2Secret9x ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d841fda8e06589690a33281162124f8f40730efdbf8fb13abf3ec2312604ac57
+split env  filler \xc3 at 1	"DB_PASS?WORD=Hunter2Secret9x ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d841fda8e06589690a33281162124f8f40730efdbf8fb13abf3ec2312604ac57
 split env  filler \x80 at 1	"DB_PASS?WORD=Hunter2Secret9x ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:d841fda8e06589690a33281162124f8f40730efdbf8fb13abf3ec2312604ac57
 split env  filler \x20 at 1	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
 split env  filler \x09 at 1	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
@@ -2636,8 +2636,8 @@ split env  filler \xc2\xa0 at 1	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	
 split env  filler \xe2\x80\x8b\x0d at 1	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
 split env  filler \x0d\xe2\x80\x8b at 1	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
 split env log: filler \x0d\xe2\x80\x8b at 1	"log: DB_PASS <redacted> ok"	"log: DB_PASS <redacted> ok"	"log: DB_PASS <redacted> ok"	"log: DB_PASS <redacted> ok"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
-split env  filler \x00\xe2\x80\x8b at 1	"DB_PASS <redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
-split env log: filler \x00\xe2\x80\x8b at 1	"log: DB_PASS <redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
+split env  filler \x00\xe2\x80\x8b at 1	"DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
+split env log: filler \x00\xe2\x80\x8b at 1	"log: DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:204af5dba6a97fcae6aa7a12adeebc62eb98e09becad9490dd911e7397804105
 split env  filler \xe2\x80\x8b\x0d\x20 at 1	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
 split env  filler \x00 at 2	"DB_PASSWORD =<redacted>"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:e6243874615dee79c18bfaf48c76dee5dc37603eb789b3bebbf586d4463d6b9a
 split env log: filler \x00 at 2	"log: DB_PASSWORD =<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	"log: DB_PASSWORD=<redacted> ok"	sha256:5a72f6343327c537ec9ec81dea71d29e9af6a4c61da46c7579a8c3191d570fd8
@@ -3839,7 +3839,7 @@ token log: filler \x0d\xe2\x80\x8b at 3	"log: token:<redacted> ok"	"<redacted>"	
 token  filler \x00\xe2\x80\x8b at 3	"token:<redacted> ok"	"token:<redacted> ok"	"token:<redacted> ok"	"token:<redacted> ok"	sha256:7dd689147b664b8d4e1721e5d29be2b13de3355e432d3616627e44524fb885d2
 token log: filler \x00\xe2\x80\x8b at 3	"log: token:<redacted> ok"	"log: token:<redacted> ok"	"log: token:<redacted> ok"	"log: token:<redacted> ok"	sha256:a6ac637068f71e85ee1e281e55215819d9ccc056ac0f95d7a4f478a281e97cd1
 token  filler \xe2\x80\x8b\x0d\x20 at 3	"token:<redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:7dd689147b664b8d4e1721e5d29be2b13de3355e432d3616627e44524fb885d2
-env key split by "\x00"	"DB_PASS <redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	"DB_PASSWORD=<redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
+env key split by "\x00"	"DB_PASS <redacted> ok"	"<redacted>"	"<redacted>"	"<redacted>"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
 env key split by "\r"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
 env key split by "\v"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415
 env key split by "\r\n"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	"DB_PASS <redacted> ok"	sha256:557f25f31c99b880d1b667c8f778d285857babdbff791bdee43d4c002b9a1415

@@ -75,8 +75,9 @@ func (r *Redactor) ReplaceCheckedShort(s string, repl func(kind, text string) st
 // that are not printable, each run of whitespace as one space. The rules read that text, and the text returned is
 // that text with each match replaced (repl) and the text between matches passed through between. It withholds s
 // whole when s cannot be printed with certainty (any escape but a complete CSI, a C1 control in any encoding but
-// NEL as UTF-8, which is a line end, a backspace or DEL), and when a rule finds a secret in a squeezed text of s, or in s as it was read, that the
-// matches of the printed text do not cover. It runs on the same budget and in the same slots as
+// NEL as UTF-8, which is a line end, a backspace or DEL), and when a rule finds a secret that the matches of the
+// printed text do not cover in a squeezed text of s, in the printed text with one space for each character or CSI
+// it removed, or in s as it was read. It runs on the same budget and in the same slots as
 // ReplaceCheckedShort; an entry over its budget, or longer than MaxShortEntry, is withheld.
 func ReplaceCheckedShortShown(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
 	return defaultRedactor.ReplaceCheckedShortShown(s, repl, between)
@@ -97,6 +98,31 @@ func (r *Redactor) ReplaceCheckedShortShown(s string, repl func(kind, text strin
 		return Withheld, false
 	}
 	return r.replaceSpans(unstopped(), d.printed, d.spans, repl, between), true
+}
+
+// ReplaceCheckedShortShownAndRead is ReplaceCheckedShortShown, and also returns s redacted as it was read, as
+// ReplaceCheckedShort returns it: origin/main's reading, which a caller compares with the shown text. Both readings
+// run on one budget, the budget of ReplaceCheckedShortShown; an entry over it is withheld, and so is an entry
+// ReplaceCheckedShortShown withholds.
+func ReplaceCheckedShortShownAndRead(s string, repl func(kind, text string) string, between func(string) string) (shown, read string, ok bool) {
+	return defaultRedactor.ReplaceCheckedShortShownAndRead(s, repl, between)
+}
+
+// ReplaceCheckedShortShownAndRead is the package's ReplaceCheckedShortShownAndRead with r's rules and work budget.
+func (r *Redactor) ReplaceCheckedShortShownAndRead(s string, repl func(kind, text string) string, between func(string) string) (shown, read string, ok bool) {
+	type decision struct {
+		printed     string
+		spans, read []span
+		ok          bool
+	}
+	d, ok := meteredShort(r, len(s), func(wm *meter.Meter) decision {
+		p, spans, read, ok := r.shownAndReadSpans(wm, s)
+		return decision{p, spans, read, ok}
+	})
+	if !ok || !d.ok {
+		return Withheld, Withheld, false
+	}
+	return r.replaceSpans(unstopped(), d.printed, d.spans, repl, between), r.replaceSpans(unstopped(), s, d.read, repl, between), true
 }
 
 // meteredShort is metered for a short entry: f runs on r's budget of the entry in one of the short entries' slots,

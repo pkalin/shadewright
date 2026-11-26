@@ -209,38 +209,118 @@ const (
 
 // normalize redacts with redact.ReplaceCheckedShort for the fingerprint input (keepNone), the readings the
 // fingerprint has always been computed from, so a fingerprint stays as it was across an upgrade. The text that is
-// stored or shown ([Symptom], [Value]) is redacted with redact.ReplaceCheckedShortShown: the note as a terminal
-// prints it, on one line, with its matches replaced, or withheld whole where a secret a control, an escape sequence,
-// an invisible character, an invalid byte or a line end splits could show. A credential split by plain ASCII
-// spaces alone is out of scope there: it is shown as printed.
+// stored or shown ([Symptom], [Value]) is redacted with redact.ReplaceCheckedShortShownAndRead: the note as a
+// terminal prints it, on one line, with its matches replaced, or withheld whole where a secret a control, an escape
+// sequence, an invisible character, an invalid byte or a line end splits could show. A credential split by plain
+// ASCII spaces alone is out of scope there: it is shown as printed. The same call gives origin/main's reading of
+// the note, which is normalised too, and the shown text is withheld when it shows four word characters in a row
+// that origin/main's text does not (showsMoreThan).
 func normalize(o Observation, mode quantityMode) string {
 	if mode == keepNone {
 		return normalizeWith(redact.ReplaceCheckedShort, o, mode)
 	}
-	return normalizeWith(redact.ReplaceCheckedShortShown, o, mode)
+	return normalizeShown(redact.ReplaceCheckedShortShownAndRead, o, mode)
+}
+
+// replaceShownAndRead is the signature of redact.ReplaceCheckedShortShownAndRead.
+type replaceShownAndRead func(s string, repl func(kind, text string) string, between func(string) string) (shown, read string, ok bool)
+
+// normalizeShown is normalize for the text that is stored or shown, with the redaction given:
+// redact.ReplaceCheckedShortShownAndRead, or in a test the same method of a redactor on a lowered work budget. The
+// two readings run on one budget; over it, the note is withheld whole.
+func normalizeShown(replace replaceShownAndRead, o Observation, mode quantityMode) string {
+	if len(o.Note) > maxInputLength {
+		return placeholderRedacted
+	}
+	shown, read, ok := replace(o.Note, rawPlaceholder, sanitize)
+	if !ok {
+		return placeholderRedacted
+	}
+	shown, read = normalizeRedacted(shown, o, mode), normalizeRedacted(read, o, mode)
+	if showsMoreThan(shown, read) {
+		return placeholderRedacted
+	}
+	return shown
+}
+
+// showsMoreThan reports whether shown holds four word characters (letters, digits, "_") in a row that read does
+// not, both read without their placeholders (each a break), spaces, "?" (an invalid byte in origin/main's reading)
+// and characters that are not graphic: a part of a value origin/main's stored text hid, or split with one of those,
+// that the shown text shows. It is linear in the length of the two texts, at most MaxSymptomLength bytes each.
+func showsMoreThan(shown, read string) bool {
+	if shown == read {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, g := range wordGrams(read) {
+		seen[g] = true
+	}
+	for _, g := range wordGrams(shown) {
+		if !seen[g] {
+			return true
+		}
+	}
+	return false
+}
+
+// wordGrams returns the four-byte parts of s that are four word characters, read as showsMoreThan reads s.
+func wordGrams(s string) []string {
+	var out []string
+	var run []byte
+	flush := func() {
+		for i := 0; i+4 <= len(run); i++ {
+			out = append(out, string(run[i:i+4]))
+		}
+		run = run[:0]
+	}
+	inPlaceholder := false
+	for _, r := range s {
+		switch {
+		case r == '<':
+			inPlaceholder = true
+			flush()
+		case r == '>':
+			inPlaceholder = false
+		case inPlaceholder:
+		case r == '_' || r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r)):
+			run = append(run, byte(r)) // #nosec G115 -- r is ASCII
+		case unicode.IsSpace(r) || r == '?' || r == utf8.RuneError || !unicode.IsGraphic(r) || unicode.Is(unicode.Cf, r):
+			// skipped, as a reader who ignores it would
+		default:
+			flush()
+		}
+	}
+	flush()
+	return out
 }
 
 // replaceChecked is the signature of redact.ReplaceCheckedShort.
 type replaceChecked func(s string, repl func(kind, text string) string, between func(string) string) (string, bool)
 
-// normalizeWith is normalize with the redaction given: redact.ReplaceCheckedShort, which takes no share of the
-// limit on the heap of the redactions running at once and never waits for an analysis, or in a test the same
-// method of a redactor on a lowered work budget (#962). Every caller gives it a note of at most
+// normalizeWith is normalize for the fingerprint input, with the redaction given: redact.ReplaceCheckedShort,
+// which takes no share of the limit on the heap of the redactions running at once and never waits for an
+// analysis, or in a test the same method of a redactor on a lowered work budget (#962). Every caller gives it a note of at most
 // redact.MaxShortEntry bytes; a longer one is withheld by the short entry point and stands as "<redacted>".
 func normalizeWith(replace replaceChecked, o Observation, mode quantityMode) string {
 	if len(o.Note) > maxInputLength {
 		return placeholderRedacted
 	}
-	// Redact the note before any character is replaced: sanitize turns ">" into ")", which would hide a folded
-	// block scalar indicator from the rules (#840). The fingerprint input is redacted as it was read; the shown text
-	// as it is printed (redact.ReplaceCheckedShortShown), which then holds no control, invisible character or line
-	// end. Each match becomes its placeholder at once, and only the text between matches is sanitized.
+	// Redact the note before sanitize replaces any character of it: sanitize turns ">" into ")", which would hide a
+	// folded block scalar indicator from the rules (#840). The note is redacted as it was read. Each match becomes
+	// its placeholder at once, and only the text between matches is sanitized. The stored text (normalizeShown)
+	// redacts the printed text instead: the note without its controls, escape sequences and line ends, which are
+	// gone before the rules read it.
 	s, ok := replace(o.Note, rawPlaceholder, sanitize)
 	if !ok {
 		// Redaction withheld the note whole (its work budget ran out): it stands as a note too long to read. The
 		// flag says so, never the text: a note that spells the marker is a note like any other (#873).
 		return placeholderRedacted
 	}
+	return normalizeRedacted(s, o, mode)
+}
+
+// normalizeRedacted is normalizeWith after the redaction: s is the note redacted.
+func normalizeRedacted(s string, o Observation, mode quantityMode) string {
 	s = expandShortIPv6(s)
 	s = flatten(s)
 	s = apply(s, identifierRules)

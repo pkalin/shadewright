@@ -243,6 +243,22 @@ func TestTerminalStringsWithholdTheStoredSymptom(t *testing.T) {
 	}
 }
 
+// A complete CSI with a space as its intermediate byte (CSI 5 SP q, the cursor style) is removed whole by the
+// event symptom, the evidence value and the module evidence value, in both its forms.
+func TestCSIWithASpaceIsRemovedFromTheStoredSymptom(t *testing.T) {
+	for _, note := range []string{"left\x1b[5 qright", "left\u009b5 qright"} {
+		if got := fingerprint.Symptom(fingerprint.Observation{Note: note, Source: fingerprint.SourceEvent}); got != "leftright" {
+			t.Errorf("Symptom(%q) = %q, want leftright", note, got)
+		}
+		if got := fingerprint.Value(note); got != "leftright" {
+			t.Errorf("Value(%q) = %q, want leftright", note, got)
+		}
+		if got := modules.BoundValue(note); got != "leftright" {
+			t.Errorf("BoundValue(%q) = %q, want leftright", note, got)
+		}
+	}
+}
+
 // symptomGateStride is the share of the gate's rows checked under -race: one in symptomGateStride.
 const symptomGateStride = 7
 

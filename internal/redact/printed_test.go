@@ -156,3 +156,38 @@ func TestNELIsALineEnd(t *testing.T) {
 		t.Errorf("ReplaceCheckedShortShown(raw 0x85) = %q, want it withheld", got)
 	}
 }
+
+// The CSI grammar of ECMA-48: parameter bytes 0x30 to 0x3F, then intermediate bytes 0x20 to 0x2F (a space among
+// them: CSI 5 SP q sets the cursor style), then one final byte 0x40 to 0x7E. A complete CSI is removed whole, in
+// the ESC "[" and the U+009B form; a byte outside its range before the final byte, or the end of the text,
+// withholds the entry.
+func TestCSIGrammarBoundaries(t *testing.T) {
+	removed := []string{
+		"0m", "?m", "09;?m", // parameter bytes 0x30 and 0x3F
+		" q", "5 q", "/m", "5 /m", // intermediate bytes 0x20 and 0x2F
+		"@", "~", "5@", "5~", // final bytes 0x40 and 0x7E
+	}
+	withheld := []string{
+		"5\x1f", "\x1fm", // 0x1F, below the intermediate range
+		"5\x7f", // 0x7F, above the final range
+		" 5m",   // a parameter byte after an intermediate byte
+		"5ém", "5\xc3m", "5",
+	}
+	for _, intro := range []string{"\x1b[", "\u009b"} {
+		for _, seq := range removed {
+			in := "left" + intro + seq + "right"
+			if got, ok := ReplaceCheckedShortShown(in, keep, same); !ok || got != "leftright" {
+				t.Errorf("ReplaceCheckedShortShown(%q) = %q, %t; want %q", in, got, ok, "leftright")
+			}
+		}
+		for _, seq := range withheld {
+			in := "left" + intro + seq
+			if seq != "5" {
+				in += "right"
+			}
+			if got, ok := ReplaceCheckedShortShown(in, keep, same); ok {
+				t.Errorf("ReplaceCheckedShortShown(%q) = %q, want it withheld", in, got)
+			}
+		}
+	}
+}

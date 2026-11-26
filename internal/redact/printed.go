@@ -32,7 +32,7 @@ import (
 // The printed text is the entry as a terminal prints it, on one line:
 //
 //   - invalid UTF-8 bytes other than 0x80 to 0x9F are dropped;
-//   - each complete CSI (ESC "[" or U+009B, parameter bytes 0x30 to 0x3F, intermediate bytes 0x21 to 0x2F, one
+//   - each complete CSI (ESC "[" or U+009B, parameter bytes 0x30 to 0x3F, intermediate bytes 0x20 to 0x2F, one
 //     final byte 0x40 to 0x7E: colours, cursor moves, erasing) is removed whole. Cursor movement is not simulated:
 //     "state" ESC "[2DOK" prints as "staOK" on a terminal, and as "stateOK" here;
 //   - a run of whitespace of any kind (Unicode White_Space: blanks, tabs, CR, LF, NEL, the no-break and wide
@@ -215,16 +215,16 @@ func escapeAt(wm *meter.Meter, s string, i int) (n, body int, ok bool) {
 	return 0, -1, true
 }
 
-// csiAt reads the CSI that starts at s[i], whose parameter bytes start at s[j]: parameter bytes 0x30 to 0x3F,
-// intermediate bytes 0x21 to 0x2F, one final byte 0x40 to 0x7E. Any other byte before the final one, or the end
-// of s, withholds the entry.
+// csiAt reads the CSI that starts at s[i], whose parameter bytes start at s[j], as ECMA-48 defines it: parameter
+// bytes 0x30 to 0x3F, intermediate bytes 0x20 to 0x2F, one final byte 0x40 to 0x7E. Any other byte before the
+// final one, or the end of s, withholds the entry.
 func csiAt(wm *meter.Meter, s string, i, j int) (n, body int, ok bool) {
 	start := j
 	for j < len(s) && s[j] >= 0x30 && s[j] <= 0x3f {
 		tick(wm, 1)
 		j++
 	}
-	for j < len(s) && s[j] >= 0x21 && s[j] <= 0x2f {
+	for j < len(s) && s[j] >= 0x20 && s[j] <= 0x2f {
 		tick(wm, 1)
 		j++
 	}

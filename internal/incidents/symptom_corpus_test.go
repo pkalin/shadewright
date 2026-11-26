@@ -303,26 +303,76 @@ func symptomSample(corpus []symptomInput) []symptomInput {
 	return out
 }
 
-// symptomGeneratedClasses returns every class the generators make, built from the generators' own lists and not
-// from the corpus: each case of the controls gate whose form (GateCase.FormName, set when the case is built) is one
-// of redacttest.ShownForms, and each form of redacttest.ShownForms with each separator and each prefix. Left out by
-// construction: a gate case whose filler is ASCII spaces alone, a credential split by plain spaces, which the
-// printed text shows as it is (out of scope, TestPlainSpacesAreOutOfScope).
+// The classes the corpus must check, pinned here as literals and not read from the slices the generators read, so
+// a separator, filler, prefix or form that disappears from a generator fails TestEveryGeneratedClassIsChecked with
+// its name instead of taking its expectation with it.
+var (
+	// expectedGenerators are the generators of the corpus.
+	expectedGenerators = []string{symptomGenGate, symptomGenSeparators}
+	// expectedForms are the forms of redacttest.ShownForms.
+	expectedForms = []string{
+		"api key", "authorization", "block", "connection string", "flag=", "key=value", "split env", "split flag",
+		"split key: value", "split key=value", "split token", "split value", "token",
+	}
+	// expectedPrefixes are the texts each row of the separators generator is placed after.
+	expectedPrefixes = []string{"", "log: "}
+	// expectedSeparators are the separators of symptomSeparators.
+	expectedSeparators = []string{
+		"\x00", "\x01", "\x07", "\b", "\x1b", "\x7f", "\u0080", "\u009c",
+		"\x1b[31m", "\x1b[0m", "\x1b[1;31m", "\x1b[m", "\x1b[", "\u009b31m", "\u009b",
+		"\x1b]0;title\x07", "\x1b]8;;http://x\x1b\\", "\u009d0;t\u009c", "\x1bPq#0\x1b\\", "\x1bXs\x1b\\",
+		"\x1b^p\x1b\\", "\x1b_a\x1b\\", "\x1b]0;open", "\x1b(B", "\x1b7", "\x1b=", "\x1b ",
+		"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u202e", "\u2066", "\U000E0041", "\ufe0f", "\u00ad",
+		"\t", "\r", "\n", "\r\n", "\v", "\f", "\u0085", "\u00a0", "\u2003", "\u3000", "\u2028", "  ",
+		"\xff", "\xc3", "\x80",
+	}
+	// expectedGateFillers are the fillers of the controls gate checked by the corpus (all but the ASCII space, out
+	// of scope), each with whether the gate also places it after "log: " (a control but newline and tab).
+	expectedGateFillers = []struct {
+		filler string
+		logged bool
+	}{
+		{"\x00", true}, {"\x01", true}, {"\b", true}, {"\v", true}, {"\f", true}, {"\r", true}, {"\x1b", true},
+		{"\x1f", true}, {"\x7f", true}, {"\u0080", true}, {"\u0085", true}, {"\u009b", true}, {"\u009f", true},
+		{"\x1b[31m", true},
+		{"\u200b", false}, {"\u200c", false}, {"\u200d", false}, {"\u2060", false}, {"\ufeff", false},
+		{"\xff", false}, {"\xc3", false}, {"\x80", false},
+		{"\t", false}, {"\n", false}, {"\r\n", true}, {"\u00a0", false},
+		{"\u200b\r", false}, {"\r\u200b", true}, {"\x00\u200b", true}, {"\u200b\r ", false},
+	}
+)
+
+// symptomGeneratedClasses returns every class the corpus must check, built from the pinned lists above and not
+// from the generators: each pinned form with each pinned gate filler, alone and, where pinned, after "log: ", and
+// each pinned form with each pinned separator and prefix. Left out by construction: a gate case whose filler is
+// ASCII spaces alone, a credential split by plain spaces, which the printed text shows as it is (out of scope,
+// TestPlainSpacesAreOutOfScope).
 func symptomGeneratedClasses() map[string]bool {
 	out := map[string]bool{}
-	for _, c := range redacttest.GateCases() {
-		if slices.Contains(redacttest.ShownForms, c.FormName) && strings.Trim(c.Filler, " ") != "" {
-			out[symptomInput{gen: symptomGenGate, form: c.FormName, filler: c.Filler, prefix: c.Prefix}.class()] = true
+	for _, form := range expectedForms {
+		for _, f := range expectedGateFillers {
+			out[symptomInput{gen: symptomGenGate, form: form, filler: f.filler}.class()] = true
+			if f.logged {
+				out[symptomInput{gen: symptomGenGate, form: form, filler: f.filler, prefix: "log: "}.class()] = true
+			}
 		}
-	}
-	for _, form := range redacttest.ShownForms {
-		for _, sep := range symptomSeparators {
-			for _, prefix := range symptomPrefixes {
+		for _, sep := range expectedSeparators {
+			for _, prefix := range expectedPrefixes {
 				out[symptomInput{gen: symptomGenSeparators, form: form, filler: sep, prefix: prefix}.class()] = true
 			}
 		}
 	}
 	return out
+}
+
+// pinnedMissing names each pinned value want holds that got does not.
+func pinnedMissing(t *testing.T, what string, want, got []string) {
+	t.Helper()
+	for _, w := range want {
+		if !slices.Contains(got, w) {
+			t.Errorf("the corpus generates no %s %q, which the test expects", what, w)
+		}
+	}
 }
 
 // Every class the generators make (form, separator, prefix and generator) is checked by at least one row, in the
@@ -331,6 +381,23 @@ func symptomGeneratedClasses() map[string]bool {
 // when another generator covers its separator and prefix.
 func TestEveryGeneratedClassIsChecked(t *testing.T) {
 	corpus := symptomCorpus(t)
+	var gens, forms, seps, prefixes, fillers []string
+	for _, in := range corpus {
+		gens = append(gens, in.gen)
+		forms = append(forms, in.form)
+		if in.gen == symptomGenSeparators {
+			seps, prefixes = append(seps, in.filler), append(prefixes, in.prefix)
+		} else {
+			fillers = append(fillers, in.filler)
+		}
+	}
+	pinnedMissing(t, "generator", expectedGenerators, gens)
+	pinnedMissing(t, "form", expectedForms, forms)
+	pinnedMissing(t, "separator", expectedSeparators, seps)
+	pinnedMissing(t, "prefix", expectedPrefixes, prefixes)
+	for _, f := range expectedGateFillers {
+		pinnedMissing(t, "gate filler", []string{f.filler}, fillers)
+	}
 	for _, run := range []struct {
 		name string
 		rows []symptomInput
@@ -340,6 +407,9 @@ func TestEveryGeneratedClassIsChecked(t *testing.T) {
 			checked[in.class()]++
 		}
 		classes := symptomGeneratedClasses()
+		if len(classes) != 1963 {
+			t.Errorf("the pinned lists make %d classes, want 1963", len(classes))
+		}
 		missing := 0
 		for k := range classes {
 			if checked[k] == 0 {

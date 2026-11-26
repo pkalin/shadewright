@@ -38,7 +38,11 @@ import (
 // exactly as before by every entry point, and the collector's short entry points decide text with invalid bytes
 // exactly as before too. invalidSameTable holds, for each input, a hash of each entry point's outputs at the
 // commit before the shown view; it was written with INVALID_SAME_TABLE set to the output path. This file
-// compiles on that commit as it is.
+// compiles on that commit as it is. The columns of the collector's shown text (fingerprint.Symptom,
+// fingerprint.Value, modules.BoundValue and incidentcontext.Value of the symptom) were written again when that text
+// became the printed text, redacted as printed and withheld where its squeezed forms disagree
+// (redact.ReplaceCheckedShortShownAndRead); every other column, fingerprint.Normalize included, is as at that commit.
+// TestStoredSymptomOmitsSecretsSplitByControls (package incidents) checks the shown text on a generated corpus.
 
 // invalidSameTable is the table of the outputs before the shown view.
 const invalidSameTable = "testdata/invalid-utf8-same.tsv"
@@ -251,7 +255,8 @@ func TestWriteInvalidSameTable(t *testing.T) {
 
 // Text that is valid UTF-8 is decided exactly as before the shown view by every entry point, and text with
 // invalid bytes by the collector's short entry points (decision of 2026-11-23): each output is byte for byte the
-// one of the table. Under -race each entry point checks a seeded sample (redact.RaceKeeps).
+// one of the table, whose columns of the collector's shown text are as since that text is the printed text. Under
+// -race each entry point checks a seeded sample (redact.RaceKeeps).
 func TestShownViewLeavesValidTextAndTheCollectorAsBefore(t *testing.T) {
 	redact.ParallelUnderRace(t)
 	in, names := invalidSameInputs(), invalidSameNames()

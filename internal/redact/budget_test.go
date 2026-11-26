@@ -127,6 +127,18 @@ var budgetEntries = []budgetEntry{
 			return strings.Join(defaultRedactor.strings(wm, budgetLines(in)), "\n")
 		},
 		func(in string) string { return strings.Join(Strings(budgetLines(in)), "\n") }},
+	{shownAndReadEntry, func(in string) int { return len(in) },
+		func(wm *meter.Meter, in string) string {
+			p, spans, _, ok := defaultRedactor.shownAndReadSpans(wm, in)
+			if !ok {
+				return Withheld
+			}
+			return defaultRedactor.replaceSpans(wm, p, spans, budgetRepl, func(s string) string { return s })
+		},
+		func(in string) string {
+			out, _, _ := ReplaceCheckedShortShownAndRead(in, budgetRepl, func(s string) string { return s })
+			return out
+		}},
 	{"PiecesWithin", func(in string) int { return piecesSize(budgetPieces(in)) },
 		func(wm *meter.Meter, in string) string {
 			return strings.Join(defaultRedactor.piecesWithin(wm, budgetPieces(in), -1, false, nil), "")
@@ -183,6 +195,7 @@ func corpusShapes(n int) map[string]string {
 	maps.Copy(out, budgetShapes(n))
 	maps.Copy(out, shortFlagShapes(n))
 	out[passwordFlagRun] = strings.Repeat(passwordFlagUnit, n/len(passwordFlagUnit))
+	out[printedRun] = strings.Repeat(printedUnit, n/len(printedUnit))
 	out[`TOKEN="a" before a blank line`] = strings.Repeat(`TOKEN="a"`, n/len(`TOKEN="a"`)) + "\"\n" +
 		strings.Repeat(" ", 4096) + "\"："
 	return out
@@ -190,6 +203,14 @@ func corpusShapes(n int) map[string]string {
 
 // passwordFlagRun names "-password," repeated in corpusShapes.
 const passwordFlagRun = "-password, repeated"
+
+// printedRun names printedUnit repeated in corpusShapes: secrets split by colour sequences, a carriage return and
+// a zero-width character, which the printed text of the shown short entry point removes (printed.go).
+const printedRun = "escape sequences repeated"
+
+// printedUnit is a secret key a colour sequence splits, its value, a zero-width character and a carriage return
+// before a reset sequence.
+const printedUnit = "pass\x1b[31mword=v\u200b\r\x1b[0m "
 
 // The units of the shapes that cost the most per byte before #962, which more than one test builds.
 const (
@@ -390,6 +411,11 @@ func TestBudgetDecidesWholeOrWithholdsWhole(t *testing.T) {
 			}
 			for i, n := range sizes {
 				in, secret, kept := budgetKnown(n, i)
+				if e.name == shownAndReadEntry {
+					// The shown text is printed on one line, and a value a line end follows is withheld there
+					// (printed.go): its known input is the same on one line.
+					in = strings.ReplaceAll(in, "\n", " ")
+				}
 				want := e.run(nil, in)
 				if e.name != "Clean" {
 					if strings.Contains(want, secret) {
@@ -452,5 +478,57 @@ func TestBudgetWithholdsAnEntryOverTheBound(t *testing.T) {
 		if _, ok, spent := meteredSpent(e, in, budgetOf(len(in))); ok || spent != 0 {
 			t.Errorf("%s on %d bytes: decided %v after %d steps", e.name, len(in), ok, spent)
 		}
+	}
+}
+
+// shownAndReadEntry names the shown short entry point, ReplaceCheckedShortShownAndRead, in the tables of the tests.
+const shownAndReadEntry = "ReplaceCheckedShortShownAndRead"
+
+// shownShapes are the shapes of the printed text of the shown short entry point (printed.go), each to about n
+// bytes: escape introducers of every kind (CSI, OSC strings, two-byte escapes, the C1 CSI), escape strings left
+// open at the end, backspaces, zero-width characters, and keys an escape sequence or a zero-width character splits.
+func shownShapes(n int) map[string]string {
+	rep := func(unit string) string { return strings.Repeat(unit, n/len(unit)) }
+	return map[string]string{
+		"CSI sequences":           rep("\x1b[m"),
+		"colour sequences":        rep("\x1b[1;31m"),
+		"OSC strings":             rep("\x1b]0;t\x07"),
+		"two-byte escapes":        rep("\x1b7"),
+		"C1 CSI":                  rep("\u009b1m"),
+		"an OSC left open":        "\x1b]0;" + rep("x"),
+		"escapes then one open":   rep("\x1b[m") + "\x1b]",
+		"backspaces":              rep("a\b"),
+		"zero-width characters":   rep("\u200b"),
+		"keys split by escapes":   rep(printedUnit),
+		"keys split by ZW and CR": rep("pass\u200bword=v\r\u200b "),
+	}
+}
+
+// The work of the shown short entry point grows linearly up to a megabyte, from 512 KiB to 1 MiB, on every shape
+// of its printed text, and stays within the budget of its size, so no shape is withheld for its work alone. The
+// product takes at most MaxShortEntry bytes; the bound holds far above it.
+func TestShownTextWorkGrowsLinearlyAtAMegabyte(t *testing.T) {
+	if raceDetector {
+		t.Skip("it counts work on texts of 512 KiB and 1 MiB, 10 to 20 times slower under -race; make test runs this " +
+			"package again without it")
+	}
+	i := slices.IndexFunc(budgetEntries, func(e budgetEntry) bool { return e.name == shownAndReadEntry })
+	if i < 0 {
+		t.Fatal("no budget entry " + shownAndReadEntry)
+	}
+	e := budgetEntries[i]
+	small, large := shownShapes(512<<10), shownShapes(1<<20)
+	for _, name := range slices.Sorted(maps.Keys(small)) {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			g, fail := growthFails(e, name, small[name], large[name])
+			if fail != "" {
+				t.Error(fail)
+			}
+			if spent, budget := spentOn(e, large[name]), budgetOf(len(large[name])); spent > budget {
+				t.Errorf("%d steps on %d bytes, over the budget of %d", spent, len(large[name]), budget)
+			}
+			t.Logf("%.2f times from 512 KiB to 1 MiB", g)
+		})
 	}
 }

@@ -34,9 +34,12 @@ import (
 // once, each holding at most ShortEntryHeap (TestHeapOfAShortEntry measures every shape known at MaxShortEntry).
 // One more short entry waits only for another short entry to finish, never for an analysis.
 //
-// A short entry is decided by the readings of origin/main alone, without the controls view (controls.go, #852,
-// decision of 2026-11-22): its callers redact, change the text and redact again, and the added reading there can
-// show a key's bytes the second reading hid. A secret a control splits in an event note is shown there as before.
+// ReplaceCheckedShort and StringShort decide by the readings of origin/main alone, without the controls view
+// (controls.go, #852, decision of 2026-11-22): the fingerprint is computed from them, and it must not change, so
+// Incident history carries across an upgrade. ReplaceCheckedShortShownAndRead is for the text that is stored or
+// shown (the symptom an Incident holds, a module's evidence value), never for a fingerprint: it redacts the text as
+// it is printed and withholds it whole where that text and its squeezed forms disagree (printed.go), so a secret a
+// control, an escape sequence, an invisible character, an invalid byte or a line end splits is never shown.
 
 const (
 	// MaxShortEntry is the longest entry, in bytes, the short entry points take: four times the 1,024 bytes the API
@@ -65,6 +68,37 @@ func (r *Redactor) ReplaceCheckedShort(s string, repl func(kind, text string) st
 		return Withheld, false
 	}
 	return r.replaceSpans(unstopped(), s, spans, repl, between), true
+}
+
+// ReplaceCheckedShortShownAndRead is ReplaceCheckedShort for text that is stored or shown, never fingerprinted. It
+// redacts the printed text of s (printed.go): s without its invalid bytes, complete CSI sequences and characters
+// that are not printable, each run of whitespace as one space. The rules read that text, and shown is that text
+// with each match replaced (repl) and the text between matches passed through between. It withholds s whole when
+// s cannot be printed with certainty (any escape but a complete CSI, a C1 control in any encoding but NEL as UTF-8,
+// which is a line end, a backspace or DEL), and when a rule finds a secret that the matches of the printed text do
+// not cover in a squeezed text of s, in the printed text with one space for each character or CSI it removed, or
+// in s as it was read. It also returns read, s redacted as it was read, as ReplaceCheckedShort returns it:
+// origin/main's reading, which a caller compares with the shown text. Both readings run on one budget, in the
+// same slots as ReplaceCheckedShort; an entry over its budget, or longer than MaxShortEntry, is withheld.
+func ReplaceCheckedShortShownAndRead(s string, repl func(kind, text string) string, between func(string) string) (shown, read string, ok bool) {
+	return defaultRedactor.ReplaceCheckedShortShownAndRead(s, repl, between)
+}
+
+// ReplaceCheckedShortShownAndRead is the package's ReplaceCheckedShortShownAndRead with r's rules and work budget.
+func (r *Redactor) ReplaceCheckedShortShownAndRead(s string, repl func(kind, text string) string, between func(string) string) (shown, read string, ok bool) {
+	type decision struct {
+		printed     string
+		spans, read []span
+		ok          bool
+	}
+	d, ok := meteredShort(r, len(s), func(wm *meter.Meter) decision {
+		p, spans, read, ok := r.shownAndReadSpans(wm, s)
+		return decision{p, spans, read, ok}
+	})
+	if !ok || !d.ok {
+		return Withheld, Withheld, false
+	}
+	return r.replaceSpans(unstopped(), d.printed, d.spans, repl, between), r.replaceSpans(unstopped(), s, d.read, repl, between), true
 }
 
 // meteredShort is metered for a short entry: f runs on r's budget of the entry in one of the short entries' slots,

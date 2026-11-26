@@ -38,9 +38,10 @@ import (
 //
 // Not read without controls, as on origin/main: the decisions that read a key alone (SecretKey,
 // SecretCollection), the forms a tool writes a value in (write), the cut of shown text, and the short entry points
-// of the collector (shortentry.go), whose callers redact, change the text and redact again: a fingerprint, a
-// symptom and a module's evidence value are decided as before. A secret key name split by a control is not read as
-// a secret key, and a secret a control splits in an event note's symptom is shown as on origin/main.
+// of the collector that a fingerprint is computed from (ReplaceCheckedShort, StringShort): a fingerprint is decided
+// as before. A secret key name split by a control is not read as a secret key. The shown short entry point
+// (ReplaceCheckedShortShownAndRead), which the stored symptom and a module's evidence value take, reads neither this
+// view nor the shown view: it reads the printed text of the entry (printed.go).
 //
 // The view is read with its own long windows (windowIDs), so what it reads leaves no trace in the windows the
 // other readings of the same decision share. It holds the text without its controls (at most the bytes of the

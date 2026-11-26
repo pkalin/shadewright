@@ -165,6 +165,14 @@ func TestWriteFingerprintMainTable(t *testing.T) {
 	}
 }
 
+// symptomsOfThePrintedText are the recorded notes whose symptom changed when the shown symptom became the printed
+// text (redact.ReplaceCheckedShortShownAndRead), with the symptom now. The printed text is one line, and the value of
+// "DB_PASSWORD" there follows a line end the printed text collapses, so the note is withheld rather than shown with
+// a value the printed text may split. Every fingerprint stays as main computes it.
+var symptomsOfThePrintedText = map[string]string{
+	"- name: DB_PASSWORD\n  value: s3cr3tValue99": placeholderRedacted, // #nosec G101 -- a made-up value of the recorded data
+}
+
 // The fingerprint and the symptom of every recorded note are what main computes: the redaction rules of #840
 // change no stored fingerprint, so no Incident splits or merges on upgrade (design 3). A note main had and
 // the current data no longer has fails too, so the table cannot shrink unnoticed.
@@ -196,8 +204,12 @@ func TestRecordedFingerprintsAreUnchanged(t *testing.T) {
 		if got := Fingerprint(o); got != row.Fingerprint {
 			t.Errorf("fingerprint of %q changed: %s, main %s", note, got, row.Fingerprint)
 		}
-		if got := Symptom(o); got != row.Symptom {
-			t.Errorf("symptom of %q changed:\n now:  %q\n main: %q", note, got, row.Symptom)
+		want := row.Symptom
+		if s, ok := symptomsOfThePrintedText[note]; ok {
+			want = s
+		}
+		if got := Symptom(o); got != want {
+			t.Errorf("symptom of %q changed:\n now:  %q\n want: %q", note, got, want)
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -228,10 +240,42 @@ func TestSymptomIsRedactedBeforeAnyCharacterIsReplaced(t *testing.T) {
 }
 
 // A marker can still not be forged: the text between the redactor's matches is sanitized, so "<redacted>"
-// and "[REDACTED]" written in the note stay text, while the placeholders of real matches are written whole.
+// and "[REDACTED]" written in the note stay text, while the placeholders of real matches are written whole. The
+// note with a folded block scalar is the one main checked: main stored "fake (redacted) (REDACTED) ###
+// password: <redacted> <redacted>". The printed text is one line, and the match "password: >" ends at the line end
+// it collapses, with the value after it, so the whole note is withheld (printed.go, continuesPastARun): nothing of
+// it, forged markers included, is stored. The one-line note keeps the check of the markers between matches.
 func TestRawRedactionKeepsPlaceholdersUnforgeable(t *testing.T) {
-	got := Symptom(Observation{Note: "fake <redacted> [REDACTED] *** password: >\n  opensesame\n"})
-	if want := "fake (redacted) (REDACTED) ### password: <redacted> <redacted>"; got != want {
-		t.Errorf("Symptom = %q, want %q", got, want)
+	for _, c := range []struct{ note, want string }{
+		{"fake <redacted> [REDACTED] *** password: >\n  opensesame\n", "<redacted>"},
+		{"fake <redacted> [REDACTED] *** password: opensesame", "fake (redacted) (REDACTED) ### password: <redacted>"},
+	} {
+		if got := Symptom(Observation{Note: c.note}); got != c.want {
+			t.Errorf("Symptom(%q) = %q, want %q", c.note, got, c.want)
+		}
+	}
+}
+
+// The guard of the stored text: it withholds a shown text that holds four word characters in a row that
+// origin/main's text does not, read without spaces, "?", characters that are not graphic and placeholders, and
+// keeps one that holds no more.
+func TestShowsMoreThanReadsWordsAsOriginMain(t *testing.T) {
+	for _, c := range []struct {
+		shown, read string
+		want        bool
+	}{
+		{"Bearer " + placeholderRedacted, "Bearer " + placeholderRedacted, false},
+		{"BearerZq8rT2vX9", "Bearer " + placeholderRedacted, true},   // a value main hid, glued to its key
+		{"Zq8rT2vX9 mK4pL7w", "Zq8rT2vX9 <duration> ?mK4pL7w", true}, // main split it with a placeholder
+		{"podStatusevent", "podStatus event", false},                 // main split it with a space alone
+		{"Zq8r T2vX", "Zq8r?T2vX", false},                            // an invalid byte in main's reading
+		{"leftright", "left (5 qright", true},                        // punctuation breaks a word
+		{"abc", "xyz", false},                                        // no four word characters
+		{"<redacted> ok", "password ok", false},                      // a placeholder is no part of a value
+		{"x" + placeholderRedacted + "y", "x y", false},
+	} {
+		if got := showsMoreThan(c.shown, c.read); got != c.want {
+			t.Errorf("showsMoreThan(%q, %q) = %t, want %t", c.shown, c.read, got, c.want)
+		}
 	}
 }

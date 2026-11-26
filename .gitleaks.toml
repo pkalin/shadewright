@@ -53,6 +53,8 @@ paths = [
   '''^internal/modules/cloudflared/cloudflared_test\.go$''',
   '''^internal/modules/rules_test\.go$''',
   '''^internal/modules/secretsstore/secretsstore_test\.go$''',
+  '''^internal/modules/symptom_differential_test\.go$''',
+  '''^internal/modules/symptom_inputs_test\.go$''',
   '''^internal/providers/model/openaicompatible/credential_decoy_corpus_test\.go$''',
   '''^internal/providers/model/openaicompatible/credential_unicode_corpus_test\.go$''',
   '''^internal/providers/model/openaicompatible/provider_test\.go$''',

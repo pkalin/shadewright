@@ -18,9 +18,12 @@ package redact
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // keep is the repl of a test that only reads the flag: it writes the marker of each match.
@@ -79,24 +82,43 @@ func TestShortEntryRefusesLongText(t *testing.T) {
 	}
 }
 
-// The heap one short entry holds, on every shape known at MaxShortEntry, is at most ShortEntryHeap: the figure the
-// room next to the heap limit counts for each of its slots.
+// The heap one short entry holds, at each short entry point and on every shape known at MaxShortEntry, is at most
+// ShortEntryHeap: the figure the room next to the heap limit counts for each of its slots. No shape is withheld for
+// its work: the shown short entry point withholds some shapes for what they hold (a control after a token, keys
+// invalid bytes split), after its readings ran, and its work on every shape stays within the budget.
 func TestHeapOfAShortEntry(t *testing.T) {
 	if raceDetector {
 		t.Skip("measures the heap of the product build")
 	}
 	worst := uint64(0)
-	for _, sh := range heapShapes {
-		s := sh.text(MaxShortEntry)
-		var ok bool
-		peak := peakLiveHeap(func() { _, ok = ReplaceCheckedShort(s, keep, same) })
-		worst = max(worst, peak)
-		if !ok {
-			t.Errorf("%s: a short entry was withheld", sh.name)
-		}
-		if peak > ShortEntryHeap {
-			t.Errorf("%s: a short entry of %d bytes held %.2f MiB, over ShortEntryHeap (%.2f MiB)", sh.name,
-				MaxShortEntry, mib(peak), mib(ShortEntryHeap))
+	entries := []struct {
+		name string
+		run  func(s string, repl func(kind, text string) string, between func(string) string) (string, bool)
+	}{{"ReplaceCheckedShort", ReplaceCheckedShort}, {shownAndReadEntry,
+		func(s string, repl func(kind, text string) string, between func(string) string) (string, bool) {
+			out, _, ok := ReplaceCheckedShortShownAndRead(s, repl, between)
+			return out, ok
+		}}}
+	for _, e := range entries {
+		for _, sh := range heapShapes {
+			s := sh.text(MaxShortEntry)
+			var ok bool
+			peak := peakLiveHeap(func() { _, ok = e.run(s, keep, same) })
+			worst = max(worst, peak)
+			if !ok && e.name != shownAndReadEntry {
+				t.Errorf("%s on %s: a short entry was withheld", e.name, sh.name)
+			}
+			if e.name == shownAndReadEntry {
+				wm := meter.New(math.MaxInt64)
+				defaultRedactor.shownAndReadSpans(wm, s)
+				if wm.Spent() > budgetOf(len(s)) {
+					t.Errorf("%s on %s: %d steps, over the budget of %d", e.name, sh.name, wm.Spent(), budgetOf(len(s)))
+				}
+			}
+			if peak > ShortEntryHeap {
+				t.Errorf("%s on %s: a short entry of %d bytes held %.2f MiB, over ShortEntryHeap (%.2f MiB)", e.name,
+					sh.name, MaxShortEntry, mib(peak), mib(ShortEntryHeap))
+			}
 		}
 	}
 	t.Logf("the heaviest short entry of %d bytes held %.3f MiB; %d slots hold at most %.1f MiB", MaxShortEntry,

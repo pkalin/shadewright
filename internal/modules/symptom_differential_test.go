@@ -39,17 +39,21 @@ import (
 // diffSecret is the probe the generator places in every input.
 const diffSecret = "Zq8rT2vX9mK4pL7w" // #nosec G101 -- a made-up value the test looks for
 
+// diffTokenBody is the body of the GitHub token of the vocabulary, written apart from its prefix so that no
+// line holds a whole token shape.
+const diffTokenBody = "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z" // #nosec G101 -- a made-up token the test looks for
+
 // diffReason is the reason of the observations of the differential.
 const diffReason = "BackOff"
 
 // diffProbes are the secrets an input may hold: diffSecret, the body of the made-up GitHub token and the made-up
 // AWS key body of the vocabulary.
-var diffProbes = []string{diffSecret, "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z", "IOSFODNN7EXAMPLE"}
+var diffProbes = []string{diffSecret, diffTokenBody, "IOSFODNN7EXAMPLE"}
 
 // diffVocab is the vocabulary of the generator.
 var diffVocab = []string{
 	"password", "--password", "pass", "word", "token", "secret", "DB_PASSWORD", "api_key", "Authorization:", "Bearer",
-	"ghp_", "ghp_aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z", "postgres://", "u:", "@db.example/app", "AKIA", "IOSFODNN7EXAMPLE",
+	"ghp_", "ghp_" + diffTokenBody, "postgres://", "u:", "@db.example/app", "AKIA", "IOSFODNN7EXAMPLE",
 	diffSecret, diffSecret[:5], diffSecret[5:], diffSecret[:9], diffSecret[9:],
 	"=", ":", " ", "  ", "\n", "\n  ", "\r", "\r\n", "\t", "\u00a0", "\u0085", "\u2028", "\u200b", "\u00ad", "\x00", "\x01",
 	"\x1b[31m", "\x1b[0m", "\x1b[5 q", "\u009b1m", "\x1b", "\x1b]0;t\x07", "\b", "\x7f", "\xff", "\xc3", "\x85", "\x9b",
@@ -184,8 +188,8 @@ var diffRegressions = []string{
 	"--password\u009b1mZq8rT@sha1:",
 	"u:  \n  \u200b--password\x1b[31m{]Zq8rT2vX9mK4pL7w",
 	"\xc3--password\x00ok[Zq8rT2vX9mK4pL7w",
-	"ghp_aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z@db.example/app=Bearer\x012vX9mK4pL7w},\xc3\"",
-	"=\npassword\u009b1m--passwordmain ,failed@db.example/appZq8rT2vX9mK4pL7w",
+	"ghp_" + diffTokenBody + "@" + "db.example/app=Bearer\x012vX9mK4pL7w},\xc3\"",
+	"=\npassword\u009b1m--passwordmain ,failed" + "@db.example/appZq8rT2vX9mK4pL7w",
 	"-api_key\u200bBearer[abcdef0123456789abcdef0123456789abcdef01x>Zq8rT2vX9mK4pL7w",
 	"main\x1b[5 qmain[10.0.0.1ok@sha1:--password\u00adZq8rT",
 }

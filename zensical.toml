@@ -153,6 +153,7 @@ nav = [
     { "Lab: OOM acceptance run" = "lab-oom-acceptance.md" },
     { "Lab: reviewer hint on OOM" = "lab-oom-hint.md" },
   ] },
+  { "Shadewright Labs" = "https://shadewrightlabs.com/" },
 ]
 
 [project.theme]

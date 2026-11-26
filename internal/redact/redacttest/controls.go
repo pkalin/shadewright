@@ -315,12 +315,20 @@ func GateUncovered(cases []GateCase, built func(i int) bool) []string {
 }
 
 // ShownForms are the forms of the gate whose secret the collector's shown paths (the symptom an Incident stores,
-// a module's evidence value) hide in plain form, without any filler. The gate's other forms are not hidden there
-// even in plain form (a JSON member, a bearer token glued to a word, a token after "token:"), so a filler cannot
-// make them worse.
+// a module's evidence value) hide in plain form, without any filler. Every other form of the gate is in
+// NotShownForms, with its reason.
 var ShownForms = []string{
 	"api key", gateAuthorization, "block", "connection string", "flag=", "key=value", "split env", "split flag",
-	"split key: value", "split key=value", "split token", "split value",
+	"split key: value", "split key=value", "split token", "split value", gateToken,
+}
+
+// NotShownForms are the forms of the gate left out of ShownForms, each with the reason: the shown paths, like
+// origin/main, show its secret even in plain form, so a filler cannot make it worse. The test of package incidents
+// TestFormsLeftOutAreShownInPlainForm fails when one of them is hidden in plain form, so a form the rules start to
+// hide joins ShownForms and its rows are checked.
+var NotShownForms = map[string]string{
+	"json member":  `a quoted JSON member "password":"value" with no space after the colon is not a key and value of any rule`,
+	"glued bearer": `"Bearer" glued to the word before it ("xBearer") is not the Authorization scheme of the bearer rule`,
 }
 
 // Form returns the name of the case's form, as set when the case was built. It is not parsed from Name, which
@@ -352,8 +360,21 @@ func CredentialChars(s string) string {
 	return b.String()
 }
 
-// ShowsProbe reports whether out shows probe, with no reference to what a matcher does: the probe whole once out
-// and probe are squeezed to CredentialChars, or any four-byte part of it (VisibleGrams).
+// ShowsProbe reports whether out shows probe, with no reference to what a matcher does: any four-byte part of the
+// probe in out (VisibleGrams), or, once out and probe are both squeezed to CredentialChars, the probe whole or any
+// four-byte part of it in the squeezed out ("a-b-c-d" shows "abcdefgh").
 func ShowsProbe(out, probe string) bool {
-	return strings.Contains(CredentialChars(out), CredentialChars(probe)) || VisibleGrams(out, probe) != 0
+	if VisibleGrams(out, probe) != 0 {
+		return true
+	}
+	so, sp := CredentialChars(out), CredentialChars(probe)
+	if strings.Contains(so, sp) {
+		return true
+	}
+	for i := 0; i+gateGram <= len(sp); i++ {
+		if strings.Contains(so, sp[i:i+gateGram]) {
+			return true
+		}
+	}
+	return false
 }

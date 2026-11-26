@@ -197,6 +197,38 @@ func TestShownFormsAreRecognisedInPlainForm(t *testing.T) {
 	}
 }
 
+// Every form of the gate is in exactly one of redacttest.ShownForms and redacttest.NotShownForms, and the reason a
+// form is left out holds: every shown path shows its secret in plain form. A form the rules start to hide fails
+// here and moves to ShownForms, so its rows are checked.
+func TestFormsLeftOutAreShownInPlainForm(t *testing.T) {
+	plain := map[string]redacttest.GateCase{}
+	for _, c := range redacttest.GateCases() {
+		if c.Filler == "\x00" && c.Prefix == "" && strings.HasPrefix(c.Text(), "\x00") {
+			plain[c.FormName] = c
+		}
+	}
+	for name := range plain {
+		_, out := redacttest.NotShownForms[name]
+		if in := slices.Contains(redacttest.ShownForms, name); in == out {
+			t.Errorf("the form %q is in ShownForms (%t) and in NotShownForms (%t): it must be in exactly one", name, in, out)
+		}
+	}
+	for name, reason := range redacttest.NotShownForms {
+		c, ok := plain[name]
+		if !ok {
+			t.Errorf("NotShownForms names %q, which the gate has not", name)
+			continue
+		}
+		text := "log: " + strings.TrimPrefix(c.Text(), "\x00")
+		for _, p := range symptomPaths {
+			if out := p.text(text); !redacttest.ShowsProbe(out, c.Probe) {
+				t.Errorf("%s hides the plain form of %q (%q gives %q), so its reason %q no longer holds: move it to ShownForms",
+					p.name, name, text, out, reason)
+			}
+		}
+	}
+}
+
 // Terminal strings are not interpreted: a note that holds one, in any encoding, is withheld whole by the event
 // symptom and the module evidence value, so nothing of its payload or of the text around it is stored.
 func TestTerminalStringsWithholdTheStoredSymptom(t *testing.T) {

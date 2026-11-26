@@ -205,7 +205,7 @@ spec:
                             default: Foundry
                             description: |-
                               provider is the API the analyzer's adapter speaks to this deployment: Foundry (the default),
-                              Anthropic or OpenAICompatible (ADR-0042). It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
+                              Anthropic, OpenAICompatible (ADR-0042) or VertexAI (ADR-0050). It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
                               Anthropic the endpoint must be https://api.anthropic.com, the analyzer reads its API key from the file
                               of its --anthropic-api-key-file flag (not in this object) and refuses the deployment without it,
                               deployment must equal the role's --triage-model or --escalation-model value, apiVersion may be left out
@@ -213,6 +213,8 @@ spec:
                               deployment needs the analyzer's Azure workload identity and --model-endpoint-suffixes; an analyzer
                               started without them refuses it (ProviderNotConfigured). A Foundry deployment may
                               not name the host api.anthropic.com. There is no fallback between providers.
+                              VertexAI (ADR-0050) needs an EU regional endpoint, https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region>,
+                              and its deployment is the Gemini model ID. It forbids apiVersion and inferenceAPI: the endpoint carries the API version, project and location.
                               OpenAICompatible matches --openai-compatible-endpoints declarations and their allowed models lists (ModelNotAllowed for an undeclared model), with no Azure identity and an optional API key
                               read from its endpoint's own mounted file. The key is bound to its full install-time base URL, never an Azure model host
                               or api.anthropic.com. Without a key it sends no Authorization header. No apiVersion is allowed.
@@ -220,6 +222,7 @@ spec:
                             - Foundry
                             - Anthropic
                             - OpenAICompatible
+                            - VertexAI
                             type: string
                         required:
                         - deployment
@@ -230,7 +233,7 @@ spec:
                         - fieldPath: .apiVersion
                           message: a Foundry deployment needs apiVersion
                           rule: has(self.apiVersion) || (has(self.provider) && self.provider
-                            in ['Anthropic', 'OpenAICompatible'])
+                            in ['Anthropic', 'OpenAICompatible', 'VertexAI'])
                         - message: a deployment with provider Anthropic must have
                             the endpoint https://api.anthropic.com
                           rule: '!has(self.provider) || self.provider != ''Anthropic''
@@ -261,6 +264,23 @@ spec:
                           rule: (has(self.provider) && self.provider != 'Foundry')
                             || !isURL(self.endpoint) || url(self.endpoint).getHostname()
                             != 'api.openai.com'
+                        - message: VertexAI does not allow apiVersion or inferenceAPI
+                          rule: '!has(self.provider) || self.provider != ''VertexAI''
+                            || (!has(self.apiVersion) && !has(self.inferenceAPI))'
+                        - message: a deployment with provider VertexAI must have an
+                            EU regional endpoint https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region>,
+                            where the region is one of europe-west1, europe-west4,
+                            europe-west8, europe-west9, europe-north1, europe-central2
+                            and europe-southwest1 (ADR-0050), with the same location
+                            in host and path
+                          rule: '!has(self.provider) || self.provider != ''VertexAI''
+                            || (self.endpoint.matches(''^https://europe-(west1|west4|west8|west9|north1|central2|southwest1)-aiplatform[.]googleapis[.]com/v1/projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/europe-(west1|west4|west8|west9|north1|central2|southwest1)$'')
+                            && self.endpoint.endsWith(''/locations/'' + self.endpoint.split(''/'')[2].split(''-aiplatform'')[0]))'
+                        - message: googleapis.com hosts are only for a deployment
+                            with provider VertexAI
+                          rule: (has(self.provider) && self.provider == 'VertexAI')
+                            || !isURL(self.endpoint) || !(url(self.endpoint).getHostname()
+                            == 'googleapis.com' || url(self.endpoint).getHostname().endsWith('.googleapis.com'))
                       triage:
                         description: |-
                           triage is the small model for the one structured call on the prepared context, without tools. Left out,
@@ -346,7 +366,7 @@ spec:
                             default: Foundry
                             description: |-
                               provider is the API the analyzer's adapter speaks to this deployment: Foundry (the default),
-                              Anthropic or OpenAICompatible (ADR-0042). It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
+                              Anthropic, OpenAICompatible (ADR-0042) or VertexAI (ADR-0050). It names the API, not the model family: a Claude model on Microsoft Foundry is Foundry. With
                               Anthropic the endpoint must be https://api.anthropic.com, the analyzer reads its API key from the file
                               of its --anthropic-api-key-file flag (not in this object) and refuses the deployment without it,
                               deployment must equal the role's --triage-model or --escalation-model value, apiVersion may be left out
@@ -354,6 +374,8 @@ spec:
                               deployment needs the analyzer's Azure workload identity and --model-endpoint-suffixes; an analyzer
                               started without them refuses it (ProviderNotConfigured). A Foundry deployment may
                               not name the host api.anthropic.com. There is no fallback between providers.
+                              VertexAI (ADR-0050) needs an EU regional endpoint, https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region>,
+                              and its deployment is the Gemini model ID. It forbids apiVersion and inferenceAPI: the endpoint carries the API version, project and location.
                               OpenAICompatible matches --openai-compatible-endpoints declarations and their allowed models lists (ModelNotAllowed for an undeclared model), with no Azure identity and an optional API key
                               read from its endpoint's own mounted file. The key is bound to its full install-time base URL, never an Azure model host
                               or api.anthropic.com. Without a key it sends no Authorization header. No apiVersion is allowed.
@@ -361,6 +383,7 @@ spec:
                             - Foundry
                             - Anthropic
                             - OpenAICompatible
+                            - VertexAI
                             type: string
                         required:
                         - deployment
@@ -371,7 +394,7 @@ spec:
                         - fieldPath: .apiVersion
                           message: a Foundry deployment needs apiVersion
                           rule: has(self.apiVersion) || (has(self.provider) && self.provider
-                            in ['Anthropic', 'OpenAICompatible'])
+                            in ['Anthropic', 'OpenAICompatible', 'VertexAI'])
                         - message: a deployment with provider Anthropic must have
                             the endpoint https://api.anthropic.com
                           rule: '!has(self.provider) || self.provider != ''Anthropic''
@@ -402,6 +425,23 @@ spec:
                           rule: (has(self.provider) && self.provider != 'Foundry')
                             || !isURL(self.endpoint) || url(self.endpoint).getHostname()
                             != 'api.openai.com'
+                        - message: VertexAI does not allow apiVersion or inferenceAPI
+                          rule: '!has(self.provider) || self.provider != ''VertexAI''
+                            || (!has(self.apiVersion) && !has(self.inferenceAPI))'
+                        - message: a deployment with provider VertexAI must have an
+                            EU regional endpoint https://europe-<region>-aiplatform.googleapis.com/v1/projects/<project>/locations/europe-<region>,
+                            where the region is one of europe-west1, europe-west4,
+                            europe-west8, europe-west9, europe-north1, europe-central2
+                            and europe-southwest1 (ADR-0050), with the same location
+                            in host and path
+                          rule: '!has(self.provider) || self.provider != ''VertexAI''
+                            || (self.endpoint.matches(''^https://europe-(west1|west4|west8|west9|north1|central2|southwest1)-aiplatform[.]googleapis[.]com/v1/projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/europe-(west1|west4|west8|west9|north1|central2|southwest1)$'')
+                            && self.endpoint.endsWith(''/locations/'' + self.endpoint.split(''/'')[2].split(''-aiplatform'')[0]))'
+                        - message: googleapis.com hosts are only for a deployment
+                            with provider VertexAI
+                          rule: (has(self.provider) && self.provider == 'VertexAI')
+                            || !isURL(self.endpoint) || !(url(self.endpoint).getHostname()
+                            == 'googleapis.com' || url(self.endpoint).getHostname().endsWith('.googleapis.com'))
                     type: object
                     x-kubernetes-validations:
                     - message: an escalation model needs a triage model

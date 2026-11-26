@@ -52,7 +52,7 @@ var withheldInPlainForm = []string{"block"}
 // (tab, CR, LF, CRLF, NEL, no-break and wide spaces, the line separator, two ASCII spaces) and invalid bytes.
 var symptomSeparators = []string{
 	"\x00", "\x01", "\x07", "\b", "\x1b", "\x7f", "\u0080", "\u009c",
-	"\x1b[31m", "\x1b[0m", "\x1b[1;31m", "\x1b[m", "\x1b[", "\u009b31m", "\u009b",
+	symptomSGRRed, "\x1b[0m", "\x1b[1;31m", "\x1b[m", "\x1b[", "\u009b31m", "\u009b",
 	"\x1b]0;title\x07", "\x1b]8;;http://x\x1b\\", "\u009d0;t\u009c", "\x1bPq#0\x1b\\", "\x1bXs\x1b\\",
 	"\x1b^p\x1b\\", "\x1b_a\x1b\\", "\x1b]0;open", "\x1b(B", "\x1b7", "\x1b=", "\x1b ",
 	"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u202e", "\u2066", "\U000E0041", "\ufe0f", "\u00ad",
@@ -60,8 +60,17 @@ var symptomSeparators = []string{
 	"\xff", "\xc3", "\x80",
 }
 
+// symptomLogPrefix is the text before a form in the rows after a log prefix, and symptomSGRRed an ANSI colour
+// sequence, both used by the generators and the pinned lists.
+const (
+	symptomLogPrefix = "log: "
+	symptomSGRRed    = "\x1b[31m"
+	// csiRemovedText is "left" and "right" around a complete CSI, once the CSI is removed.
+	csiRemovedText = "leftright"
+)
+
 // symptomPrefixes are the texts each generated row is placed after.
-var symptomPrefixes = []string{"", "log: "}
+var symptomPrefixes = []string{"", symptomLogPrefix}
 
 // symptomInput is one generated note and the secret it holds.
 type symptomInput struct {
@@ -186,7 +195,7 @@ var symptomPaths = []symptomPath{
 func TestShownFormsAreRecognisedInPlainForm(t *testing.T) {
 	for _, f := range symptomForms(t) {
 		for _, p := range symptomPaths {
-			out := p.text("log: " + f.plain)
+			out := p.text(symptomLogPrefix + f.plain)
 			if redacttest.ShowsProbe(out, f.probe) {
 				t.Errorf("%s: %s shows the secret of the plain form %q: %q", p.name, f.name, f.plain, out)
 			}
@@ -219,7 +228,7 @@ func TestFormsLeftOutAreShownInPlainForm(t *testing.T) {
 			t.Errorf("NotShownForms names %q, which the gate has not", name)
 			continue
 		}
-		text := "log: " + strings.TrimPrefix(c.Text(), "\x00")
+		text := symptomLogPrefix + strings.TrimPrefix(c.Text(), "\x00")
 		for _, p := range symptomPaths {
 			if out := p.text(text); !redacttest.ShowsProbe(out, c.Probe) {
 				t.Errorf("%s hides the plain form of %q (%q gives %q), so its reason %q no longer holds: move it to ShownForms",
@@ -247,13 +256,13 @@ func TestTerminalStringsWithholdTheStoredSymptom(t *testing.T) {
 // event symptom, the evidence value and the module evidence value, in both its forms.
 func TestCSIWithASpaceIsRemovedFromTheStoredSymptom(t *testing.T) {
 	for _, note := range []string{"left\x1b[5 qright", "left\u009b5 qright"} {
-		if got := fingerprint.Symptom(fingerprint.Observation{Note: note, Source: fingerprint.SourceEvent}); got != "leftright" {
+		if got := fingerprint.Symptom(fingerprint.Observation{Note: note, Source: fingerprint.SourceEvent}); got != csiRemovedText {
 			t.Errorf("Symptom(%q) = %q, want leftright", note, got)
 		}
-		if got := fingerprint.Value(note); got != "leftright" {
+		if got := fingerprint.Value(note); got != csiRemovedText {
 			t.Errorf("Value(%q) = %q, want leftright", note, got)
 		}
-		if got := modules.BoundValue(note); got != "leftright" {
+		if got := modules.BoundValue(note); got != csiRemovedText {
 			t.Errorf("BoundValue(%q) = %q, want leftright", note, got)
 		}
 	}
@@ -315,11 +324,11 @@ var (
 		"split key: value", "split key=value", "split token", "split value", "token",
 	}
 	// expectedPrefixes are the texts each row of the separators generator is placed after.
-	expectedPrefixes = []string{"", "log: "}
+	expectedPrefixes = []string{"", symptomLogPrefix}
 	// expectedSeparators are the separators of symptomSeparators.
 	expectedSeparators = []string{
 		"\x00", "\x01", "\x07", "\b", "\x1b", "\x7f", "\u0080", "\u009c",
-		"\x1b[31m", "\x1b[0m", "\x1b[1;31m", "\x1b[m", "\x1b[", "\u009b31m", "\u009b",
+		symptomSGRRed, "\x1b[0m", "\x1b[1;31m", "\x1b[m", "\x1b[", "\u009b31m", "\u009b",
 		"\x1b]0;title\x07", "\x1b]8;;http://x\x1b\\", "\u009d0;t\u009c", "\x1bPq#0\x1b\\", "\x1bXs\x1b\\",
 		"\x1b^p\x1b\\", "\x1b_a\x1b\\", "\x1b]0;open", "\x1b(B", "\x1b7", "\x1b=", "\x1b ",
 		"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u202e", "\u2066", "\U000E0041", "\ufe0f", "\u00ad",
@@ -334,7 +343,7 @@ var (
 	}{
 		{"\x00", true}, {"\x01", true}, {"\b", true}, {"\v", true}, {"\f", true}, {"\r", true}, {"\x1b", true},
 		{"\x1f", true}, {"\x7f", true}, {"\u0080", true}, {"\u0085", true}, {"\u009b", true}, {"\u009f", true},
-		{"\x1b[31m", true},
+		{symptomSGRRed, true},
 		{"\u200b", false}, {"\u200c", false}, {"\u200d", false}, {"\u2060", false}, {"\ufeff", false},
 		{"\xff", false}, {"\xc3", false}, {"\x80", false},
 		{"\t", false}, {"\n", false}, {"\r\n", true}, {"\u00a0", false},
@@ -353,7 +362,7 @@ func symptomGeneratedClasses() map[string]bool {
 		for _, f := range expectedGateFillers {
 			out[symptomInput{gen: symptomGenGate, form: form, filler: f.filler}.class()] = true
 			if f.logged {
-				out[symptomInput{gen: symptomGenGate, form: form, filler: f.filler, prefix: "log: "}.class()] = true
+				out[symptomInput{gen: symptomGenGate, form: form, filler: f.filler, prefix: symptomLogPrefix}.class()] = true
 			}
 		}
 		for _, sep := range expectedSeparators {
@@ -381,7 +390,8 @@ func pinnedMissing(t *testing.T, what string, want, got []string) {
 // when another generator covers its separator and prefix.
 func TestEveryGeneratedClassIsChecked(t *testing.T) {
 	corpus := symptomCorpus(t)
-	var gens, forms, seps, prefixes, fillers []string
+	gens, forms := make([]string, 0, len(corpus)), make([]string, 0, len(corpus))
+	var seps, prefixes, fillers []string
 	for _, in := range corpus {
 		gens = append(gens, in.gen)
 		forms = append(forms, in.form)

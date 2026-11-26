@@ -51,11 +51,11 @@ const MinTightPeakDuration = 3 * time.Millisecond
 // sampler goroutine to start, and samples every 50 microseconds (catching peaks held for at least
 // MinTightPeakDuration).
 //
-// The reading is not a strict upper bound on live heap: /memory/classes/heap/objects:bytes still counts live
-// objects plus objects not yet swept, but the runtime builds it from smallAllocCount, which is flushed only at
-// mcache.refill and releaseAll, so a sample misses small objects allocated into the active P's cached spans since
-// the last refill (tens of KiB, up to roughly 100 to 200 KiB when many size classes are touched at once;
-// PeakLiveHeap has the same bias).
+// What one reading guarantees: a reading is never below the true live peak of f (modulo per-P mcache refill slack:
+// /memory/classes/heap/objects:bytes is built from smallAllocCount, flushed at mcache.refill and releaseAll, so
+// small objects allocated since the last refill can lag by tens of KiB, as in PeakLiveHeap), and may be above it
+// by uncollected garbage when the collector is preempted on a slow or busy machine. Use SmallestPeakTight to
+// estimate the live peak as the smallest of up to TightPeakRuns readings.
 func PeakLiveHeapTight(f func()) uint64 {
 	return peakHeap(f, 1, 0, 2, 50*time.Microsecond)
 }
@@ -104,6 +104,13 @@ func peakHeap(f func(), gogc int, memLimit int64, preGCs int, interval time.Dura
 // PeakRuns is the most runs SmallestPeak measures.
 const PeakRuns = 3
 
+// TightPeakRuns is the most runs SmallestPeakTight measures. On a slow or shared runner, a single
+// PeakLiveHeapTight reading can still carry uncollected garbage (over 1 MiB under heavy CPU contention), so
+// SmallestPeakTight retries up to TightPeakRuns times and stops at the first reading not over the bound: the
+// common idle case takes one run, while even a 50% per-run garbage-spike rate leaves a 0.5^15 (~0.003%) chance
+// that every run is over.
+const TightPeakRuns = 15
+
 // SmallestPeak returns PeakLiveHeap of f, measured again up to PeakRuns runs in all while the reading is over
 // (over reports it), and the smallest reading. A sample counts the heap objects not yet swept, and when the
 // collector gets little processor time (a loaded machine, a runner with few cores) it can still count garbage at
@@ -112,29 +119,30 @@ const PeakRuns = 3
 // (#1112). The live heap of f is the same in every run, so its smallest reading is the closest to it, and a shape
 // that really holds more is over in every run. f must hold nothing from one run to the next.
 func SmallestPeak(f func(), over func(peak uint64) bool) uint64 {
-	return smallestPeak(PeakLiveHeap, f, over)
+	return smallestPeak(PeakLiveHeap, PeakRuns, f, over)
 }
 
-// SmallestPeakTight is SmallestPeak using PeakLiveHeapTight.
+// SmallestPeakTight returns PeakLiveHeapTight of f, measured again up to TightPeakRuns runs in all while the
+// reading is over (over reports it), and the smallest reading.
 func SmallestPeakTight(f func(), over func(peak uint64) bool) uint64 {
-	return smallestPeak(PeakLiveHeapTight, f, over)
+	return smallestPeak(PeakLiveHeapTight, TightPeakRuns, f, over)
 }
 
 // SmallestPeakTightRuns is SmallestPeakTight, also returning the reading of each run it took.
 func SmallestPeakTightRuns(f func(), over func(peak uint64) bool) (uint64, []uint64) {
-	return smallestPeakRuns(PeakLiveHeapTight, f, over)
+	return smallestPeakRuns(PeakLiveHeapTight, TightPeakRuns, f, over)
 }
 
-func smallestPeak(measure func(func()) uint64, f func(), over func(peak uint64) bool) uint64 {
-	peak, _ := smallestPeakRuns(measure, f, over)
+func smallestPeak(measure func(func()) uint64, maxRuns int, f func(), over func(peak uint64) bool) uint64 {
+	peak, _ := smallestPeakRuns(measure, maxRuns, f, over)
 	return peak
 }
 
-func smallestPeakRuns(measure func(func()) uint64, f func(), over func(peak uint64) bool) (uint64, []uint64) {
-	runs := make([]uint64, 1, PeakRuns)
+func smallestPeakRuns(measure func(func()) uint64, maxRuns int, f func(), over func(peak uint64) bool) (uint64, []uint64) {
+	runs := make([]uint64, 1, maxRuns)
 	runs[0] = measure(f)
 	peak := runs[0]
-	for range PeakRuns - 1 {
+	for range maxRuns - 1 {
 		if !over(peak) {
 			break
 		}

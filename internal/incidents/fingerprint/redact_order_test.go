@@ -240,10 +240,18 @@ func TestSymptomIsRedactedBeforeAnyCharacterIsReplaced(t *testing.T) {
 }
 
 // A marker can still not be forged: the text between the redactor's matches is sanitized, so "<redacted>"
-// and "[REDACTED]" written in the note stay text, while the placeholders of real matches are written whole.
+// and "[REDACTED]" written in the note stay text, while the placeholders of real matches are written whole. The
+// note with a folded block scalar is the one main checked: main stored "fake (redacted) (REDACTED) ###
+// password: <redacted> <redacted>". The printed text is one line, and the match "password: >" ends at the line end
+// it collapses, with the value after it, so the whole note is withheld (printed.go, continuesPastARun): nothing of
+// it, forged markers included, is stored. The one-line note keeps the check of the markers between matches.
 func TestRawRedactionKeepsPlaceholdersUnforgeable(t *testing.T) {
-	got := Symptom(Observation{Note: "fake <redacted> [REDACTED] *** password: opensesame"})
-	if want := "fake (redacted) (REDACTED) ### password: <redacted>"; got != want {
-		t.Errorf("Symptom = %q, want %q", got, want)
+	for _, c := range []struct{ note, want string }{
+		{"fake <redacted> [REDACTED] *** password: >\n  opensesame\n", "<redacted>"},
+		{"fake <redacted> [REDACTED] *** password: opensesame", "fake (redacted) (REDACTED) ### password: <redacted>"},
+	} {
+		if got := Symptom(Observation{Note: c.note}); got != c.want {
+			t.Errorf("Symptom(%q) = %q, want %q", c.note, got, c.want)
+		}
 	}
 }

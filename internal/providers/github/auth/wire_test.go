@@ -17,7 +17,6 @@ package auth
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -47,7 +46,8 @@ func (r tlsRewrite) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // wireEnv is a Source talking to a TLS server that answers the token exchange (the first one with a 503 when
-// fail is set) and GET /app, and keeps every App JWT it was sent.
+// fail is set) and GET /app, and keeps every App JWT it was sent. When hold is set, it answers nothing: it
+// reports each request to hold and keeps it until the client goes away.
 type wireEnv struct {
 	src   *Source
 	clk   *clock
@@ -57,7 +57,7 @@ type wireEnv struct {
 	rt    tlsRewrite
 }
 
-func newWireEnv(t *testing.T, fail bool, block chan struct{}) *wireEnv {
+func newWireEnv(t *testing.T, fail bool, hold *tracecanary.Arrivals) *wireEnv {
 	t.Helper()
 	e := &wireEnv{clk: &clock{t: t0}}
 	var n atomic.Int32
@@ -65,11 +65,10 @@ func newWireEnv(t *testing.T, fail bool, block chan struct{}) *wireEnv {
 		e.mu.Lock()
 		e.jwts = append(e.jwts, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 		e.mu.Unlock()
-		if block != nil {
-			select {
-			case <-block:
-			case <-r.Context().Done():
-			}
+		if hold != nil {
+			_, _ = io.Copy(io.Discard, r.Body) // so the server sees the client go away
+			hold.Arrived()
+			<-r.Context().Done()
 			return
 		}
 		if r.URL.Path == "/app" {
@@ -178,38 +177,21 @@ func TestCallerTraceHooksNeverSeeTheAppJWT(t *testing.T) {
 	}
 }
 
-// The caller's cancellation still aborts an exchange in flight, and the caller's deadline still applies.
+// The caller's cancellation still aborts an exchange in flight, and the caller's deadline still applies, to
+// the token exchange and to GET /app, each with a context of its own.
 func TestExchangeEndsWithTheCallersContext(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		ctx  func() (context.Context, context.CancelFunc)
-		want error
-	}{
-		{"cancel", func() (context.Context, context.CancelFunc) {
-			ctx, cancel := context.WithCancel(context.Background())
-			time.AfterFunc(200*time.Millisecond, cancel)
-			return ctx, cancel
-		}, context.Canceled},
-		{"deadline", func() (context.Context, context.CancelFunc) {
-			return context.WithTimeout(context.Background(), 200*time.Millisecond)
-		}, context.DeadlineExceeded},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			block := make(chan struct{})
-			defer close(block)
-			e := newWireEnv(t, false, block)
-			ctx, cancel := tc.ctx()
-			defer cancel()
-			start := time.Now()
-			if _, err := e.src.Token(ctx); err == nil || !errors.Is(err, tc.want) {
-				t.Errorf("Token error = %v, want %v", err, tc.want)
-			}
-			if _, err := e.src.AppID(ctx); err == nil || !errors.Is(err, tc.want) {
-				t.Errorf("AppID error = %v, want %v", err, tc.want)
-			}
-			if d := time.Since(start); d > 10*time.Second {
-				t.Errorf("the requests ran %v after their context ended", d)
-			}
+	arrivals := tracecanary.NewArrivals()
+	e := newWireEnv(t, false, arrivals)
+	t.Run("token", func(t *testing.T) {
+		tracecanary.Ends(t, arrivals, func(ctx context.Context) error {
+			_, err := e.src.Token(ctx)
+			return err
 		})
-	}
+	})
+	t.Run("app", func(t *testing.T) {
+		tracecanary.Ends(t, arrivals, func(ctx context.Context) error {
+			_, err := e.src.AppID(ctx)
+			return err
+		})
+	})
 }

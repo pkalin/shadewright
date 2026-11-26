@@ -37,6 +37,7 @@ func TestCallerTraceHooksNeverSeeTheKey(t *testing.T) {
 	key := strings.Join([]string{"sk", "TRACECANARY", "c3a0"}, "-")
 	var n atomic.Int32
 	var hold atomic.Bool
+	arrivals := tracecanary.NewArrivals()
 	var mu sync.Mutex
 	remotes := map[string]bool{}
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +46,7 @@ func TestCallerTraceHooksNeverSeeTheKey(t *testing.T) {
 		mu.Unlock()
 		_, _ = io.Copy(io.Discard, r.Body)
 		if hold.Load() {
+			arrivals.Arrived()
 			<-r.Context().Done()
 			return
 		}
@@ -90,7 +92,7 @@ func TestCallerTraceHooksNeverSeeTheKey(t *testing.T) {
 	tracecanary.Control(t, &rec, ctx, p.client, p.url, "Authorization", "Bearer "+key)
 
 	hold.Store(true)
-	tracecanary.Ends(t, func(ctx context.Context) error {
+	tracecanary.Ends(t, arrivals, func(ctx context.Context) error {
 		_, err := p.Complete(ctx, request())
 		return err
 	})

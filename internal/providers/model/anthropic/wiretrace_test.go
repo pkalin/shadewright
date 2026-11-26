@@ -32,6 +32,7 @@ import (
 func TestCallerTraceHooksNeverSeeTheKey(t *testing.T) {
 	var n atomic.Int32
 	var hold atomic.Bool
+	arrivals := tracecanary.NewArrivals()
 	var mu sync.Mutex
 	remotes := map[string]bool{}
 	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
@@ -40,6 +41,7 @@ func TestCallerTraceHooksNeverSeeTheKey(t *testing.T) {
 		mu.Unlock()
 		if hold.Load() {
 			_, _ = io.Copy(io.Discard, r.Body) // so the server sees the client go away
+			arrivals.Arrived()
 			<-r.Context().Done()
 			return
 		}
@@ -68,7 +70,7 @@ func TestCallerTraceHooksNeverSeeTheKey(t *testing.T) {
 	tracecanary.Control(t, &rec, ctx, h.p.client, messagesURL, "x-api-key", keyMark)
 
 	hold.Store(true)
-	tracecanary.Ends(t, func(ctx context.Context) error {
+	tracecanary.Ends(t, arrivals, func(ctx context.Context) error {
 		_, err := h.p.Complete(ctx, structuredRequest())
 		return err
 	})

@@ -31,9 +31,11 @@ import (
 func TestCallerTraceHooksNeverSeeTheToken(t *testing.T) {
 	var n atomic.Int32
 	var hold atomic.Bool
+	arrivals := tracecanary.NewArrivals()
 	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		if hold.Load() {
+			arrivals.Arrived()
 			<-r.Context().Done()
 			return
 		}
@@ -59,7 +61,7 @@ func TestCallerTraceHooksNeverSeeTheToken(t *testing.T) {
 	tracecanary.Control(t, &rec, ctx, h.p.client, h.p.url, "Authorization", "Bearer "+tokenMark)
 
 	hold.Store(true)
-	tracecanary.Ends(t, func(ctx context.Context) error {
+	tracecanary.Ends(t, arrivals, func(ctx context.Context) error {
 		_, err := h.p.Complete(ctx, structuredRequest())
 		return err
 	})

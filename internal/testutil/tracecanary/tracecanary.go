@@ -21,6 +21,7 @@ package tracecanary
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptrace"
@@ -120,33 +121,96 @@ func Control(t testing.TB, rec *Recorder, ctx context.Context, client *http.Clie
 	}
 }
 
-// Ends checks that call, whose request the server holds until the client goes away, returns an error soon
-// after its context is canceled, and soon after its deadline passes.
-func Ends(t *testing.T, call func(ctx context.Context) error) {
+// Arrivals tells [Ends] that the test server received a request. A handler that holds a request calls
+// Arrived before it waits.
+type Arrivals struct{ ch chan struct{} }
+
+// NewArrivals returns an empty Arrivals.
+func NewArrivals() *Arrivals { return &Arrivals{ch: make(chan struct{}, 64)} }
+
+// Arrived records that the server received a request. It never blocks.
+func (a *Arrivals) Arrived() {
+	select {
+	case a.ch <- struct{}{}:
+	default:
+	}
+}
+
+// drain forgets the arrivals recorded so far.
+func (a *Arrivals) drain() {
+	for {
+		select {
+		case <-a.ch:
+		default:
+			return
+		}
+	}
+}
+
+// mode is how a context ends in [Ends].
+type mode string
+
+const (
+	cancelMode   mode = "cancel"
+	deadlineMode mode = "deadline"
+)
+
+const (
+	// endsDeadline is the deadline of the deadline case, counted from the start of the call. The request must
+	// reach the server before it passes.
+	endsDeadline = 2 * time.Second
+	// endsWait bounds every wait of Ends, so a hung call fails the test instead of blocking it.
+	endsWait = 10 * time.Second
+)
+
+// Ends checks that call, whose request the server holds until the client goes away, ends with its context:
+// once with a context canceled after the server reported the request to a, once with a context whose
+// deadline passes while the server holds it. Each case gets a fresh context. The call must return an error
+// that matches context.Canceled or context.DeadlineExceeded respectively; a call that fails before the server
+// has its request, or with another error, fails the test.
+func Ends(t *testing.T, a *Arrivals, call func(ctx context.Context) error) {
 	t.Helper()
-	for _, tc := range []struct {
-		name string
-		ctx  func() (context.Context, context.CancelFunc)
-	}{
-		{"cancel", func() (context.Context, context.CancelFunc) {
-			ctx, cancel := context.WithCancel(context.Background())
-			time.AfterFunc(200*time.Millisecond, cancel)
-			return ctx, cancel
-		}},
-		{"deadline", func() (context.Context, context.CancelFunc) {
-			return context.WithTimeout(context.Background(), 200*time.Millisecond)
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := tc.ctx()
-			defer cancel()
-			start := time.Now()
-			if err := call(ctx); err == nil {
-				t.Error("the call succeeded, want the end of its context")
-			}
-			if d := time.Since(start); d > 10*time.Second {
-				t.Errorf("the call returned %v after it started, its context ended after 200ms", d)
+	for _, m := range []mode{cancelMode, deadlineMode} {
+		t.Run(string(m), func(t *testing.T) {
+			if err := ends(a, m, call); err != nil {
+				t.Error(err)
 			}
 		})
+	}
+}
+
+// ends runs one case of [Ends] and returns what was wrong with it, or nil.
+func ends(a *Arrivals, m mode, call func(ctx context.Context) error) error {
+	a.drain()
+	want := context.Canceled
+	ctx, cancel := context.WithCancel(context.Background())
+	if m == deadlineMode {
+		want = context.DeadlineExceeded
+		ctx, cancel = context.WithTimeout(context.Background(), endsDeadline)
+	}
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- call(ctx) }()
+	select {
+	case err := <-done:
+		return fmt.Errorf("the call returned before the server received its request: %w", err)
+	case <-a.ch:
+	case <-time.After(endsWait):
+		cancel()
+		return fmt.Errorf("the server never received the request; the call then returned: %w", <-done)
+	}
+	if m == cancelMode {
+		cancel()
+	} else if ctx.Err() != nil {
+		return fmt.Errorf("the deadline passed before the server received the request (%v)", endsDeadline)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, want) {
+			return fmt.Errorf("the call returned %w, want an error that matches %w", err, want)
+		}
+		return nil
+	case <-time.After(endsWait):
+		return fmt.Errorf("the call did not return within %v after its context ended", endsWait)
 	}
 }

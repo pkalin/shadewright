@@ -17,7 +17,7 @@ package github
 
 import (
 	"context"
-	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -46,8 +46,9 @@ func (r tlsRewrite) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // wireServer is a TLS server that answers GET .../git/ref/heads/main, the first one with a 503 when fail is
-// set, and counts the connections it accepts.
-func wireServer(t *testing.T, fail bool, block chan struct{}) (*atomic.Int32, tlsRewrite) {
+// set, and counts the connections it accepts. When hold is set, it answers nothing: it reports each request
+// to hold and keeps it until the client goes away.
+func wireServer(t *testing.T, fail bool, hold *tracecanary.Arrivals) (*atomic.Int32, tlsRewrite) {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join("testdata", "ref_main.json"))
 	if err != nil {
@@ -55,11 +56,10 @@ func wireServer(t *testing.T, fail bool, block chan struct{}) (*atomic.Int32, tl
 	}
 	var n atomic.Int32
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if block != nil {
-			select {
-			case <-block:
-			case <-r.Context().Done():
-			}
+		if hold != nil {
+			_, _ = io.Copy(io.Discard, r.Body) // so the server sees the client go away
+			hold.Arrived()
+			<-r.Context().Done()
 			return
 		}
 		if fail && n.Add(1) == 1 {
@@ -149,35 +149,11 @@ func TestCallerTraceHooksNeverSeeTheToken(t *testing.T) {
 
 // The caller's cancellation still aborts a request in flight, and the caller's deadline still applies.
 func TestWireRequestEndsWithTheCallersContext(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		ctx  func() (context.Context, context.CancelFunc)
-		want error
-	}{
-		{"cancel", func() (context.Context, context.CancelFunc) {
-			ctx, cancel := context.WithCancel(context.Background())
-			time.AfterFunc(200*time.Millisecond, cancel)
-			return ctx, cancel
-		}, context.Canceled},
-		{"deadline", func() (context.Context, context.CancelFunc) {
-			return context.WithTimeout(context.Background(), 200*time.Millisecond)
-		}, context.DeadlineExceeded},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			block := make(chan struct{})
-			defer close(block)
-			_, rt := wireServer(t, false, block)
-			p := wireProvider(t, rt, canaryToken())
-			ctx, cancel := tc.ctx()
-			defer cancel()
-			start := time.Now()
-			_, err := p.BranchHead(ctx, target)
-			if err == nil || !errors.Is(err, tc.want) {
-				t.Errorf("BranchHead error = %v, want %v", err, tc.want)
-			}
-			if d := time.Since(start); d > 10*time.Second {
-				t.Errorf("the request ran %v after its context ended", d)
-			}
-		})
-	}
+	arrivals := tracecanary.NewArrivals()
+	_, rt := wireServer(t, false, arrivals)
+	p := wireProvider(t, rt, canaryToken())
+	tracecanary.Ends(t, arrivals, func(ctx context.Context) error {
+		_, err := p.BranchHead(ctx, target)
+		return err
+	})
 }

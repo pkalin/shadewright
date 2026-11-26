@@ -30,6 +30,7 @@ import (
 // caller's cancellation and deadline still end a request in flight.
 func TestCallerTraceHooksNeverSeeTheToken(t *testing.T) {
 	var hold atomic.Bool
+	arrivals := tracecanary.NewArrivals()
 	var mu sync.Mutex
 	remotes := map[string]bool{}
 	created := status(http.StatusCreated)
@@ -38,6 +39,7 @@ func TestCallerTraceHooksNeverSeeTheToken(t *testing.T) {
 		remotes[r.RemoteAddr] = true
 		mu.Unlock()
 		if hold.Load() {
+			arrivals.Arrived()
 			<-r.Context().Done()
 			return
 		}
@@ -64,7 +66,7 @@ func TestCallerTraceHooksNeverSeeTheToken(t *testing.T) {
 	tracecanary.Control(t, &rec, ctx, st.client, st.container.String(), "Authorization", "Bearer "+testToken)
 
 	hold.Store(true)
-	tracecanary.Ends(t, func(ctx context.Context) error {
+	tracecanary.Ends(t, arrivals, func(ctx context.Context) error {
 		_, err := st.Put(ctx, testRecord())
 		return err
 	})

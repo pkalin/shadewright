@@ -201,6 +201,15 @@
   min-width: 120px;
   height: auto;
 }
+.md-typeset .sw-hero .sw-lore {
+  max-width: 34rem;
+  margin: 1.5rem auto 0;
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--sw-muted);
+}
 .md-typeset .sw-hero .sw-tagline {
   max-width: 38rem;
   margin: 1.75rem auto 1.85rem;

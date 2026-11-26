@@ -1,5 +1,8 @@
 <h1 align="center">
-  <img src="docs/assets/wordmark.png" alt="Shadewright" width="520">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/shadewright-horizontal-nolabs-dark.png">
+    <img src="docs/assets/brand/shadewright-horizontal-nolabs-light.png" alt="Shadewright" width="520">
+  </picture>
 </h1>
 
 <p align="center">

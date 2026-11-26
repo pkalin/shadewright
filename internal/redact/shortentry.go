@@ -37,11 +37,9 @@ import (
 // ReplaceCheckedShort and StringShort decide by the readings of origin/main alone, without the controls view
 // (controls.go, #852, decision of 2026-11-22): the fingerprint is computed from them, and it must not change, so
 // Incident history carries across an upgrade. ReplaceCheckedShortShown is for the text that is stored or shown (the
-// symptom an Incident holds, a module's evidence value), never for a fingerprint: it adds the controls view, the
-// shown view and the printed view (printed.go), so a secret a control or a terminal escape sequence splits is
-// hidden there. It can show a key's bytes that the second redaction of its callers hid on main ("DB_PASS
-// WORD=<redacted>" where main gave "DB_PASS <redacted>"); the collector's table (package modules) checks that no
-// part of a secret main hid is shown.
+// symptom an Incident holds, a module's evidence value), never for a fingerprint: it redacts the text as it is
+// printed and withholds it whole where that text and its squeezed forms disagree (printed.go), so a secret a
+// control, an escape sequence, an invisible character, an invalid byte or a line end splits is never shown.
 
 const (
 	// MaxShortEntry is the longest entry, in bytes, the short entry points take: four times the 1,024 bytes the API
@@ -72,31 +70,33 @@ func (r *Redactor) ReplaceCheckedShort(s string, repl func(kind, text string) st
 	return r.replaceSpans(unstopped(), s, spans, repl, between), true
 }
 
-// ReplaceCheckedShortShown is ReplaceCheckedShort for text that is stored or shown, never fingerprinted: it also
-// reads the text without its controls, as it is shown when it is not valid UTF-8, and as a terminal prints it
-// (without its escape sequences and invisible characters), and hides what those readings find (addControlsView,
-// addPrintedView). It runs on the same budget and in the same slots as ReplaceCheckedShort; an entry over its
-// budget, or longer than MaxShortEntry, is withheld.
+// ReplaceCheckedShortShown is ReplaceCheckedShort for text that is stored or shown, never fingerprinted. It
+// redacts the printed text of s (printed.go): s without its invalid bytes, escape sequences and characters that
+// are not printable, each run of whitespace as one space. The rules read that text, and the text returned is that
+// text with each match replaced (repl) and the text between matches passed through between. It withholds s whole
+// when s cannot be printed with certainty (an escape that is not complete, a backspace or DEL), and when a rule
+// finds a secret in a squeezed text of s, or in s as it was read, that the matches of the printed text do not
+// cover. It runs on the same budget and in the same slots as ReplaceCheckedShort; an entry over its budget, or
+// longer than MaxShortEntry, is withheld.
 func ReplaceCheckedShortShown(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
 	return defaultRedactor.ReplaceCheckedShortShown(s, repl, between)
 }
 
 // ReplaceCheckedShortShown is the package's ReplaceCheckedShortShown with r's rules and work budget.
 func (r *Redactor) ReplaceCheckedShortShown(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
-	spans, ok := meteredShort(r, len(s), func(wm *meter.Meter) []span { return r.spansShown(wm, s) })
-	if !ok {
+	type decision struct {
+		printed string
+		spans   []span
+		ok      bool
+	}
+	d, ok := meteredShort(r, len(s), func(wm *meter.Meter) decision {
+		p, spans, ok := r.shownSpans(wm, s)
+		return decision{p, spans, ok}
+	})
+	if !ok || !d.ok {
 		return Withheld, false
 	}
-	return r.replaceSpans(unstopped(), s, spans, repl, between), true
-}
-
-// spansShown is spans with the printed view added: every reading of the text the full entry points take, and the
-// text as a terminal prints it.
-func (r *Redactor) spansShown(wm *meter.Meter, s string) []span {
-	l := r.mainMatches(wm, s)
-	r.addControlsView(wm, s, l)
-	r.addPrintedView(wm, s, l)
-	return settle(wm, s, l.spans(wm))
+	return r.replaceSpans(unstopped(), d.printed, d.spans, repl, between), true
 }
 
 // meteredShort is metered for a short entry: f runs on r's budget of the entry in one of the short entries' slots,

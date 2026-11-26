@@ -230,6 +230,27 @@ func TestFluxRevisionIsKeptOnlyWhole(t *testing.T) {
 	}
 }
 
+// A Flux revision whose reference name holds a token is redacted like any other value: the exception for a whole
+// revision keeps a reference name and a commit, never a secret a rule recognises in the name.
+func TestFluxRevisionWithASecretInItsReferenceIsRedacted(t *testing.T) {
+	commit := strings.Repeat("1f3c", 10)
+	token := "ghp_" + strings.Repeat("A", 36)
+	for _, ref := range []string{token, "refs/heads/" + token, "feature/" + token + "/x"} {
+		rev := ref + "@sha1:" + commit
+		if !IsFluxRevision(rev) {
+			t.Fatalf("%q is not a Flux revision", rev)
+		}
+		if got := BoundValue(rev); strings.Contains(got, token) || strings.Contains(got, strings.Repeat("A", 8)) {
+			t.Errorf("BoundValue(%q) = %q, shows the token", rev, got)
+		}
+	}
+	for _, rev := range []string{"release-1.2@sha1:" + commit, "renovate/go-1.x@sha1:" + commit} {
+		if got := BoundValue(rev); got != rev {
+			t.Errorf("BoundValue(%q) = %q, want it kept", rev, got)
+		}
+	}
+}
+
 // A redactor panic withholds the value instead of stopping the analyzer, for rules and sources alike (#523).
 func TestBoundValueWithholdsAValueWhenRedactionPanics(t *testing.T) {
 	saved := boundWithoutRecover

@@ -286,8 +286,9 @@ func finding(module, rule string, subject ObjectRef, s Symptom) (Finding, bool) 
 // that is a milli quantity such as "6500m" kept; a value over 4 KiB is not read and becomes "<long value: N
 // bytes>") and cuts it to [MaxEvidenceValueLength] bytes, redacting
 // again after the cut. The one exception is a value that is, as a whole, a Flux revision
-// ([IsFluxRevision]): it holds only a reference name and a commit and is kept as it is. A revision
-// inside other text is redacted like the rest. If redaction panics, the whole value is withheld as
+// ([IsFluxRevision]) whose reference name holds nothing a secret rule matches: it holds only a reference name and
+// a commit and is kept as it is. A revision whose reference name a rule matches ("ghp_...@sha1:...") is redacted
+// like any other value, and so is a revision inside other text. If redaction panics, the whole value is withheld as
 // "[REDACTED]": BoundValue runs in informer predicates and rule evaluation, outside any recover, so a
 // redactor bug must neither stop the analyzer nor let the value through (#523).
 func BoundValue(s string) (out string) {
@@ -302,9 +303,21 @@ func BoundValue(s string) (out string) {
 // boundWithoutRecover is [BoundValue] without the recover; a variable so a test can make it panic.
 var boundWithoutRecover = boundValue
 
+// refHoldsSecret reports whether the reference name of the Flux revision s, the text before its last "@", holds
+// anything a secret rule matches. A revision without a reference name holds none. A name the short entry point
+// withholds (over its budget) counts as one that holds a secret.
+func refHoldsSecret(s string) bool {
+	at := strings.LastIndexByte(s, '@')
+	if at <= 0 {
+		return false
+	}
+	ref := s[:at]
+	return redact.StringShort(ref) != ref
+}
+
 // boundValue is [BoundValue] without the recover.
 func boundValue(s string) string {
-	if IsFluxRevision(s) {
+	if IsFluxRevision(s) && !refHoldsSecret(s) {
 		return s
 	}
 	s = fingerprint.Value(s)

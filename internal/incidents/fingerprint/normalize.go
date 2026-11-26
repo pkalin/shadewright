@@ -209,8 +209,10 @@ const (
 
 // normalize redacts with redact.ReplaceCheckedShort for the fingerprint input (keepNone), the readings the
 // fingerprint has always been computed from, so a fingerprint stays as it was across an upgrade. The text that is
-// stored or shown ([Symptom], [Value]) is redacted with redact.ReplaceCheckedShortShown, which also hides a secret a
-// control or a terminal escape sequence splits.
+// stored or shown ([Symptom], [Value]) is redacted with redact.ReplaceCheckedShortShown: the note as a terminal
+// prints it, on one line, with its matches replaced, or withheld whole where a secret a control, an escape sequence,
+// an invisible character, an invalid byte or a line end splits could show. A credential split by plain ASCII
+// spaces alone is out of scope there: it is shown as printed.
 func normalize(o Observation, mode quantityMode) string {
 	if mode == keepNone {
 		return normalizeWith(redact.ReplaceCheckedShort, o, mode)
@@ -229,9 +231,10 @@ func normalizeWith(replace replaceChecked, o Observation, mode quantityMode) str
 	if len(o.Note) > maxInputLength {
 		return placeholderRedacted
 	}
-	// Redact the note as it was read, before any character is replaced: sanitize turns ">" into ")", which
-	// would hide a folded block scalar indicator from the rules (#840). Each match becomes its placeholder
-	// at once, and only the text between matches is sanitized.
+	// Redact the note before any character is replaced: sanitize turns ">" into ")", which would hide a folded
+	// block scalar indicator from the rules (#840). The fingerprint input is redacted as it was read; the shown text
+	// as it is printed (redact.ReplaceCheckedShortShown), which then holds no control, invisible character or line
+	// end. Each match becomes its placeholder at once, and only the text between matches is sanitized.
 	s, ok := replace(o.Note, rawPlaceholder, sanitize)
 	if !ok {
 		// Redaction withheld the note whole (its work budget ran out): it stands as a note too long to read. The

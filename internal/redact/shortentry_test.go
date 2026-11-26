@@ -18,9 +18,12 @@ package redact
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
 // keep is the repl of a test that only reads the flag: it writes the marker of each match.
@@ -80,7 +83,9 @@ func TestShortEntryRefusesLongText(t *testing.T) {
 }
 
 // The heap one short entry holds, at each short entry point and on every shape known at MaxShortEntry, is at most
-// ShortEntryHeap: the figure the room next to the heap limit counts for each of its slots.
+// ShortEntryHeap: the figure the room next to the heap limit counts for each of its slots. No shape is withheld for
+// its work: the shown short entry point withholds some shapes for what they hold (a control after a token, keys
+// invalid bytes split), after its readings ran, and its work on every shape stays within the budget.
 func TestHeapOfAShortEntry(t *testing.T) {
 	if raceDetector {
 		t.Skip("measures the heap of the product build")
@@ -89,15 +94,22 @@ func TestHeapOfAShortEntry(t *testing.T) {
 	entries := []struct {
 		name string
 		run  func(s string, repl func(kind, text string) string, between func(string) string) (string, bool)
-	}{{"ReplaceCheckedShort", ReplaceCheckedShort}, {"ReplaceCheckedShortShown", ReplaceCheckedShortShown}}
+	}{{"ReplaceCheckedShort", ReplaceCheckedShort}, {shownEntry, ReplaceCheckedShortShown}}
 	for _, e := range entries {
 		for _, sh := range heapShapes {
 			s := sh.text(MaxShortEntry)
 			var ok bool
 			peak := peakLiveHeap(func() { _, ok = e.run(s, keep, same) })
 			worst = max(worst, peak)
-			if !ok {
+			if !ok && e.name != shownEntry {
 				t.Errorf("%s on %s: a short entry was withheld", e.name, sh.name)
+			}
+			if e.name == shownEntry {
+				wm := meter.New(math.MaxInt64)
+				defaultRedactor.shownSpans(wm, s)
+				if wm.Spent() > budgetOf(len(s)) {
+					t.Errorf("%s on %s: %d steps, over the budget of %d", e.name, sh.name, wm.Spent(), budgetOf(len(s)))
+				}
 			}
 			if peak > ShortEntryHeap {
 				t.Errorf("%s on %s: a short entry of %d bytes held %.2f MiB, over ShortEntryHeap (%.2f MiB)", e.name,

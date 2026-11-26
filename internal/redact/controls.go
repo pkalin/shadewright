@@ -40,8 +40,8 @@ import (
 // SecretCollection), the forms a tool writes a value in (write), the cut of shown text, and the short entry points
 // of the collector that a fingerprint is computed from (ReplaceCheckedShort, StringShort): a fingerprint is decided
 // as before. A secret key name split by a control is not read as a secret key. The shown short entry point
-// (ReplaceCheckedShortShown), which the stored symptom and a module's evidence value take, reads this view, the
-// shown view and the printed view (printed.go).
+// (ReplaceCheckedShortShown), which the stored symptom and a module's evidence value take, reads neither this
+// view nor the shown view: it reads the printed text of the entry (printed.go).
 //
 // The view is read with its own long windows (windowIDs), so what it reads leaves no trace in the windows the
 // other readings of the same decision share. It holds the text without its controls (at most the bytes of the
@@ -57,8 +57,7 @@ import (
 // more as it is shown: without its controls and with each run of invalid bytes as one "?" (shownViewOf). Its
 // matches are added the same way as those of the controls view, by the same callers, after it; a match that
 // starts at a "?" starts at its run and one that ends with it ends after its run (controlsView.origEnd). Valid
-// UTF-8 is not read again, and the collector's short entry points read neither view, except the shown one
-// (ReplaceCheckedShortShown). Its heap is the view's text
+// UTF-8 is not read again, and the collector's short entry points read neither view. Its heap is the view's text
 // (at most the bytes of the text) and one gap for each run of controls or of invalid bytes.
 
 // Control reports whether r is a code point the controls view leaves out, and that model text is stored without:

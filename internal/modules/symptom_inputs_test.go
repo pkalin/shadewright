@@ -212,7 +212,7 @@ func TestWriteSymptomMainBaseline(t *testing.T) {
 	for i, s := range diffRegressions {
 		b.WriteString(storedOutputsRow(i, readOutputsHere(s)) + "\n")
 	}
-	if err := os.WriteFile(filepath.Join(dir, filepath.Base(symptomMainRegressions)), []byte(b.String()), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, filepath.Base(symptomMainRegressions)), []byte(b.String()), 0o600); err != nil { // #nosec G703 -- a directory the person running the test names
 		t.Fatal(err)
 	}
 	in := diffInputsOf()
@@ -221,7 +221,7 @@ func TestWriteSymptomMainBaseline(t *testing.T) {
 		outs[i] = readOutputsHere(s)
 	}
 	sum := symptomOutputsHash(outs) + "\n"
-	if err := os.WriteFile(filepath.Join(dir, filepath.Base(symptomMainGeneratedHash)), []byte(sum), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, filepath.Base(symptomMainGeneratedHash)), []byte(sum), 0o600); err != nil { // #nosec G703 -- a directory the person running the test names
 		t.Fatal(err)
 	}
 }

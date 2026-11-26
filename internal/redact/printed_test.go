@@ -44,9 +44,9 @@ func TestShownTextIsThePrintedText(t *testing.T) {
 		// Text without anything to remove is decided as it is.
 		{"Back-off restarting failed container app", "Back-off restarting failed container app"},
 	} {
-		got, ok := ReplaceCheckedShortShown(c.in, keep, same)
+		got, ok := replaceShown(c.in, keep, same)
 		if !ok || got != c.want {
-			t.Errorf("ReplaceCheckedShortShown(%q) = %q, %t; want %q", c.in, got, ok, c.want)
+			t.Errorf("ReplaceCheckedShortShownAndRead(%q) = %q, %t; want %q", c.in, got, ok, c.want)
 		}
 	}
 }
@@ -71,8 +71,8 @@ func TestShownTextIsWithheldWhenItCouldShowASecret(t *testing.T) {
 		"pass\x1b[word=" + secret,                              // a CSI takes "w"
 		"--password " + secret[:6] + "\r" + secret[6:] + " ok", // the match of the printed text ends at a line end
 	} {
-		if got, ok := ReplaceCheckedShortShown(in, keep, same); ok {
-			t.Errorf("ReplaceCheckedShortShown(%q) = %q, want it withheld", in, got)
+		if got, ok := replaceShown(in, keep, same); ok {
+			t.Errorf("ReplaceCheckedShortShownAndRead(%q) = %q, want it withheld", in, got)
 		}
 	}
 }
@@ -119,8 +119,8 @@ func TestShownTextWithholdsEveryEscapeButCSI(t *testing.T) {
 	// The raw CSI byte, and escapes other than CSI: two-byte escapes, an escape with an intermediate byte.
 	in = append(in, "ready \x9b31m ok", "ready \x1b7 ok", "ready \x1b= ok", "ready \x1b(B ok", "ready \x1bA ok")
 	for _, s := range in {
-		if got, ok := ReplaceCheckedShortShown(s, keep, same); ok {
-			t.Errorf("ReplaceCheckedShortShown(%q) = %q, want it withheld", s, got)
+		if got, ok := replaceShown(s, keep, same); ok {
+			t.Errorf("ReplaceCheckedShortShownAndRead(%q) = %q, want it withheld", s, got)
 		}
 	}
 }
@@ -136,8 +136,8 @@ func TestNELIsALineEnd(t *testing.T) {
 		{"line one\r\u0085 \tline two", "line one line two"},
 		{"Back-off\u0085restarting failed container", "Back-off restarting failed container"},
 	} {
-		if got, ok := ReplaceCheckedShortShown(c.in, keep, same); !ok || got != c.want {
-			t.Errorf("ReplaceCheckedShortShown(%q) = %q, %t; want %q", c.in, got, ok, c.want)
+		if got, ok := replaceShown(c.in, keep, same); !ok || got != c.want {
+			t.Errorf("ReplaceCheckedShortShownAndRead(%q) = %q, %t; want %q", c.in, got, ok, c.want)
 		}
 	}
 	for _, in := range []string{
@@ -146,14 +146,14 @@ func TestNELIsALineEnd(t *testing.T) {
 		"password=" + secret[:6] + "\u0085" + secret[6:] + " ok",
 		"--password " + secret[:6] + "\u0085" + secret[6:] + " ok",
 	} {
-		got, ok := ReplaceCheckedShortShown(in, keep, same)
+		got, ok := replaceShown(in, keep, same)
 		if ok && (strings.Contains(got, secret[:4]) || strings.Contains(got, secret[6:10]) ||
 			strings.Contains(got, token[:20]) || strings.Contains(got, token[20:])) {
-			t.Errorf("ReplaceCheckedShortShown(%q) = %q shows the secret", in, got)
+			t.Errorf("ReplaceCheckedShortShownAndRead(%q) = %q shows the secret", in, got)
 		}
 	}
-	if got, ok := ReplaceCheckedShortShown("line one\x85line two", keep, same); ok {
-		t.Errorf("ReplaceCheckedShortShown(raw 0x85) = %q, want it withheld", got)
+	if got, ok := replaceShown("line one\x85line two", keep, same); ok {
+		t.Errorf("ReplaceCheckedShortShownAndRead(raw 0x85) = %q, want it withheld", got)
 	}
 }
 
@@ -176,8 +176,8 @@ func TestCSIGrammarBoundaries(t *testing.T) {
 	for _, intro := range []string{"\x1b[", "\u009b"} {
 		for _, seq := range removed {
 			in := "left" + intro + seq + "right"
-			if got, ok := ReplaceCheckedShortShown(in, keep, same); !ok || got != "leftright" {
-				t.Errorf("ReplaceCheckedShortShown(%q) = %q, %t; want %q", in, got, ok, "leftright")
+			if got, ok := replaceShown(in, keep, same); !ok || got != "leftright" {
+				t.Errorf("ReplaceCheckedShortShownAndRead(%q) = %q, %t; want %q", in, got, ok, "leftright")
 			}
 		}
 		for _, seq := range withheld {
@@ -185,9 +185,15 @@ func TestCSIGrammarBoundaries(t *testing.T) {
 			if seq != "5" {
 				in += "right"
 			}
-			if got, ok := ReplaceCheckedShortShown(in, keep, same); ok {
-				t.Errorf("ReplaceCheckedShortShown(%q) = %q, want it withheld", in, got)
+			if got, ok := replaceShown(in, keep, same); ok {
+				t.Errorf("ReplaceCheckedShortShownAndRead(%q) = %q, want it withheld", in, got)
 			}
 		}
 	}
+}
+
+// replaceShown is the shown text of ReplaceCheckedShortShownAndRead, and whether it decided.
+func replaceShown(s string, repl func(kind, text string) string, between func(string) string) (string, bool) {
+	shown, _, ok := ReplaceCheckedShortShownAndRead(s, repl, between)
+	return shown, ok
 }

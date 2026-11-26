@@ -41,7 +41,7 @@ import (
 // compiles on that commit as it is. The columns of the collector's shown text (fingerprint.Symptom,
 // fingerprint.Value, modules.BoundValue and incidentcontext.Value of the symptom) were written again when that text
 // became the printed text, redacted as printed and withheld where its squeezed forms disagree
-// (redact.ReplaceCheckedShortShown); every other column, fingerprint.Normalize included, is as at that commit.
+// (redact.ReplaceCheckedShortShownAndRead); every other column, fingerprint.Normalize included, is as at that commit.
 // TestStoredSymptomOmitsSecretsSplitByControls (package incidents) checks the shown text on a generated corpus.
 
 // invalidSameTable is the table of the outputs before the shown view.

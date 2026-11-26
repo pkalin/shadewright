@@ -38,8 +38,8 @@ import (
 //
 // The shown columns (Symptom, Value, BoundValue) were written again when the text an Incident stores and a
 // module's evidence value became the printed text, redacted as printed and withheld where its squeezed forms
-// disagree (redact.ReplaceCheckedShortShown), because main showed a secret a control, an escape sequence or a line
-// end splits there. Normalize and the fingerprint were not touched: every one of the 3,845 rows holds them as at
+// disagree (redact.ReplaceCheckedShortShownAndRead), because main showed a secret a control, an escape sequence or
+// a line end splits there. Normalize and the fingerprint were not touched: every one of the 3,845 rows holds them as at
 // the commit the table names. The table is checked by construction too: a row of a form the shown paths hide
 // (redacttest.ShownInScope) whose shown column shows its probe fails (redacttest.ShowsProbe), whatever the table
 // says.

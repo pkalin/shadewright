@@ -36,9 +36,9 @@ import (
 //
 // ReplaceCheckedShort and StringShort decide by the readings of origin/main alone, without the controls view
 // (controls.go, #852, decision of 2026-11-22): the fingerprint is computed from them, and it must not change, so
-// Incident history carries across an upgrade. ReplaceCheckedShortShown is for the text that is stored or shown (the
-// symptom an Incident holds, a module's evidence value), never for a fingerprint: it redacts the text as it is
-// printed and withholds it whole where that text and its squeezed forms disagree (printed.go), so a secret a
+// Incident history carries across an upgrade. ReplaceCheckedShortShownAndRead is for the text that is stored or
+// shown (the symptom an Incident holds, a module's evidence value), never for a fingerprint: it redacts the text as
+// it is printed and withholds it whole where that text and its squeezed forms disagree (printed.go), so a secret a
 // control, an escape sequence, an invisible character, an invalid byte or a line end splits is never shown.
 
 const (
@@ -70,40 +70,16 @@ func (r *Redactor) ReplaceCheckedShort(s string, repl func(kind, text string) st
 	return r.replaceSpans(unstopped(), s, spans, repl, between), true
 }
 
-// ReplaceCheckedShortShown is ReplaceCheckedShort for text that is stored or shown, never fingerprinted. It
+// ReplaceCheckedShortShownAndRead is ReplaceCheckedShort for text that is stored or shown, never fingerprinted. It
 // redacts the printed text of s (printed.go): s without its invalid bytes, complete CSI sequences and characters
-// that are not printable, each run of whitespace as one space. The rules read that text, and the text returned is
-// that text with each match replaced (repl) and the text between matches passed through between. It withholds s
-// whole when s cannot be printed with certainty (any escape but a complete CSI, a C1 control in any encoding but
-// NEL as UTF-8, which is a line end, a backspace or DEL), and when a rule finds a secret that the matches of the
-// printed text do not cover in a squeezed text of s, in the printed text with one space for each character or CSI
-// it removed, or in s as it was read. It runs on the same budget and in the same slots as
-// ReplaceCheckedShort; an entry over its budget, or longer than MaxShortEntry, is withheld.
-func ReplaceCheckedShortShown(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
-	return defaultRedactor.ReplaceCheckedShortShown(s, repl, between)
-}
-
-// ReplaceCheckedShortShown is the package's ReplaceCheckedShortShown with r's rules and work budget.
-func (r *Redactor) ReplaceCheckedShortShown(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
-	type decision struct {
-		printed string
-		spans   []span
-		ok      bool
-	}
-	d, ok := meteredShort(r, len(s), func(wm *meter.Meter) decision {
-		p, spans, ok := r.shownSpans(wm, s)
-		return decision{p, spans, ok}
-	})
-	if !ok || !d.ok {
-		return Withheld, false
-	}
-	return r.replaceSpans(unstopped(), d.printed, d.spans, repl, between), true
-}
-
-// ReplaceCheckedShortShownAndRead is ReplaceCheckedShortShown, and also returns s redacted as it was read, as
-// ReplaceCheckedShort returns it: origin/main's reading, which a caller compares with the shown text. Both readings
-// run on one budget, the budget of ReplaceCheckedShortShown; an entry over it is withheld, and so is an entry
-// ReplaceCheckedShortShown withholds.
+// that are not printable, each run of whitespace as one space. The rules read that text, and shown is that text
+// with each match replaced (repl) and the text between matches passed through between. It withholds s whole when
+// s cannot be printed with certainty (any escape but a complete CSI, a C1 control in any encoding but NEL as UTF-8,
+// which is a line end, a backspace or DEL), and when a rule finds a secret that the matches of the printed text do
+// not cover in a squeezed text of s, in the printed text with one space for each character or CSI it removed, or
+// in s as it was read. It also returns read, s redacted as it was read, as ReplaceCheckedShort returns it:
+// origin/main's reading, which a caller compares with the shown text. Both readings run on one budget, in the
+// same slots as ReplaceCheckedShort; an entry over its budget, or longer than MaxShortEntry, is withheld.
 func ReplaceCheckedShortShownAndRead(s string, repl func(kind, text string) string, between func(string) string) (shown, read string, ok bool) {
 	return defaultRedactor.ReplaceCheckedShortShownAndRead(s, repl, between)
 }

@@ -166,7 +166,7 @@ func TestWriteFingerprintMainTable(t *testing.T) {
 }
 
 // symptomsOfThePrintedText are the recorded notes whose symptom changed when the shown symptom became the printed
-// text (redact.ReplaceCheckedShortShown), with the symptom now. The printed text is one line, and the value of
+// text (redact.ReplaceCheckedShortShownAndRead), with the symptom now. The printed text is one line, and the value of
 // "DB_PASSWORD" there follows a line end the printed text collapses, so the note is withheld rather than shown with
 // a value the printed text may split. Every fingerprint stays as main computes it.
 var symptomsOfThePrintedText = map[string]string{

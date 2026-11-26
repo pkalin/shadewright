@@ -41,8 +41,8 @@ import (
 // buildGateMainTable holds origin/main's answer, written at a commit of main with BUILD_GATE_MAIN_TABLE set to the
 // output path. This file compiles on origin/main as it is. Its symptom lines were written again when the symptom
 // an Incident stores became the printed text, redacted as printed and withheld where its squeezed forms disagree
-// (redact.ReplaceCheckedShortShown); the columns of what the context showed are origin/main's. A symptom line of a
-// form the shown paths hide that shows its probe fails the test by construction (redacttest.ShowsProbe).
+// (redact.ReplaceCheckedShortShownAndRead); the columns of what the context showed are origin/main's. A symptom
+// line of a form the shown paths hide that shows its probe fails the test by construction (redacttest.ShowsProbe).
 
 // buildGateMainTable is the table of origin/main's answers.
 const buildGateMainTable = "testdata/controls-gate-build-main.tsv"

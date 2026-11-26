@@ -40,7 +40,7 @@ import (
 // SecretCollection), the forms a tool writes a value in (write), the cut of shown text, and the short entry points
 // of the collector that a fingerprint is computed from (ReplaceCheckedShort, StringShort): a fingerprint is decided
 // as before. A secret key name split by a control is not read as a secret key. The shown short entry point
-// (ReplaceCheckedShortShown), which the stored symptom and a module's evidence value take, reads neither this
+// (ReplaceCheckedShortShownAndRead), which the stored symptom and a module's evidence value take, reads neither this
 // view nor the shown view: it reads the printed text of the entry (printed.go).
 //
 // The view is read with its own long windows (windowIDs), so what it reads leaves no trace in the windows the

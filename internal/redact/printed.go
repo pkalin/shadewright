@@ -24,7 +24,7 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
-// The printed text of a shown short entry (ReplaceCheckedShortShown). The printed text is built first, and the
+// The printed text of a shown short entry (ReplaceCheckedShortShownAndRead). The printed text is built first, and the
 // rules read that text and nothing else: what is matched is what is printed, and no match is moved from one text
 // to another. The callers then normalise and cut the redacted text (package fingerprint), so what an Incident
 // stores is that text after their normalisation, not the printed text itself.
@@ -262,16 +262,10 @@ func csiAt(wm *meter.Meter, s string, i, j int) (n, body int, ok bool) {
 	return 0, -1, false
 }
 
-// shownSpans returns the printed text of s and the spans of it to replace, and false when s is withheld whole:
-// it cannot be printed with certainty, or a rule finds in a squeezed text, in the spaced text or in s as it was
-// read a secret whose printed bytes the spans of the printed text do not all cover.
-func (r *Redactor) shownSpans(wm *meter.Meter, s string) (string, []span, bool) {
-	p, spans, _, ok := r.shownAndReadSpans(wm, s)
-	return p, spans, ok
-}
-
-// shownAndReadSpans is shownSpans, and also returns the spans of s as it was read: origin/main's reading of s,
-// on the same meter.
+// shownAndReadSpans returns the printed text of s, the spans of it to replace and the spans of s as it was read
+// (origin/main's reading of s, on the same meter), and false when s is withheld whole: it cannot be printed with
+// certainty, or a rule finds in a squeezed text, in the spaced text or in s as it was read a secret whose printed
+// bytes the spans of the printed text do not all cover.
 func (r *Redactor) shownAndReadSpans(wm *meter.Meter, s string) (string, []span, []span, bool) {
 	t, ok := printedTextsOf(wm, s)
 	if !ok {

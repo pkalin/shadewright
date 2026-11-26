@@ -127,16 +127,16 @@ var budgetEntries = []budgetEntry{
 			return strings.Join(defaultRedactor.strings(wm, budgetLines(in)), "\n")
 		},
 		func(in string) string { return strings.Join(Strings(budgetLines(in)), "\n") }},
-	{shownEntry, func(in string) int { return len(in) },
+	{shownAndReadEntry, func(in string) int { return len(in) },
 		func(wm *meter.Meter, in string) string {
-			p, spans, ok := defaultRedactor.shownSpans(wm, in)
+			p, spans, _, ok := defaultRedactor.shownAndReadSpans(wm, in)
 			if !ok {
 				return Withheld
 			}
 			return defaultRedactor.replaceSpans(wm, p, spans, budgetRepl, func(s string) string { return s })
 		},
 		func(in string) string {
-			out, _ := ReplaceCheckedShortShown(in, budgetRepl, func(s string) string { return s })
+			out, _, _ := ReplaceCheckedShortShownAndRead(in, budgetRepl, func(s string) string { return s })
 			return out
 		}},
 	{"PiecesWithin", func(in string) int { return piecesSize(budgetPieces(in)) },
@@ -411,7 +411,7 @@ func TestBudgetDecidesWholeOrWithholdsWhole(t *testing.T) {
 			}
 			for i, n := range sizes {
 				in, secret, kept := budgetKnown(n, i)
-				if e.name == shownEntry {
+				if e.name == shownAndReadEntry {
 					// The shown text is printed on one line, and a value a line end follows is withheld there
 					// (printed.go): its known input is the same on one line.
 					in = strings.ReplaceAll(in, "\n", " ")
@@ -481,10 +481,7 @@ func TestBudgetWithholdsAnEntryOverTheBound(t *testing.T) {
 	}
 }
 
-// shownEntry names the shown short entry point in budgetEntries.
-const shownEntry = "ReplaceCheckedShortShown"
-
-// shownAndReadEntry is the name of ReplaceCheckedShortShownAndRead in the tables of the tests.
+// shownAndReadEntry names the shown short entry point, ReplaceCheckedShortShownAndRead, in the tables of the tests.
 const shownAndReadEntry = "ReplaceCheckedShortShownAndRead"
 
 // shownShapes are the shapes of the printed text of the shown short entry point (printed.go), each to about n
@@ -515,9 +512,9 @@ func TestShownTextWorkGrowsLinearlyAtAMegabyte(t *testing.T) {
 		t.Skip("it counts work on texts of 512 KiB and 1 MiB, 10 to 20 times slower under -race; make test runs this " +
 			"package again without it")
 	}
-	i := slices.IndexFunc(budgetEntries, func(e budgetEntry) bool { return e.name == shownEntry })
+	i := slices.IndexFunc(budgetEntries, func(e budgetEntry) bool { return e.name == shownAndReadEntry })
 	if i < 0 {
-		t.Fatal("no budget entry " + shownEntry)
+		t.Fatal("no budget entry " + shownAndReadEntry)
 	}
 	e := budgetEntries[i]
 	small, large := shownShapes(512<<10), shownShapes(1<<20)

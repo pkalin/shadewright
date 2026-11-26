@@ -484,6 +484,9 @@ func TestBudgetWithholdsAnEntryOverTheBound(t *testing.T) {
 // shownEntry names the shown short entry point in budgetEntries.
 const shownEntry = "ReplaceCheckedShortShown"
 
+// shownAndReadEntry is the name of ReplaceCheckedShortShownAndRead in the tables of the tests.
+const shownAndReadEntry = "ReplaceCheckedShortShownAndRead"
+
 // shownShapes are the shapes of the printed text of the shown short entry point (printed.go), each to about n
 // bytes: escape introducers of every kind (CSI, OSC strings, two-byte escapes, the C1 CSI), escape strings left
 // open at the end, backspaces, zero-width characters, and keys an escape sequence or a zero-width character splits.

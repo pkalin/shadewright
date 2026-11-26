@@ -94,19 +94,23 @@ func TestHeapOfAShortEntry(t *testing.T) {
 	entries := []struct {
 		name string
 		run  func(s string, repl func(kind, text string) string, between func(string) string) (string, bool)
-	}{{"ReplaceCheckedShort", ReplaceCheckedShort}, {shownEntry, ReplaceCheckedShortShown}}
+	}{{"ReplaceCheckedShort", ReplaceCheckedShort}, {shownEntry, ReplaceCheckedShortShown}, {shownAndReadEntry,
+		func(s string, repl func(kind, text string) string, between func(string) string) (string, bool) {
+			out, _, ok := ReplaceCheckedShortShownAndRead(s, repl, between)
+			return out, ok
+		}}}
 	for _, e := range entries {
 		for _, sh := range heapShapes {
 			s := sh.text(MaxShortEntry)
 			var ok bool
 			peak := peakLiveHeap(func() { _, ok = e.run(s, keep, same) })
 			worst = max(worst, peak)
-			if !ok && e.name != shownEntry {
+			if !ok && e.name != shownEntry && e.name != shownAndReadEntry {
 				t.Errorf("%s on %s: a short entry was withheld", e.name, sh.name)
 			}
-			if e.name == shownEntry {
+			if e.name == shownEntry || e.name == shownAndReadEntry {
 				wm := meter.New(math.MaxInt64)
-				defaultRedactor.shownSpans(wm, s)
+				defaultRedactor.shownAndReadSpans(wm, s)
 				if wm.Spent() > budgetOf(len(s)) {
 					t.Errorf("%s on %s: %d steps, over the budget of %d", e.name, sh.name, wm.Spent(), budgetOf(len(s)))
 				}

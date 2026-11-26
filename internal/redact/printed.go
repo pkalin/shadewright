@@ -281,7 +281,6 @@ func (r *Redactor) shownAndReadSpans(wm *meter.Meter, s string) (string, []span,
 	if !t.changed {
 		return t.printed, spans, spans, true
 	}
-	read := r.spansAsMain(wm, s)
 	if continuesPastARun(wm, t, spans) {
 		return "", nil, nil, false
 	}
@@ -307,7 +306,13 @@ func (r *Redactor) shownAndReadSpans(wm *meter.Meter, s string) (string, []span,
 	}
 	if shows(r.spansAsMain(wm, t.squeezed), t.squeezedAt) ||
 		(t.squeezedBodies != t.squeezed && shows(r.spansAsMain(wm, t.squeezedBodies), t.bodiesAt)) ||
-		(t.spaced != t.printed && shows(r.spansAsMain(wm, t.spaced), t.spacedAt)) || shows(read, t.readAt) {
+		(t.spaced != t.printed && shows(r.spansAsMain(wm, t.spaced), t.spacedAt)) {
+		return "", nil, nil, false
+	}
+	// s as it was read is read last, once the other texts' spans are released, and its spans are kept: they are
+	// origin/main's reading of s.
+	read := r.spansAsMain(wm, s)
+	if shows(read, t.readAt) {
 		return "", nil, nil, false
 	}
 	return t.printed, spans, read, true

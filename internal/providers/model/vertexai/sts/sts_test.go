@@ -958,7 +958,7 @@ func TestAnswerAfterContextEndIsDiscarded(t *testing.T) {
 				t.Errorf("exchange err = %v, want its cancellation", call.err)
 			}
 			s.mu.Lock()
-			cached := s.token
+			cached := s.cachedToken()
 			s.mu.Unlock()
 			if cached != "" {
 				t.Error("a token taken after the context ended was cached")
@@ -1295,7 +1295,7 @@ func TestTokenAlreadyStaleOnArrivalIsRefused(t *testing.T) {
 				}
 				assertNoLeak(t, err, Config{TokenFile: "/unused"})
 				s.mu.Lock()
-				cached := s.token
+				cached := s.cachedToken()
 				s.mu.Unlock()
 				if cached != "" {
 					t.Error("a stale token was cached")
@@ -1474,7 +1474,7 @@ func TestTokenIsRefusedWhenTheProjectionExpiredInTransit(t *testing.T) {
 	}
 	assertNoLeak(t, err, cfg)
 	s.mu.Lock()
-	cached := s.token
+	cached := s.cachedToken()
 	s.mu.Unlock()
 	if cached != "" {
 		t.Error("a token for an expired projection was cached")
@@ -1611,7 +1611,7 @@ func TestTokenExpiredAtPublishIsNotHandedOut(t *testing.T) {
 		}
 	}
 	s.mu.Lock()
-	cached := s.token
+	cached := s.cachedToken()
 	s.mu.Unlock()
 	if cached != "" {
 		t.Error("an expired token was cached")

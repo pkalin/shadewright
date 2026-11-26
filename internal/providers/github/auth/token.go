@@ -24,23 +24,22 @@ import (
 // Token is an installation token. It prints as a placeholder with every fmt verb and in slog, so it cannot
 // reach a log line or an error by accident; the value is available only through [Token.Reveal].
 //
-// The value sits behind a pointer: when a Token is an unexported field of another struct, fmt and slog walk
-// that struct without calling Token's methods, and they print a nested pointer as an address, never the
-// text it points to.
+// The value sits behind a function value: when a Token is an unexported field of another struct, fmt and slog
+// walk that struct without calling Token's methods, and they print a function only as an address, under every
+// verb. A pointer would not do: for a verb that does not fit a pointer (%s, %q), fmt's bad-verb form prints
+// the target of the pointer.
 type Token struct {
-	value *secret
+	value func() string
 }
 
-type secret struct{ s string }
-
-func newToken(v string) Token { return Token{value: &secret{s: v}} }
+func newToken(v string) Token { return Token{value: func() string { return v }} }
 
 // Reveal returns the token value, or "" for the zero Token. Use it only to set an Authorization header.
 func (t Token) Reveal() string {
 	if t.value == nil {
 		return ""
 	}
-	return t.value.s
+	return t.value()
 }
 
 // String returns a placeholder.

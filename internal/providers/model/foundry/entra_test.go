@@ -379,7 +379,7 @@ func TestWorkloadIdentityAnswerAfterContextEnd(t *testing.T) {
 				t.Errorf("exchange err = %v, want its cancellation", call.err)
 			}
 			w.mu.Lock()
-			cached := w.token
+			cached := w.cachedToken()
 			w.mu.Unlock()
 			if cached != "" {
 				t.Error("a token taken after the context ended was cached")

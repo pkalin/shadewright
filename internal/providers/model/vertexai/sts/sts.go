@@ -126,8 +126,9 @@ type Source struct {
 	readFile func(path string) (string, error)
 
 	// mu guards the fields below; it is never held across the network or a file read.
-	mu        sync.Mutex
-	token     string
+	mu sync.Mutex
+	// token is the cached access token, behind a function value: see setToken.
+	token     func() string
 	refreshAt time.Time
 	// inflight is the exchange in progress, shared by every caller that needs a token meanwhile.
 	inflight *exchangeCall
@@ -276,8 +277,7 @@ func (s *Source) Token(ctx context.Context) (string, error) {
 		return "", ctxError(ctx)
 	}
 	s.mu.Lock()
-	if s.token != "" && s.now().Before(s.refreshAt) {
-		tok := s.token
+	if tok := s.cachedToken(); tok != "" && s.now().Before(s.refreshAt) {
 		s.mu.Unlock()
 		return tok, nil
 	}
@@ -323,7 +323,8 @@ func (s *Source) run(ctx context.Context, call *exchangeCall) {
 	}
 	if s.inflight == call {
 		if err == nil {
-			s.token, s.refreshAt = tok, refreshAt
+			s.setToken(tok)
+			s.refreshAt = refreshAt
 		}
 		s.inflight = nil
 	} else if err == nil {
@@ -685,4 +686,16 @@ func readTokenFile(path string) (string, error) {
 		return "", errors.New("the projected token file is empty")
 	}
 	return tok, nil
+}
+
+// setToken caches v. The value is kept behind a function value, which fmt prints only as an address under every
+// verb, so a value that holds the Source cannot print the token. The caller holds mu.
+func (s *Source) setToken(v string) { s.token = func() string { return v } }
+
+// cachedToken returns the cached token, or "" for none. The caller holds mu.
+func (s *Source) cachedToken() string {
+	if s.token == nil {
+		return ""
+	}
+	return s.token()
 }

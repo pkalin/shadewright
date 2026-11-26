@@ -83,8 +83,9 @@ type WorkloadIdentity struct {
 	now                 func() time.Time
 
 	// mu guards the fields below; it is never held across the network.
-	mu        sync.Mutex
-	token     string
+	mu sync.Mutex
+	// token is the cached access token, behind a function value: see setToken.
+	token     func() string
 	refreshAt time.Time
 	// inflight is the exchange in progress, shared by every caller that needs a token meanwhile.
 	inflight *exchangeCall
@@ -144,8 +145,7 @@ func (w *WorkloadIdentity) Token(ctx context.Context) (string, error) {
 		return "", tokenCtxError(ctx)
 	}
 	w.mu.Lock()
-	if w.token != "" && w.now().Before(w.refreshAt) {
-		tok := w.token
+	if tok := w.cachedToken(); tok != "" && w.now().Before(w.refreshAt) {
 		w.mu.Unlock()
 		return tok, nil
 	}
@@ -185,7 +185,8 @@ func (w *WorkloadIdentity) run(ctx context.Context, call *exchangeCall) {
 	tok, refreshAt, err := w.exchange(ctx)
 	w.mu.Lock()
 	if err == nil {
-		w.token, w.refreshAt = tok, refreshAt
+		w.setToken(tok)
+		w.refreshAt = refreshAt
 	}
 	if w.inflight == call {
 		w.inflight = nil
@@ -343,4 +344,16 @@ func readTokenFile(path string) (string, error) {
 		return "", errors.New("the federated token file is empty")
 	}
 	return tok, nil
+}
+
+// setToken caches v. The value is kept behind a function value, which fmt prints only as an address under every
+// verb, so a value that holds the WorkloadIdentity cannot print the token. The caller holds mu.
+func (w *WorkloadIdentity) setToken(v string) { w.token = func() string { return v } }
+
+// cachedToken returns the cached token, or "" for none. The caller holds mu.
+func (w *WorkloadIdentity) cachedToken() string {
+	if w.token == nil {
+		return ""
+	}
+	return w.token()
 }

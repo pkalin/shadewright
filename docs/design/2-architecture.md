@@ -470,7 +470,7 @@ When the Kustomization or HelmRelease comparison differs, the summary says the c
 - The module has no actions and no tools, and reads objects only. A fix is a pull request to the manifest, values or Kustomization (section 7), never a change to a Flux object.
 - The read-only access to these kinds is the chart value `analyzer.modules.flux.enabled` (off by default, 2.2.2). Flux objects usually live in `flux-system`, which then has to be among the analyzer's watched namespaces.
 
-**Revisions and redaction.** A revision evidence value is kept unredacted only when the whole value is a Flux revision: an optional reference name, `@`, `sha1:` and exactly 40 lower-case hex digits (`modules.IsFluxRevision`). The evaluator applies this (`modules.BoundValue`, 2.5.1). Inside any other text, such as a condition message, the commit hash is redacted like any long hex run, so `sha1:` written in front of a secret keeps nothing.
+**Revisions and redaction.** A revision evidence value is kept unredacted only when the whole value is a Flux revision: an optional reference name, `@`, `sha1:` and exactly 40 lower-case hex digits (`modules.IsFluxRevision`) and its reference name holds nothing a secret rule matches; a revision whose reference name holds a token (`ghp_...@sha1:...`) is redacted like any other value (`TestFluxRevisionWithASecretInItsReferenceIsRedacted`). The evaluator applies this (`modules.BoundValue`, 2.5.1). Inside any other text, such as a condition message, the commit hash is redacted like any long hex run, so `sha1:` written in front of a secret keeps nothing.
 
 ### 2.5.3. KEDA
 

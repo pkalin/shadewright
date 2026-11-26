@@ -1032,9 +1032,9 @@ func okResponse(r *http.Request, status int, body io.ReadCloser) (*http.Response
 	return &http.Response{StatusCode: status, Header: http.Header{}, Body: body, Request: r}, nil
 }
 
-func stsAnswerFor(token string, expiresIn int64) string {
+func stsAnswerFor(token string) string {
 	return fmt.Sprintf(`{"access_token":%q,"issued_token_type":%q,"token_type":"Bearer","expires_in":%d}`,
-		token, typeAccessToken, expiresIn)
+		token, typeAccessToken, 3600)
 }
 
 // pipeListener is an in-memory listener, so the HTTP/2 test needs no loopback socket.
@@ -1157,13 +1157,13 @@ func waitSignal(t *testing.T, ch <-chan struct{}, msg string) {
 	}
 }
 
-func waitErr(t *testing.T, ch <-chan error, msg string) error {
+func waitErr(t *testing.T, ch <-chan error) error {
 	t.Helper()
 	select {
 	case err := <-ch:
 		return err
 	case <-time.After(testWaitBound):
-		t.Fatal(msg)
+		t.Fatal("first caller never returned")
 		return nil
 	}
 }
@@ -1172,7 +1172,7 @@ func waitErr(t *testing.T, ch <-chan error, msg string) error {
 // while still finishing with its own result.
 func TestSupersededExchangeDoesNotWriteTheCache(t *testing.T) {
 	const stale = "opaque-STALE-TOKEN-0123456789"
-	gate := &closeGate{Reader: strings.NewReader(stsAnswerFor(stale, 3600)), entered: make(chan struct{}), release: make(chan struct{})}
+	gate := &closeGate{Reader: strings.NewReader(stsAnswerFor(stale)), entered: make(chan struct{}), release: make(chan struct{})}
 	defer gate.unblock()
 	var n atomic.Int32
 	var s *Source
@@ -1195,7 +1195,7 @@ func TestSupersededExchangeDoesNotWriteTheCache(t *testing.T) {
 	go func() { _, err := s.Token(ctxA); errA <- err }()
 	waitSignal(t, gate.entered, "the first exchange never reached the end of its response")
 	cancelA() // the only waiter leaves
-	if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
+	if err := waitErr(t, errA); !errors.Is(err, context.Canceled) {
 		t.Fatalf("first caller: err = %v, want canceled", err)
 	}
 	if tok, err := s.Token(context.Background()); err != nil || tok != issuedMark {
@@ -1216,7 +1216,7 @@ func TestSupersededExchangeDoesNotWriteTheCache(t *testing.T) {
 // call reuses it without making a second exchange.
 func TestAbandonedExchangeCachesWhenAlone(t *testing.T) {
 	const firstTok = "opaque-FIRST-TOKEN-0123456789"
-	gate := &closeGate{Reader: strings.NewReader(stsAnswerFor(firstTok, 3600)), entered: make(chan struct{}), release: make(chan struct{})}
+	gate := &closeGate{Reader: strings.NewReader(stsAnswerFor(firstTok)), entered: make(chan struct{}), release: make(chan struct{})}
 	defer gate.unblock()
 	var n atomic.Int32
 	var s *Source
@@ -1239,7 +1239,7 @@ func TestAbandonedExchangeCachesWhenAlone(t *testing.T) {
 	go func() { _, err := s.Token(ctxA); errA <- err }()
 	waitSignal(t, gate.entered, "the first exchange never reached the end of its response")
 	cancelA() // the only waiter leaves, and no newer caller arrives
-	if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
+	if err := waitErr(t, errA); !errors.Is(err, context.Canceled) {
 		t.Fatalf("first caller: err = %v, want canceled", err)
 	}
 	gate.unblock()
@@ -1256,7 +1256,7 @@ func TestAbandonedExchangeCachesWhenAlone(t *testing.T) {
 // An abandoned exchange that succeeds after a newer exchange failed still caches its valid token.
 func TestAbandonedExchangeCachesAfterReplacementFails(t *testing.T) {
 	const firstTok = "opaque-FIRST-TOKEN-0123456789"
-	gate := &closeGate{Reader: strings.NewReader(stsAnswerFor(firstTok, 3600)), entered: make(chan struct{}), release: make(chan struct{})}
+	gate := &closeGate{Reader: strings.NewReader(stsAnswerFor(firstTok)), entered: make(chan struct{}), release: make(chan struct{})}
 	defer gate.unblock()
 	var n atomic.Int32
 	var s *Source
@@ -1283,7 +1283,7 @@ func TestAbandonedExchangeCachesAfterReplacementFails(t *testing.T) {
 	go func() { _, err := s.Token(ctxA); errA <- err }()
 	waitSignal(t, gate.entered, "the first exchange never reached the end of its response")
 	cancelA() // the only waiter leaves
-	if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
+	if err := waitErr(t, errA); !errors.Is(err, context.Canceled) {
 		t.Fatalf("first caller: err = %v, want canceled", err)
 	}
 	if _, err := s.Token(context.Background()); !providers.IsRetryable(err) {
@@ -1313,7 +1313,7 @@ func TestLiveWaiterGetsOwnCallResult(t *testing.T) {
 		{name: "replacement fails", secondOK: false, wantCache: firstTok},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gate1 := &closeGate{Reader: strings.NewReader(stsAnswerFor(firstTok, 3600)), entered: make(chan struct{}), release: make(chan struct{})}
+			gate1 := &closeGate{Reader: strings.NewReader(stsAnswerFor(firstTok)), entered: make(chan struct{}), release: make(chan struct{})}
 			defer gate1.unblock()
 			call2Started := make(chan struct{})
 			call2Release := make(chan struct{})
@@ -1352,7 +1352,7 @@ func TestLiveWaiterGetsOwnCallResult(t *testing.T) {
 			go func() { _, err := s.Token(ctxA); errA <- err }()
 			waitSignal(t, gate1.entered, "the first exchange never reached the end of its response")
 			cancelA()
-			if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
+			if err := waitErr(t, errA); !errors.Is(err, context.Canceled) {
 				t.Fatalf("first caller: err = %v, want canceled", err)
 			}
 

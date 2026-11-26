@@ -423,13 +423,13 @@ func waitSignal(t *testing.T, ch <-chan struct{}, msg string) {
 	}
 }
 
-func waitErr(t *testing.T, ch <-chan error, msg string) error {
+func waitErr(t *testing.T, ch <-chan error) error {
 	t.Helper()
 	select {
 	case err := <-ch:
 		return err
 	case <-time.After(testWaitBound):
-		t.Fatal(msg)
+		t.Fatal("first caller never returned")
 		return nil
 	}
 }
@@ -480,7 +480,7 @@ func TestWorkloadIdentitySupersededExchangeDoesNotWriteTheCache(t *testing.T) {
 	waitSignal(t, gate.entered, "the first exchange never reached the end of its response")
 
 	cancelA() // the only waiter leaves
-	if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
+	if err := waitErr(t, errA); !errors.Is(err, context.Canceled) {
 		t.Fatalf("first caller: err = %v, want canceled", err)
 	}
 	if tok, err := w.Token(context.Background()); err != nil || tok != goodToken {
@@ -541,7 +541,7 @@ func TestWorkloadIdentityAbandonedExchangeCachesWhenAlone(t *testing.T) {
 	waitSignal(t, gate.entered, "the first exchange never reached the end of its response")
 
 	cancelA() // the only waiter leaves, and no newer caller arrives
-	if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
+	if err := waitErr(t, errA); !errors.Is(err, context.Canceled) {
 		t.Fatalf("first caller: err = %v, want canceled", err)
 	}
 
@@ -607,7 +607,7 @@ func TestWorkloadIdentityAbandonedExchangeCachesAfterReplacementFails(t *testing
 	waitSignal(t, gate.entered, "the first exchange never reached the end of its response")
 
 	cancelA() // the only waiter leaves
-	if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
+	if err := waitErr(t, errA); !errors.Is(err, context.Canceled) {
 		t.Fatalf("first caller: err = %v, want canceled", err)
 	}
 	if _, err := w.Token(context.Background()); !providers.IsRetryable(err) {
@@ -701,7 +701,7 @@ func TestWorkloadIdentityLiveWaiterGetsOwnCallResult(t *testing.T) {
 			waitSignal(t, gate1.entered, "the first exchange never reached the end of its response")
 
 			cancelA()
-			if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
+			if err := waitErr(t, errA); !errors.Is(err, context.Canceled) {
 				t.Fatalf("first caller: err = %v, want canceled", err)
 			}
 

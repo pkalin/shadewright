@@ -35,6 +35,14 @@ import (
 // fingerprint must not change with this release (ADR-0039). collectorMainTable holds origin/main's outputs for
 // every input of redacttest.GateCases and a few more, written at a commit of main with COLLECTOR_MAIN_TABLE set to
 // the output path. This file and redacttest/controls.go compile on origin/main as they are.
+//
+// The shown columns (Symptom, Value, BoundValue) were written again when the text an Incident stores and a
+// module's evidence value became the printed text, redacted as printed and withheld where its squeezed forms
+// disagree (redact.ReplaceCheckedShortShownAndRead), because main showed a secret a control, an escape sequence or
+// a line end splits there. Normalize and the fingerprint were not touched: every one of the 3,845 rows holds them as at
+// the commit the table names. The table is checked by construction too: a row of a form the shown paths hide
+// (redacttest.ShownInScope) whose shown column shows its probe fails (redacttest.ShowsProbe), whatever the table
+// says.
 
 // collectorMainTable is the table of origin/main's outputs.
 const collectorMainTable = "testdata/controls-collector-main.tsv"
@@ -90,7 +98,8 @@ func TestWriteCollectorMainTable(t *testing.T) {
 	}
 }
 
-// Every collector reading of every input equals origin/main's, the fingerprint included.
+// Every collector reading of every input equals the table: Normalize and the fingerprint as on origin/main, the
+// shown columns as since the shown short entry point.
 func TestCollectorReadingsDecideAsMain(t *testing.T) {
 	f, err := os.Open(collectorMainTable)
 	if err != nil {
@@ -112,11 +121,27 @@ func TestCollectorReadingsDecideAsMain(t *testing.T) {
 	if len(want) != len(texts) {
 		t.Fatalf("%s has %d rows, the test %d inputs", collectorMainTable, len(want), len(texts))
 	}
-	differ := 0
+	cases := redacttest.GateCases()
+	differ, shown := 0, 0
 	for i := range texts {
 		name, row, _ := strings.Cut(want[i], "\t")
 		if name != strings.ReplaceAll(names[i], "\t", " ") {
 			t.Fatalf("%s row %d is %q, the input %q", collectorMainTable, i+1, name, names[i])
+		}
+		probe, inScope := redacttest.GateProbeHunter, true // the keys a control splits that the finding named
+		if i < len(cases) {
+			probe, inScope = cases[i].Probe, cases[i].ShownInScope()
+		}
+		if inScope {
+			cols := strings.Split(row, "\t")
+			for _, col := range cols[1:4] {
+				if v, err := strconv.Unquote(col); err != nil || redacttest.ShowsProbe(v, probe) {
+					if shown++; shown <= 5 {
+						t.Errorf("%s row %d (%q) shows its probe in a shown column: %s", collectorMainTable, i+1,
+							texts[i], col)
+					}
+				}
+			}
 		}
 		if got := collectorRow(texts[i]); got != row {
 			if differ++; differ <= 5 {
@@ -125,6 +150,9 @@ func TestCollectorReadingsDecideAsMain(t *testing.T) {
 		}
 	}
 	if differ > 0 {
-		t.Errorf("%d of %d inputs differ from origin/main", differ, len(texts))
+		t.Errorf("%d of %d inputs differ from the table", differ, len(texts))
+	}
+	if shown > 0 {
+		t.Errorf("%d shown columns of the table show their probe", shown)
 	}
 }

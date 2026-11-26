@@ -44,6 +44,8 @@ type GateCase struct {
 	Probe string
 	// Filler is the filler placed, and Prefix the text before the form ("" or "log: ").
 	Filler, Prefix string
+	// FormName is the name of the form the case was built from, set when it is built (Form).
+	FormName string
 }
 
 // Text returns the case as one text.
@@ -73,6 +75,8 @@ const (
 	gatePassword = "password"
 	gateWord     = "word"
 	gateToken    = "token"
+	// gateAuthorization names the form of an Authorization header.
+	gateAuthorization = "authorization"
 )
 
 // GateProbeToken is the GitHub token of Samples (rule 2), made up, the probe of the token forms.
@@ -88,7 +92,7 @@ func gateForms() []gateForm {
 		{"json member", []string{`"password"`, ":", `"`, GateProbeValue, `"`}, 1, GateProbeValue},
 		{"split flag", []string{"--pass", gateWord, " ", GateProbeValue}, 2, GateProbeValue},
 		{"flag=", []string{"--password", "=", GateProbeHunter}, 1, GateProbeHunter},
-		{"authorization", []string{"Authorization", ":", " ", "Bearer", " ", gateProbeBearer}, 1, gateProbeBearer},
+		{gateAuthorization, []string{"Authorization", ":", " ", "Bearer", " ", gateProbeBearer}, 1, gateProbeBearer},
 		{"glued bearer", []string{"x", "Bearer", " ", gateProbeBearer}, 2, gateProbeBearer},
 		{"split token", []string{tok[:20], tok[20:]}, -1, tok},
 		{"connection string", []string{"postgres://", "u", ":", gateProbeConnPass, "@", "db.example", "/app"}, 2, gateProbeConnPass},
@@ -132,6 +136,37 @@ func GateCases() []GateCase {
 	return out
 }
 
+// SeparatorReplacedCases returns each form of the gate that has a separator with that separator replaced by each
+// of fills, after each of prefixes, and " ok" after it: "password" NUL "mysecretvalue ok" for the form key=value.
+// The filler then stands where the form's own separator stood, between its key and its value.
+func SeparatorReplacedCases(fills, prefixes []string) []GateCase {
+	var out []GateCase
+	for _, f := range gateForms() {
+		if f.sep < 0 {
+			continue
+		}
+		for _, fill := range fills {
+			for _, prefix := range prefixes {
+				parts := make([]string, 0, len(f.parts)+2)
+				if prefix != "" {
+					parts = append(parts, prefix)
+				}
+				parts = append(parts, f.parts[:f.sep]...)
+				parts = append(parts, fill)
+				parts = append(parts, f.parts[f.sep+1:]...)
+				parts = append(parts, " ok")
+				out = append(out, GateCase{
+					Name:  f.name + " " + strings.TrimSpace(prefix) + " separator replaced by " + quoteFill(fill),
+					Parts: parts, Key: strings.Join(f.parts[:f.sep], ""), Sep: fill,
+					Value: strings.Join(f.parts[f.sep+1:], "") + " ok", Probe: f.probe, Filler: fill, Prefix: prefix,
+					FormName: f.name,
+				})
+			}
+		}
+	}
+	return out
+}
+
 // gateControl reports whether fill starts with a control character but newline and tab.
 func gateControl(fill string) bool {
 	r, _ := utf8.DecodeRuneInString(fill)
@@ -150,7 +185,7 @@ func gateCase(f gateForm, pos, fi int, prefix string) GateCase {
 	parts = append(parts, f.parts[pos:]...)
 	parts = append(parts, " ok")
 	c := GateCase{Name: f.name + " " + strings.TrimSpace(prefix) + " filler " + quoteFill(fill) + " at " + strconv.Itoa(pos),
-		Parts: parts, Probe: f.probe, Filler: fill, Prefix: prefix}
+		Parts: parts, Probe: f.probe, Filler: fill, Prefix: prefix, FormName: f.name}
 	if f.sep < 0 {
 		c.Value = c.Text()
 		return c
@@ -308,4 +343,69 @@ func GateUncovered(cases []GateCase, built func(i int) bool) []string {
 		out = append(out, `the prefix "log: "`)
 	}
 	return out
+}
+
+// ShownForms are the forms of the gate whose secret the collector's shown paths (the symptom an Incident stores,
+// a module's evidence value) hide in plain form, without any filler. Every other form of the gate is in
+// NotShownForms, with its reason.
+var ShownForms = []string{
+	"api key", gateAuthorization, "block", "connection string", "flag=", "key=value", "split env", "split flag",
+	"split key: value", "split key=value", "split token", "split value", gateToken,
+}
+
+// NotShownForms are the forms of the gate left out of ShownForms, each with the reason: the shown paths, like
+// origin/main, show its secret even in plain form, so a filler cannot make it worse. The test of package incidents
+// TestFormsLeftOutAreShownInPlainForm fails when one of them is hidden in plain form, so a form the rules start to
+// hide joins ShownForms and its rows are checked.
+var NotShownForms = map[string]string{
+	"json member":  `a quoted JSON member "password":"value" with no space after the colon is not a key and value of any rule`,
+	"glued bearer": `"Bearer" glued to the word before it ("xBearer") is not the Authorization scheme of the bearer rule`,
+}
+
+// Form returns the name of the case's form, as set when the case was built. It is not parsed from Name, which
+// holds the prefix after the form ("split key=value log: filler ..."): a parser of the name read the form of every
+// case after "log: " as one no list holds, and the cases after "log: " were never checked.
+func (c GateCase) Form() string { return c.FormName }
+
+// ShownInScope reports whether a shown path must hide the case's secret: its form is one of ShownForms and its
+// filler is not made of ASCII spaces alone (a credential split by plain spaces is shown as it is, out of scope).
+func (c GateCase) ShownInScope() bool {
+	for _, f := range ShownForms {
+		if f == c.Form() {
+			return strings.Trim(c.Filler, " ") != ""
+		}
+	}
+	return false
+}
+
+// CredentialChars keeps of s the characters a probe of the gate is made of: ASCII letters, digits and "_".
+// Everything else, separators, punctuation and the brackets of markers included, is dropped, so a probe split by
+// anything an output shows reads as whole.
+func CredentialChars(s string) string {
+	var b strings.Builder
+	for i := range len(s) {
+		if c := s[i]; c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// ShowsProbe reports whether out shows probe, with no reference to what a matcher does: any four-byte part of the
+// probe in out (VisibleGrams), or, once out and probe are both squeezed to CredentialChars, the probe whole or any
+// four-byte part of it in the squeezed out ("a-b-c-d" shows "abcdefgh").
+func ShowsProbe(out, probe string) bool {
+	if VisibleGrams(out, probe) != 0 {
+		return true
+	}
+	so, sp := CredentialChars(out), CredentialChars(probe)
+	if strings.Contains(so, sp) {
+		return true
+	}
+	for i := 0; i+gateGram <= len(sp); i++ {
+		if strings.Contains(so, sp[i:i+gateGram]) {
+			return true
+		}
+	}
+	return false
 }

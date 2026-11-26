@@ -1,7 +1,8 @@
 name: Vulncheck
 
 # Called by ci.yml on pull requests and pushes to main, which decides from the changed files whether it runs.
-# A scheduled or manual run has no inputs and always runs.
+# A scheduled or manual run has no inputs and always runs: the job condition names those two events, because an
+# absent input is an empty value there and `inputs.run != false` is false for it.
 on:
   workflow_call:
     inputs:
@@ -18,7 +19,7 @@ permissions: {}
 
 jobs:
   vulncheck:
-    if: ${{ inputs.run != false }}
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || inputs.run != false }}
     permissions:
       contents: read
     name: govulncheck

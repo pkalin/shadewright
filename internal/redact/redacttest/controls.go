@@ -136,6 +136,37 @@ func GateCases() []GateCase {
 	return out
 }
 
+// SeparatorReplacedCases returns each form of the gate that has a separator with that separator replaced by each
+// of fills, after each of prefixes, and " ok" after it: "password" NUL "mysecretvalue ok" for the form key=value.
+// The filler then stands where the form's own separator stood, between its key and its value.
+func SeparatorReplacedCases(fills, prefixes []string) []GateCase {
+	var out []GateCase
+	for _, f := range gateForms() {
+		if f.sep < 0 {
+			continue
+		}
+		for _, fill := range fills {
+			for _, prefix := range prefixes {
+				parts := make([]string, 0, len(f.parts)+2)
+				if prefix != "" {
+					parts = append(parts, prefix)
+				}
+				parts = append(parts, f.parts[:f.sep]...)
+				parts = append(parts, fill)
+				parts = append(parts, f.parts[f.sep+1:]...)
+				parts = append(parts, " ok")
+				out = append(out, GateCase{
+					Name:  f.name + " " + strings.TrimSpace(prefix) + " separator replaced by " + quoteFill(fill),
+					Parts: parts, Key: strings.Join(f.parts[:f.sep], ""), Sep: fill,
+					Value: strings.Join(f.parts[f.sep+1:], "") + " ok", Probe: f.probe, Filler: fill, Prefix: prefix,
+					FormName: f.name,
+				})
+			}
+		}
+	}
+	return out
+}
+
 // gateControl reports whether fill starts with a control character but newline and tab.
 func gateControl(fill string) bool {
 	r, _ := utf8.DecodeRuneInString(fill)

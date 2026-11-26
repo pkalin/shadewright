@@ -26,6 +26,7 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 	"github.com/shadewright-labs/shadewright/internal/modules"
 	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
+	"github.com/shadewright-labs/shadewright/internal/testutil/mainsymptom"
 )
 
 // The symptom an Incident stores, and the module evidence it is built from, never show a credential that a
@@ -79,14 +80,22 @@ type symptomInput struct {
 	sample bool
 	// filler and prefix are the separator placed and the text before the form.
 	filler, prefix string
-	// form is the name of the form, and gen the generator of the row (symptomGenGate or symptomGenSeparators).
+	// form is the name of the form, and gen the generator of the row (symptomGenGate, symptomGenSeparators or
+	// symptomGenReplaced).
 	form, gen string
+	// differential is set for a row checked against origin/main's reading (package mainsymptom) rather than
+	// absolutely: a filler in place of the form's own separator can leave a key and value origin/main shows too
+	// ("password" TAB "value" is no key and value of any rule), so such a row fails only when a shown path shows a
+	// four-byte part of the secret that origin/main's same path hides.
+	differential bool
 }
 
-// The generators of the corpus: the controls gate's cases, and the separators placed around and inside the secret.
+// The generators of the corpus: the controls gate's cases, the separators placed around and inside the secret,
+// and the separators placed in place of the form's own separator.
 const (
 	symptomGenGate       = "gate"
 	symptomGenSeparators = "separators"
+	symptomGenReplaced   = "separator replaced"
 )
 
 // class is the class of a row: its generator, form, separator and prefix. Every class the generators make is
@@ -160,6 +169,16 @@ func symptomCorpus(t *testing.T) []symptomInput {
 			}
 		}
 	}
+	shown := map[string]bool{}
+	for _, f := range forms {
+		shown[f.name] = true
+	}
+	for _, c := range redacttest.SeparatorReplacedCases(symptomSeparators, symptomPrefixes) {
+		if shown[c.FormName] {
+			out = append(out, symptomInput{name: c.Name, text: c.Text(), probe: c.Probe, filler: c.Filler, prefix: c.Prefix,
+				form: c.FormName, gen: symptomGenReplaced, differential: true})
+		}
+	}
 	return out
 }
 
@@ -167,6 +186,15 @@ func symptomCorpus(t *testing.T) []symptomInput {
 type symptomPath struct {
 	name string
 	text func(note string) string
+	// main is the same path with origin/main's reading of the note (package mainsymptom), for the rows checked
+	// against it.
+	main func(note string) string
+}
+
+// eventObservation is the observation of an event whose note is note.
+func eventObservation(note string) fingerprint.Observation {
+	return fingerprint.Observation{Note: note, Source: fingerprint.SourceEvent, Reason: "BackOff", Type: "Warning",
+		ReportingController: "kubelet", RegardingKind: pullPodKind, RegardingName: "web-abc-1"}
 }
 
 // symptomPaths are the paths of the collector that store or show untrusted text: the symptom of an event or a
@@ -175,16 +203,20 @@ type symptomPath struct {
 // texts and hold nothing from the cluster.
 var symptomPaths = []symptomPath{
 	{"event symptom in spec.symptom", func(note string) string {
-		return specOf(collector.Observation{Symptom: fingerprint.Symptom(fingerprint.Observation{
-			Note: note, Source: fingerprint.SourceEvent, Reason: "BackOff", Type: "Warning",
-			ReportingController: "kubelet", RegardingKind: "Pod", RegardingName: "web-abc-1",
-		})}).Symptom
+		return specOf(collector.Observation{Symptom: fingerprint.Symptom(eventObservation(note))}).Symptom
+	}, func(note string) string {
+		return specOf(collector.Observation{Symptom: mainsymptom.Symptom(eventObservation(note))}).Symptom
 	}},
-	{"module evidence value", modules.BoundValue},
+	{"module evidence value", modules.BoundValue, mainsymptom.BoundValue},
 	{"module symptom in spec.symptom", func(note string) string {
 		return specOf(collector.Observation{Symptom: collector.SymptomText(modules.Symptom{
 			Reason: "ScaledObjectNotReady", Summary: "The ScaledObject is not ready",
 			Evidence: []modules.Evidence{{Field: "status.conditions.Ready.message", Value: modules.BoundValue(note)}},
+		})}).Symptom
+	}, func(note string) string {
+		return specOf(collector.Observation{Symptom: collector.SymptomText(modules.Symptom{
+			Reason: "ScaledObjectNotReady", Summary: "The ScaledObject is not ready",
+			Evidence: []modules.Evidence{{Field: "status.conditions.Ready.message", Value: mainsymptom.BoundValue(note)}},
 		})}).Symptom
 	}},
 }
@@ -317,11 +349,11 @@ func symptomSample(corpus []symptomInput) []symptomInput {
 // its name instead of taking its expectation with it.
 var (
 	// expectedGenerators are the generators of the corpus.
-	expectedGenerators = []string{symptomGenGate, symptomGenSeparators}
+	expectedGenerators = []string{symptomGenGate, symptomGenSeparators, symptomGenReplaced}
 	// expectedForms are the forms of redacttest.ShownForms.
 	expectedForms = []string{
 		"api key", "authorization", "block", "connection string", "flag=", "key=value", "split env", "split flag",
-		"split key: value", "split key=value", "split token", "split value", "token",
+		"split key: value", "split key=value", formSplitToken, "split value", "token",
 	}
 	// expectedPrefixes are the texts each row of the separators generator is placed after.
 	expectedPrefixes = []string{"", symptomLogPrefix}
@@ -351,6 +383,9 @@ var (
 	}
 )
 
+// formSplitToken is the one form of the gate without a separator of its own.
+const formSplitToken = "split token"
+
 // symptomGeneratedClasses returns every class the corpus must check, built from the pinned lists above and not
 // from the generators: each pinned form with each pinned gate filler, alone and, where pinned, after "log: ", and
 // each pinned form with each pinned separator and prefix. Left out by construction: a gate case whose filler is
@@ -368,6 +403,9 @@ func symptomGeneratedClasses() map[string]bool {
 		for _, sep := range expectedSeparators {
 			for _, prefix := range expectedPrefixes {
 				out[symptomInput{gen: symptomGenSeparators, form: form, filler: sep, prefix: prefix}.class()] = true
+				if form != formSplitToken { // the one form without a separator of its own
+					out[symptomInput{gen: symptomGenReplaced, form: form, filler: sep, prefix: prefix}.class()] = true
+				}
 			}
 		}
 	}
@@ -417,8 +455,8 @@ func TestEveryGeneratedClassIsChecked(t *testing.T) {
 			checked[in.class()]++
 		}
 		classes := symptomGeneratedClasses()
-		if len(classes) != 1963 {
-			t.Errorf("the pinned lists make %d classes, want 1963", len(classes))
+		if len(classes) != 3211 {
+			t.Errorf("the pinned lists make %d classes, want 3211", len(classes))
 		}
 		missing := 0
 		for k := range classes {
@@ -446,7 +484,7 @@ func TestEveryGeneratedClassIsChecked(t *testing.T) {
 func TestPlainSpacesAreOutOfScope(t *testing.T) {
 	n := 0
 	for _, c := range redacttest.GateCases() {
-		if c.Filler != " " || c.FormName != "split token" || len(c.Parts) < 3 || c.Parts[len(c.Parts)-3] != " " {
+		if c.Filler != " " || c.FormName != formSplitToken || len(c.Parts) < 3 || c.Parts[len(c.Parts)-3] != " " {
 			continue
 		}
 		n++
@@ -473,7 +511,8 @@ func TestStoredSymptomOmitsSecretsSplitByControls(t *testing.T) {
 			redacttest.ParallelUnderRace(t)
 			leaks := 0
 			for _, in := range corpus {
-				if out := p.text(in.text); redacttest.ShowsProbe(out, in.probe) {
+				if out := p.text(in.text); redacttest.ShowsProbe(out, in.probe) &&
+					(!in.differential || redacttest.VisibleGrams(out, in.probe)&^redacttest.VisibleGrams(p.main(in.text), in.probe) != 0) {
 					if leaks++; leaks <= 10 {
 						t.Errorf("%s (%q): shows the secret in %q", in.name, in.text, out)
 					}

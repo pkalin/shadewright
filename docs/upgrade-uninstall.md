@@ -167,6 +167,8 @@ The Go module is now `github.com/shadewright-labs/shadewright`. If your Go code 
 
 The move does not change the CRDs or the API group `remediation.shadewright.io`. It does not reset `RemediationSettings`, Incident history, or open pull requests. The chart upgrade applies the new CRDs and Deployments to the existing cluster objects. Keep the same `clusterId` and values file as for other upgrades.
 
+v0.7.0 redacts the symptom an Incident stores from the note as a terminal prints it and withholds it whole as `<redacted>` where a secret could show ([data handling](data-handling.md#what-is-stored-in-the-cluster)). The fingerprint does not change, so no Incident is split or merged. Incidents created before the upgrade keep the symptom they were created with; delete one whose symptom shows a secret.
+
 Releases through v0.6.0 remain at `ghcr.io/pkalin` and keep their existing signing identity. Verify them with the commands under [Releases from before the move](#releases-from-before-the-move): cosign uses the release-era workflow identity, and GitHub attestations use registry bundles for images and charts or `--owner` for plugin archives. v0.1.0 images are unsigned, and charts before v0.6.0 have no provenance attestation; see [Verify a release](#verify-a-release) for these exceptions.
 
 ## Upgrade

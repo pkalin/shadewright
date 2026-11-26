@@ -55,8 +55,11 @@ import (
 // sequence may have taken from the text after it: "pass" ESC "[1mword"). The spaced text is the printed text with
 // one space for each character and each CSI it removed, as origin/main read a removed control (a separator between
 // a key and its value: "Bearer" SOH "token" prints as "Bearertoken", which no rule reads as a key and value, and
-// the spaced text "Bearer token" shows the value). The entry as it was read (the readings of origin/main on it) is
-// the last. When a rule finds in any of them a
+// the spaced text "Bearer token" shows the value). The spaced text is a first line only: the leak tests (the
+// stored-symptom differential and corpus, redacttest.ShowsProbe) pass without it, behind the final check of the
+// caller; the tables of decisions pin it (TestShownViewLeavesValidTextAndTheCollectorAsBefore here,
+// TestCollectorReadingsDecideAsMain in package modules), which fail when it is taken out. The entry as it was read
+// (the readings of origin/main on it) is the last. When a rule finds in any of them a
 // secret whose printed bytes the matches of the printed text do not all cover, the entry is withheld whole. It is
 // withheld too when a match of the printed text, other than an address, ends at a run of whitespace other than one
 // ASCII space that more text follows: the run may split the value ("--password abc" CR "def" prints as

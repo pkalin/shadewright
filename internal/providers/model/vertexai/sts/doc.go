@@ -57,7 +57,7 @@ limitations under the License.
 // The access token is cached until shortly before it expires: five minutes, or half its lifetime when that
 // is shorter. It never outlives the projected token it came from: the exp claim of that token is read
 // without verifying it, and the cache ends at exp minus the same margin. A projected token without a readable
-// exp caps the cache at five minutes. An exchange that was canceled and replaced never writes the cache.
+// exp caps the cache at five minutes. An older exchange never overwrites a token cached by a newer exchange.
 //
 // A [Source] is safe for concurrent use: callers that need a token while an exchange is in
 // progress share it, each waits only as long as its own context allows, and the exchange goes on while

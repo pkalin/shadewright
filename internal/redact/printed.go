@@ -24,9 +24,10 @@ import (
 	"github.com/shadewright-labs/shadewright/internal/redact/meter"
 )
 
-// The printed text of a shown short entry (ReplaceCheckedShortShown). The text an Incident stores is built first,
-// and the rules read that text and nothing else: what is matched is what is printed, and no match is moved from
-// one text to another.
+// The printed text of a shown short entry (ReplaceCheckedShortShown). The printed text is built first, and the
+// rules read that text and nothing else: what is matched is what is printed, and no match is moved from one text
+// to another. The callers then normalise and cut the redacted text (package fingerprint), so what an Incident
+// stores is that text after their normalisation, not the printed text itself.
 //
 // The printed text is the entry as a terminal prints it, on one line:
 //

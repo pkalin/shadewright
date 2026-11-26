@@ -130,6 +130,10 @@ type Source struct {
 	// token is the cached access token, behind a function value: see setToken.
 	token     func() string
 	refreshAt time.Time
+	// seq numbers each exchange as it is created; cachedSeq is the seq of the exchange that last wrote
+	// token and refreshAt, so an older exchange never overwrites a newer one.
+	seq       uint64
+	cachedSeq uint64
 	// inflight is the exchange in progress, shared by every caller that needs a token meanwhile.
 	inflight *exchangeCall
 	// readSlot has room for one token file read: the read holds it until it returns, even after its caller
@@ -140,6 +144,7 @@ type Source struct {
 // exchangeCall is one exchange in progress. Its result is set before done is closed; waiters is guarded by
 // Source.mu.
 type exchangeCall struct {
+	seq     uint64
 	cancel  context.CancelFunc
 	waiters int
 	done    chan struct{}
@@ -297,7 +302,8 @@ func (s *Source) Token(ctx context.Context) (string, error) {
 		// Detached from this caller's cancellation: the exchange serves every waiter, and is canceled only
 		// when all of them have left.
 		xctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-		call = &exchangeCall{done: make(chan struct{}), cancel: cancel}
+		s.seq++
+		call = &exchangeCall{seq: s.seq, done: make(chan struct{}), cancel: cancel}
 		s.inflight = call
 		go s.run(xctx, call)
 	}
@@ -332,16 +338,13 @@ func (s *Source) run(ctx context.Context, call *exchangeCall) {
 		// included, gets a retryable error, not a token that is already expired or inside its refresh margin.
 		tok, err = "", &providers.RetryableError{Err: errors.New("sts: the access token was stale when it arrived")}
 	}
+	if err == nil && call.seq > s.cachedSeq {
+		s.setToken(tok)
+		s.refreshAt = refreshAt
+		s.cachedSeq = call.seq
+	}
 	if s.inflight == call {
-		if err == nil {
-			s.setToken(tok)
-			s.refreshAt = refreshAt
-		}
 		s.inflight = nil
-	} else if err == nil {
-		// Every waiter left and the exchange was replaced, possibly after its last context check: a newer
-		// exchange may have written the cache, and this one must not overwrite it.
-		tok, err = "", fmt.Errorf("sts: the token request was superseded: %w", context.Canceled)
 	}
 	s.mu.Unlock()
 	call.finish(tok, err)

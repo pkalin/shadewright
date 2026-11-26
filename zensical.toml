@@ -9,9 +9,17 @@ repo_url = "https://github.com/shadewright-labs/shadewright"
 repo_name = "shadewright-labs/shadewright"
 edit_uri = "edit/main/docs/"
 copyright = "Copyright 2026 The Shadewright Authors. Apache-2.0. Shadewright™ and the Shadewright logo are trademarks of Paweł Kalinowski."
-extra_css = ["stylesheets/brand.css"]
+extra_css = [
+  "stylesheets/brand.css",
+  "stylesheets/hero-bg.css",
+  "stylesheets/labs-switcher.css",
+]
 # Pinned, self-hosted Mermaid; without it Zensical fetches mermaid@12 from unpkg (see README.txt next to it).
-extra_javascript = ["assets/javascripts/mermaid/mermaid-12.2.0.min.js", "javascripts/diagram-zoom.js"]
+extra_javascript = [
+  "assets/javascripts/mermaid/mermaid-12.2.0.min.js",
+  "javascripts/diagram-zoom.js",
+  "javascripts/labs-switcher.js",
+]
 nav = [
   { "Overview" = [
     { "Home" = "index.md" },
@@ -153,16 +161,13 @@ nav = [
     { "Lab: OOM acceptance run" = "lab-oom-acceptance.md" },
     { "Lab: reviewer hint on OOM" = "lab-oom-hint.md" },
   ] },
-  { "Sablecourt docs" = "https://shadewrightlabs.com/sablecourt/" },
-  { "Armory docs" = "https://shadewrightlabs.com/armory/" },
-  { "Shadewright Labs" = "https://shadewrightlabs.com/" },
 ]
 
 [project.theme]
 language = "en"
 logo = "assets/brand/shadewright-glyph.svg"
 favicon = "assets/brand/favicon.ico"
-# overrides/: the announcement bar, the 404 page, the footer attribution and the link preview tags (templates only, no Markdown change).
+# overrides/: the announcement bar, the header projects menu, the 404 page, the footer attribution and the link preview tags (templates only, no Markdown change).
 custom_dir = "overrides"
 # false: no Google Fonts request (the default theme loads Inter and JetBrains Mono from fonts.googleapis.com).
 # Headings, body and code text use local system font stacks set in brand.css.

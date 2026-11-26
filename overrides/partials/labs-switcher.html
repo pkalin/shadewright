@@ -1,0 +1,93 @@
+{#- Sites of the house switcher. Set labs_current to: shadewright, sablecourt, armory, or labs. -#}
+{% set labs_current = "shadewright" %}
+{% set labs_projects = [
+  {
+    "id": "shadewright",
+    "name": "Shadewright",
+    "desc": "Kubernetes fixes as pull requests",
+    "url": "https://shadewright.io/",
+    "glyph": "assets/brand/glyphs/shadewright.svg",
+  },
+  {
+    "id": "sablecourt",
+    "name": "Sablecourt",
+    "desc": "Agents under one set of rules",
+    "url": "https://shadewrightlabs.com/sablecourt/",
+    "glyph": "assets/brand/glyphs/sablecourt.svg",
+  },
+  {
+    "id": "armory",
+    "name": "Armory",
+    "desc": "Shared Go building blocks",
+    "url": "https://shadewrightlabs.com/armory/",
+    "glyph": "assets/brand/glyphs/armory.svg",
+  },
+  {
+    "id": "nightloom",
+    "name": "Nightloom",
+    "desc": "Session and build visibility",
+    "url": none,
+    "glyph": "assets/brand/glyphs/nightloom.svg",
+    "tag": "not released",
+  },
+] %}
+<details class="labs-switcher">
+  <summary class="labs-switcher__summary" title="Shadewright Labs">
+    <img class="labs-switcher__trigger-glyph" src="{{ 'assets/brand/glyphs/shadewright-labs.svg' | url }}" alt="" width="20" height="20" aria-hidden="true">
+    <span class="labs-switcher__label">Shadewright Labs</span>
+    <svg class="labs-switcher__chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+      <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </summary>
+  <div class="labs-switcher__panel" role="region" aria-label="Shadewright Labs sites">
+    <div class="labs-switcher__heading">Projects</div>
+    <ul class="labs-switcher__list">
+      {% for item in labs_projects %}
+        {% set is_current = (item.id == labs_current) %}
+        <li class="labs-switcher__entry">
+          {% if item.url %}
+            <a class="labs-switcher__item{% if is_current %} labs-switcher__item--current{% endif %}" href="{{ item.url }}"{% if is_current %} aria-current="page"{% endif %}>
+              <img class="labs-switcher__glyph" src="{{ item.glyph | url }}" alt="" width="28" height="28" aria-hidden="true">
+              <span class="labs-switcher__text">
+                <span class="labs-switcher__title">
+                  <span class="labs-switcher__name">{{ item.name }}</span>
+                  {% if is_current %}
+                    <span class="labs-switcher__badge labs-switcher__badge--current">this site</span>
+                  {% endif %}
+                </span>
+                <span class="labs-switcher__desc">{{ item.desc }}</span>
+              </span>
+            </a>
+          {% else %}
+            <div class="labs-switcher__item labs-switcher__item--unreleased">
+              <img class="labs-switcher__glyph" src="{{ item.glyph | url }}" alt="" width="28" height="28" aria-hidden="true">
+              <span class="labs-switcher__text">
+                <span class="labs-switcher__title">
+                  <span class="labs-switcher__name">{{ item.name }}</span>
+                  {% if item.tag %}
+                    <span class="labs-switcher__badge">{{ item.tag }}</span>
+                  {% endif %}
+                </span>
+                <span class="labs-switcher__desc">{{ item.desc }}</span>
+              </span>
+            </div>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+    <hr class="labs-switcher__divider">
+    {% set labs_is_current = (labs_current == "labs") %}
+    <a class="labs-switcher__item labs-switcher__item--house{% if labs_is_current %} labs-switcher__item--current{% endif %}" href="https://shadewrightlabs.com/"{% if labs_is_current %} aria-current="page"{% endif %}>
+      <img class="labs-switcher__glyph" src="{{ 'assets/brand/glyphs/shadewright-labs.svg' | url }}" alt="" width="28" height="28" aria-hidden="true">
+      <span class="labs-switcher__text">
+        <span class="labs-switcher__title">
+          <span class="labs-switcher__name">Shadewright Labs</span>
+          {% if labs_is_current %}
+            <span class="labs-switcher__badge labs-switcher__badge--current">this site</span>
+          {% endif %}
+        </span>
+        <span class="labs-switcher__desc">The house and its security laws</span>
+      </span>
+    </a>
+  </div>
+</details>

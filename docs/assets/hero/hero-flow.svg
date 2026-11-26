@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 672" width="1920" height="672" aria-hidden="true">
+  <defs>
+    <linearGradient id="fade-left-out" gradientUnits="userSpaceOnUse" x1="384" y1="0" x2="456" y2="0">
+      <stop offset="0%" stop-color="#a879ff" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="#a879ff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="fade-right-in" gradientUnits="userSpaceOnUse" x1="1464" y1="0" x2="1536" y2="0">
+      <stop offset="0%" stop-color="#a879ff" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#a879ff" stop-opacity="0.34"/>
+    </linearGradient>
+    <linearGradient id="mask-fade-out" gradientUnits="userSpaceOnUse" x1="384" y1="0" x2="456" y2="0">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+    <linearGradient id="mask-fade-in" gradientUnits="userSpaceOnUse" x1="1464" y1="0" x2="1536" y2="0">
+      <stop offset="0%" stop-color="#000000"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+    <mask id="dash-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="1920" height="672">
+      <rect x="0" y="0" width="1920" height="672" fill="#000000"/>
+      <!-- Arrow 1 -> 2 -->
+      <rect x="184" y="192" width="16" height="96" fill="#ffffff"/>
+      <!-- Arrow 2 -> 3 -->
+      <rect x="184" y="384" width="104" height="104" fill="#ffffff"/>
+      <!-- Bridge out from 3 (fades out before text column) -->
+      <rect x="384" y="472" width="72" height="16" fill="url(#mask-fade-out)"/>
+      <!-- Bridge in to 4 (fades in after text column) -->
+      <rect x="1464" y="184" width="72" height="16" fill="url(#mask-fade-in)"/>
+      <!-- Arrow 4 -> 5 -->
+      <rect x="1632" y="184" width="104" height="200" fill="#ffffff"/>
+    </mask>
+    <style>
+      .tile {
+        fill: #14111c;
+        fill-opacity: 0.62;
+        stroke: #a879ff;
+        stroke-opacity: 0.36;
+        stroke-width: 1.5;
+      }
+      .tile-tick {
+        fill: none;
+        stroke: #a879ff;
+        stroke-opacity: 0.52;
+        stroke-width: 1.5;
+        stroke-linecap: round;
+      }
+      .icon {
+        fill: none;
+        stroke: #efe9dc;
+        stroke-opacity: 0.44;
+        stroke-width: 1.85;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .flow {
+        fill: none;
+        stroke: #a879ff;
+        stroke-opacity: 0.34;
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .head {
+        fill: none;
+        stroke: #a879ff;
+        stroke-opacity: 0.46;
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .joint {
+        fill: #a879ff;
+        fill-opacity: 0.46;
+      }
+      .travel {
+        fill: none;
+        stroke: #caa5ff;
+        stroke-opacity: 0.82;
+        stroke-width: 2.4;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-dasharray: 44 1396;
+        stroke-dashoffset: 1440;
+        animation: sw-hero-dash 24s linear -4.5s infinite;
+      }
+      @keyframes sw-hero-dash {
+        from { stroke-dashoffset: 1440; }
+        to { stroke-dashoffset: 0; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .travel {
+          animation: none;
+          opacity: 0;
+        }
+      }
+    </style>
+  </defs>
+
+  <!-- Flow arrows snapped to 48px blueprint grid lines -->
+  <!-- 1 -> 2 (x = 192) -->
+  <path class="flow" d="M 192 192 V 285"/>
+  <path class="head" d="M 186 277 L 192 286 L 198 277"/>
+
+  <!-- 2 -> 3 (x = 192, y = 480) -->
+  <path class="flow" d="M 192 384 V 480 H 285"/>
+  <circle class="joint" cx="192" cy="480" r="2.2"/>
+  <path class="head" d="M 277 474 L 286 480 L 277 486"/>
+
+  <!-- 3 -> center fade (y = 480) -->
+  <path fill="none" stroke="url(#fade-left-out)" stroke-width="1.5" stroke-linecap="round" d="M 384 480 H 456"/>
+
+  <!-- center fade -> 4 (y = 192) -->
+  <path fill="none" stroke="url(#fade-right-in)" stroke-width="1.5" stroke-linecap="round" d="M 1464 192 H 1533"/>
+  <path class="head" d="M 1525 186 L 1534 192 L 1525 198"/>
+
+  <!-- 4 -> 5 (y = 192, x = 1728) -->
+  <path class="flow" d="M 1632 192 H 1728 V 381"/>
+  <circle class="joint" cx="1728" cy="192" r="2.2"/>
+  <path class="head" d="M 1722 373 L 1728 382 L 1734 373"/>
+
+  <!-- Single slow dash travelling along the arrows from step 1 to step 5 -->
+  <g mask="url(#dash-mask)">
+    <path class="travel" d="M 192 192 V 480 H 456 M 1464 192 H 1728 V 384"/>
+  </g>
+
+  <!-- Step 1: Observe (pulse line), snapped to x=144..240, y=96..192 -->
+  <g transform="translate(144, 96)">
+    <rect class="tile" x="0.75" y="0.75" width="94.5" height="94.5" rx="6"/>
+    <path class="icon" d="M 16 48 H 31 L 38 28 L 46 68 L 54 38 L 61 48 H 80"/>
+  </g>
+
+  <!-- Step 2: Diagnose (branching nodes), snapped to x=144..240, y=288..384 -->
+  <g transform="translate(144, 288)">
+    <rect class="tile" x="0.75" y="0.75" width="94.5" height="94.5" rx="6"/>
+    <circle class="icon" cx="27" cy="48" r="6"/>
+    <circle class="icon" cx="67" cy="31" r="5.5"/>
+    <circle class="icon" cx="67" cy="65" r="5.5"/>
+    <path class="icon" d="M 32.6 45.6 L 61.9 33.2 M 32.6 50.4 L 61.9 62.8"/>
+  </g>
+
+  <!-- Step 3: Check (shield), snapped to x=288..384, y=432..528 -->
+  <g transform="translate(288, 432)">
+    <rect class="tile" x="0.75" y="0.75" width="94.5" height="94.5" rx="6"/>
+    <path class="icon" d="M 48 22 L 68 29 V 47 C 68 60 59 69 48 74 C 37 69 28 60 28 47 V 29 Z"/>
+    <path class="icon" d="M 40 48 L 46 54 L 57 42"/>
+  </g>
+
+  <!-- Step 4: Propose (pull request glyph: two dots joined by a branch line), snapped to x=1536..1632, y=144..240 -->
+  <g transform="translate(1536, 144)">
+    <rect class="tile" x="0.75" y="0.75" width="94.5" height="94.5" rx="6"/>
+    <circle class="icon" cx="34" cy="30" r="5.5"/>
+    <circle class="icon" cx="62" cy="64" r="5.5"/>
+    <path class="icon" d="M 34 35.5 V 69 M 62 58.5 V 42 C 62 34 57 30 49 30 H 44"/>
+    <path class="icon" d="M 48.5 25.5 L 44 30 L 48.5 34.5"/>
+  </g>
+
+  <!-- Step 5: Verify (tick in a circle), snapped to x=1680..1776, y=384..480 -->
+  <g transform="translate(1680, 384)">
+    <rect class="tile" x="0.75" y="0.75" width="94.5" height="94.5" rx="6"/>
+    <circle class="icon" cx="48" cy="48" r="22"/>
+    <path class="icon" d="M 37 48 L 45 56 L 60 40"/>
+  </g>
+</svg>

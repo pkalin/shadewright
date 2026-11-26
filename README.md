@@ -1,6 +1,13 @@
 <h1 align="center">
-  <img src="docs/assets/wordmark.png" alt="Shadewright" width="520">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/shadewright-horizontal-nolabs-dark.png">
+    <img src="docs/assets/brand/shadewright-horizontal-nolabs-light.png" alt="Shadewright" width="520">
+  </picture>
 </h1>
+
+<p align="center">
+  <em>The Guardian is one hooded wright of the house, at work in the half-light while others sleep. It watches from the edge, lays no hand on what it guards and keeps quiet until it finds the fault. Then it shapes a fix at its bench and hands it over, and others judge whether the work is fit to use.</em>
+</p>
 
 <p align="center">
   A safe-remediation controller for Kubernetes clusters run with GitOps: it turns untrusted proposals, from rules or an LLM, into typed, bounded changes tied to policy and to the object's real source in Git, delivers them only as reviewed pull requests, and verifies the effect.

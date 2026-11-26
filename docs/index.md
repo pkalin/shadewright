@@ -11,6 +11,8 @@ hide:
 
 ![Shadewright by Shadewright Labs](assets/brand/shadewright-horizontal-dark.png){ width="1313" height="403" }
 
+<p class="sw-lore">The Guardian is one hooded wright of the house, at work in the half-light while others sleep. It watches from the edge, lays no hand on what it guards and keeps quiet until it finds the fault. Then it shapes a fix at its bench and hands it over, and others judge whether the work is fit to use. <a href="name/">The name</a></p>
+
 <p class="sw-tagline">Shadewright watches a Kubernetes cluster for failing workloads, works out a fix, and proposes it as a pull request to your GitOps repository for a person to review.</p>
 
 [Get started](getting-started.md){ .md-button .md-button--primary }

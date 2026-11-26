@@ -376,7 +376,8 @@ type Outcome struct {
 	// unknown or that failed, and nothing for a call that sent nothing or that its host refused before
 	// processing.
 	Tokens int64
-	// Models are the model IDs that answered, as the replies named them.
+	// Models are the configured model IDs that answered: a reply's model is added only when it is exactly the
+	// model configured for its role, so a name the provider gave for another model never reaches the outcome.
 	Models []string
 	// PromptVersion is [PromptVersion].
 	PromptVersion string
@@ -1012,9 +1013,21 @@ type attemptResult struct {
 	wait   time.Duration
 }
 
+// refuseModel logs the refusal of a reply that did not name want, the model configured for the role. The line
+// names want and says whether the reply named no model or a different one, never the name it gave: that is the
+// provider's text.
+func (r *run) refuseModel(role Role, d *remediationv1alpha1.ModelDeployment, want string, unnamed bool) {
+	named := "a different model"
+	if unnamed {
+		named = "no model"
+	}
+	log.FromContext(r.parent).Info("Refused a model reply that did not name the configured model",
+		"role", role, "deployment", d.Deployment, "expected", want, "replyNamed", named)
+}
+
 // attempt makes one model call, charges it and classifies its end, in its own span. The span records the role,
-// the deployment, the model the reply named, the usage and the fixed result label, never the request or the
-// reply.
+// the deployment, the model the reply named when it is exactly the configured one, the usage and the fixed
+// result label, never the request or the reply.
 func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1alpha1.ModelDeployment,
 	req providers.CompletionRequest, upper int64, key string, attempt int) (res attemptResult) {
 	ctx, span := r.a.tracer.Start(r.ctx, spanModelCall, trace.WithAttributes(
@@ -1048,7 +1061,7 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 	// each of them charged on its own (billedAttemptsCharge): a call it retried after a billed failure costs
 	// every attempt, not one.
 	charge := upper
-	billed := (err == nil || providers.IsMalformedOutput(err)) && !c.UsageUnknown
+	billed := usageReported(c, err)
 	switch {
 	case notSent, providers.RefusedUnbilled(c, err):
 		charge = 0
@@ -1068,18 +1081,21 @@ func (r *run) attempt(model providers.ModelProvider, role Role, d *remediationv1
 	span.SetAttributes(attrCharged.Int64(charge), attrUsageUnknown.Bool(c.UsageUnknown))
 	r.out.Tokens += charge
 	r.spent[key] += charge
-	if c.Model != "" {
-		// The adapter checks the name's form, so it is safe to record, as it is to log below.
+	// The model a reply names is the provider's text: the adapter bounds its form, which still lets through
+	// any short string of letters and digits, a token among them. It reaches the span, the outcome (the log
+	// line of the outcome, the root span and the record) only once it is exactly the configured name, so what
+	// is recorded is always a name the operator configured.
+	want := r.a.cfg.ExpectedModels[role]
+	if c.Model != "" && c.Model == want {
 		span.SetAttributes(attrResponseModel.String(c.Model))
 		if !slices.Contains(r.out.Models, c.Model) {
 			r.out.Models = append(r.out.Models, c.Model)
 		}
 	}
-	// ADR-0023 decision 8: only the model configured for the role may answer. The adapter checks the name's
-	// form, so it is safe to log; a reply that names no model cannot be placed and is refused too.
-	if want := r.a.cfg.ExpectedModels[role]; r.parent.Err() == nil && (err == nil || c.Model != "") && c.Model != want {
-		log.FromContext(r.parent).Info("Refused a model reply from another model than the configured one",
-			"role", role, "deployment", d.Deployment, "expected", want, "got", c.Model)
+	// ADR-0023 decision 8: only the model configured for the role may answer; a reply that names no model
+	// cannot be placed and is refused too.
+	if r.parent.Err() == nil && (err == nil || c.Model != "") && c.Model != want {
+		r.refuseModel(role, d, want, c.Model == "")
 		return attemptResult{reason: ReasonUnexpectedModel}
 	}
 	switch {
@@ -1378,6 +1394,14 @@ func (a *Analyzer) accept(inc *remediationv1alpha1.Incident, out Outcome, reason
 	p.PolicyRef = ref
 	out.Reason, out.Plan = reason, &p
 	return out, nil
+}
+
+// usageReported reports whether the call's reply was billed with a usage that may be charged and recorded as
+// reported: a reply that completed or was malformed, with a known usage whose counts are within
+// providers.MaxUsageTokens. Counts outside it are charged the upper bound and recorded nowhere, since their sum
+// could overflow and lower the spend; the adapters refuse such a reply, and this holds for any provider.
+func usageReported(c providers.Completion, err error) bool {
+	return (err == nil || providers.IsMalformedOutput(err)) && !c.UsageUnknown && c.Usage.InRange()
 }
 
 // billedAttemptsCharge is the charge of a call whose adapter listed the attempts the service may have billed:

@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+
+	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // maxResponseBody bounds every Key Vault response body. A sign response holds a key identifier and at most
@@ -85,7 +87,11 @@ func (g guardTransport) do(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, final{errRequestSDK}
 	}
-	resp, err := g.inner.Do(req)
+	// The HTTP client gets the request with a context that ends with req's but carries none of its values:
+	// a net/http/httptrace hook a caller put into the context of Sign would otherwise receive every header
+	// the client writes, the Key Vault bearer included. req keeps its context for the checks below and for
+	// the token request recorder in Do.
+	resp, err := g.inner.Do(req.WithContext(providers.WireContext(req.Context())))
 	if err != nil {
 		return nil, cleanTransportError(err)
 	}

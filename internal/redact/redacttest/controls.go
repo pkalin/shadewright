@@ -44,6 +44,8 @@ type GateCase struct {
 	Probe string
 	// Filler is the filler placed, and Prefix the text before the form ("" or "log: ").
 	Filler, Prefix string
+	// FormName is the name of the form the case was built from, set when it is built (Form).
+	FormName string
 }
 
 // Text returns the case as one text.
@@ -152,7 +154,7 @@ func gateCase(f gateForm, pos, fi int, prefix string) GateCase {
 	parts = append(parts, f.parts[pos:]...)
 	parts = append(parts, " ok")
 	c := GateCase{Name: f.name + " " + strings.TrimSpace(prefix) + " filler " + quoteFill(fill) + " at " + strconv.Itoa(pos),
-		Parts: parts, Probe: f.probe, Filler: fill, Prefix: prefix}
+		Parts: parts, Probe: f.probe, Filler: fill, Prefix: prefix, FormName: f.name}
 	if f.sep < 0 {
 		c.Value = c.Text()
 		return c
@@ -321,11 +323,10 @@ var ShownForms = []string{
 	"split key: value", "split key=value", "split token", "split value",
 }
 
-// Form returns the name of the case's form.
-func (c GateCase) Form() string {
-	form, _, _ := strings.Cut(c.Name, " filler ")
-	return strings.TrimSpace(form)
-}
+// Form returns the name of the case's form, as set when the case was built. It is not parsed from Name, which
+// holds the prefix after the form ("split key=value log: filler ..."): a parser of the name read the form of every
+// case after "log: " as one no list holds, and the cases after "log: " were never checked.
+func (c GateCase) Form() string { return c.FormName }
 
 // ShownInScope reports whether a shown path must hide the case's secret: its form is one of ShownForms and its
 // filler is not made of ASCII spaces alone (a credential split by plain spaces is shown as it is, out of scope).

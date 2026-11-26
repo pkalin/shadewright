@@ -70,6 +70,20 @@ type symptomInput struct {
 	sample bool
 	// filler and prefix are the separator placed and the text before the form.
 	filler, prefix string
+	// form is the name of the form, and gen the generator of the row (symptomGenGate or symptomGenSeparators).
+	form, gen string
+}
+
+// The generators of the corpus: the controls gate's cases, and the separators placed around and inside the secret.
+const (
+	symptomGenGate       = "gate"
+	symptomGenSeparators = "separators"
+)
+
+// class is the class of a row: its generator, form, separator and prefix. Every class the generators make is
+// checked by at least one row, in the full corpus and in the sample under -race (TestEveryGeneratedClassIsChecked).
+func (in symptomInput) class() string {
+	return in.gen + "|" + in.form + "|" + in.filler + "|" + in.prefix
 }
 
 // symptomForm is a form of redacttest.ShownForms in plain form.
@@ -108,7 +122,7 @@ func symptomCorpus(t *testing.T) []symptomInput {
 			continue
 		}
 		out = append(out, symptomInput{name: c.Name, text: c.Text(), probe: c.Probe, sample: gate%symptomGateStride == 0,
-			filler: c.Filler, prefix: c.Prefix})
+			filler: c.Filler, prefix: c.Prefix, form: c.FormName, gen: symptomGenGate})
 		gate++
 	}
 	for fi, f := range forms {
@@ -121,7 +135,7 @@ func symptomCorpus(t *testing.T) []symptomInput {
 				add := func(where, secret string, sample bool) {
 					out = append(out, symptomInput{name: fmt.Sprintf("%s %q, %q %s", f.name, prefix, sep, where),
 						text: prefix + strings.Replace(f.plain, p, secret, 1), probe: p, sample: sample, filler: sep,
-						prefix: prefix})
+						prefix: prefix, form: f.name, gen: symptomGenSeparators})
 				}
 				// Under -race one form in three, turning with the separator and the prefix, gives one row of its
 				// group: around the secret (row 0), inside it at byte k (row k) or around and inside it (the last).
@@ -200,31 +214,124 @@ func TestTerminalStringsWithholdTheStoredSymptom(t *testing.T) {
 // symptomGateStride is the share of the gate's rows checked under -race: one in symptomGateStride.
 const symptomGateStride = 7
 
-// symptomRaceSample returns the rows checked under -race, a stratified sample: every separator with every prefix,
-// for one form in three (turning with the separator and the prefix, so every form is taken), at one place that
-// turns from group to group (around the secret, inside it at a byte, or both), and one in symptomGateStride of the
-// gate's rows. The race detector makes each redaction 10 to 20 times slower: the
-// whole corpus takes about 30 s without it and several minutes with it. Without -race every row is checked. It
-// fails when the sample leaves out a separator or filler of the corpus with a prefix the corpus has it with.
-func symptomRaceSample(t *testing.T, corpus []symptomInput) []symptomInput {
+// symptomRaceSample returns the rows checked under -race (symptomSample), or every row without it. The race
+// detector makes each redaction 10 to 20 times slower: the whole corpus takes about 30 s without it and several
+// minutes with it.
+func symptomRaceSample(corpus []symptomInput) []symptomInput {
 	if !redacttest.RaceDetector {
 		return corpus
 	}
-	var out []symptomInput
-	seen := map[[2]string]bool{}
-	for _, in := range corpus {
-		if in.sample {
-			out = append(out, in)
-			seen[[2]string{in.filler, in.prefix}] = true
+	return symptomSample(corpus)
+}
+
+// symptomSample is a stratified sample of the corpus: the rows marked sample (every separator with every prefix,
+// for one form in three, at one place that turns from group to group, and one in symptomGateStride of the gate's
+// rows), and one row of every class (symptomInput.class) besides, the k-th class taking its row at k modulo the
+// rows of the class, so the place turns from class to class.
+func symptomSample(corpus []symptomInput) []symptomInput {
+	byClass := map[string][]int{}
+	var order []string
+	for i, in := range corpus {
+		k := in.class()
+		if _, ok := byClass[k]; !ok {
+			order = append(order, k)
 		}
+		byClass[k] = append(byClass[k], i)
 	}
-	for _, in := range corpus {
-		if !seen[[2]string{in.filler, in.prefix}] {
-			t.Errorf("the sample under -race leaves out the separator %q after %q", in.filler, in.prefix)
-			seen[[2]string{in.filler, in.prefix}] = true
+	take := make([]bool, len(corpus))
+	for i, in := range corpus {
+		take[i] = in.sample
+	}
+	for n, k := range order {
+		rows := byClass[k]
+		take[rows[n%len(rows)]] = true
+	}
+	var out []symptomInput
+	for i, in := range corpus {
+		if take[i] {
+			out = append(out, in)
 		}
 	}
 	return out
+}
+
+// symptomGeneratedClasses returns every class the generators make, built from the generators' own lists and not
+// from the corpus: each case of the controls gate whose form (GateCase.FormName, set when the case is built) is one
+// of redacttest.ShownForms, and each form of redacttest.ShownForms with each separator and each prefix. Left out by
+// construction: a gate case whose filler is ASCII spaces alone, a credential split by plain spaces, which the
+// printed text shows as it is (out of scope, TestPlainSpacesAreOutOfScope).
+func symptomGeneratedClasses() map[string]bool {
+	out := map[string]bool{}
+	for _, c := range redacttest.GateCases() {
+		if slices.Contains(redacttest.ShownForms, c.FormName) && strings.Trim(c.Filler, " ") != "" {
+			out[symptomInput{gen: symptomGenGate, form: c.FormName, filler: c.Filler, prefix: c.Prefix}.class()] = true
+		}
+	}
+	for _, form := range redacttest.ShownForms {
+		for _, sep := range symptomSeparators {
+			for _, prefix := range symptomPrefixes {
+				out[symptomInput{gen: symptomGenSeparators, form: form, filler: sep, prefix: prefix}.class()] = true
+			}
+		}
+	}
+	return out
+}
+
+// Every class the generators make (form, separator, prefix and generator) is checked by at least one row, in the
+// full corpus and in the sample under -race, counted class by class: a class the eligibility of the corpus drops
+// (the gate's rows after "log: ", whose form a name parser once read as "split key=value log:") fails here, even
+// when another generator covers its separator and prefix.
+func TestEveryGeneratedClassIsChecked(t *testing.T) {
+	corpus := symptomCorpus(t)
+	for _, run := range []struct {
+		name string
+		rows []symptomInput
+	}{{"the full corpus", corpus}, {"the sample under -race", symptomSample(corpus)}} {
+		checked := map[string]int{}
+		for _, in := range run.rows {
+			checked[in.class()]++
+		}
+		classes := symptomGeneratedClasses()
+		missing := 0
+		for k := range classes {
+			if checked[k] == 0 {
+				if missing++; missing <= 10 {
+					t.Errorf("%s checks no row of the class %q", run.name, k)
+				}
+			}
+		}
+		for k := range checked {
+			if !classes[k] {
+				t.Errorf("%s checks the class %q no generator makes", run.name, k)
+			}
+		}
+		if missing > 0 {
+			t.Errorf("%s checks no row of %d of %d classes", run.name, missing, len(classes))
+		}
+		t.Logf("%s: %d rows, %d classes", run.name, len(run.rows), len(classes))
+	}
+}
+
+// A credential split by plain ASCII spaces alone is out of scope by construction: the printed text shows it as
+// it is, so the gate's cases with such a filler are not checked. This pins that reason: a token split by one
+// space shows its probe on the event symptom path, and such a case is not in scope.
+func TestPlainSpacesAreOutOfScope(t *testing.T) {
+	n := 0
+	for _, c := range redacttest.GateCases() {
+		if c.Filler != " " || c.FormName != "split token" || len(c.Parts) < 3 || c.Parts[len(c.Parts)-3] != " " {
+			continue
+		}
+		n++
+		if c.ShownInScope() {
+			t.Errorf("%s: a filler of ASCII spaces alone is in scope", c.Name)
+		}
+		if out := symptomPaths[0].text(c.Text()); !redacttest.ShowsProbe(out, c.Probe) {
+			t.Errorf("%s: the token split by one space is hidden (%q): the exclusion no longer holds", c.Name, out)
+		}
+	}
+	if n == 0 {
+		t.Fatal("the gate has no token split by one space")
+	}
 }
 
 func TestStoredSymptomOmitsSecretsSplitByControls(t *testing.T) {
@@ -232,7 +339,7 @@ func TestStoredSymptomOmitsSecretsSplitByControls(t *testing.T) {
 	if len(corpus) < 20000 {
 		t.Fatalf("the corpus has %d inputs, too few to cover the forms and separators", len(corpus))
 	}
-	corpus = symptomRaceSample(t, corpus)
+	corpus = symptomRaceSample(corpus)
 	for _, p := range symptomPaths {
 		t.Run(p.name, func(t *testing.T) {
 			redacttest.ParallelUnderRace(t)

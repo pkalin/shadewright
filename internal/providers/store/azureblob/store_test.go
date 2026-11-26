@@ -145,6 +145,8 @@ func testRecord() providers.AnalysisRecord {
 func TestPutCreates(t *testing.T) {
 	s := newServer(t, status(http.StatusCreated))
 	st, waits := testStore(t, s)
+	cred := &staticCredential{}
+	st.token = cred.GetToken
 	ref, err := st.Put(t.Context(), testRecord())
 	if err != nil {
 		t.Fatalf("Put: %v", err)
@@ -172,7 +174,6 @@ func TestPutCreates(t *testing.T) {
 	if r.body != recordData {
 		t.Errorf("body %q, want the record's data", r.body)
 	}
-	cred := st.cred.(*staticCredential)
 	if len(cred.scopes) != 1 || len(cred.scopes[0]) != 1 || cred.scopes[0][0] != storageScope {
 		t.Errorf("token scopes %v, want only %s", cred.scopes, storageScope)
 	}
@@ -537,6 +538,8 @@ func TestPutRefusesBeforeAnyCall(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := newServer(t, status(http.StatusCreated))
 			st, _ := testStore(t, s)
+			cred := &staticCredential{}
+			st.token = cred.GetToken
 			rec := testRecord()
 			tc.edit(&rec)
 			_, err := st.Put(t.Context(), rec)
@@ -549,7 +552,7 @@ func TestPutRefusesBeforeAnyCall(t *testing.T) {
 			if n := len(s.requests()); n != 0 {
 				t.Errorf("%d requests, want none", n)
 			}
-			if c := st.cred.(*staticCredential); len(c.scopes) != 0 {
+			if len(cred.scopes) != 0 {
 				t.Errorf("a token was requested")
 			}
 		})
@@ -661,7 +664,7 @@ func TestPutCheckAcceptsCleanEncodedStrings(t *testing.T) {
 func TestPutTokenErrors(t *testing.T) {
 	s := newServer(t, status(http.StatusCreated))
 	st, _ := testStore(t, s)
-	st.cred = &staticCredential{err: errors.New("AZURE_CLIENT_ID=secret-looking-value: no answer")}
+	st.token = (&staticCredential{err: errors.New("AZURE_CLIENT_ID=secret-looking-value: no answer")}).GetToken
 	_, err := st.Put(t.Context(), testRecord())
 	if !providers.IsRetryable(err) || strings.Contains(err.Error(), "secret-looking-value") {
 		t.Fatalf("Put = %v, want a retryable error without the SDK text", err)
@@ -681,9 +684,9 @@ func TestPutTokenAnswers(t *testing.T) {
 		t.Run(strconv.Itoa(code), func(t *testing.T) {
 			s := newServer(t, status(http.StatusCreated))
 			st, _ := testStore(t, s)
-			st.cred = &staticCredential{err: &azidentity.AuthenticationFailedError{RawResponse: &http.Response{
+			st.token = (&staticCredential{err: &azidentity.AuthenticationFailedError{RawResponse: &http.Response{
 				StatusCode: code, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")),
-			}}}
+			}}}).GetToken
 			_, err := st.Put(t.Context(), testRecord())
 			if providers.IsRetryable(err) != retryable || (!retryable && !providers.IsForbidden(err)) {
 				t.Fatalf("Put = %v, want retryable %v", err, retryable)

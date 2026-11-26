@@ -513,7 +513,9 @@ func (p *Provider) once(ctx context.Context, body []byte, tokOut *string) (data 
 		// The deadline or the cancellation came while the token was fetched: nothing was handed to the client.
 		return nil, false, false, transportError(ctx, actx.Err())
 	}
-	req, err := http.NewRequestWithContext(actx, http.MethodPost, p.url, bytes.NewReader(body))
+	// No value of the caller's context reaches the request: a trace hook there would see the access token
+	// (providers.WireContext). The end and the deadline still apply.
+	req, err := http.NewRequestWithContext(providers.WireContext(actx), http.MethodPost, p.url, bytes.NewReader(body))
 	if err != nil {
 		return nil, false, false, errors.New("vertexai: could not build the request")
 	}

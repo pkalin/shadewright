@@ -126,8 +126,9 @@ type Source struct {
 	readFile func(path string) (string, error)
 
 	// mu guards the fields below; it is never held across the network or a file read.
-	mu        sync.Mutex
-	token     string
+	mu sync.Mutex
+	// token is the cached access token, behind a function value: see setToken.
+	token     func() string
 	refreshAt time.Time
 	// inflight is the exchange in progress, shared by every caller that needs a token meanwhile.
 	inflight *exchangeCall
@@ -142,9 +143,20 @@ type exchangeCall struct {
 	cancel  context.CancelFunc
 	waiters int
 	done    chan struct{}
-	token   string
-	err     error
+	// token returns the token of a finished exchange. A function value, so no fmt verb prints the token
+	// through an exchangeCall.
+	token func() string
+	err   error
 }
+
+// finish records the result of the exchange and wakes its waiters.
+func (c *exchangeCall) finish(tok string, err error) {
+	c.token, c.err = func() string { return tok }, err
+	close(c.done)
+}
+
+// result returns the result of the exchange, once done is closed.
+func (c *exchangeCall) result() (string, error) { return c.token(), c.err }
 
 const redactedSource = "[redacted Google STS token source]"
 
@@ -276,8 +288,7 @@ func (s *Source) Token(ctx context.Context) (string, error) {
 		return "", ctxError(ctx)
 	}
 	s.mu.Lock()
-	if s.token != "" && s.now().Before(s.refreshAt) {
-		tok := s.token
+	if tok := s.cachedToken(); tok != "" && s.now().Before(s.refreshAt) {
 		s.mu.Unlock()
 		return tok, nil
 	}
@@ -294,7 +305,7 @@ func (s *Source) Token(ctx context.Context) (string, error) {
 	s.mu.Unlock()
 	select {
 	case <-call.done:
-		return call.token, call.err
+		return call.result()
 	case <-ctx.Done():
 		s.mu.Lock()
 		call.waiters--
@@ -323,7 +334,8 @@ func (s *Source) run(ctx context.Context, call *exchangeCall) {
 	}
 	if s.inflight == call {
 		if err == nil {
-			s.token, s.refreshAt = tok, refreshAt
+			s.setToken(tok)
+			s.refreshAt = refreshAt
 		}
 		s.inflight = nil
 	} else if err == nil {
@@ -332,8 +344,7 @@ func (s *Source) run(ctx context.Context, call *exchangeCall) {
 		tok, err = "", fmt.Errorf("sts: the token request was superseded: %w", context.Canceled)
 	}
 	s.mu.Unlock()
-	call.token, call.err = tok, err
-	close(call.done)
+	call.finish(tok, err)
 }
 
 func ctxError(ctx context.Context) error {
@@ -685,4 +696,16 @@ func readTokenFile(path string) (string, error) {
 		return "", errors.New("the projected token file is empty")
 	}
 	return tok, nil
+}
+
+// setToken caches v. The value is kept behind a function value, which fmt prints only as an address under every
+// verb, so a value that holds the Source cannot print the token. The caller holds mu.
+func (s *Source) setToken(v string) { s.token = func() string { return v } }
+
+// cachedToken returns the cached token, or "" for none. The caller holds mu.
+func (s *Source) cachedToken() string {
+	if s.token == nil {
+		return ""
+	}
+	return s.token()
 }

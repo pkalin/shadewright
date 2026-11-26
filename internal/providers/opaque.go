@@ -26,15 +26,14 @@ import (
 // carries that reply's tool calls, for example the thinking blocks of the Anthropic API. Only the adapter that
 // made it reads it; a caller copies it from Completion.ProviderBlocks to Message.ProviderBlocks and does
 // nothing else with it. Its bytes are unexported and every printed or encoded form hides them, so it cannot
-// reach a log line, an error, a trace or a stored record by accident. The zero value is empty.
+// reach a log line, an error, a trace or a stored record by accident. The zero value is empty. Compare two
+// values with Bytes: reflect.DeepEqual never finds two non-empty ones equal, since the data sits behind a
+// function value.
 type Opaque struct {
-	// d is a pointer so that fmt, when it prints the struct without its methods (the %p verb on a value),
-	// shows an address and not the bytes.
-	d *opaqueData
-}
-
-type opaqueData struct {
-	b []byte
+	// d is a function value: fmt prints a function only as an address under every verb, also when it walks a
+	// struct that holds the Opaque as an unexported field without calling its methods. A pointer would not do:
+	// for a verb that does not fit a pointer (%s, %q), fmt's bad-verb form prints the target of the pointer.
+	d func() []byte
 }
 
 // NewOpaque returns an Opaque holding a copy of b.
@@ -42,14 +41,15 @@ func NewOpaque(b []byte) Opaque {
 	if len(b) == 0 {
 		return Opaque{}
 	}
-	return Opaque{d: &opaqueData{b: bytes.Clone(b)}}
+	c := bytes.Clone(b)
+	return Opaque{d: func() []byte { return c }}
 }
 
 func (o Opaque) data() []byte {
 	if o.d == nil {
 		return nil
 	}
-	return o.d.b
+	return o.d()
 }
 
 // Bytes returns a copy of the data, for the adapter that made it.

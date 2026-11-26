@@ -785,7 +785,12 @@ func TestWithoutControlsLeavesCleanRepliesAlone(t *testing.T) {
 		ToolCalls:      []ToolCall{{ID: "c1", Name: "list_events", Arguments: json.RawMessage(`{"namespace":"shop"}`)}},
 		ProviderBlocks: NewOpaque([]byte("\x1b[31m")), UsageUnknown: true}
 	got := WithoutControls(in)
-	if !reflect.DeepEqual(got, in) || &got.ToolCalls[0] != &in.ToolCalls[0] {
+	// reflect.DeepEqual never finds two non-empty Opaque values equal (they hold a function value), so
+	// ProviderBlocks is compared by its bytes and the rest without it.
+	gotRest, inRest := got, in
+	gotRest.ProviderBlocks, inRest.ProviderBlocks = Opaque{}, Opaque{}
+	if !reflect.DeepEqual(gotRest, inRest) || !bytes.Equal(got.ProviderBlocks.Bytes(), in.ProviderBlocks.Bytes()) ||
+		&got.ToolCalls[0] != &in.ToolCalls[0] {
 		t.Errorf("WithoutControls(%+v) = %+v, want it unchanged", in, got)
 	}
 	in.Model = "m\x1b"

@@ -954,11 +954,11 @@ func TestAnswerAfterContextEndIsDiscarded(t *testing.T) {
 			}
 			call := <-calls
 			<-call.done
-			if !errors.Is(call.err, context.Canceled) || providers.IsForbidden(call.err) || providers.IsRetryable(call.err) || call.token != "" {
+			if !errors.Is(call.err, context.Canceled) || providers.IsForbidden(call.err) || providers.IsRetryable(call.err) || call.token() != "" {
 				t.Errorf("exchange err = %v, want its cancellation", call.err)
 			}
 			s.mu.Lock()
-			cached := s.token
+			cached := s.cachedToken()
 			s.mu.Unlock()
 			if cached != "" {
 				t.Error("a token taken after the context ended was cached")
@@ -1179,7 +1179,7 @@ func TestSupersededExchangeDoesNotWriteTheCache(t *testing.T) {
 	close(gate.release)
 	call := <-first
 	<-call.done
-	if call.token == stale {
+	if call.token() == stale {
 		t.Error("the superseded exchange returned its token")
 	}
 	if tok, err := s.Token(context.Background()); err != nil || tok != issuedMark || n.Load() != 2 {
@@ -1295,7 +1295,7 @@ func TestTokenAlreadyStaleOnArrivalIsRefused(t *testing.T) {
 				}
 				assertNoLeak(t, err, Config{TokenFile: "/unused"})
 				s.mu.Lock()
-				cached := s.token
+				cached := s.cachedToken()
 				s.mu.Unlock()
 				if cached != "" {
 					t.Error("a stale token was cached")
@@ -1363,7 +1363,7 @@ func TestEndDuringRefusalBodyIsNotTheRefusal(t *testing.T) {
 			}
 			call := <-calls
 			<-call.done
-			if !errors.Is(call.err, context.Canceled) || providers.IsForbidden(call.err) || call.token != "" {
+			if !errors.Is(call.err, context.Canceled) || providers.IsForbidden(call.err) || call.token() != "" {
 				t.Errorf("exchange err = %v, want its cancellation", call.err)
 			}
 		})
@@ -1474,7 +1474,7 @@ func TestTokenIsRefusedWhenTheProjectionExpiredInTransit(t *testing.T) {
 	}
 	assertNoLeak(t, err, cfg)
 	s.mu.Lock()
-	cached := s.token
+	cached := s.cachedToken()
 	s.mu.Unlock()
 	if cached != "" {
 		t.Error("a token for an expired projection was cached")
@@ -1611,7 +1611,7 @@ func TestTokenExpiredAtPublishIsNotHandedOut(t *testing.T) {
 		}
 	}
 	s.mu.Lock()
-	cached := s.token
+	cached := s.cachedToken()
 	s.mu.Unlock()
 	if cached != "" {
 		t.Error("an expired token was cached")

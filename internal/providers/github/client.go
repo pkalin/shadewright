@@ -337,7 +337,9 @@ func (p *Provider) once(ctx context.Context, c call) (response, error) {
 	if len(c.query) > 0 {
 		u += "?" + c.query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, c.method, u, body)
+	// The request gets the caller's end and deadline but none of its values: a trace hook there would see the
+	// Authorization header (providers.WireContext). ctx stays in use for everything else.
+	req, err := http.NewRequestWithContext(providers.WireContext(ctx), c.method, u, body)
 	if err != nil {
 		return response{}, fmt.Errorf("%s: build request", c.op)
 	}

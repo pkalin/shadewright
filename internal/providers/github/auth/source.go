@@ -292,7 +292,9 @@ func (s *Source) fetch(ctx context.Context) (Token, time.Time, error) {
 		return Token{}, time.Time{}, fmt.Errorf("encode token request: %w", err)
 	}
 	url := apiBase + "/app/installations/" + strconv.FormatInt(s.instID, 10) + "/access_tokens"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	// The request gets ctx's end and deadline but none of its values: a trace hook there would see the App
+	// JWT in the Authorization header (providers.WireContext).
+	req, err := http.NewRequestWithContext(providers.WireContext(ctx), http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return Token{}, time.Time{}, errors.New("build installation token request")
 	}
@@ -364,7 +366,9 @@ func (s *Source) fetchAppID(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, s.classifyCtx(err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBase+"/app", nil)
+	// The request gets ctx's end and deadline but none of its values: a trace hook there would see the App
+	// JWT in the Authorization header (providers.WireContext).
+	req, err := http.NewRequestWithContext(providers.WireContext(ctx), http.MethodGet, apiBase+"/app", nil)
 	if err != nil {
 		return 0, errors.New("build App identity request")
 	}

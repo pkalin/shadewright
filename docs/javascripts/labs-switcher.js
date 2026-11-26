@@ -8,6 +8,15 @@ document.addEventListener("keydown", (event) => {
 
 document.addEventListener("click", (event) => {
   for (const switcher of document.querySelectorAll("details.labs-switcher[open]")) {
-    if (!switcher.contains(event.target)) switcher.open = false;
+    if (!switcher.contains(event.target) || event.target.closest?.("a")) {
+      switcher.open = false;
+    }
+  }
+});
+
+document.addEventListener("focusout", (event) => {
+  const switcher = event.target.closest?.("details.labs-switcher[open]");
+  if (switcher && event.relatedTarget && !switcher.contains(event.relatedTarget)) {
+    switcher.open = false;
   }
 });

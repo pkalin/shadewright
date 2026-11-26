@@ -1,18 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 672" width="1920" height="672" aria-hidden="true">
   <defs>
-    <linearGradient id="fade-left-out" gradientUnits="userSpaceOnUse" x1="384" y1="0" x2="456" y2="0">
+    <linearGradient id="fade-left-out" gradientUnits="userSpaceOnUse" x1="384" y1="0" x2="432" y2="0">
       <stop offset="0%" stop-color="#a879ff" stop-opacity="0.34"/>
       <stop offset="100%" stop-color="#a879ff" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="fade-right-in" gradientUnits="userSpaceOnUse" x1="1464" y1="0" x2="1536" y2="0">
+    <linearGradient id="fade-right-in" gradientUnits="userSpaceOnUse" x1="1488" y1="0" x2="1536" y2="0">
       <stop offset="0%" stop-color="#a879ff" stop-opacity="0"/>
       <stop offset="100%" stop-color="#a879ff" stop-opacity="0.34"/>
     </linearGradient>
-    <linearGradient id="mask-fade-out" gradientUnits="userSpaceOnUse" x1="384" y1="0" x2="456" y2="0">
+    <linearGradient id="mask-fade-out" gradientUnits="userSpaceOnUse" x1="384" y1="0" x2="432" y2="0">
       <stop offset="0%" stop-color="#ffffff"/>
       <stop offset="100%" stop-color="#000000"/>
     </linearGradient>
-    <linearGradient id="mask-fade-in" gradientUnits="userSpaceOnUse" x1="1464" y1="0" x2="1536" y2="0">
+    <linearGradient id="mask-fade-in" gradientUnits="userSpaceOnUse" x1="1488" y1="0" x2="1536" y2="0">
       <stop offset="0%" stop-color="#000000"/>
       <stop offset="100%" stop-color="#ffffff"/>
     </linearGradient>
@@ -23,9 +23,9 @@
       <!-- Arrow 2 -> 3 -->
       <rect x="184" y="384" width="104" height="104" fill="#ffffff"/>
       <!-- Bridge out from 3 (fades out before text column) -->
-      <rect x="384" y="472" width="72" height="16" fill="url(#mask-fade-out)"/>
+      <rect x="384" y="472" width="48" height="16" fill="url(#mask-fade-out)"/>
       <!-- Bridge in to 4 (fades in after text column) -->
-      <rect x="1464" y="184" width="72" height="16" fill="url(#mask-fade-in)"/>
+      <rect x="1488" y="184" width="48" height="16" fill="url(#mask-fade-in)"/>
       <!-- Arrow 4 -> 5 -->
       <rect x="1632" y="184" width="104" height="200" fill="#ffffff"/>
     </mask>
@@ -80,12 +80,17 @@
         stroke-linecap: round;
         stroke-linejoin: round;
         stroke-dasharray: 44 1396;
-        stroke-dashoffset: 1440;
+        stroke-dashoffset: 1486;
+      }
+      .travel-left {
         animation: sw-hero-dash 24s linear -4.5s infinite;
       }
+      .travel-right {
+        animation: sw-hero-dash 24s linear -17.5s infinite;
+      }
       @keyframes sw-hero-dash {
-        from { stroke-dashoffset: 1440; }
-        to { stroke-dashoffset: 0; }
+        from { stroke-dashoffset: 1486; }
+        to { stroke-dashoffset: 46; }
       }
       @media (prefers-reduced-motion: reduce) {
         .travel {
@@ -107,10 +112,10 @@
   <path class="head" d="M 277 474 L 286 480 L 277 486"/>
 
   <!-- 3 -> center fade (y = 480) -->
-  <path fill="none" stroke="url(#fade-left-out)" stroke-width="1.5" stroke-linecap="round" d="M 384 480 H 456"/>
+  <path fill="none" stroke="url(#fade-left-out)" stroke-width="1.5" stroke-linecap="round" d="M 384 480 H 432"/>
 
   <!-- center fade -> 4 (y = 192) -->
-  <path fill="none" stroke="url(#fade-right-in)" stroke-width="1.5" stroke-linecap="round" d="M 1464 192 H 1533"/>
+  <path fill="none" stroke="url(#fade-right-in)" stroke-width="1.5" stroke-linecap="round" d="M 1488 192 H 1533"/>
   <path class="head" d="M 1525 186 L 1534 192 L 1525 198"/>
 
   <!-- 4 -> 5 (y = 192, x = 1728) -->
@@ -118,9 +123,10 @@
   <circle class="joint" cx="1728" cy="192" r="2.2"/>
   <path class="head" d="M 1722 373 L 1728 382 L 1734 373"/>
 
-  <!-- Single slow dash travelling along the arrows from step 1 to step 5 -->
+  <!-- Single slow dash travelling along the left arrows first, then the right ones -->
   <g mask="url(#dash-mask)">
-    <path class="travel" d="M 192 192 V 480 H 456 M 1464 192 H 1728 V 384"/>
+    <path class="travel travel-left" d="M 192 192 V 480 H 432"/>
+    <path class="travel travel-right" d="M 1488 192 H 1728 V 384"/>
   </g>
 
   <!-- Step 1: Observe (pulse line), snapped to x=144..240, y=96..192 -->

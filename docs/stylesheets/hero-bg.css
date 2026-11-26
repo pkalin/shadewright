@@ -33,6 +33,12 @@
 }
 
 .sw-hero {
+  /*
+   * Single grid cell unit shared by the CSS grid and the 40x14-cell hero-flow.svg so tiles stay
+   * snapped to grid lines at every width from 84em (1344px) to 2560px, with >= 29px to the
+   * viewport edge and >= 35px to the hero text column.
+   */
+  --sw-grid: clamp(37.8px, 2.8vw, 48px);
   position: relative;
   box-sizing: border-box;
   width: 100vw;
@@ -40,22 +46,22 @@
   padding: 4.1rem 1.5rem 3.8rem;
   border-radius: 0;
   background-color: #08060e;
-  /* Full-width 48px blueprint grid (every 4th line at 192px stronger), aligned to the 1920x672 SVG. */
+  /* Full-width blueprint grid (every 4th line stronger), aligned to the 40x14-cell SVG. */
   background-image:
     linear-gradient(to right, rgba(183, 148, 255, 0.21) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(183, 148, 255, 0.21) 1px, transparent 1px),
     linear-gradient(to right, rgba(239, 230, 210, 0.085) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(239, 230, 210, 0.085) 1px, transparent 1px);
   background-size:
-    192px 192px,
-    192px 192px,
-    48px 48px,
-    48px 48px;
+    calc(var(--sw-grid) * 4) calc(var(--sw-grid) * 4),
+    calc(var(--sw-grid) * 4) calc(var(--sw-grid) * 4),
+    var(--sw-grid) var(--sw-grid),
+    var(--sw-grid) var(--sw-grid);
   background-position:
-    calc(50% + 96px) calc(50% + 48px),
-    calc(50% + 96px) calc(50% + 48px),
-    calc(50% + 24px) calc(50% + 24px),
-    calc(50% + 24px) calc(50% + 24px);
+    calc(50% + var(--sw-grid) * 2) calc(50% + var(--sw-grid)),
+    calc(50% + var(--sw-grid) * 2) calc(50% + var(--sw-grid)),
+    calc(50% + var(--sw-grid) * 0.5) calc(50% + var(--sw-grid) * 0.5),
+    calc(50% + var(--sw-grid) * 0.5) calc(50% + var(--sw-grid) * 0.5);
   overflow: hidden;
   isolation: isolate;
 }
@@ -79,14 +85,14 @@
   color: var(--sw-amethyst-hover);
 }
 
-/* Five-step icon flow snapped to the 48px grid cells in the outer flanks. */
+/* Five-step icon flow snapped to the grid cells in the outer flanks. */
 .sw-hero::before {
   content: "";
   position: absolute;
   inset: 0;
   z-index: -2;
   pointer-events: none;
-  background: url("../assets/hero/hero-flow.svg") center center / 1920px 672px no-repeat;
+  background: url("../assets/hero/hero-flow.svg") center center / calc(var(--sw-grid) * 40) calc(var(--sw-grid) * 14) no-repeat;
 }
 
 /* Calm central veil behind text, violet glow behind the logo, and bottom/outer-edge fade to #08060E. */
@@ -98,7 +104,7 @@
   pointer-events: none;
   background:
     radial-gradient(
-      ellipse 25rem 13.5rem at 50% 63%,
+      ellipse 23rem 13.5rem at 50% 63%,
       rgba(8, 6, 14, 0.94) 0%,
       rgba(8, 6, 14, 0.92) 66%,
       rgba(8, 6, 14, 0.78) 84%,
@@ -126,73 +132,19 @@
     linear-gradient(
       to right,
       #08060e 0%,
-      rgba(8, 6, 14, 0.42) 4.5%,
-      rgba(8, 6, 14, 0) 11%,
-      rgba(8, 6, 14, 0) 89%,
-      rgba(8, 6, 14, 0.42) 95.5%,
+      rgba(8, 6, 14, 0.36) 14px,
+      rgba(8, 6, 14, 0) 28px,
+      rgba(8, 6, 14, 0) calc(100% - 28px),
+      rgba(8, 6, 14, 0.36) calc(100% - 14px),
       #08060e 100%
     );
 }
 
-/* Medium desktop (including 1300px): scale both grid and icon tiles by 0.75 so tiles stay clear of text. */
-@media (max-width: 95em) {
-  .sw-hero {
-    background-size:
-      144px 144px,
-      144px 144px,
-      36px 36px,
-      36px 36px;
-    background-position:
-      calc(50% + 72px) calc(50% + 36px),
-      calc(50% + 72px) calc(50% + 36px),
-      calc(50% + 18px) calc(50% + 18px),
-      calc(50% + 18px) calc(50% + 18px);
-  }
-  .sw-hero::before {
-    background-size: 1440px 504px;
-  }
-  .sw-hero::after {
-    background:
-      radial-gradient(
-        ellipse 22rem 13rem at 50% 63%,
-        rgba(8, 6, 14, 0.94) 0%,
-        rgba(8, 6, 14, 0.92) 72%,
-        rgba(8, 6, 14, 0.78) 87%,
-        rgba(8, 6, 14, 0) 100%
-      ),
-      radial-gradient(
-        ellipse 24rem 9.5rem at 50% 27%,
-        rgba(139, 61, 255, 0.22) 0%,
-        rgba(139, 61, 255, 0.085) 48%,
-        rgba(8, 6, 14, 0) 76%
-      ),
-      radial-gradient(
-        ellipse 72% 28% at 50% 46%,
-        rgba(139, 61, 255, 0.065) 0%,
-        rgba(8, 6, 14, 0) 100%
-      ),
-      linear-gradient(
-        to bottom,
-        rgba(8, 6, 14, 0.44) 0%,
-        rgba(8, 6, 14, 0.03) 18%,
-        rgba(8, 6, 14, 0.03) 78%,
-        rgba(8, 6, 14, 0.76) 92%,
-        #08060e 100%
-      ),
-      linear-gradient(
-        to right,
-        #08060e 0%,
-        rgba(8, 6, 14, 0.36) 2%,
-        rgba(8, 6, 14, 0) 6%,
-        rgba(8, 6, 14, 0) 94%,
-        rgba(8, 6, 14, 0.36) 98%,
-        #08060e 100%
-      );
-  }
-}
-
 /* Narrower screens where outer flanks cannot hold tiles beside the text column: keep the grid and glow only. */
-@media (max-width: 72em) {
+@media (max-width: 83.9375em) {
+  .sw-hero {
+    --sw-grid: 36px;
+  }
   .sw-hero::before {
     display: none;
   }

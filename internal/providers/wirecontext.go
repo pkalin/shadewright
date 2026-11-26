@@ -29,9 +29,11 @@ import (
 // would see the credential. Build only the request with this context; keep ctx for everything before it
 // (credential lookup, the write checkpoint, logging) and for classifying the request's errors.
 //
-// It starts no goroutine: a context that net/http derives from it (a request timeout, the transport's own
-// cancellation) registers with ctx through [context.AfterFunc] instead of watching it from a goroutine of
-// its own.
+// A context that net/http derives from it (a request timeout, the transport's own cancellation) registers
+// with ctx through [context.AfterFunc], so it starts no goroutine per request when ctx supports AfterFunc
+// directly, as every context of the standard library does. A custom ctx whose type has no AfterFunc method
+// and that hides the standard library's cancel context makes context.AfterFunc start a goroutine that watches
+// ctx; it ends when the derived context is done, so it lasts no longer than the request.
 func WireContext(ctx context.Context) context.Context { return wireContext{parent: ctx} }
 
 type wireContext struct{ parent context.Context }

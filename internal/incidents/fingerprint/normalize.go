@@ -236,6 +236,11 @@ func normalizeShown(replace replaceShownAndRead, o Observation, mode quantityMod
 	if !ok {
 		return placeholderRedacted
 	}
+	if shown == read {
+		// The printed text is the note and the two readings agree: normalised once, the shown text shows nothing
+		// origin/main's does not.
+		return normalizeRedacted(shown, o, mode)
+	}
 	shown, read = normalizeRedacted(shown, o, mode), normalizeRedacted(read, o, mode)
 	if showsMoreThan(shown, read) {
 		return placeholderRedacted

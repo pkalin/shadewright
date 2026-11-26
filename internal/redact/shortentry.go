@@ -71,13 +71,13 @@ func (r *Redactor) ReplaceCheckedShort(s string, repl func(kind, text string) st
 }
 
 // ReplaceCheckedShortShown is ReplaceCheckedShort for text that is stored or shown, never fingerprinted. It
-// redacts the printed text of s (printed.go): s without its invalid bytes, escape sequences and characters that
-// are not printable, each run of whitespace as one space. The rules read that text, and the text returned is that
-// text with each match replaced (repl) and the text between matches passed through between. It withholds s whole
-// when s cannot be printed with certainty (an escape that is not complete, a backspace or DEL), and when a rule
-// finds a secret in a squeezed text of s, or in s as it was read, that the matches of the printed text do not
-// cover. It runs on the same budget and in the same slots as ReplaceCheckedShort; an entry over its budget, or
-// longer than MaxShortEntry, is withheld.
+// redacts the printed text of s (printed.go): s without its invalid bytes, complete CSI sequences and characters
+// that are not printable, each run of whitespace as one space. The rules read that text, and the text returned is
+// that text with each match replaced (repl) and the text between matches passed through between. It withholds s
+// whole when s cannot be printed with certainty (any escape but a complete CSI, a C1 control in any encoding, a
+// backspace or DEL), and when a rule finds a secret in a squeezed text of s, or in s as it was read, that the
+// matches of the printed text do not cover. It runs on the same budget and in the same slots as
+// ReplaceCheckedShort; an entry over its budget, or longer than MaxShortEntry, is withheld.
 func ReplaceCheckedShortShown(s string, repl func(kind, text string) string, between func(string) string) (out string, ok bool) {
 	return defaultRedactor.ReplaceCheckedShortShown(s, repl, between)
 }

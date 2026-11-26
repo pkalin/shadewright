@@ -183,6 +183,20 @@ func TestShownFormsAreRecognisedInPlainForm(t *testing.T) {
 	}
 }
 
+// Terminal strings are not interpreted: a note that holds one, in any encoding, is withheld whole by the event
+// symptom and the module evidence value, so nothing of its payload or of the text around it is stored.
+func TestTerminalStringsWithholdTheStoredSymptom(t *testing.T) {
+	for _, note := range []string{"\x9dtitle\x07ready", "\x9dtitle", "x\u009done\u009dtwo\u009crest\u009cz"} {
+		sym := fingerprint.Symptom(fingerprint.Observation{Note: note, Source: fingerprint.SourceEvent})
+		if sym != "<redacted>" {
+			t.Errorf("Symptom(%q) = %q, want <redacted>", note, sym)
+		}
+		if v := modules.BoundValue(note); v != "<redacted>" {
+			t.Errorf("BoundValue(%q) = %q, want <redacted>", note, v)
+		}
+	}
+}
+
 // symptomGateStride is the share of the gate's rows checked under -race: one in symptomGateStride.
 const symptomGateStride = 7
 

@@ -35,14 +35,11 @@ func TestShownTextIsThePrintedText(t *testing.T) {
 		{"\x1b[31mpassword=" + secret + " ok", passwordHidden},
 		{"\x1b[31mtoken " + token + "\x1b[0m ok", "token [REDACTED:token] ok"},
 		{"pass\x1b[31mword=" + secret + "\x1b[0m ok", passwordHidden},
-		// An OSC and a DCS are removed whole, up to their terminators.
-		{"pass\x1b]0;title\x07word=" + secret + " ok", passwordHidden},
-		{"pass\x1bPq#0\x1b\\word=" + secret + " ok", passwordHidden},
-		{"pass\u009d0;t\u009cword=" + secret + " ok", passwordHidden},
-		// Invisible characters and invalid bytes are removed; a run of whitespace is one space.
+		{"pass\u009b31mword=" + secret + "\u009b0m ok", passwordHidden}, // the C1 CSI
+		// Invisible characters and invalid bytes other than 0x80 to 0x9F are removed; a run of whitespace is one
+		// space.
 		{"pass\u200b\u202e\U000E0041\ufe0f\u00adword=" + secret + " ok", passwordHidden},
 		{token[:20] + "\xff" + token[20:] + " ok", "[REDACTED:token] ok"},
-		{token[:20] + "\x1bA" + token[20:], "[REDACTED:token]"}, // a two-byte escape takes "A": still a token
 		{"line one\r\n\tline\u00a0two\u2028end", "line one line two end"},
 		// Text without anything to remove is decided as it is.
 		{"Back-off restarting failed container app", "Back-off restarting failed container app"},
@@ -76,6 +73,51 @@ func TestShownTextIsWithheldWhenItCouldShowASecret(t *testing.T) {
 	} {
 		if got, ok := ReplaceCheckedShortShown(in, keep, same); ok {
 			t.Errorf("ReplaceCheckedShortShown(%q) = %q, want it withheld", in, got)
+		}
+	}
+}
+
+// Terminal strings are not interpreted: a complete CSI is the only escape the printed text removes. Every other
+// escape and every C1 control withholds the entry whole, whatever its encoding (ESC and a byte, the C1 control as
+// UTF-8, the C1 control as one raw byte), terminated or not, nested or not.
+func TestShownTextWithholdsEveryEscapeButCSI(t *testing.T) {
+	var in []string
+	// The three inputs of the finding: a raw OSC byte, its payload printed; the same unterminated; nested strings.
+	in = append(in, "\x9dtitle\x07ready", "\x9dtitle", "x\u009done\u009dtwo\u009crest\u009cz")
+	// Each string introducer and ST in its three encodings, terminated by BEL, by ST, or not at all.
+	type enc struct{ esc, c1, raw string }
+	strs := []enc{
+		{"\x1b]", "\u009d", "\x9d"}, // OSC
+		{"\x1bP", "\u0090", "\x90"}, // DCS
+		{"\x1b_", "\u009f", "\x9f"}, // APC
+		{"\x1b^", "\u009e", "\x9e"}, // PM
+		{"\x1bX", "\u0098", "\x98"}, // SOS
+	}
+	st := enc{"\x1b\\", "\u009c", "\x9c"}
+	for _, s := range strs {
+		for _, intro := range []string{s.esc, s.c1, s.raw} {
+			for _, end := range []string{"\x07", st.esc, st.c1, st.raw, ""} {
+				in = append(in, "ready "+intro+"payload"+end+" ok")
+				// Nested: the inner string ends first, the outer one later.
+				in = append(in, "x"+intro+"one"+intro+"two"+end+"rest"+end+"z")
+			}
+		}
+	}
+	// ST alone, and every other C1 control in both encodings.
+	for _, end := range []string{st.esc, st.c1, st.raw} {
+		in = append(in, "ready"+end+"ok")
+	}
+	for c := rune(0x80); c <= 0x9f; c++ {
+		if c == 0x9b {
+			continue // the C1 CSI, complete, is removed (TestShownTextIsThePrintedText)
+		}
+		in = append(in, "ready "+string(c)+" ok", "ready "+string([]byte{byte(c)})+" ok")
+	}
+	// The raw CSI byte, and escapes other than CSI: two-byte escapes, an escape with an intermediate byte.
+	in = append(in, "ready \x9b31m ok", "ready \x1b7 ok", "ready \x1b= ok", "ready \x1b(B ok", "ready \x1bA ok")
+	for _, s := range in {
+		if got, ok := ReplaceCheckedShortShown(s, keep, same); ok {
+			t.Errorf("ReplaceCheckedShortShown(%q) = %q, want it withheld", s, got)
 		}
 	}
 }

@@ -136,9 +136,12 @@ type Options struct {
 // Store writes analysis records to one Blob Storage container, create-only. It is safe for concurrent use.
 type Store struct {
 	container *url.URL
-	cred      azcore.TokenCredential
-	redactor  *redact.Redactor
-	client    *http.Client
+	// token is the credential's GetToken. A function value, so no fmt verb prints the credential through a
+	// Store: azidentity's credentials keep the projected service account token in a plain field, and fmt
+	// walks a struct's unexported fields without calling their print methods.
+	token    func(context.Context, policy.TokenRequestOptions) (azcore.AccessToken, error)
+	redactor *redact.Redactor
+	client   *http.Client
 	// tryTimeout bounds one try; tests shorten it.
 	tryTimeout time.Duration
 	// sleep waits between tries; tests replace it.
@@ -183,7 +186,7 @@ func newStore(container *url.URL, cred azcore.TokenCredential, red *redact.Redac
 		rt = http.DefaultTransport
 	}
 	return &Store{
-		container: container, cred: cred, redactor: red,
+		container: container, token: cred.GetToken, redactor: red,
 		client: &http.Client{
 			Transport: rt,
 			// Never follow a redirect: it could carry the token and the record to another host.
@@ -363,7 +366,7 @@ func backoff(try int) time.Duration {
 func (s *Store) try(ctx context.Context, blob *url.URL, data []byte) (time.Duration, error) {
 	tctx, cancel := context.WithTimeout(ctx, s.tryTimeout)
 	defer cancel()
-	tok, err := s.cred.GetToken(tctx, policy.TokenRequestOptions{Scopes: []string{storageScope}})
+	tok, err := s.token(tctx, policy.TokenRequestOptions{Scopes: []string{storageScope}})
 	if err != nil {
 		return 0, s.tokenError(ctx, err)
 	}

@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand/v2"
 	"mime"
 	"net"
@@ -834,7 +835,9 @@ const maxNestedJSON = 3
 // A key that comes back re-encoded (base64, percent encoding, homoglyphs, reordered) is not found, and no
 // check of this kind can find it: the endpoint is given the key at install and is trusted with it.
 type keyScan struct {
-	key   []byte
+	// key returns the key. A function value, so no fmt verb prints the key through a keyScan or a value that
+	// holds one.
+	key   func() []byte
 	allow [utf8.RuneSelf]bool
 	// streams: the views of the string values, of the string values and object keys, and of each of the two
 	// with the numbers of the document as well. A number must not interrupt a stream of strings, and a key
@@ -845,9 +848,25 @@ type keyScan struct {
 	work    int
 }
 
+const redactedKeyScan = "[redacted key scan]"
+
+// String returns a placeholder: a keyScan's streams hold any part of a reply that repeats the key. A value
+// that holds a *keyScan in an unexported field prints the streams anyway (fmt calls no method there).
+func (*keyScan) String() string { return redactedKeyScan }
+
+// GoString returns a placeholder, for %#v.
+func (*keyScan) GoString() string { return "openaicompatible.keyScan{[redacted]}" }
+
+// Format writes the placeholder for every verb.
+func (k *keyScan) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(k.String())) }
+
+// LogValue logs the placeholder.
+func (*keyScan) LogValue() slog.Value { return slog.StringValue(redactedKeyScan) }
+
 // newKeyScan returns a scan for key with empty streams.
 func newKeyScan(key string) *keyScan {
-	k := &keyScan{key: []byte(key)}
+	kb := []byte(key)
+	k := &keyScan{key: func() []byte { return kb }}
 	for c := range utf8.RuneSelf {
 		k.allow[c] = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 	}
@@ -875,7 +894,7 @@ func keyIn(data []byte, key string) (bool, int) {
 func (k *keyScan) result() bool {
 	for _, stream := range k.streams {
 		k.work += len(stream)
-		k.found = k.found || bytes.Contains(stream, k.key)
+		k.found = k.found || bytes.Contains(stream, k.key())
 	}
 	return k.found
 }
@@ -895,7 +914,7 @@ func (k *keyScan) view(dst []byte, s string) []byte {
 func (k *keyScan) searchAlone(s string) {
 	k.scratch = k.view(k.scratch[:0], s)
 	k.work += len(k.scratch)
-	k.found = k.found || bytes.Contains(k.scratch, k.key)
+	k.found = k.found || bytes.Contains(k.scratch, k.key())
 }
 
 // add appends the view of s to the streams: an object key to the two streams with keys, a number to the two

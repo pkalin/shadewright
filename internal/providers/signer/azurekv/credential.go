@@ -133,9 +133,11 @@ func tokenRequestFrom(ctx context.Context) *tokenRequest {
 
 // tokenFile reads the federated token file and reuses its content for tokenFileReuse.
 type tokenFile struct {
-	path      string
-	mu        sync.Mutex
-	content   string
+	path string
+	mu   sync.Mutex
+	// content returns the token read last, nil before the first good read. A function value, so no fmt verb
+	// prints the token through a tokenFile or a value that holds one.
+	content   func() string
 	expiresAt time.Time
 }
 
@@ -145,8 +147,8 @@ type tokenFile struct {
 func (f *tokenFile) assertion(ctx context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if time.Now().Before(f.expiresAt) {
-		return f.content, nil
+	if f.content != nil && time.Now().Before(f.expiresAt) {
+		return f.content(), nil
 	}
 	content, err := readTokenFile(f.path)
 	if errors.Is(err, errTokenFileMissing) {
@@ -168,7 +170,7 @@ func (f *tokenFile) assertion(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	f.content, f.expiresAt = content, time.Now().Add(tokenFileReuse)
+	f.content, f.expiresAt = func() string { return content }, time.Now().Add(tokenFileReuse)
 	return content, nil
 }
 

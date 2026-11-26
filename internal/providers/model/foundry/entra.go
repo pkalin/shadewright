@@ -97,9 +97,20 @@ type exchangeCall struct {
 	cancel  context.CancelFunc
 	waiters int
 	done    chan struct{}
-	token   string
-	err     error
+	// token returns the token of a finished exchange. A function value, so no fmt verb prints the token
+	// through an exchangeCall.
+	token func() string
+	err   error
 }
+
+// finish records the result of the exchange and wakes its waiters.
+func (c *exchangeCall) finish(tok string, err error) {
+	c.token, c.err = func() string { return tok }, err
+	close(c.done)
+}
+
+// result returns the result of the exchange, once done is closed.
+func (c *exchangeCall) result() (string, error) { return c.token(), c.err }
 
 // NewWorkloadIdentity reads AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE and the optional
 // AZURE_AUTHORITY_HOST. An error names the variable at fault, never its value, and matches
@@ -162,7 +173,7 @@ func (w *WorkloadIdentity) Token(ctx context.Context) (string, error) {
 	w.mu.Unlock()
 	select {
 	case <-call.done:
-		return call.token, call.err
+		return call.result()
 	case <-ctx.Done():
 		w.mu.Lock()
 		call.waiters--
@@ -192,8 +203,7 @@ func (w *WorkloadIdentity) run(ctx context.Context, call *exchangeCall) {
 		w.inflight = nil
 	}
 	w.mu.Unlock()
-	call.token, call.err = tok, err
-	close(call.done)
+	call.finish(tok, err)
 }
 
 func tokenCtxError(ctx context.Context) error {

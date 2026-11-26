@@ -954,7 +954,7 @@ func TestAnswerAfterContextEndIsDiscarded(t *testing.T) {
 			}
 			call := <-calls
 			<-call.done
-			if !errors.Is(call.err, context.Canceled) || providers.IsForbidden(call.err) || providers.IsRetryable(call.err) || call.token != "" {
+			if !errors.Is(call.err, context.Canceled) || providers.IsForbidden(call.err) || providers.IsRetryable(call.err) || call.token() != "" {
 				t.Errorf("exchange err = %v, want its cancellation", call.err)
 			}
 			s.mu.Lock()
@@ -1179,7 +1179,7 @@ func TestSupersededExchangeDoesNotWriteTheCache(t *testing.T) {
 	close(gate.release)
 	call := <-first
 	<-call.done
-	if call.token == stale {
+	if call.token() == stale {
 		t.Error("the superseded exchange returned its token")
 	}
 	if tok, err := s.Token(context.Background()); err != nil || tok != issuedMark || n.Load() != 2 {
@@ -1363,7 +1363,7 @@ func TestEndDuringRefusalBodyIsNotTheRefusal(t *testing.T) {
 			}
 			call := <-calls
 			<-call.done
-			if !errors.Is(call.err, context.Canceled) || providers.IsForbidden(call.err) || call.token != "" {
+			if !errors.Is(call.err, context.Canceled) || providers.IsForbidden(call.err) || call.token() != "" {
 				t.Errorf("exchange err = %v, want its cancellation", call.err)
 			}
 		})

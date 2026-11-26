@@ -1,4 +1,4 @@
-# What the context showed of the probe of each input of the controls gate of #852, and its symptom line, at origin/main ab900832. The symptom lines since the shown symptom is the printed text (redact.ReplaceCheckedShortShown).
+# What the context showed of the probe of each input of the controls gate of #852, and its symptom line, at origin/main ab900832. The symptom lines since the shown symptom is the printed text (redact.ReplaceCheckedShortShownAndRead).
 key=value  filler \x00 at 0	0	"symptom: password=[REDACTED]"
 key=value log: filler \x00 at 0	0	"symptom: log: password=[REDACTED]"
 key=value  filler \x01 at 0	0	"symptom: password=[REDACTED]"

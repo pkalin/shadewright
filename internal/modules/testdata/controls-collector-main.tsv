@@ -1,4 +1,4 @@
-# Normalize, Symptom, Value, BoundValue and the fingerprint of each input. Normalize and the fingerprint at origin/main ab900832; Symptom, Value and BoundValue since the shown text is the printed text (redact.ReplaceCheckedShortShown).
+# Normalize, Symptom, Value, BoundValue and the fingerprint of each input. Normalize and the fingerprint at origin/main ab900832; Symptom, Value and BoundValue since the shown text is the printed text (redact.ReplaceCheckedShortShownAndRead).
 key=value  filler \x00 at 0	"password=<redacted>"	"password=<redacted>"	"password=<redacted>"	"password=<redacted>"	sha256:f5992dea08fe821ad12dd7027a0201e8cfcf012dacc40fc28b9c0ab823700b45
 key=value log: filler \x00 at 0	"log: password=<redacted>"	"log: password=<redacted>"	"log: password=<redacted>"	"log: password=<redacted>"	sha256:35090903565dd6e2c900666b461dab7b13ff48859addff89cfae6ed424c03102
 key=value  filler \x01 at 0	"password=<redacted>"	"password=<redacted>"	"password=<redacted>"	"password=<redacted>"	sha256:f5992dea08fe821ad12dd7027a0201e8cfcf012dacc40fc28b9c0ab823700b45

@@ -16,5 +16,5 @@ trap 'rm -rf "$work"' EXIT
 
 git -C "$root" archive "$commit" | tar -x -C "$work"
 cp "$root/internal/modules/symptom_inputs_test.go" "$work/internal/modules/"
-(cd "$work" && SYMPTOM_MAIN_BASELINE="$root/internal/modules/testdata" \
+(cd "$work" && GOPROXY=off SYMPTOM_MAIN_BASELINE="$root/internal/modules/testdata" \
 	go test ./internal/modules/ -run '^TestWriteSymptomMainBaseline$' -count=1)

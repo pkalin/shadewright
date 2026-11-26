@@ -17,86 +17,38 @@ limitations under the License.
 package modules
 
 import (
-	"math/rand"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
-	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 	"github.com/shadewright-labs/shadewright/internal/testutil/mainsymptom"
 )
 
 // The stored symptom never shows what origin/main's stored symptom hides. A random differential compares the
-// current fingerprint.Symptom, fingerprint.Value and BoundValue with origin/main's, frozen in package
-// mainsymptom, on inputs drawn with a fixed seed from a vocabulary of keys, tokens, punctuation and separators
-// (whitespace of every kind, controls, format characters, CSI and other escapes, invalid bytes), joined so that a
-// separator often stands between a key and its value or inside a value. An input fails when a shown output holds a
-// four-byte part of a probe (redacttest.VisibleGrams) that origin/main's same output does not. The seed and the
-// generator are those of the code review of 2026-11-26, which found 61 such inputs at 14435c81
-// (diffRegressions). Without -race every input runs; under -race one in diffRaceStride.
+// current fingerprint.Symptom, fingerprint.Value and BoundValue with origin/main's on inputs drawn with a fixed
+// seed from a vocabulary of keys, tokens, punctuation and separators (whitespace of every kind, controls, format
+// characters, CSI and other escapes, invalid bytes), joined so that a separator often stands between a key and its
+// value or inside a value (symptom_inputs_test.go). An input fails when a shown output holds a four-byte part of a
+// probe (redacttest.VisibleGrams) that origin/main's same output does not. The seed and the generator are those of
+// the code review of 2026-11-26, which found 61 such inputs at 14435c81 (diffRegressions). Without -race every input
+// runs; under -race one in diffRaceStride.
+//
+// origin/main's outputs come from two places. For the 61 regression inputs they are the real outputs of
+// origin/main at 24cd00a6, committed in symptomMainRegressions. For the generated inputs they come from the frozen
+// reading (package mainsymptom), which calls the live redact package; TestFrozenReadingIsOriginMain holds that
+// reading to the real outputs of origin/main (the table and symptomMainGeneratedHash), so a change of the
+// redaction rules that moves the frozen reading fails there instead of moving the baseline unseen.
 
-// diffSecret is the probe the generator places in every input.
-const diffSecret = "Zq8rT2vX9mK4pL7w" // #nosec G101 -- a made-up value the test looks for
-
-// diffTokenBody is the body of the GitHub token of the vocabulary, written apart from its prefix so that no
-// line holds a whole token shape.
-const diffTokenBody = "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z" // #nosec G101 -- a made-up token the test looks for
-
-// diffReason is the reason of the observations of the differential.
-const diffReason = "BackOff"
-
-// diffProbes are the secrets an input may hold: diffSecret, the body of the made-up GitHub token and the made-up
-// AWS key body of the vocabulary.
-var diffProbes = []string{diffSecret, diffTokenBody, "IOSFODNN7EXAMPLE"}
-
-// diffVocab is the vocabulary of the generator.
-var diffVocab = []string{
-	"password", "--password", "pass", "word", "token", "secret", "DB_PASSWORD", "api_key", "Authorization:", "Bearer",
-	"ghp_", "ghp_" + diffTokenBody, "postgres://", "u:", "@db.example/app", "AKIA", "IOSFODNN7EXAMPLE",
-	diffSecret, diffSecret[:5], diffSecret[5:], diffSecret[:9], diffSecret[9:],
-	"=", ":", " ", "  ", "\n", "\n  ", "\r", "\r\n", "\t", "\u00a0", "\u0085", "\u2028", "\u200b", "\u00ad", "\x00", "\x01",
-	"\x1b[31m", "\x1b[0m", "\x1b[5 q", "\u009b1m", "\x1b", "\x1b]0;t\x07", "\b", "\x7f", "\xff", "\xc3", "\x85", "\x9b",
-	"|", ">", "\"", "'", "{", "}", ",", "-", "log: ", "x", "value:", "[", "]", "<redacted>", "@sha1:", "main",
-	"1.2.3.4", "10.0.0.1", "ok", "failed", "abcdef0123456789abcdef0123456789abcdef01",
-}
-
-const (
-	// diffSeed and diffInputs are the seed and the number of inputs of the differential.
-	diffSeed   = 7
-	diffInputs = 60000
-	// diffRaceStride is the share of the inputs checked under -race: one in diffRaceStride.
-	diffRaceStride = 20
-)
-
-// diffInputsOf returns the inputs of the differential, the same on every run.
-func diffInputsOf() []string {
-	r := rand.New(rand.NewSource(diffSeed)) // #nosec G404 -- a fixed seed for reproducible test inputs
-	out := make([]string, 0, diffInputs)
-	for range diffInputs {
-		var b strings.Builder
-		k := 2 + r.Intn(9)
-		for range k {
-			b.WriteString(diffVocab[r.Intn(len(diffVocab))])
-		}
-		s := b.String()
-		if !strings.Contains(s, diffSecret[:5]) && !strings.Contains(s, diffSecret[5:]) && !strings.Contains(s, diffSecret[9:]) {
-			s += diffSecret
-		}
-		out = append(out, s)
-	}
-	return out
-}
-
-// diffShowsMore returns a description of the first shown output of s that holds a four-byte part of a probe
-// origin/main's same output does not, or "".
-func diffShowsMore(s string) string {
-	o := fingerprint.Observation{Note: s, Reason: diffReason, Type: "Warning", RegardingKind: collectorRegardingKind,
-		RegardingName: "web-abc-1"}
+// shownMoreThan returns a description of the first of now's outputs that holds a four-byte part of a probe
+// main's same output does not, or "".
+func shownMoreThan(now, main storedOutputs) string {
 	for _, c := range []struct{ name, now, main string }{
-		{"Symptom", fingerprint.Symptom(o), mainsymptom.Symptom(o)},
-		{"Value", fingerprint.Value(s), mainsymptom.Value(s)},
-		{"BoundValue", BoundValue(s), mainsymptom.BoundValue(s)},
+		{"Symptom", now.symptom, main.symptom},
+		{"Value", now.value, main.value},
+		{"BoundValue", now.bound, main.bound},
 	} {
 		for _, p := range diffProbes {
 			if redacttest.VisibleGrams(c.now, p)&^redacttest.VisibleGrams(c.main, p) != 0 {
@@ -107,6 +59,65 @@ func diffShowsMore(s string) string {
 	return ""
 }
 
+// frozenOutputs is the frozen reading of origin/main (package mainsymptom) of s.
+func frozenOutputs(s string) storedOutputs {
+	return storedOutputs{mainsymptom.Symptom(diffObservation(s)), mainsymptom.Value(s), mainsymptom.BoundValue(s)}
+}
+
+// frozenGenerated is frozenOutputs of every input of diffInputsOf, read once for the tests that read them all.
+var frozenGenerated = sync.OnceValue(func() []storedOutputs {
+	in := diffInputsOf()
+	out := make([]storedOutputs, len(in))
+	for i, s := range in {
+		out[i] = frozenOutputs(s)
+	}
+	return out
+})
+
+// diffShowsMore returns a description of the first shown output of s that holds a four-byte part of a probe
+// the frozen reading of origin/main's same output does not, or "".
+func diffShowsMore(s string) string {
+	return shownMoreThan(readOutputsHere(s), frozenOutputs(s))
+}
+
+// diffShowsMoreAt is diffShowsMore of the input of diffInputsOf of index i, s; without -race it takes the frozen
+// reading from frozenGenerated.
+func diffShowsMoreAt(i int, s string) string {
+	if redacttest.RaceDetector {
+		return diffShowsMore(s)
+	}
+	return shownMoreThan(readOutputsHere(s), frozenGenerated()[i])
+}
+
+// mainRegressionOutputs reads symptomMainRegressions: origin/main's real outputs on diffRegressions.
+func mainRegressionOutputs(t *testing.T) []storedOutputs {
+	t.Helper()
+	data, err := os.ReadFile(symptomMainRegressions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(lines) != len(diffRegressions) {
+		t.Fatalf("%s has %d lines, want %d: regenerate it with hack/symptom-main-baseline.sh", symptomMainRegressions,
+			len(lines), len(diffRegressions))
+	}
+	out := make([]storedOutputs, len(lines))
+	for i, line := range lines {
+		f := strings.Split(line, "\t")
+		if len(f) != 4 || f[0] != strconv.Itoa(i) {
+			t.Fatalf("%s line %d is malformed", symptomMainRegressions, i+1)
+		}
+		var v [3]string
+		for k := range v {
+			if v[k], err = strconv.Unquote(f[k+1]); err != nil {
+				t.Fatalf("%s line %d: %v", symptomMainRegressions, i+1, err)
+			}
+		}
+		out[i] = storedOutputs{v[0], v[1], v[2]}
+	}
+	return out
+}
+
 func TestStoredSymptomShowsNothingMainHides(t *testing.T) {
 	in := diffInputsOf()
 	more, ran := 0, 0
@@ -115,7 +126,7 @@ func TestStoredSymptomShowsNothingMainHides(t *testing.T) {
 			continue
 		}
 		ran++
-		if d := diffShowsMore(s); d != "" {
+		if d := diffShowsMoreAt(i, s); d != "" {
 			if more++; more <= 10 {
 				t.Errorf("input %d %q: %s", i, s, d)
 			}
@@ -127,80 +138,40 @@ func TestStoredSymptomShowsNothingMainHides(t *testing.T) {
 	t.Logf("%d inputs, %d show more than origin/main", ran, more)
 }
 
-// diffRegressions are the 61 inputs of the code review of 2026-11-26 that showed more than origin/main at
-// 14435c81: a key and its value, or two parts of a value, glued once a control, a format character or a CSI
-// between them was removed.
-var diffRegressions = []string{
-	"\x00word\xc3Authorization:\t\n\u00adZq8rT2vX9mK4pL7w",
-	"ok\r\n--password\x00Zq8rT\u0085",
-	"--password\u00ad|Zq8rT2vX9x}x|",
-	"\u00a0api_key\u200bZq8rT2vX9mK4pL7w",
-	"--password\u009b1mIOSFODNN7EXAMPLE10.0.0.1Zq8rT2vX9mK4pL7w",
-	"Bearer\x01Zq8rT2vX9mK4pL7w",
-	"token \u009b1mapi_keyAKIA}Bearer\x01Zq8rT2vX9mK4pL7w",
-	"api_key\u00adZq8rT2vX9mK4pL7w",
-	"value:password1.2.3.4AKIA\u00adZq8rT2vX9mK4pL7w",
-	"DB_PASSWORD\x01secretpostgres://<redacted>secretDB_PASSWORDxlog: \xc3Zq8rT2vX9mK4pL7w",
-	"\u00ad,\"--password\u009b1m}|:@sha1:10.0.0.1Zq8rT2vX9mK4pL7w",
-	"api_key\x01Zq8rT2vX9mK4pL7w",
-	"\u0085  Zq8rT\u200b2vX9mK4pL7w{\u0085\u00ad10.0.0.1word",
-	"\n\u200b[AKIA<redacted>\u2028Bearer\u200bZq8rT2vX9mK4pL7w",
-	"value:api_key\x00Zq8rT2vX9mK4pL7w",
-	"Bearer\x01\x00mK4pL7wZq8rT",
-	"ghp_log: Bearer\u2028word\"ghp_|api_key\x01Zq8rT2vX9mK4pL7w",
-	"DB_PASSWORD1.2.3.4\x00Zq8rT2vX9mK4pL7w",
-	"log: Bearer\u200bZq8rT2vX9mK4pL7w",
-	"--passwordmain\x1b[0m>pass2vX9mK4pL7w<redacted>",
-	"|\xffapi_key\u00adZq8rT2vX9mK4pL7w",
-	"\x00}<redacted>Bearer\u200bZq8rT2vX9mK4pL7w",
-	"{u:--password\x00Bearer@sha1:,Zq8rT2vX9Zq8rTpassword",
-	"]--password\x00|wordZq8rT2vX9mK4pL7w",
-	"failed\n  AKIAx}\xffapi_key\x01Zq8rT2vX9mK4pL7w",
-	"api_key\u200bZq8rT2vX9mK4pL7w",
-	"--password\u200b}Zq8rT2vX9mK4pL7w",
-	"log: \u009b1m--password\u009b1m{abcdef0123456789abcdef0123456789abcdef01}wordZq8rT2vX9mK4pL7w",
-	"Bearer\u00adZq8rT2vX9mK4pL7w",
-	"api_key\x00Zq8rT2vX9mK4pL7w",
-	"value:\x1b[5 qvalue:Zq8rT2vX9\u00admK4pL7w  AKIA-,",
-	"\u00a0IOSFODNN7EXAMPLE api_key\x01Zq8rT2vX9mK4pL7w",
-	"api_key\x00Zq8rT2vX9mK4pL7w",
-	"]Zq8rT\x002vX9mK4pL7w",
-	"\u00ad<redacted>--password\x1b[0m>wordZq8rT2vX9mK4pL7w",
-	" \u200b--password\u00adZq8rT\r\n{",
-	"abcdef0123456789abcdef0123456789abcdef01 Bearer\x00Zq8rT2vX9",
-	"--password\x01-secretAKIA>Zq8rT2vX9mK4pL7w",
-	"--password1.2.3.4\u009b1mZq8rT2vX9mK4pL7w",
-	"\x00\u00ad\r\n--password\x1b[31m|Zq8rT2vX9mK4pL7w",
-	"ok\r--password\u200b\x1b[0m{tokenZq8rT2vX9mK4pL7w",
-	"DB_PASSWORD\u00ad\x1b[5 q<redacted>main>Zq8rT\xff2vX9mK4pL7w",
-	"--password\u200bmK4pL7wmain\x00",
-	":api_key\x00Zq8rT2vX9mK4pL7w",
-	"--password\u200b2vX9mK4pL7w  ",
-	"api_key\x01Zq8rT2vX9mK4pL7w",
-	"\x1b[5 qokZq8rT\xc32vX9mK4pL7w@sha1:",
-	"\xc3:\n@sha1:--password\u00adok}Zq8rT2vX9mK4pL7w",
-	"- [Bearer\x00Zq8rT2vX9mK4pL7w",
-	"\x1b[0m--password\u200b>,:Zq8rT2vX9",
-	"1.2.3.4token\t--password\x00|{Zq8rT2vX9mK4pL7w",
-	"\xff[<redacted>Bearer\x01Zq8rT2vX9mK4pL7w",
-	"Bearer\x01\x00ghp_10.0.0.1Zq8rT2vX9mK4pL7w",
-	"\u0085api_key\x00--passwordx\u2028'secret\x1b[5 qZq8rT2vX9mK4pL7w",
-	"--password\u009b1mZq8rT@sha1:",
-	"u:  \n  \u200b--password\x1b[31m{]Zq8rT2vX9mK4pL7w",
-	"\xc3--password\x00ok[Zq8rT2vX9mK4pL7w",
-	"ghp_" + diffTokenBody + "@" + "db.example/app=Bearer\x012vX9mK4pL7w},\xc3\"",
-	"=\npassword\u009b1m--passwordmain ,failed" + "@db.example/appZq8rT2vX9mK4pL7w",
-	"-api_key\u200bBearer[abcdef0123456789abcdef0123456789abcdef01x>Zq8rT2vX9mK4pL7w",
-	"main\x1b[5 qmain[10.0.0.1ok@sha1:--password\u00adZq8rT",
-}
-
 func TestStoredSymptomRegressionsShowNothingMainHides(t *testing.T) {
 	if len(diffRegressions) != 61 {
 		t.Fatalf("%d regression inputs, want 61", len(diffRegressions))
 	}
-	for _, s := range diffRegressions {
-		if d := diffShowsMore(s); d != "" {
+	onMain := mainRegressionOutputs(t)
+	for i, s := range diffRegressions {
+		if d := shownMoreThan(readOutputsHere(s), onMain[i]); d != "" {
 			t.Errorf("%q: %s", s, d)
 		}
+	}
+}
+
+// TestFrozenReadingIsOriginMain holds the frozen reading (package mainsymptom) to origin/main's real outputs at
+// 24cd00a6: byte for byte on the 61 regression inputs, and by one SHA-256 over every generated input. The frozen
+// reading calls the live redact package, so a change of a redaction rule that changes what origin/main stored
+// fails here. The hash needs every input, so under -race only the table is checked.
+func TestFrozenReadingIsOriginMain(t *testing.T) {
+	onMain := mainRegressionOutputs(t)
+	for i, s := range diffRegressions {
+		if got := frozenOutputs(s); got != onMain[i] {
+			t.Errorf("regression %d %q: frozen reading gives %s, origin/main %s", i, s, storedOutputsRow(i, got),
+				storedOutputsRow(i, onMain[i]))
+		}
+	}
+	if redacttest.RaceDetector {
+		t.Skip("the hash of the generated inputs is checked without -race")
+	}
+	data, err := os.ReadFile(symptomMainGeneratedHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.TrimSpace(string(data))
+	if got := symptomOutputsHash(frozenGenerated()); got != want {
+		t.Errorf("the frozen reading of the %d generated inputs hashes to %s, origin/main's outputs to %s", diffInputs,
+			got, want)
 	}
 }

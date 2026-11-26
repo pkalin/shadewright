@@ -35,7 +35,7 @@ import (
 //   - each complete CSI (ESC "[" or U+009B, parameter bytes 0x30 to 0x3F, intermediate bytes 0x21 to 0x2F, one
 //     final byte 0x40 to 0x7E: colours, cursor moves, erasing) is removed whole. Cursor movement is not simulated:
 //     "state" ESC "[2DOK" prints as "staOK" on a terminal, and as "stateOK" here;
-//   - a run of whitespace of any kind (Unicode White_Space: blanks, tabs, CR, LF, the no-break and wide
+//   - a run of whitespace of any kind (Unicode White_Space: blanks, tabs, CR, LF, NEL, the no-break and wide
 //     spaces, the line and paragraph separators) becomes one ASCII space; what is removed in a run does not end it;
 //   - every other character that is not printable is removed: the C0 controls but backspace, the format characters
 //     (category Cf: zero-width, bidirectional, tag, soft hyphen), the default-ignorable ones (variation selectors,
@@ -44,7 +44,7 @@ import (
 // An entry is withheld whole when it cannot be printed that way with certainty. Terminal strings are not
 // interpreted, so every escape but a complete CSI withholds it: a CSI that is not complete or holds a byte its kind
 // does not allow, ESC followed by anything but "[" (an OSC, DCS, SOS, PM or APC string, ST, a two-byte escape, an
-// escape with intermediate bytes, ESC at the end), any other C1 control (U+0080 to U+009F as UTF-8, NEL among them)
+// escape with intermediate bytes, ESC at the end), any other C1 control (U+0080 to U+009F as UTF-8 but NEL)
 // and a raw byte 0x80 to 0x9F (a C1 control in its 8-bit form), terminated or not, nested or not. A backspace or
 // DEL, which a terminal uses to overstrike what it printed, withholds it too.
 //
@@ -189,9 +189,10 @@ func printable(wm *meter.Meter, r rune) bool {
 
 // escapeAt reads the escape sequence that starts at s[i]: its length n (0 when none starts there), the byte of
 // s right after its introducer (ESC "[" or U+009B), and false when the entry is withheld there. Only a complete
-// CSI is read; terminal strings are not interpreted. Any other escape (ESC and any byte but "[", ESC at the end)
-// and any other C1 control (U+0080 to U+009F encoded as UTF-8, or one raw byte 0x80 to 0x9F, which is never the
-// start of a character) withholds the entry: an OSC, DCS, SOS, PM or APC string and its terminator ST in every
+// CSI is read; terminal strings are not interpreted. NEL (U+0085) as UTF-8 is no escape: it is a line end, read
+// as whitespace. Any other escape (ESC and any byte but "[", ESC at the end) and any other C1 control (U+0080 to
+// U+009F encoded as UTF-8, or one raw byte 0x80 to 0x9F, NEL's 0x85 included, which is never the start of a
+// character) withholds the entry: an OSC, DCS, SOS, PM or APC string and its terminator ST in every
 // encoding among them, terminated or not, nested or not.
 func escapeAt(wm *meter.Meter, s string, i int) (n, body int, ok bool) {
 	switch c := s[i]; {
@@ -201,8 +202,11 @@ func escapeAt(wm *meter.Meter, s string, i int) (n, body int, ok bool) {
 		}
 		return 0, -1, false
 	case c == 0xc2 && i+1 < len(s) && s[i+1] >= 0x80 && s[i+1] <= 0x9f:
-		if s[i+1] == 0x9b {
+		switch s[i+1] {
+		case 0x9b:
 			return csiAt(wm, s, i, i+2)
+		case 0x85:
+			return 0, -1, true // NEL as UTF-8 is a line end: the caller reads it as whitespace
 		}
 		return 0, -1, false
 	case c >= 0x80 && c <= 0x9f:

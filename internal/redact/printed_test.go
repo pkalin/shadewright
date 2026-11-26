@@ -103,7 +103,7 @@ func TestShownTextWithholdsEveryEscapeButCSI(t *testing.T) {
 			}
 		}
 	}
-	// ST alone, and every other C1 control in both encodings.
+	// ST alone, every other C1 control in both encodings, and NEL as a raw byte.
 	for _, end := range []string{st.esc, st.c1, st.raw} {
 		in = append(in, "ready"+end+"ok")
 	}
@@ -111,7 +111,10 @@ func TestShownTextWithholdsEveryEscapeButCSI(t *testing.T) {
 		if c == 0x9b {
 			continue // the C1 CSI, complete, is removed (TestShownTextIsThePrintedText)
 		}
-		in = append(in, "ready "+string(c)+" ok", "ready "+string([]byte{byte(c)})+" ok")
+		in = append(in, "ready "+string([]byte{byte(c)})+" ok")
+		if c != 0x85 {
+			in = append(in, "ready "+string(c)+" ok") // NEL as UTF-8 is a line end (TestNELIsALineEnd)
+		}
 	}
 	// The raw CSI byte, and escapes other than CSI: two-byte escapes, an escape with an intermediate byte.
 	in = append(in, "ready \x9b31m ok", "ready \x1b7 ok", "ready \x1b= ok", "ready \x1b(B ok", "ready \x1bA ok")
@@ -119,5 +122,37 @@ func TestShownTextWithholdsEveryEscapeButCSI(t *testing.T) {
 		if got, ok := ReplaceCheckedShortShown(s, keep, same); ok {
 			t.Errorf("ReplaceCheckedShortShown(%q) = %q, want it withheld", s, got)
 		}
+	}
+}
+
+// NEL (U+0085) encoded as UTF-8 is a line end, Unicode White_Space like CR, LF and U+2028: a run of whitespace
+// that holds it is one space, and a secret it splits is still hidden or the entry withheld. The raw byte 0x85 is
+// a C1 control in its 8-bit form and withholds the entry (TestShownTextWithholdsEveryEscapeButCSI).
+func TestNELIsALineEnd(t *testing.T) {
+	const secret = "mysecretvalue" // #nosec G101 -- a made-up value the test looks for
+	token := "ghp_" + strings.Repeat("A", 36)
+	for _, c := range []struct{ in, want string }{
+		{"line one\u0085line two", "line one line two"},
+		{"line one\r\u0085 \tline two", "line one line two"},
+		{"Back-off\u0085restarting failed container", "Back-off restarting failed container"},
+	} {
+		if got, ok := ReplaceCheckedShortShown(c.in, keep, same); !ok || got != c.want {
+			t.Errorf("ReplaceCheckedShortShown(%q) = %q, %t; want %q", c.in, got, ok, c.want)
+		}
+	}
+	for _, in := range []string{
+		token[:20] + "\u0085" + token[20:] + " ok",
+		"pass\u0085word=" + secret + " ok",
+		"password=" + secret[:6] + "\u0085" + secret[6:] + " ok",
+		"--password " + secret[:6] + "\u0085" + secret[6:] + " ok",
+	} {
+		got, ok := ReplaceCheckedShortShown(in, keep, same)
+		if ok && (strings.Contains(got, secret[:4]) || strings.Contains(got, secret[6:10]) ||
+			strings.Contains(got, token[:20]) || strings.Contains(got, token[20:])) {
+			t.Errorf("ReplaceCheckedShortShown(%q) = %q shows the secret", in, got)
+		}
+	}
+	if got, ok := ReplaceCheckedShortShown("line one\x85line two", keep, same); ok {
+		t.Errorf("ReplaceCheckedShortShown(raw 0x85) = %q, want it withheld", got)
 	}
 }

@@ -87,6 +87,10 @@ type WorkloadIdentity struct {
 	// token is the cached access token, behind a function value: see setToken.
 	token     func() string
 	refreshAt time.Time
+	// seq numbers each exchange as it is created; cachedSeq is the seq of the exchange that last wrote
+	// token and refreshAt, so an older exchange never overwrites a newer one.
+	seq       uint64
+	cachedSeq uint64
 	// inflight is the exchange in progress, shared by every caller that needs a token meanwhile.
 	inflight *exchangeCall
 }
@@ -94,6 +98,7 @@ type WorkloadIdentity struct {
 // exchangeCall is one exchange in progress. Its result is set before done is closed; waiters is guarded by
 // WorkloadIdentity.mu.
 type exchangeCall struct {
+	seq     uint64
 	cancel  context.CancelFunc
 	waiters int
 	done    chan struct{}
@@ -165,7 +170,8 @@ func (w *WorkloadIdentity) Token(ctx context.Context) (string, error) {
 		// Detached from this caller's cancellation: the exchange serves every waiter, and is canceled only
 		// when all of them have left.
 		xctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-		call = &exchangeCall{done: make(chan struct{}), cancel: cancel}
+		w.seq++
+		call = &exchangeCall{seq: w.seq, done: make(chan struct{}), cancel: cancel}
 		w.inflight = call
 		go w.run(xctx, call)
 	}
@@ -195,9 +201,10 @@ func (w *WorkloadIdentity) run(ctx context.Context, call *exchangeCall) {
 	defer call.cancel()
 	tok, refreshAt, err := w.exchange(ctx)
 	w.mu.Lock()
-	if err == nil {
+	if err == nil && call.seq > w.cachedSeq {
 		w.setToken(tok)
 		w.refreshAt = refreshAt
+		w.cachedSeq = call.seq
 	}
 	if w.inflight == call {
 		w.inflight = nil

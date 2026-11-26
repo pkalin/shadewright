@@ -1132,20 +1132,48 @@ func TestClientNegotiatesHTTP1Only(t *testing.T) {
 type closeGate struct {
 	io.Reader
 	entered, release chan struct{}
-	once             sync.Once
+	enterOnce        sync.Once
+	releaseOnce      sync.Once
 }
 
 func (c *closeGate) Close() error {
-	c.once.Do(func() { close(c.entered) })
+	c.enterOnce.Do(func() { close(c.entered) })
 	<-c.release
 	return nil
 }
 
-// An exchange that was canceled and replaced must not write the cache, even when it passed its last context
-// check before the replacement ran: it checks under the lock that it is still the current exchange.
+func (c *closeGate) unblock() {
+	c.releaseOnce.Do(func() { close(c.release) })
+}
+
+const testWaitBound = 30 * time.Second
+
+func waitSignal(t *testing.T, ch <-chan struct{}, msg string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(testWaitBound):
+		t.Fatal(msg)
+	}
+}
+
+func waitErr(t *testing.T, ch <-chan error, msg string) error {
+	t.Helper()
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(testWaitBound):
+		t.Fatal(msg)
+		return nil
+	}
+}
+
+// An exchange that was abandoned and replaced by a newer successful exchange must not overwrite the cache,
+// while still finishing with its own result.
 func TestSupersededExchangeDoesNotWriteTheCache(t *testing.T) {
 	const stale = "opaque-STALE-TOKEN-0123456789"
 	gate := &closeGate{Reader: strings.NewReader(stsAnswerFor(stale, 3600)), entered: make(chan struct{}), release: make(chan struct{})}
+	defer gate.unblock()
 	var n atomic.Int32
 	var s *Source
 	first := make(chan *exchangeCall, 1)
@@ -1162,28 +1190,217 @@ func TestSupersededExchangeDoesNotWriteTheCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
 	errA := make(chan error, 1)
 	go func() { _, err := s.Token(ctxA); errA <- err }()
-	select {
-	case <-gate.entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the first exchange never reached the end of its response")
-	}
-	cancelA() // the only waiter leaves: the exchange is superseded
-	if err := <-errA; !errors.Is(err, context.Canceled) {
+	waitSignal(t, gate.entered, "the first exchange never reached the end of its response")
+	cancelA() // the only waiter leaves
+	if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("first caller: err = %v, want canceled", err)
 	}
 	if tok, err := s.Token(context.Background()); err != nil || tok != issuedMark {
 		t.Fatalf("second exchange: %q, %v", tok, err)
 	}
-	close(gate.release)
+	gate.unblock()
 	call := <-first
-	<-call.done
-	if call.token() == stale {
-		t.Error("the superseded exchange returned its token")
+	waitSignal(t, call.done, "the first exchange never finished")
+	if tok, err := call.result(); err != nil || tok != stale {
+		t.Errorf("first exchange result: err = %v, got own token = %v; want own token and nil error", err, tok == stale)
 	}
 	if tok, err := s.Token(context.Background()); err != nil || tok != issuedMark || n.Load() != 2 {
 		t.Errorf("cache holds %q (err %v) after %d exchanges, want the second exchange's token from 2", tok, err, n.Load())
+	}
+}
+
+// An abandoned exchange that succeeds with no newer exchange still caches its valid token, so the next Token
+// call reuses it without making a second exchange.
+func TestAbandonedExchangeCachesWhenAlone(t *testing.T) {
+	const firstTok = "opaque-FIRST-TOKEN-0123456789"
+	gate := &closeGate{Reader: strings.NewReader(stsAnswerFor(firstTok, 3600)), entered: make(chan struct{}), release: make(chan struct{})}
+	defer gate.unblock()
+	var n atomic.Int32
+	var s *Source
+	first := make(chan *exchangeCall, 1)
+	s, err := newSource(testConfig(t), rtFunc(func(r *http.Request) (*http.Response, error) {
+		if n.Add(1) == 1 {
+			s.mu.Lock()
+			first <- s.inflight
+			s.mu.Unlock()
+			return okResponse(r, http.StatusOK, gate)
+		}
+		return okResponse(r, http.StatusOK, io.NopCloser(strings.NewReader(stsAnswer(3600))))
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	errA := make(chan error, 1)
+	go func() { _, err := s.Token(ctxA); errA <- err }()
+	waitSignal(t, gate.entered, "the first exchange never reached the end of its response")
+	cancelA() // the only waiter leaves, and no newer caller arrives
+	if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller: err = %v, want canceled", err)
+	}
+	gate.unblock()
+	call := <-first
+	waitSignal(t, call.done, "the first exchange never finished")
+	if tok, err := call.result(); err != nil || tok != firstTok {
+		t.Errorf("first exchange result: err = %v, got own token = %v; want own token and nil error", err, tok == firstTok)
+	}
+	if tok, err := s.Token(context.Background()); err != nil || tok != firstTok || n.Load() != 1 {
+		t.Errorf("cache holds %q (err %v) after %d exchanges, want the first exchange's token from 1", tok, err, n.Load())
+	}
+}
+
+// An abandoned exchange that succeeds after a newer exchange failed still caches its valid token.
+func TestAbandonedExchangeCachesAfterReplacementFails(t *testing.T) {
+	const firstTok = "opaque-FIRST-TOKEN-0123456789"
+	gate := &closeGate{Reader: strings.NewReader(stsAnswerFor(firstTok, 3600)), entered: make(chan struct{}), release: make(chan struct{})}
+	defer gate.unblock()
+	var n atomic.Int32
+	var s *Source
+	first := make(chan *exchangeCall, 1)
+	s, err := newSource(testConfig(t), rtFunc(func(r *http.Request) (*http.Response, error) {
+		switch n.Add(1) {
+		case 1:
+			s.mu.Lock()
+			first <- s.inflight
+			s.mu.Unlock()
+			return okResponse(r, http.StatusOK, gate)
+		case 2:
+			return okResponse(r, http.StatusServiceUnavailable, io.NopCloser(strings.NewReader("unavailable")))
+		default:
+			return okResponse(r, http.StatusOK, io.NopCloser(strings.NewReader(stsAnswer(3600))))
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	errA := make(chan error, 1)
+	go func() { _, err := s.Token(ctxA); errA <- err }()
+	waitSignal(t, gate.entered, "the first exchange never reached the end of its response")
+	cancelA() // the only waiter leaves
+	if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller: err = %v, want canceled", err)
+	}
+	if _, err := s.Token(context.Background()); !providers.IsRetryable(err) {
+		t.Fatalf("second exchange: err = %v, want retryable failure", err)
+	}
+	gate.unblock()
+	call := <-first
+	waitSignal(t, call.done, "the first exchange never finished")
+	if tok, err := call.result(); err != nil || tok != firstTok {
+		t.Errorf("first exchange result: err = %v, got own token = %v; want own token and nil error", err, tok == firstTok)
+	}
+	if tok, err := s.Token(context.Background()); err != nil || tok != firstTok || n.Load() != 2 {
+		t.Errorf("cache holds %q (err %v) after %d exchanges, want the first exchange's token from 2", tok, err, n.Load())
+	}
+}
+
+// A live waiter of an exchange always gets that exchange's own result, even when an older abandoned exchange
+// finishes and writes the cache while the newer exchange is still in flight.
+func TestLiveWaiterGetsOwnCallResult(t *testing.T) {
+	const firstTok = "opaque-FIRST-TOKEN-0123456789"
+	for _, tc := range []struct {
+		name      string
+		secondOK  bool
+		wantCache string
+	}{
+		{name: "replacement succeeds", secondOK: true, wantCache: issuedMark},
+		{name: "replacement fails", secondOK: false, wantCache: firstTok},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate1 := &closeGate{Reader: strings.NewReader(stsAnswerFor(firstTok, 3600)), entered: make(chan struct{}), release: make(chan struct{})}
+			defer gate1.unblock()
+			call2Started := make(chan struct{})
+			call2Release := make(chan struct{})
+			var release2Once sync.Once
+			unblock2 := func() { release2Once.Do(func() { close(call2Release) }) }
+			defer unblock2()
+
+			var n atomic.Int32
+			var s *Source
+			first := make(chan *exchangeCall, 1)
+			s, err := newSource(testConfig(t), rtFunc(func(r *http.Request) (*http.Response, error) {
+				switch n.Add(1) {
+				case 1:
+					s.mu.Lock()
+					first <- s.inflight
+					s.mu.Unlock()
+					return okResponse(r, http.StatusOK, gate1)
+				case 2:
+					close(call2Started)
+					<-call2Release
+					if tc.secondOK {
+						return okResponse(r, http.StatusOK, io.NopCloser(strings.NewReader(stsAnswer(3600))))
+					}
+					return okResponse(r, http.StatusServiceUnavailable, io.NopCloser(strings.NewReader("unavailable")))
+				default:
+					return okResponse(r, http.StatusOK, io.NopCloser(strings.NewReader(stsAnswer(3600))))
+				}
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctxA, cancelA := context.WithCancel(context.Background())
+			defer cancelA()
+			errA := make(chan error, 1)
+			go func() { _, err := s.Token(ctxA); errA <- err }()
+			waitSignal(t, gate1.entered, "the first exchange never reached the end of its response")
+			cancelA()
+			if err := waitErr(t, errA, "first caller never returned"); !errors.Is(err, context.Canceled) {
+				t.Fatalf("first caller: err = %v, want canceled", err)
+			}
+
+			type result struct {
+				tok string
+				err error
+			}
+			resB := make(chan result, 1)
+			go func() {
+				tok, err := s.Token(context.Background())
+				resB <- result{tok, err}
+			}()
+			waitSignal(t, call2Started, "the second exchange never started")
+
+			gate1.unblock()
+			call1 := <-first
+			waitSignal(t, call1.done, "the first exchange never finished")
+			if tok, err := call1.result(); err != nil || tok != firstTok {
+				t.Errorf("first exchange result: err = %v, got own token = %v; want own token and nil error", err, tok == firstTok)
+			}
+			s.mu.Lock()
+			stillInflight := s.inflight != nil && s.inflight != call1
+			s.mu.Unlock()
+			if !stillInflight {
+				t.Error("older exchange cleared inflight while the newer exchange was still running")
+			}
+
+			unblock2()
+			var r result
+			select {
+			case r = <-resB:
+			case <-time.After(testWaitBound):
+				t.Fatal("second caller never returned")
+			}
+			if tc.secondOK {
+				if r.err != nil || r.tok != issuedMark {
+					t.Errorf("live waiter: err = %v, got second token = %v; want second token", r.err, r.tok == issuedMark)
+				}
+			} else {
+				if r.tok != "" || !providers.IsRetryable(r.err) {
+					t.Errorf("live waiter: err = %v, empty token = %v; want retryable error and no token", r.err, r.tok == "")
+				}
+			}
+			if tok, err := s.Token(context.Background()); err != nil || tok != tc.wantCache || n.Load() != 2 {
+				t.Errorf("cache check: err = %v, got expected token = %v, exchanges = %d; want expected token from 2 exchanges",
+					err, tok == tc.wantCache, n.Load())
+			}
+		})
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/shadewright-labs/shadewright/internal/redact/meter"
+	"github.com/shadewright-labs/shadewright/internal/redact/redacttest"
 )
 
 // keep is the repl of a test that only reads the flag: it writes the marker of each match.
@@ -99,11 +100,26 @@ func TestHeapOfAShortEntry(t *testing.T) {
 			out, _, ok := ReplaceCheckedShortShownAndRead(s, repl, between)
 			return out, ok
 		}}}
+	// Warm up one-time process initialization (released.exprs compiles each kept rule's meter.Expr lazily on first
+	// use) so standalone runs of this test do not charge package setup to the first shape.
+	for _, e := range entries {
+		e.run("password=hunter2\x01\xff", keep, same)
+	}
 	for _, e := range entries {
 		for _, sh := range heapShapes {
 			s := sh.text(MaxShortEntry)
 			var ok bool
-			peak := peakLiveHeap(func() { _, ok = e.run(s, keep, same) })
+			peak, runs := redacttest.SmallestPeakTightRuns(func() { _, ok = e.run(s, keep, same) }, func(p uint64) bool {
+				return p > ShortEntryHeap
+			})
+			if len(runs) >= 2 {
+				diff := max(runs[0], runs[1]) - min(runs[0], runs[1])
+				if diff > 256<<10 {
+					t.Logf("%-32s %-32s run 1 (%.3f MiB) and run 2 (%.3f MiB) differed by %.3f MiB",
+						e.name, sh.name, mib(runs[0]), mib(runs[1]), mib(diff))
+				}
+			}
+			t.Logf("%-32s %-32s peak %.3f MiB", e.name, sh.name, mib(peak))
 			worst = max(worst, peak)
 			if !ok && e.name != shownAndReadEntry {
 				t.Errorf("%s on %s: a short entry was withheld", e.name, sh.name)

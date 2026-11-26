@@ -36,31 +36,67 @@ const HeapProcs = 4
 // while the collector runs at GOGC 10 under a soft limit of 96 MiB and GOMAXPROCS HeapProcs, so that a sample
 // stays close to what f keeps alive. The heap tests of package redact and of the read tools measure with it.
 func PeakLiveHeap(f func()) uint64 {
+	return peakHeap(f, 10, 96<<20, 1, 500*time.Microsecond)
+}
+
+// MinTightPeakDuration is the shortest transient peak PeakLiveHeapTight is tested to catch at its 50-microsecond
+// sampling interval (TestSmallestPeakTightDoesNotUnderRead).
+const MinTightPeakDuration = 3 * time.Millisecond
+
+// PeakLiveHeapTight is PeakLiveHeap for a small bound (around 1 MiB, such as ShortEntryHeap), where GOGC 10 on
+// the test binary's own baseline heap lets hundreds of KiB of unswept garbage accumulate before a collection
+// finishes (#1201). It runs two collections before reading base (so sync.Pool victims from earlier calls do not
+// inflate base), sets GOGC 1 and the soft memory limit to base so the collector runs continuously (capped at
+// about 50% CPU, a tighter regime than production) to reclaim short-lived allocations during f, waits for the
+// sampler goroutine to start, and samples every 50 microseconds (catching peaks held for at least
+// MinTightPeakDuration).
+//
+// The reading is not a strict upper bound on live heap: /memory/classes/heap/objects:bytes still counts live
+// objects plus objects not yet swept, but the runtime builds it from smallAllocCount, which is flushed only at
+// mcache.refill and releaseAll, so a sample misses small objects allocated into the active P's cached spans since
+// the last refill (tens of KiB, up to roughly 100 to 200 KiB when many size classes are touched at once;
+// PeakLiveHeap has the same bias).
+func PeakLiveHeapTight(f func()) uint64 {
+	return peakHeap(f, 1, 0, 2, 50*time.Microsecond)
+}
+
+func peakHeap(f func(), gogc int, memLimit int64, preGCs int, interval time.Duration) uint64 {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(HeapProcs))
-	defer debug.SetGCPercent(debug.SetGCPercent(10))
-	defer debug.SetMemoryLimit(debug.SetMemoryLimit(96 << 20))
+	defer debug.SetGCPercent(debug.SetGCPercent(gogc))
+	if memLimit > 0 {
+		defer debug.SetMemoryLimit(debug.SetMemoryLimit(memLimit))
+	}
 	s := []metrics.Sample{{Name: heapSample}}
-	runtime.GC()
+	for range preGCs {
+		runtime.GC()
+	}
 	metrics.Read(s)
 	base := s[0].Value.Uint64()
+	if memLimit == 0 {
+		// #nosec G115 -- heap object bytes stay far below math.MaxInt64
+		defer debug.SetMemoryLimit(debug.SetMemoryLimit(int64(base)))
+	}
 	var (
-		stop atomic.Bool
-		peak uint64
-		done = make(chan struct{})
+		stop    atomic.Bool
+		peak    uint64
+		started = make(chan struct{})
+		done    = make(chan struct{})
 	)
 	go func() {
 		defer close(done)
 		x := []metrics.Sample{{Name: heapSample}}
+		close(started)
 		for !stop.Load() {
 			metrics.Read(x)
 			peak = max(peak, x[0].Value.Uint64())
-			time.Sleep(500 * time.Microsecond)
+			time.Sleep(interval)
 		}
 	}()
+	<-started
 	f()
+	metrics.Read(s)
 	stop.Store(true)
 	<-done
-	metrics.Read(s)
 	peak = max(peak, s[0].Value.Uint64())
 	return peak - min(base, peak)
 }
@@ -76,12 +112,35 @@ const PeakRuns = 3
 // (#1112). The live heap of f is the same in every run, so its smallest reading is the closest to it, and a shape
 // that really holds more is over in every run. f must hold nothing from one run to the next.
 func SmallestPeak(f func(), over func(peak uint64) bool) uint64 {
-	peak := PeakLiveHeap(f)
+	return smallestPeak(PeakLiveHeap, f, over)
+}
+
+// SmallestPeakTight is SmallestPeak using PeakLiveHeapTight.
+func SmallestPeakTight(f func(), over func(peak uint64) bool) uint64 {
+	return smallestPeak(PeakLiveHeapTight, f, over)
+}
+
+// SmallestPeakTightRuns is SmallestPeakTight, also returning the reading of each run it took.
+func SmallestPeakTightRuns(f func(), over func(peak uint64) bool) (uint64, []uint64) {
+	return smallestPeakRuns(PeakLiveHeapTight, f, over)
+}
+
+func smallestPeak(measure func(func()) uint64, f func(), over func(peak uint64) bool) uint64 {
+	peak, _ := smallestPeakRuns(measure, f, over)
+	return peak
+}
+
+func smallestPeakRuns(measure func(func()) uint64, f func(), over func(peak uint64) bool) (uint64, []uint64) {
+	runs := make([]uint64, 1, PeakRuns)
+	runs[0] = measure(f)
+	peak := runs[0]
 	for range PeakRuns - 1 {
 		if !over(peak) {
 			break
 		}
-		peak = min(peak, PeakLiveHeap(f))
+		r := measure(f)
+		runs = append(runs, r)
+		peak = min(peak, r)
 	}
-	return peak
+	return peak, runs
 }

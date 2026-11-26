@@ -411,6 +411,11 @@ func TestBudgetDecidesWholeOrWithholdsWhole(t *testing.T) {
 			}
 			for i, n := range sizes {
 				in, secret, kept := budgetKnown(n, i)
+				if e.name == shownEntry {
+					// The shown text is printed on one line, and a value a line end follows is withheld there
+					// (printed.go): its known input is the same on one line.
+					in = strings.ReplaceAll(in, "\n", " ")
+				}
 				want := e.run(nil, in)
 				if e.name != "Clean" {
 					if strings.Contains(want, secret) {

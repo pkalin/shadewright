@@ -102,6 +102,7 @@ func printedTextsOf(wm *meter.Meter, s string) (shownTexts, bool) {
 	b.qAt = make([]int32, 0, len(s))
 	b.fAt = make([]int32, 0, len(s))
 	for i := range b.readAt {
+		tick(wm, 1)
 		b.readAt[i] = -1
 	}
 	for i := 0; i < len(s); {
@@ -113,6 +114,7 @@ func printedTextsOf(wm *meter.Meter, s string) (shownTexts, bool) {
 			if body >= 0 {
 				b.f.WriteString(s[body : i+n])
 				for range i + n - body {
+					tick(wm, 1)
 					b.fAt = append(b.fAt, -1)
 				}
 			}
@@ -139,6 +141,7 @@ func printedTextsOf(wm *meter.Meter, s string) (shownTexts, bool) {
 			b.closeRun()
 			at := int32(b.p.Len()) // #nosec G115 -- an entry is at most MaxEntry bytes
 			for k := range n {
+				tick(wm, 1)
 				b.readAt[i+k] = at + int32(k) // #nosec G115 -- n is at most 4
 				b.qAt = append(b.qAt, at+int32(k))
 				b.fAt = append(b.fAt, at+int32(k))
@@ -285,6 +288,7 @@ func (r *Redactor) shownSpans(wm *meter.Meter, s string) (string, []span, bool) 
 	}
 	covered := make([]bool, len(t.printed))
 	for _, sp := range spans {
+		tick(wm, 1)
 		for k := sp.start; k < sp.end; k++ {
 			tick(wm, 1)
 			covered[k] = true
@@ -292,6 +296,7 @@ func (r *Redactor) shownSpans(wm *meter.Meter, s string) (string, []span, bool) 
 	}
 	shows := func(text string, at []int32) bool {
 		for _, sp := range r.spansAsMain(wm, text) {
+			tick(wm, 1)
 			for k := sp.start; k < sp.end; k++ {
 				tick(wm, 1)
 				if p := at[k]; p >= 0 && !covered[p] {
@@ -309,8 +314,8 @@ func (r *Redactor) shownSpans(wm *meter.Meter, s string) (string, []span, bool) 
 }
 
 // continuesPastARun reports whether a match of the printed text other than an address ends right before a run of
-// whitespace other than one ASCII space that more text follows: the run may split the secret ("password=abc" CR
-// "def" prints as "password=abc def", and the match holds "abc" alone), so the entry is withheld. spans and
+// whitespace other than one ASCII space that more text follows: the run may split the secret ("--password abc" CR
+// "def" prints as "--password abc def", and the match holds "abc" alone), so the entry is withheld. spans and
 // t.collapsed are both in order, so each is read once.
 func continuesPastARun(wm *meter.Meter, t shownTexts, spans []span) bool {
 	k := 0

@@ -234,8 +234,8 @@ Before the first run, the maintainer sets up:
 The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a user-assigned identity with the
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
-A run of the ten scenarios, their variants (four so far, `oom/rollout`, `oom/absorbed`, `keda-at-ceiling/wide-policy`
-and `unschedulable/over-bound`) and the five escalation scenarios is nineteen analyses per repeat. The real-model
+A run of the ten scenarios, their variants (five so far, `oom/rollout`, `oom/absorbed`, `oom/lifetimes`, `keda-at-ceiling/wide-policy`
+and `unschedulable/over-bound`) and the five escalation scenarios is twenty analyses per repeat. The real-model
 run for [#841](https://github.com/shadewright-labs/shadewright/issues/841), before the v0.6.0 release, is a run of all of them,
 so it includes both `oom/absorbed` and `unschedulable/over-bound`. The escalation scenarios need an escalation
 model: on Foundry `EVAL_ESCALATION_DEPLOYMENT` with `EVAL_ESCALATION_MODEL` (the deployment alone is refused
@@ -446,6 +446,16 @@ moves no block ID, and none of its lines is quotable. It is the recorded scenari
 asked for before the tally reached the model. `TestPromptShowsTheAbsorbedTally` replays it, checks that it passes
 and that its prompt holds one line per entry of the tally.
 
+`oom/lifetimes` is the `oom` Incident with seven `termination:` records in `status.occurrences`
+([#1005](https://github.com/shadewright-labs/shadewright/issues/1005), [ADR-0023](adr/0023-how-the-analyzer-calls-the-model.md)
+amendments of 2026-11-21 and 2026-11-26): six with usable start times (so the `last 5` cap drops the oldest, and one
+same-second kill where `started` equals `began` renders as `<1s`) and one without a start time. Its summary shows one
+fixed, non-quotable line (`age at kill (last 5, mixed across pods and revisions, oldest first): 12s, 20s, 15s, <1s,
+30s; 1 other kill without a start time (of at most 32 recorded)`), with `<` escaped as `&lt;` inside the rendered
+context block; everything else and its reply stay the scenario's, since the line moves no block ID and nothing quotes
+it. `TestPromptShowsTheOOMLifetimes` replays it and checks that it passes, that the line is non-quotable, and that the
+prompt holds the rendered line, and `TestPromptGolden` pins its prompt digest.
+
 `unschedulable/over-bound` is the case for the other half of #796: a summary over its bound with no tally, whose
 lines all stay while its values are shortened with a "(N bytes cut)" note. Its Incident is `unschedulable` in a
 shared cluster of 48 nodes: the scheduler's note lists thirteen distinct reasons (tainted node pools, cordoned and
@@ -500,8 +510,8 @@ known by construction get it under every small change.
 
 **The prompt of a scenario without a tally.** `TestPromptGolden` keeps, in `test/eval/testdata/prompt.golden`, the
 SHA-256 of the first model request (the system prompt and the context) of every scenario whose Incident has an empty
-`status.absorbed`, computed by the code before the tally block (that of `unschedulable/over-bound`, added after it,
-pins its summary as shortened at the default bound). Each must stay the same byte for byte; a change meant
+`status.absorbed`, computed by the code before the tally block (`unschedulable/over-bound` pins its shortened summary at
+the default bound, and `oom/lifetimes` pins its OOM lifetime line). Each must stay the same byte for byte; a change meant
 to alter every prompt writes them again with `SHADEWRIGHT_UPDATE_GOLDEN=1 go test -run TestPromptGolden ./test/eval/`.
 
 **Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the
@@ -641,6 +651,16 @@ result recorded before it no longer matches. No passing result is stored in this
 nothing stored is lost; a real-model evaluation run after this change, `oom/absorbed` included, is the one that
 counts. In CI the fake model replays the recorded replies, which do not depend on the prompt: every scenario, `oom`
 and `oom/absorbed` included, still passes.
+
+**OOM lifetimes and the digest.** The OOM lifetime line ([#1005](https://github.com/shadewright-labs/shadewright/issues/1005))
+adds the `oom/lifetimes` variant, which shows the model one fixed, non-quotable summary line with the last 5 per-instance
+ages at kill (oldest first, mixed across pods and revisions, same-second kills as `<1s`, rendered with `&lt;1s` inside
+the block) and the count of recorded kills without a start time. The change alters `contextBuilder.source` (code in
+`internal/incidentcontext`) and `scenarios` (the new `oom/lifetimes` variant), so every manifest digest changes and
+real-model results recorded before it no longer match. No passing result is stored in this repository yet (planned);
+the real-model result for the new manifest digest is recorded on the pull request. Every other scenario without
+termination start times keeps the same prompt bytes (`TestPromptGolden`), and in CI the fake model replays every
+scenario, `oom/lifetimes` included, and passes.
 
 The analyzer cannot yet compute the same digest at run time (it does not know the rubric, the threshold or the
 repeats, which ADR-0025 checks when the list of passing results is built); that check is the planned follow-up.

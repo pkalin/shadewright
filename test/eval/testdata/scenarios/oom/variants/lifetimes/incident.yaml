@@ -1,0 +1,57 @@
+# Synthetic: the oom scenario's Incident (../../incident.yaml) with termination records in status.occurrences
+# carrying container start times, not recorded in the lab. Six kills have usable start times (the oldest, 45s,
+# is dropped by the last-5 cap; one starts and finishes in the same second and renders as <1s; the newest
+# matches the pod's lastState.terminated in ../../objects.yaml) and one earlier kill has no start time. The
+# context builder shows the resulting lifetime line in the summary (ADR-0023 amendments of 2026-11-21 and
+# 2026-11-26, #1005).
+apiVersion: remediation.shadewright.io/v1alpha1
+kind: Incident
+metadata:
+  name: inc-oom
+  namespace: shadewright-system
+  uid: 00000000-0000-4000-8000-0000000003c0
+spec:
+  fingerprint: sha256:00000000000000000000000000000000000000000000000000000000000003c0
+  subject:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+    uid: 00000000-0000-4000-8000-0000000003c1
+  reason: OOMKilled
+  type: Warning
+  reportingController: kubelet
+  symptom: Container web terminated with exit code 137
+status:
+  phase: Open
+  count: 7
+  firstSeen: "2026-11-04T11:40:00Z"
+  lastSeen: "2026-11-04T11:56:00Z"
+  occurrences:
+    - id: termination:00000000000000000000000000000007
+      total: 1
+      began: "2026-11-04T11:56:00Z"
+      started: "2026-11-04T11:55:30Z"
+    - id: termination:00000000000000000000000000000006
+      total: 1
+      began: "2026-11-04T11:53:00Z"
+      started: "2026-11-04T11:53:00Z"
+    - id: termination:00000000000000000000000000000005
+      total: 1
+      began: "2026-11-04T11:50:15Z"
+      started: "2026-11-04T11:50:00Z"
+    - id: termination:00000000000000000000000000000004
+      total: 1
+      began: "2026-11-04T11:48:20Z"
+      started: "2026-11-04T11:48:00Z"
+    - id: termination:00000000000000000000000000000003
+      total: 1
+      began: "2026-11-04T11:46:12Z"
+      started: "2026-11-04T11:46:00Z"
+    - id: termination:00000000000000000000000000000002
+      total: 1
+      began: "2026-11-04T11:43:45Z"
+      started: "2026-11-04T11:43:00Z"
+    - id: termination:00000000000000000000000000000001
+      total: 1
+      began: "2026-11-04T11:40:00Z"

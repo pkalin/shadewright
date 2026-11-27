@@ -664,11 +664,12 @@ type oomLifetime struct {
 
 // oomLifetimeLine returns the fixed summary line of container lifetimes before each OOM kill for an
 // OOMKilled Incident (#1005, ADR-0023 amendments of 2026-11-21 and 2026-11-26), or empty when inc is not an
-// OOMKilled Incident or has no termination occurrence with a positive finish-minus-start duration. Every age
-// shown is finish minus start of one recorded termination instance, both from pod status; no age is computed
-// from the time between kills. At most [maxOOMLifetimes] newest ages are shown, oldest first, labelled as
-// mixed across pods and revisions, followed by the count of recorded termination occurrences (at most 32)
-// without a usable start time (missing, zero or negative duration). The line holds only fixed words,
+// OOMKilled Incident or has no termination occurrence with a usable start time (started set and not after
+// began in whole seconds). Every age shown is finish minus start of one recorded termination instance, both
+// from pod status; a same-second kill (age 0 after truncation) renders as "<1s", and no age is computed from
+// the time between kills. At most [maxOOMLifetimes] newest ages are shown, oldest first, labelled as mixed
+// across pods and revisions, followed by the count of recorded termination occurrences (at most 32) without
+// a usable start time (missing start or finish time, or start after finish). The line holds only fixed words,
 // durations and counts, and is never quotable.
 func oomLifetimeLine(inc *remediationv1alpha1.Incident) string {
 	if inc.Spec.Reason != causereason.OOMKilled {
@@ -685,7 +686,7 @@ func oomLifetimeLine(inc *remediationv1alpha1.Incident) string {
 			continue
 		}
 		age := r.Began.Truncate(time.Second).Sub(r.Started.Truncate(time.Second))
-		if age <= 0 {
+		if age < 0 {
 			without++
 			continue
 		}
@@ -709,7 +710,11 @@ func oomLifetimeLine(inc *remediationv1alpha1.Incident) string {
 	}
 	ages := make([]string, len(valid))
 	for i, v := range valid {
-		ages[i] = v.age.String()
+		if v.age == 0 {
+			ages[i] = "<1s"
+		} else {
+			ages[i] = v.age.String()
+		}
 	}
 	prefix := "age at kill (mixed across pods and revisions, oldest first): "
 	if capped {

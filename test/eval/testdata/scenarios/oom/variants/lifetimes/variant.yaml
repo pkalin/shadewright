@@ -1,0 +1,5 @@
+about: >-
+  The oom Incident with termination records in status.occurrences (six with usable start times including one
+  same-second kill, and one without a start time), so the context's summary shows the OOM lifetime line with
+  the "last 5" cap, a <1s age and the count of kills without a start time (ADR-0023 amendments of 2026-11-21
+  and 2026-11-26, #1005). The objects, series and policies are the scenario's.

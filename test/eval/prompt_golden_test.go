@@ -30,15 +30,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
 	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
 // promptGolden holds, per scenario whose Incident has an empty absorbed tally, the SHA-256 of the first model
 // request's messages (the system prompt and the context, by role): the prompt as the model gets it. The values
 // were computed by the code before the absorbed tally block (#796), so a scenario with an empty tally must
-// still get the same prompt, byte for byte; unschedulable/over-bound, added after it (#841), pins its shortened
-// summary. A change that is meant to change the prompt of every Incident
-// writes them again: SHADEWRIGHT_UPDATE_GOLDEN=1 go test -run TestPromptGolden ./test/eval/
+// still get the same prompt, byte for byte; unschedulable/over-bound (#841) pins its shortened summary, and
+// oom/lifetimes (#1005) pins its OOM lifetime summary line. A change that is meant to change the prompt of
+// every Incident writes them again: SHADEWRIGHT_UPDATE_GOLDEN=1 go test -run TestPromptGolden ./test/eval/
 var promptGolden = filepath.Join("testdata", "prompt.golden")
 
 // promptDigest hashes messages: each one's role and content, length-prefixed so no two lists hash alike.
@@ -168,5 +169,60 @@ func TestPromptShowsTheAbsorbedTally(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no scenario %s/absorbed", scnOOM)
+	}
+}
+
+// TestPromptShowsTheOOMLifetimes checks that oom/lifetimes exercises the OOM container lifetime summary line
+// (#1005, ADR-0023 amendments of 2026-11-21 and 2026-11-26): the oom Incident with termination records
+// (six with usable start times including one same-second kill, and one without a start time) replays its
+// recorded reply and passes, its summary carries the exact lifetime line (unquotable), and the first prompt
+// sent to the model carries the rendered line.
+func TestPromptShowsTheOOMLifetimes(t *testing.T) {
+	const wantLine = "age at kill (last 5, mixed across pods and revisions, oldest first): " +
+		"12s, 20s, 15s, <1s, 30s; 1 other kill without a start time (of at most 32 recorded)\n"
+	scheme, err := newScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios, err := loadScenarios(scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *scenario
+	for _, s := range scenarios {
+		if s.name == scnOOM+"/lifetimes" {
+			found = s
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no scenario %s/lifetimes", scnOOM)
+	}
+	sum := summaryOf(t, found, incidentcontext.DefaultLimits())
+	if strings.Count(sum.Text, wantLine) != 1 {
+		t.Errorf("%s: the summary does not hold %q once:\n%s", found.name, wantLine, sum.Text)
+	}
+	for _, part := range sum.Data() {
+		if strings.Contains(part, "age at kill") || strings.Contains(part, "<1s") ||
+			strings.Contains(part, "without a start time") {
+			t.Errorf("%s: the lifetime line is quotable: %q", found.name, part)
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), scenarioTimeout)
+	res, err := runScenario(ctx, scheme, found, replaySource{})
+	cancel()
+	if err != nil {
+		t.Fatalf("%s: %v", found.name, err)
+	}
+	if !res.Pass {
+		t.Errorf("%s: failed: outcome %+v, diagnosis %+v", found.name, res.Outcome, res.Diagnosis)
+	}
+	var prompt strings.Builder
+	for _, m := range res.prompt {
+		prompt.WriteString(m.Content)
+	}
+	renderedLine := incidentcontext.Neutralise(wantLine)
+	if strings.Count(prompt.String(), renderedLine) != 1 {
+		t.Errorf("%s: the prompt does not hold %q once:\n%s", found.name, renderedLine, prompt.String())
 	}
 }

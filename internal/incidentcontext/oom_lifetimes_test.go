@@ -52,10 +52,11 @@ func oomIncident(occs ...remediationv1alpha1.OccurrenceRecord) *remediationv1alp
 }
 
 // TestOOMLifetimesGolden pins the exact summary wording for issue #1005 (decision of 2026-11-21, ADR-0023
-// amendment of 2026-11-21): same short age each time, growing ages, more than 5 instances, one instance only,
-// one instance with earlier kills lacking a start time, none with a start time (nothing claimed, and never
-// computed from the gap between two kills), negative/zero durations counted as without, and unsorted records
-// ordered oldest first and labelled as mixed across pods and revisions.
+// amendments of 2026-11-21 and 2026-11-26): same short age each time, growing ages, more than 5 instances,
+// one instance only, one instance with earlier kills lacking a start time, none with a start time (nothing
+// claimed, and never computed from the gap between two kills), same-second kill rendered as <1s, negative
+// durations and missing times counted as without, and unsorted records ordered oldest first and labelled as
+// mixed across pods and revisions.
 func TestOOMLifetimesGolden(t *testing.T) {
 	b := newBuilder(t, reader(t, webObjects()...), sources{}, nil)
 	base := testNow.Add(-time.Hour)
@@ -137,23 +138,37 @@ func TestOOMLifetimesGolden(t *testing.T) {
 			wantLine: "",
 		},
 		{
-			name: "negative and zero durations only claim nothing",
+			name: "negative duration only claims nothing",
 			occs: []remediationv1alpha1.OccurrenceRecord{
-				termRec(2, base.Add(10*time.Minute+5*time.Second), base.Add(10*time.Minute)), // finish before start
-				termRec(1, base, base), // zero duration
+				termRec(1, base.Add(10*time.Minute+5*time.Second), base.Add(10*time.Minute)), // finish before start
 			},
 			wantLine: "",
 		},
 		{
-			name: "negative zero and missing times counted as without",
+			name: "same-second kill only renders as <1s",
+			occs: []remediationv1alpha1.OccurrenceRecord{
+				termRec(1, base, base),
+			},
+			wantLine: "age at kill (mixed across pods and revisions, oldest first): <1s",
+		},
+		{
+			name: "same-second kill with negative duration renders <1s and counts negative as without",
+			occs: []remediationv1alpha1.OccurrenceRecord{
+				termRec(2, base.Add(10*time.Minute+5*time.Second), base.Add(10*time.Minute)), // finish before start
+				termRec(1, base, base), // same-second kill
+			},
+			wantLine: "age at kill (mixed across pods and revisions, oldest first): <1s; 1 other kill without a start time (of at most 32 recorded)",
+		},
+		{
+			name: "same-second kill kept as <1s while negative and missing times count as without",
 			occs: []remediationv1alpha1.OccurrenceRecord{
 				termRec(5, base.Add(40*time.Minute), base.Add(40*time.Minute+45*time.Second)),
 				termRec(4, base.Add(30*time.Minute+5*time.Second), base.Add(30*time.Minute)), // negative
-				termRec(3, base.Add(20*time.Minute), base.Add(20*time.Minute)),               // zero
+				termRec(3, base.Add(20*time.Minute), base.Add(20*time.Minute)),               // same-second kill
 				termRec(2, base.Add(10*time.Minute), time.Time{}),                            // missing finish
 				termRec(1, base, base.Add(15*time.Second)),
 			},
-			wantLine: "age at kill (mixed across pods and revisions, oldest first): 15s, 45s; 3 other kills without a start time (of at most 32 recorded)",
+			wantLine: "age at kill (mixed across pods and revisions, oldest first): 15s, <1s, 45s; 2 other kills without a start time (of at most 32 recorded)",
 		},
 		{
 			name: "unsorted occurrences from interleaved replicas sort oldest first",
@@ -283,9 +298,10 @@ func TestOOMLifetimesNotQuotableAndNoFreeText(t *testing.T) {
 	}
 }
 
-// Even at MinSectionBytes (1 KiB) with every schema field at its limit, the longest absorbed tally, five
-// maximum-duration OOM lifetimes and 27 kills without a start time, every summary line, the age-at-kill line
-// and the whole absorbed tally stay intact within the bound.
+// Even at MinSectionBytes (1 KiB) with every schema field at its limit, the longest absorbed tally, six
+// usable OOM lifetimes (so "last 5, " is included, five at maximum duration and one same-second kill) and 26
+// kills without a start time, every summary line, the age-at-kill line and the whole absorbed tally stay
+// intact within the bound.
 func TestOOMLifetimesFitsAtMinSectionBytesWithTally(t *testing.T) {
 	b := newBuilder(t, reader(t), sources{}, nil)
 	inc := schemaMax("é", largestTally...)
@@ -296,7 +312,9 @@ func TestOOMLifetimesFitsAtMinSectionBytesWithTally(t *testing.T) {
 	for i := range maxOOMLifetimes {
 		occs = append(occs, termRec(i+1, epoch, far.Add(-time.Duration(i)*time.Second)))
 	}
-	for i := range remediationv1alpha1.MaxOccurrenceRecords - maxOOMLifetimes {
+	// A sixth usable start triggers the longer "last 5, " prefix.
+	occs = append(occs, termRec(maxOOMLifetimes+1, epoch, epoch))
+	for i := range remediationv1alpha1.MaxOccurrenceRecords - (maxOOMLifetimes + 1) {
 		occs = append(occs, termRec(100+i, time.Time{}, far.Add(-time.Duration(i)*time.Minute)))
 	}
 	inc.Status.Occurrences = occs
@@ -308,8 +326,8 @@ func TestOOMLifetimesFitsAtMinSectionBytesWithTally(t *testing.T) {
 	}
 	for _, want := range []string{
 		"\nphase: Escalated\n",
-		"\nage at kill (mixed across pods and revisions, oldest first): ",
-		"; 27 other kills without a start time (of at most 32 recorded)\n",
+		"\nage at kill (last 5, mixed across pods and revisions, oldest first): ",
+		"; 26 other kills without a start time (of at most 32 recorded)\n",
 		largestBlock,
 	} {
 		if !strings.Contains(sum.Text, want) {
@@ -321,5 +339,16 @@ func TestOOMLifetimesFitsAtMinSectionBytesWithTally(t *testing.T) {
 	}
 	if !hasLabel(sum, LabelSectionCut) {
 		t.Errorf("expected LabelSectionCut on shortened summary")
+	}
+
+	// Same-second kill among the last 5 stays intact as <1s at MinSectionBytes too.
+	incZero := inc.DeepCopy()
+	incZero.Status.Occurrences[0] = termRec(1, far, far)
+	sumZero := withSummary(b, MinSectionBytes).summaryBlock(incZero)
+	if len(sumZero.Text) > MinSectionBytes {
+		t.Fatalf("summary with <1s is %d bytes, over MinSectionBytes (%d):\n%s", len(sumZero.Text), MinSectionBytes, sumZero.Text)
+	}
+	if !strings.Contains(sumZero.Text, ", <1s; 26 other kills without a start time (of at most 32 recorded)\n") {
+		t.Errorf("summary with <1s missing rendered same-second kill:\n%s", sumZero.Text)
 	}
 }

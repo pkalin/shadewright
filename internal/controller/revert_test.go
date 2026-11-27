@@ -173,7 +173,7 @@ func TestRevertPullRequestText(t *testing.T) {
 			"`OOMKilled`. This pull request sets the value it changed back.",
 		"**Evidence:** RemediationRequest `shadewright-system/" + revert.Name + "` (UID `" + string(revert.UID) + "`)",
 		"**Rollback:** do not revert this pull request: that applies `384Mi` again",
-		"**Size:** a decrease of 34% of the previous value, within policy `" + string(revert.Spec.PolicyRef) +
+		"**Size:** a decrease of 33.4% of the previous value, within policy `" + string(revert.Spec.PolicyRef) +
 			"`: the step of the failed request, undone.",
 	} {
 		if !strings.Contains(body, want) {

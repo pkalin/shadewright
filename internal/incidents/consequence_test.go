@@ -820,6 +820,10 @@ func TestDropLogsCountTheAbsorbed(t *testing.T) {
 	if got := logs.with("Dropped observations of a deleted Incident", `"count"=0`, `"absorbed"=4`); len(got) != 1 {
 		t.Fatalf("drop lines with the absorbed count: %q; all lines %q", got, logs.lines)
 	}
+	// Someone deleting an Incident is expected, not an error to look at (#902): the line is at INFO.
+	if got := logs.with("Dropped observations of a deleted Incident", `"level"=0`); len(got) != 1 {
+		t.Fatalf("drop line not at INFO: all lines %q", logs.lines)
+	}
 }
 
 // TestRefusedCauseDropsTheEvidenceHeldForIt: a consequence counted as evidence while the create of its cause's

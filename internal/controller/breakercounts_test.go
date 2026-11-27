@@ -27,13 +27,17 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -993,4 +997,213 @@ func TestRestoreRefusedIsVisible(t *testing.T) {
 		t.Fatalf("event %q recorded; the executor writes only the kill switch's Events", e)
 	default:
 	}
+}
+
+// TestEnterVerifyingConflictIsAnExpectedRetry (#902): a conflict on the write that moves a request to Verifying is
+// marked as an expected retry, whose "Reconciler error" line is at V(1) (expectedRetryLogConstructor) while it keeps
+// the error path; another failure of the write is not.
+func TestEnterVerifyingConflictIsAnExpectedRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		retry bool
+	}{
+		{name: "conflict", retry: true, err: apierrors.NewConflict(
+			remediationv1alpha1.GroupVersion.WithResource("remediationrequests").GroupResource(), "x",
+			errors.New("the object has been modified"))},
+		{name: "other failure", err: errors.New("the API server is down")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, base, rr, _ := limitsWorld(t, 20)
+			r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+				SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+					return tc.err
+				},
+			})
+			at := metav1.Now()
+			rr.Status.PullRequest = &remediationv1alpha1.PullRequestStatus{Number: 1, AppliedObservedAt: &at}
+			rr.Status.MergeReceipt = &remediationv1alpha1.MergeReceipt{MergeCommitSHA: strings.Repeat("a", 40)}
+			err := r.enterVerifying(context.Background(), rr)
+			if err == nil || errors.Is(err, errVerifyingConflict) != tc.retry {
+				t.Fatalf("enterVerifying = %v, want an expected retry = %v", err, tc.retry)
+			}
+		})
+	}
+}
+
+type deliveryVerifierFunc func(context.Context, providers.DeliveryUnit, string, string) (
+	providers.DeliveryOutcome, providers.DeliveryStatus, error)
+
+func (f deliveryVerifierFunc) Verify(ctx context.Context, unit providers.DeliveryUnit, mergeCommit, branch string) (
+	providers.DeliveryOutcome, providers.DeliveryStatus, error) {
+	return f(ctx, unit, mergeCommit, branch)
+}
+
+// TestVerifyingConflictBoundedByDeliveryWindow (#902): a conflict entering Verifying keeps the error path (conflict
+// metric, empty Result for rate-limited backoff, appliedObservedAt unset), and the delivery window still bounds
+// retries and ends the request in its final phase.
+func TestVerifyingConflictBoundedByDeliveryWindow(t *testing.T) {
+	mergeSHA := strings.Repeat("a", 40)
+	headSHA := strings.Repeat("b", 40)
+	baseSHA := strings.Repeat("c", 40)
+	merged := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+
+	newReconciler := func(t *testing.T, now *time.Time, verify deliveryVerifierFunc) (
+		*RemediationRequestReconciler, client.Client, types.NamespacedName, *bool) {
+		t.Helper()
+		scheme := runtime.NewScheme()
+		if err := remediationv1alpha1.AddToScheme(scheme); err != nil {
+			t.Fatal(err)
+		}
+		if err := appsv1.AddToScheme(scheme); err != nil {
+			t.Fatal(err)
+		}
+		target := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: appLabel,
+				Name:      appName,
+				UID:       "target-uid-1",
+				Labels:    fluxLabels(),
+			},
+		}
+		settings := &remediationv1alpha1.RemediationSettings{
+			ObjectMeta: metav1.ObjectMeta{Name: remediationv1alpha1.SettingsName},
+		}
+		mergedAt := metav1.NewMicroTime(merged)
+		rr := &remediationv1alpha1.RemediationRequest{
+			ObjectMeta: metav1.ObjectMeta{Namespace: operatorNamespace, Name: "rr-delivery-bound", UID: "rr-uid-1"},
+			Spec: remediationv1alpha1.RemediationRequestSpec{
+				TargetRef: remediationv1alpha1.ObjectRef{
+					APIVersion: linkAPI,
+					Kind:       linkKind,
+					Namespace:  target.Namespace,
+					Name:       target.Name,
+					UID:        remediationv1alpha1.UID(target.UID),
+				},
+			},
+			Status: remediationv1alpha1.RemediationRequestStatus{
+				Phase:    remediationv1alpha1.PhaseWaitingForDelivery,
+				Deadline: &metav1.Time{Time: merged.Add(deliveryWindow)},
+				PullRequest: &remediationv1alpha1.PullRequestStatus{
+					Number:         1,
+					HeadSHA:        headSHA,
+					MergeCommitSHA: mergeSHA,
+					MergedAt:       &mergedAt,
+				},
+				MergeReceipt: &remediationv1alpha1.MergeReceipt{
+					PullRequest:    1,
+					HeadSHA:        headSHA,
+					MergeCommitSHA: mergeSHA,
+					TargetBranch:   mainBranch,
+					MergedAt:       mergedAt,
+					Repository:     *freshness.RepositoryOf(fx.RemediationSettings().Spec.Repositories[0]),
+				},
+			},
+		}
+		base := fake.NewClientBuilder().WithScheme(scheme).
+			WithStatusSubresource(&remediationv1alpha1.RemediationRequest{}).
+			WithObjects(target, settings, rr).Build()
+		failVerifying := true
+		cl := interceptor.NewClient(base, interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+				opts ...client.SubResourceUpdateOption) error {
+				if req, ok := obj.(*remediationv1alpha1.RemediationRequest); ok &&
+					req.Status.Phase == remediationv1alpha1.PhaseVerifying && failVerifying {
+					return apierrors.NewConflict(
+						remediationv1alpha1.GroupVersion.WithResource("remediationrequests").GroupResource(),
+						req.Name, errors.New("the object has been modified"))
+				}
+				return c.Status().Update(ctx, obj, opts...)
+			},
+		})
+		r := &RemediationRequestReconciler{
+			Client:         cl,
+			APIReader:      cl,
+			Scheme:         scheme,
+			Namespace:      operatorNamespace,
+			VerifyOutcomes: true,
+			Now:            func() time.Time { return *now },
+			Delivery: func(providers.AncestryChecker) (DeliveryVerifier, error) {
+				return verify, nil
+			},
+		}
+		return r, base, client.ObjectKeyFromObject(rr), &failVerifying
+	}
+
+	t.Run("not applied at end of delivery window", func(t *testing.T) {
+		now := merged.Add(2 * time.Minute)
+		applied := true
+		r, base, key, _ := newReconciler(t, &now, func(context.Context, providers.DeliveryUnit, string, string) (
+			providers.DeliveryOutcome, providers.DeliveryStatus, error) {
+			if applied {
+				return providers.DeliveryApplied, providers.DeliveryStatus{AppliedCommit: mergeSHA}, nil
+			}
+			return providers.DeliveryPending, providers.DeliveryStatus{AppliedCommit: baseSHA}, nil
+		})
+		before := testutil.ToFloat64(reconcileErrors.WithLabelValues(errorConflict))
+		res, err := countErrors{r}.Reconcile(t.Context(), reconcile.Request{NamespacedName: key})
+		if !errors.Is(err, errVerifyingConflict) || !apierrors.IsConflict(err) {
+			t.Fatalf("Reconcile err = %v, want errVerifyingConflict wrapping conflict", err)
+		}
+		if res != (reconcile.Result{}) {
+			t.Fatalf("Reconcile res = %+v, want empty Result for error backoff", res)
+		}
+		if got := testutil.ToFloat64(reconcileErrors.WithLabelValues(errorConflict)) - before; got != 1 {
+			t.Fatalf("conflict metric delta = %v, want 1", got)
+		}
+
+		applied = false
+		now = merged.Add(deliveryWindow)
+		if _, err := (countErrors{r}).Reconcile(t.Context(), reconcile.Request{NamespacedName: key}); err != nil {
+			t.Fatalf("Reconcile at windowEnd: %v", err)
+		}
+		var got remediationv1alpha1.RemediationRequest
+		if err := base.Get(t.Context(), key, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status.Phase != remediationv1alpha1.PhaseInconclusive || got.Status.Deadline != nil {
+			t.Fatalf("phase = %q deadline = %v, want Inconclusive and nil", got.Status.Phase, got.Status.Deadline)
+		}
+		if c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionVerified); c == nil ||
+			c.Reason != ReasonDeliveryNotObserved {
+			t.Fatalf("Verified condition = %+v, want reason %s", c, ReasonDeliveryNotObserved)
+		}
+	})
+
+	t.Run("read failure past window and grace", func(t *testing.T) {
+		now := merged.Add(2 * time.Minute)
+		var readErr error
+		r, base, key, _ := newReconciler(t, &now, func(context.Context, providers.DeliveryUnit, string, string) (
+			providers.DeliveryOutcome, providers.DeliveryStatus, error) {
+			if readErr != nil {
+				return providers.DeliveryOutcome(""), providers.DeliveryStatus{}, readErr
+			}
+			return providers.DeliveryApplied, providers.DeliveryStatus{AppliedCommit: mergeSHA}, nil
+		})
+		res, err := countErrors{r}.Reconcile(t.Context(), reconcile.Request{NamespacedName: key})
+		if !errors.Is(err, errVerifyingConflict) || res != (reconcile.Result{}) {
+			t.Fatalf("Reconcile = (%+v, %v), want empty Result and errVerifyingConflict", res, err)
+		}
+
+		readErr = errors.New("the API server is unavailable")
+		now = merged.Add(deliveryWindow + finalGrace)
+		if _, err := (countErrors{r}).Reconcile(t.Context(), reconcile.Request{NamespacedName: key}); err == nil {
+			t.Fatal("expected error at windowEnd + finalGrace")
+		}
+		now = merged.Add(deliveryWindow + finalGrace + time.Second)
+		if _, err := (countErrors{r}).Reconcile(t.Context(), reconcile.Request{NamespacedName: key}); err != nil {
+			t.Fatalf("Reconcile past windowEnd + finalGrace: %v", err)
+		}
+		var got remediationv1alpha1.RemediationRequest
+		if err := base.Get(t.Context(), key, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status.Phase != remediationv1alpha1.PhaseInconclusive || got.Status.Deadline != nil {
+			t.Fatalf("phase = %q deadline = %v, want Inconclusive and nil", got.Status.Phase, got.Status.Deadline)
+		}
+		if c := meta.FindStatusCondition(got.Status.Conditions, remediationv1alpha1.ConditionVerified); c == nil ||
+			c.Reason != ReasonDeliveryNotChecked {
+			t.Fatalf("Verified condition = %+v, want reason %s", c, ReasonDeliveryNotChecked)
+		}
+	})
 }

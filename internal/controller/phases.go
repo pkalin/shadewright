@@ -493,6 +493,9 @@ func (r *RemediationRequestReconciler) enterVerifying(ctx context.Context, rr *r
 	}
 	setCondition(rr, remediationv1alpha1.ConditionDelivered, metav1.ConditionTrue, ReasonMergeCommitApplied, message)
 	if err := r.writeIf(ctx, rr, true); err != nil {
+		if apierrors.IsConflict(err) {
+			return fmt.Errorf("%w: %w", errVerifyingConflict, err)
+		}
 		return err
 	}
 	logf.FromContext(ctx).Info("Verifying RemediationRequest", "remediationRequest", client.ObjectKeyFromObject(rr),

@@ -47,7 +47,7 @@ kubectl -n shadewright-system logs deploy/shadewright-executor
 The reason is on one of these conditions:
 
 - `PolicyAllowed`: the policy check. `False` is `Denied`, `Unknown` is `NeedsIntervention` or a wait, `True` is allowed.
-- `PullRequestOpened`: a stop before a pull request is recorded, and the history of one that was closed.
+- `PullRequestOpened`: a stop before a pull request is recorded, and the history of one that was closed or merged (`ChangeRequestMerged` on `Merged`).
 - `Approved`: a stop after a pull request is recorded; `WaitingForReview` while it waits, or `ReviewCheckRefused` or `ReviewListTooLong` while it waits on a check that does not pass on the current head, or `ReviewCheckLiveReadFailed` while the request cannot be read from the API server before a check write (`ReviewListTooLong` is final for that head; `ReviewCheckRefused` is asked again after a backoff and ends once the Git host shows what the reviews call for; a replacement after a handoff starts again at `WaitingForReview`).
 - `PlanFresh`: `False` when the plan went stale, another request of the same Incident was merged (`AnotherRequestMerged`), the request it waited behind had its pull request for the same field closed without a merge (`AnotherRequestClosed`), or that request's change of the same field succeeded (`AnotherRequestSucceeded`), all `Superseded`, `Unknown` while the Git host refuses a freshness check, or while Flux is still reconciling the Kustomization (`KustomizationReconciling`, at most 10 minutes, then the plan is stale).
 - `Queued`: `True` while a limit holds a request back before its policy check (see [Limits](#limits)).

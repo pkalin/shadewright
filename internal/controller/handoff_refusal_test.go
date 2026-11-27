@@ -1259,3 +1259,25 @@ func TestRecoveryWaitEndOnAnotherBaseSurvivesAConflict(t *testing.T) {
 		t.Fatalf("writes to Git: %q, want none", *writes)
 	}
 }
+
+// TestMergedStopDoesNotKeepSayingThePullRequestIsOpen (#902): a request that ends Merged on a path that did not
+// mark its pull request merged does not keep "Pull request #N is open" in PullRequestOpened.
+func TestMergedStopDoesNotKeepSayingThePullRequestIsOpen(t *testing.T) {
+	r, _, _, rr, _, _ := handoffAppendedWorld(t, nil)
+	ctx := context.Background()
+	number := int64(42)
+	rr.Status.PullRequest = &api.PullRequestStatus{Number: number}
+	meta.SetStatusCondition(&rr.Status.Conditions, metav1.Condition{Type: api.ConditionPROpened,
+		Status: metav1.ConditionTrue, Reason: ReasonPullRequestOpened, Message: fmt.Sprintf("Pull request #%d is open", number)})
+	if err := r.stop(ctx, rr, api.PhaseMerged, ReasonChangeRequestMerged, "The pull request was merged"); !errors.Is(err, errStopped) {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rr), rr); err != nil {
+		t.Fatal(err)
+	}
+	c := meta.FindStatusCondition(rr.Status.Conditions, api.ConditionPROpened)
+	want := fmt.Sprintf("Pull request #%d was merged", number)
+	if c == nil || c.Message != want || c.Reason != ReasonChangeRequestMerged {
+		t.Fatalf("PullRequestOpened = %+v, want reason %s and message %q", c, ReasonChangeRequestMerged, want)
+	}
+}

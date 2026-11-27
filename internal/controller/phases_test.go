@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -301,6 +302,94 @@ var _ = Describe("RemediationRequest phases after the merge", func() {
 		Expect(condition(rr, remediationv1alpha1.ConditionDelivered).Status).To(Equal(metav1.ConditionTrue))
 		Expect(condition(rr, remediationv1alpha1.ConditionConfigured).Status).To(Equal(metav1.ConditionTrue))
 		Expect(rr.Status.Rollout.AppliedRevision).To(Equal(w.merge))
+	})
+
+	// #902: a conflict on the write that moves a request to Verifying keeps the error path (the controller's rate
+	// limited backoff and both error counters) and only its log line is lowered (expectedRetryLog); the next
+	// reconcile, on the newer version, moves the request.
+	It("returns a conflict entering Verifying as an error, counted as a conflict", func() {
+		w := newWorld(nil)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		conflicted := false
+		w.r.Client = &statusRecorder{Client: k8sClient, fail: func(rr *remediationv1alpha1.RemediationRequest) bool {
+			if rr.Status.Phase == remediationv1alpha1.PhaseVerifying && !conflicted {
+				conflicted = true
+				// Another writer writes the request first: the status write below has a stale resourceVersion.
+				Expect(k8sClient.Patch(ctx, fetch(w), client.RawPatch(types.MergePatchType,
+					[]byte(`{"metadata":{"annotations":{"example.invalid/touched":"yes"}}}`)))).To(Succeed())
+			}
+			return false
+		}}
+		before := testutil.ToFloat64(reconcileErrors.WithLabelValues(errorConflict))
+		w.now = w.merged.Add(2 * time.Minute)
+		res, err := countErrors{w.r}.Reconcile(ctx, reconcile.Request{NamespacedName: w.key})
+		Expect(conflicted).To(BeTrue())
+		Expect(err).To(MatchError(errVerifyingConflict))
+		Expect(apierrors.IsConflict(err)).To(BeTrue())
+		Expect(res).To(Equal(reconcile.Result{}), "the error, not a delay, decides when it runs again")
+		Expect(testutil.ToFloat64(reconcileErrors.WithLabelValues(errorConflict)) - before).To(Equal(1.0))
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseWaitingForDelivery))
+		mustReconcileAt(w, w.merged.Add(3*time.Minute))
+		Expect(fetch(w).Status.Phase).To(Equal(remediationv1alpha1.PhaseVerifying))
+	})
+
+	// #902: after a conflict entering Verifying leaves appliedObservedAt unset, the delivery window and its grace
+	// still bound the retries and end the request in its final phase.
+	It("bounds retries after a conflict entering Verifying by the delivery window", func() {
+		// Case 1: delivery is no longer applied when the delivery window ends.
+		w := newWorld(nil)
+		w.reader.ks = kustomization(ksStatus{applied: w.merge})
+		conflicted := false
+		w.r.Client = &statusRecorder{Client: k8sClient, fail: func(rr *remediationv1alpha1.RemediationRequest) bool {
+			if rr.Status.Phase == remediationv1alpha1.PhaseVerifying && !conflicted {
+				conflicted = true
+				Expect(k8sClient.Patch(ctx, fetch(w), client.RawPatch(types.MergePatchType,
+					[]byte(`{"metadata":{"annotations":{"example.invalid/touched":"yes"}}}`)))).To(Succeed())
+			}
+			return false
+		}}
+		w.now = w.merged.Add(2 * time.Minute)
+		res, err := countErrors{w.r}.Reconcile(ctx, reconcile.Request{NamespacedName: w.key})
+		Expect(conflicted).To(BeTrue())
+		Expect(err).To(MatchError(errVerifyingConflict))
+		Expect(res).To(Equal(reconcile.Result{}))
+		Expect(fetch(w).Status.PullRequest.AppliedObservedAt).To(BeNil())
+
+		w.reader.ks = kustomization(ksStatus{applied: w.base})
+		mustReconcileAt(w, windowEnd(w))
+		rr := expectEnd(w, remediationv1alpha1.PhaseInconclusive, ReasonDeliveryNotObserved)
+		Expect(condition(rr, remediationv1alpha1.ConditionDelivered).Status).To(Equal(metav1.ConditionFalse))
+
+		// Case 2: delivery reads fail past the window and its grace.
+		w2 := newWorld(nil)
+		w2.reader.ks = kustomization(ksStatus{applied: w2.merge})
+		conflicted2 := false
+		w2.r.Client = &statusRecorder{Client: k8sClient, fail: func(rr *remediationv1alpha1.RemediationRequest) bool {
+			if rr.Status.Phase == remediationv1alpha1.PhaseVerifying && !conflicted2 {
+				conflicted2 = true
+				Expect(k8sClient.Patch(ctx, fetch(w2), client.RawPatch(types.MergePatchType,
+					[]byte(`{"metadata":{"annotations":{"example.invalid/touched":"yes"}}}`)))).To(Succeed())
+			}
+			return false
+		}}
+		w2.now = w2.merged.Add(2 * time.Minute)
+		res, err = countErrors{w2.r}.Reconcile(ctx, reconcile.Request{NamespacedName: w2.key})
+		Expect(conflicted2).To(BeTrue())
+		Expect(err).To(MatchError(errVerifyingConflict))
+		Expect(res).To(Equal(reconcile.Result{}))
+
+		w2.reader.fail = func(obj client.Object) error {
+			if u, ok := obj.(*unstructured.Unstructured); ok && u.GetKind() == w2.reader.ks.GetKind() {
+				return errors.New("the API server is unavailable")
+			}
+			return nil
+		}
+		_, err = reconcileAt(w2, windowEnd(w2).Add(finalGrace))
+		Expect(err).To(HaveOccurred())
+		Expect(fetch(w2).Status.Phase).To(Equal(remediationv1alpha1.PhaseWaitingForDelivery))
+		mustReconcileAt(w2, windowEnd(w2).Add(finalGrace+time.Second))
+		rr = expectEnd(w2, remediationv1alpha1.PhaseInconclusive, ReasonDeliveryNotChecked)
+		Expect(condition(rr, remediationv1alpha1.ConditionDelivered).Status).To(Equal(metav1.ConditionUnknown))
 	})
 
 	// Row 2: a later commit of the branch that holds the merge commit, asked of the receipt's repository.

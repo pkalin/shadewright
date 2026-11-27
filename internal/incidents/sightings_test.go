@@ -250,6 +250,47 @@ func TestOneOffWarningsOpenNothing(t *testing.T) {
 	}
 }
 
+// #901: a symptom held as a first sighting says so at INFO, once per first sighting, with why and until when, so
+// an Incident that is not there yet is explained by the log.
+func TestFirstSightingHeldIsLogged(t *testing.T) {
+	ns := namespace(t)
+	t0 := time.Now().Truncate(time.Second)
+	clock := &fakeClock{now: t0}
+	r := start(t, ns, Config{Now: clock.Now})
+	r.obs <- sightingOf(1, 1, t0)
+	waitHeld(t, r, "the first sighting held", func() bool { return r.sightings.len() == 1 })
+	held := func() []string {
+		return r.logs.with(`"msg"="Held a first sighting; its Incident opens when the symptom is seen again"`,
+			fp(1), `"reason"="BackOff"`, `"recurAfter"="2m0s"`, `"recurWithin"="15m0s"`)
+	}
+	if got := held(); len(got) != 1 {
+		t.Fatalf("%d log lines of the held first sighting, want 1: %q", len(got), r.logs.with(fp(1)))
+	}
+	// Seen again too early, it is the same hold: no second line.
+	clock.set(t0.Add(time.Minute))
+	r.obs <- sightingOf(1, 2, t0.Add(time.Minute))
+	waitHeld(t, r, "the early sighting held", func() bool {
+		_, ok := r.sightings.total(eventID(2))
+		return ok
+	})
+	if got := held(); len(got) != 1 {
+		t.Fatalf("%d log lines after an early sighting, want still 1: %q", len(got), got)
+	}
+	// Nothing of the symptom's text is logged, only the subject and the reason.
+	if got := r.logs.with(sightingOf(1, 1, t0).Symptom); len(got) != 0 {
+		t.Fatalf("the symptom's text is logged: %q", got)
+	}
+	// Once the hold is forgotten after RecurWithin, a sighting starts another hold, which says so again.
+	late := t0.Add(RecurWithin + time.Second)
+	clock.set(late)
+	waitHeld(t, r, "the first sighting forgotten", func() bool { return r.sightings.len() == 0 })
+	r.obs <- sightingOf(1, 3, late)
+	waitHeld(t, r, "the late sighting held", func() bool { return r.sightings.len() == 1 })
+	if got := held(); len(got) != 2 {
+		t.Fatalf("%d log lines after a sighting past RecurWithin, want 2: %q", len(got), got)
+	}
+}
+
 func TestSecondSightingOpensOneIncidentWithBothCounted(t *testing.T) {
 	ns := namespace(t)
 	t0 := time.Now().Truncate(time.Second)

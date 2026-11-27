@@ -22,7 +22,14 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
 	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/analyzer/collector"
+	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
+	"github.com/shadewright-labs/shadewright/internal/incidents/fingerprint"
 )
 
 var t0 = time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
@@ -205,5 +212,194 @@ func TestAppliedChecksAbsorbedRecords(t *testing.T) {
 	}
 	if len(st.Occurrences) != 1 || len(st.AbsorbedOccurrences) != 1 || st.Count != 1 || st.Absorbed[0].Count != 1 {
 		t.Fatalf("status %+v: absorbed records mixed with the Incident's own", st)
+	}
+}
+
+// Issue #1005: merge stores started on termination records only when began is set and started is not after
+// began, preserves existing started values, leaves older records without started untouched, and drops started
+// from non-termination or invalid records so status writes stay within the CRD schema.
+func TestMergeRecordsStartedOnTerminations(t *testing.T) {
+	termID := func(i int) string { return fmt.Sprintf("termination:%032x", i) }
+	waitID := fmt.Sprintf("waiting:%032x", 1)
+	condID := fmt.Sprintf("condition:%032x", 1)
+
+	olderBegan := t0.Add(-5 * time.Minute)
+	st := &remediationv1alpha1.IncidentStatus{
+		Occurrences: []remediationv1alpha1.OccurrenceRecord{
+			// A record written by an older version has no Started.
+			{ID: termID(0), Total: 1, Began: timeOf(olderBegan)},
+		},
+	}
+
+	began1 := t0.Add(-2 * time.Minute)
+	started1 := began1.Add(-30 * time.Second)
+	began2 := t0.Add(-time.Minute)
+	merge(st, batchOf(6, map[string]counted{
+		termID(1):  {total: 1, began: began1.Add(500 * time.Millisecond), started: started1.Add(400 * time.Millisecond)},
+		termID(2):  {total: 1, began: began2, started: began2},                  // zero duration, allowed by schema
+		termID(3):  {total: 1, began: began2, started: began2.Add(time.Second)}, // invalid: started > began
+		termID(4):  {total: 1, started: started1},                               // invalid: no began
+		eventID(1): {total: 1, began: began1, started: started1},                // non-termination
+		waitID:     {total: 1, began: began1, started: started1},                // non-termination
+		condID:     {total: 1, began: began1, started: started1},                // non-termination
+	}))
+
+	byID := make(map[string]remediationv1alpha1.OccurrenceRecord, len(st.Occurrences))
+	for _, r := range st.Occurrences {
+		byID[r.ID] = r
+	}
+	if r := byID[termID(0)]; r.Started != nil {
+		t.Errorf("older record gained Started = %v, want nil", r.Started)
+	}
+	if r := byID[termID(1)]; r.Started == nil || !r.Started.Time.Equal(started1) {
+		t.Errorf("valid termination Started = %v, want %v", r.Started, started1)
+	}
+	if r := byID[termID(2)]; r.Started == nil || !r.Started.Time.Equal(began2) {
+		t.Errorf("same-second termination Started = %v, want %v", r.Started, began2)
+	}
+	for _, id := range []string{termID(3), termID(4), eventID(1), waitID, condID} {
+		if r := byID[id]; r.Started != nil {
+			t.Errorf("%s stored Started = %v, want nil", id, r.Started)
+		}
+	}
+
+	// Merging the same termination again without a start time keeps the stored start time.
+	merge(st, batchOf(0, map[string]counted{
+		termID(1): {total: 1, began: began1},
+	}))
+	for _, r := range st.Occurrences {
+		if r.ID == termID(1) && (r.Started == nil || !r.Started.Time.Equal(started1)) {
+			t.Fatalf("existing Started lost on re-merge: %+v", r)
+		}
+	}
+}
+
+// TestConsumeAndFlushPersistsTerminationStarted checks the controller path from collector.Observation to
+// stored Incident.Status.Occurrences[].Started.
+func TestConsumeAndFlushPersistsTerminationStarted(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := remediationv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&remediationv1alpha1.Incident{}).Build()
+	c, err := New(Config{Namespace: fakeNamespace, Now: func() time.Time { return t0 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.client, c.reader, c.cache = cl, cl, cl
+	if err := c.load(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	started := t0.Add(-90 * time.Second)
+	finished := t0.Add(-10 * time.Second)
+	obs := collector.Observation{
+		Fingerprint:         fp(77),
+		Subject:             firstSpec().Subject,
+		Source:              firstSpec().Subject.Namespace,
+		Reason:              causereason.OOMKilled,
+		Type:                "Warning",
+		ReportingController: kubeletController,
+		Symptom:             "Container app terminated with exit code 137",
+		Occurrence:          fmt.Sprintf("termination:%032x", 1),
+		Total:               1,
+		Began:               finished,
+		Started:             started,
+		Count:               1,
+		ObservedAt:          finished,
+		Immediate:           true,
+		Origin:              fingerprint.SourcePodStatus,
+		Container:           "app",
+		Class:               collector.ClassCause,
+	}
+	c.consume(t.Context(), obs)
+	c.flush(t.Context(), fp(77))
+
+	var got remediationv1alpha1.Incident
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: fakeNamespace, Name: Name(fp(77))}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Status.Occurrences) != 1 {
+		t.Fatalf("occurrences = %+v, want 1", got.Status.Occurrences)
+	}
+	r := got.Status.Occurrences[0]
+	if r.Began == nil || !r.Began.Time.Equal(finished) || r.Started == nil || !r.Started.Time.Equal(started) {
+		t.Fatalf("occurrence = %+v, want Began=%v Started=%v", r, finished, started)
+	}
+}
+
+// Issue #1005: higher takes started only together with the began it belongs to (same observation, or two
+// observations with equal began). A clamped finish time with no started must not later adopt a real started
+// from a re-read whose began differs.
+func TestHigherPairsStartedWithSameBegan(t *testing.T) {
+	clamped := t0
+	realFinish := t0.Add(time.Minute)
+	realStart := t0.Add(-30 * time.Second)
+
+	cases := []struct {
+		name        string
+		a, b        counted
+		wantBegan   time.Time
+		wantStarted time.Time
+	}{
+		{
+			name:        "clamped finish without started followed by real finish with started",
+			a:           counted{total: 1, began: clamped},
+			b:           counted{total: 1, began: realFinish, started: realStart},
+			wantBegan:   clamped,
+			wantStarted: time.Time{},
+		},
+		{
+			name:        "same began fills missing started",
+			a:           counted{total: 1, began: realFinish},
+			b:           counted{total: 1, began: realFinish, started: realStart},
+			wantBegan:   realFinish,
+			wantStarted: realStart,
+		},
+		{
+			name:        "zero began takes both began and started from b",
+			a:           counted{total: 1},
+			b:           counted{total: 1, began: realFinish, started: realStart},
+			wantBegan:   realFinish,
+			wantStarted: realStart,
+		},
+		{
+			name:        "zero began with stray started does not pair stray started with b.began",
+			a:           counted{total: 1, started: realStart},
+			b:           counted{total: 1, began: clamped},
+			wantBegan:   clamped,
+			wantStarted: time.Time{},
+		},
+		{
+			name:        "existing began and started kept when b has another began",
+			a:           counted{total: 1, began: realFinish, started: realStart},
+			b:           counted{total: 2, began: clamped},
+			wantBegan:   realFinish,
+			wantStarted: realStart,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := higher(tc.a, tc.b)
+			if !got.began.Equal(tc.wantBegan) || !got.started.Equal(tc.wantStarted) {
+				t.Fatalf("higher(%+v, %+v) = (began=%v, started=%v), want (began=%v, started=%v)",
+					tc.a, tc.b, got.began, got.started, tc.wantBegan, tc.wantStarted)
+			}
+		})
+	}
+
+	// End-to-end through merge: a stored record with a clamped finish and no started must not pick up
+	// started from a re-read of the same termination ID with a different finish time.
+	termID := fmt.Sprintf("termination:%032x", 42)
+	st := &remediationv1alpha1.IncidentStatus{
+		Occurrences: []remediationv1alpha1.OccurrenceRecord{
+			{ID: termID, Total: 1, Began: timeOf(clamped)},
+		},
+	}
+	merge(st, batchOf(0, map[string]counted{
+		termID: {total: 1, began: realFinish, started: realStart},
+	}))
+	if len(st.Occurrences) != 1 || st.Occurrences[0].Started != nil {
+		t.Fatalf("merged clamped record gained Started from another observation: %+v", st.Occurrences)
 	}
 }

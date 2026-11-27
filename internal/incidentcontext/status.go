@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
 	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
@@ -92,15 +93,20 @@ const (
 
 // summaryBlock describes the Incident, most relevant first. A cause Incident of a reason of causereason.Tallied with a
 // non-empty absorbed tally gets the tally last and always whole (#796, decided 2026-11-16): the summary keeps room for the longest
-// tally ([longestTally]) and fits its other lines in what is left. They fit by shortening values, never by
-// removing a line: the symptom, then the reporting controller, then the reason, then the subject's name, each
-// cut at a character boundary and followed by a note of the bytes cut ([fitSummary]). This holds at every
-// summary bound the settings allow: with every value cut to nothing, the lines of an Incident at the schema's
-// limits and the longest tally take 575 bytes, within the smallest bound, [MinSectionBytes]. Without a tally the same fit applies to
-// the whole bound, and a summary that fits is what it always was.
+// tally ([longestTally]) and fits its other lines in what is left. For an OOMKilled Incident with termination
+// records carrying start times, the summary also includes one fixed line of up to the last [maxOOMLifetimes]
+// ages at kill, oldest first, labelled as mixed across pods and revisions, plus the count of kills without a
+// start time (#1005, ADR-0023 amendment of 2026-11-21); it is written by code and never quotable. Lines fit by
+// shortening values, never by removing a line: the symptom, then the reporting controller, then the reason,
+// then the subject's name, each cut at a character boundary and followed by a note of the bytes cut
+// ([fitSummary]). This holds at every summary bound the settings allow: with every value cut to nothing, the
+// lines of an Incident at the schema's limits, the longest OOM lifetime line and the longest tally stay well
+// within the smallest bound, [MinSectionBytes]. Without a tally or lifetimes the same fit applies to the whole
+// bound, and a summary that fits is what it always was.
 func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 	s, st := inc.Spec, inc.Status
-	vals, kind, namespace, typ, phase, red, withheld := b.summaryValues(inc)
+	lifetimes := oomLifetimeLine(inc)
+	vals, kind, namespace, typ, phase, red, withheld := b.summaryValues(inc, lifetimes)
 	if withheld {
 		blk := Block{Section: SectionSummary, Provenance: ProvenanceIncident}
 		withholdBlock(&blk)
@@ -142,6 +148,10 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 			// The phase is written by the analyzer itself, never evidence.
 			l.add("phase: %s", phase)
 		}
+		if lifetimes != "" {
+			// Computed from status.occurrences by code: durations and counts only, never quotable.
+			l.add("%s", lifetimes)
+		}
 		return &l, tails
 	}
 	blk := Block{Section: SectionSummary, Provenance: ProvenanceIncident, Availability: Available}
@@ -166,7 +176,7 @@ func (b *Builder) summaryBlock(inc *remediationv1alpha1.Incident) Block {
 // lines are not redacted again (the identity). With any other redactor each value is redacted alone ([Value])
 // and the lines are redacted again after the fit ([Redact]), as the release before #845 did. withheld is true,
 // with nothing else, when redaction withheld the summary's lines whole.
-func (b *Builder) summaryValues(inc *remediationv1alpha1.Incident) (vals [cutValues]string, kind, namespace, typ, phase string,
+func (b *Builder) summaryValues(inc *remediationv1alpha1.Incident, lifetimes string) (vals [cutValues]string, kind, namespace, typ, phase string,
 	red func(string) string, withheld bool) {
 	s, st := inc.Spec, inc.Status
 	pr, ok := b.redactor.(pieceRedactor)
@@ -203,6 +213,9 @@ func (b *Builder) summaryValues(inc *remediationv1alpha1.Incident) (vals [cutVal
 	}
 	if st.Phase != "" {
 		l.add("phase: %s", val(string(st.Phase)))
+	}
+	if lifetimes != "" {
+		l.add("%s", lifetimes)
 	}
 	var data []string
 	decided, withheld := decidedPieces(pr, l.ps)
@@ -633,6 +646,84 @@ func (b *Builder) state(l *lines, s corev1.ContainerState) frag {
 var absorbedReasons = []remediationv1alpha1.AbsorbedReason{
 	remediationv1alpha1.AbsorbedBackOff,
 	remediationv1alpha1.AbsorbedUnhealthy,
+}
+
+// maxOOMLifetimes is the most container instance lifetimes shown in the summary of an OOMKilled Incident
+// (#1005, ADR-0023 amendment of 2026-11-21).
+const maxOOMLifetimes = 5
+
+// terminationOccurrencePrefix starts the ID of a termination record in Incident.Status.Occurrences.
+const terminationOccurrencePrefix = "termination:"
+
+type oomLifetime struct {
+	began   time.Time
+	started time.Time
+	id      string
+	age     time.Duration
+}
+
+// oomLifetimeLine returns the fixed summary line of container lifetimes before each OOM kill for an
+// OOMKilled Incident (#1005, ADR-0023 amendments of 2026-11-21 and 2026-11-26), or empty when inc is not an
+// OOMKilled Incident or has no termination occurrence with a positive finish-minus-start duration. Every age
+// shown is finish minus start of one recorded termination instance, both from pod status; no age is computed
+// from the time between kills. At most [maxOOMLifetimes] newest ages are shown, oldest first, labelled as
+// mixed across pods and revisions, followed by the count of recorded termination occurrences (at most 32)
+// without a usable start time (missing, zero or negative duration). The line holds only fixed words,
+// durations and counts, and is never quotable.
+func oomLifetimeLine(inc *remediationv1alpha1.Incident) string {
+	if inc.Spec.Reason != causereason.OOMKilled {
+		return ""
+	}
+	var valid []oomLifetime
+	without := 0
+	for _, r := range inc.Status.Occurrences {
+		if !strings.HasPrefix(r.ID, terminationOccurrencePrefix) {
+			continue
+		}
+		if r.Began == nil || r.Began.IsZero() || r.Started == nil || r.Started.IsZero() {
+			without++
+			continue
+		}
+		age := r.Began.Truncate(time.Second).Sub(r.Started.Truncate(time.Second))
+		if age <= 0 {
+			without++
+			continue
+		}
+		valid = append(valid, oomLifetime{began: r.Began.Time, started: r.Started.Time, id: r.ID, age: age})
+	}
+	if len(valid) == 0 {
+		return ""
+	}
+	slices.SortFunc(valid, func(a, b oomLifetime) int {
+		if c := a.began.Compare(b.began); c != 0 {
+			return c
+		}
+		if c := a.started.Compare(b.started); c != 0 {
+			return c
+		}
+		return strings.Compare(a.id, b.id)
+	})
+	capped := len(valid) > maxOOMLifetimes
+	if capped {
+		valid = valid[len(valid)-maxOOMLifetimes:]
+	}
+	ages := make([]string, len(valid))
+	for i, v := range valid {
+		ages[i] = v.age.String()
+	}
+	prefix := "age at kill (mixed across pods and revisions, oldest first): "
+	if capped {
+		prefix = "age at kill (last 5, mixed across pods and revisions, oldest first): "
+	}
+	line := prefix + strings.Join(ages, ", ")
+	switch without {
+	case 0:
+	case 1:
+		line += "; 1 other kill without a start time (of at most 32 recorded)"
+	default:
+		line += fmt.Sprintf("; %d other kills without a start time (of at most 32 recorded)", without)
+	}
+	return line
 }
 
 // absorbedLines writes the absorbed tally of a cause Incident, the last thing in the summary and always whole

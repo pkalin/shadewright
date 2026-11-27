@@ -818,3 +818,85 @@ func TestHeldMergeTakesTheCauseOfARepeat(t *testing.T) {
 		})
 	}
 }
+
+// Issue #1005: sightings.hold pairs Started with the Began it belongs to. A held observation with a clamped
+// finish time and no Started must not adopt Started from a later re-read whose finish time differs, and an
+// earlier Began replacing the held Began replaces Started with its own.
+func TestSightingsHoldPairsStartedWithSameBegan(t *testing.T) {
+	clamped := t0
+	realFinish := t0.Add(time.Minute)
+	realStart := t0.Add(-30 * time.Second)
+	termOcc := fmt.Sprintf("termination:%032x", 99)
+
+	makeObs := func(began, started, at time.Time) collector.Observation {
+		o := sightingOf(1, 1, at)
+		o.Occurrence = termOcc
+		o.Began = began
+		o.Started = started
+		return o
+	}
+
+	cases := []struct {
+		name        string
+		first       collector.Observation
+		second      collector.Observation
+		wantBegan   time.Time
+		wantStarted time.Time
+	}{
+		{
+			name:        "clamped finish without started followed by real finish with started",
+			first:       makeObs(clamped, time.Time{}, t0),
+			second:      makeObs(realFinish, realStart, t0.Add(30*time.Second)),
+			wantBegan:   clamped,
+			wantStarted: time.Time{},
+		},
+		{
+			name:        "real finish with started followed by earlier clamped finish without started",
+			first:       makeObs(realFinish, realStart, t0),
+			second:      makeObs(clamped, time.Time{}, t0.Add(30*time.Second)),
+			wantBegan:   clamped,
+			wantStarted: time.Time{},
+		},
+		{
+			name:        "same began fills missing started",
+			first:       makeObs(realFinish, time.Time{}, t0),
+			second:      makeObs(realFinish, realStart, t0.Add(30*time.Second)),
+			wantBegan:   realFinish,
+			wantStarted: realStart,
+		},
+		{
+			name:        "missing began followed by observation with began and started",
+			first:       makeObs(time.Time{}, time.Time{}, t0),
+			second:      makeObs(realFinish, realStart, t0.Add(30*time.Second)),
+			wantBegan:   realFinish,
+			wantStarted: realStart,
+		},
+		{
+			name:        "earlier observation with its own started replaces both",
+			first:       makeObs(realFinish, realStart, t0),
+			second:      makeObs(clamped, clamped.Add(-15*time.Second), t0.Add(30*time.Second)),
+			wantBegan:   clamped,
+			wantStarted: clamped.Add(-15 * time.Second),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSightings(10)
+			if got := s.admit(tc.first, t0); got != nil {
+				t.Fatalf("first admit opened %v", occurrencesOf(got))
+			}
+			if got := s.admit(tc.second, t0.Add(30*time.Second)); got != nil {
+				t.Fatalf("second admit opened %v", occurrencesOf(got))
+			}
+			h := heldOf(s, fp(1), termOcc)
+			if h == nil {
+				t.Fatal("held observation missing")
+			}
+			if !h.Began.Equal(tc.wantBegan) || !h.Started.Equal(tc.wantStarted) {
+				t.Fatalf("held = (Began=%v, Started=%v), want (Began=%v, Started=%v)",
+					h.Began, h.Started, tc.wantBegan, tc.wantStarted)
+			}
+		})
+	}
+}

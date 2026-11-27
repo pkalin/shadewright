@@ -136,7 +136,21 @@ func (s *sightings) hold(h *sighting, o collector.Observation) {
 		if p := &h.held[i]; p.Occurrence == o.Occurrence {
 			p.Total = max(p.Total, o.Total)
 			p.Count = min(p.Count+o.Count, collector.MaxCount)
-			p.Began, p.ObservedAt = earliest(p.Began, o.Began), latest(p.ObservedAt, o.ObservedAt)
+			switch {
+			case p.Began.IsZero():
+				if !o.Began.IsZero() {
+					p.Began = o.Began
+					p.Started = o.Started
+				}
+			case !o.Began.IsZero() && o.Began.Before(p.Began):
+				p.Began = o.Began
+				p.Started = o.Started
+			case !o.Began.IsZero() && o.Began.Equal(p.Began):
+				if p.Started.IsZero() {
+					p.Started = o.Started
+				}
+			}
+			p.ObservedAt = latest(p.ObservedAt, o.ObservedAt)
 			s.note(h.fingerprint, p.Occurrence, p.Total)
 			if o.CauseFingerprint != "" && o.CauseFingerprint != p.CauseFingerprint {
 				p.CauseFingerprint = o.CauseFingerprint

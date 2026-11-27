@@ -37,10 +37,15 @@ var occurrenceID = regexp.MustCompile(`^(event|termination|waiting|condition):[A
 // mark never answers for an occurrence without a begin time (Controller.handled).
 var noBegin = time.Unix(0, 0).UTC()
 
-// counted is what was counted of one occurrence: the highest total and when it began (zero when unknown).
+// terminationOccurrencePrefix starts the occurrence ID of a container termination read from pod status.
+const terminationOccurrencePrefix = "termination:"
+
+// counted is what was counted of one occurrence: the highest total, when it began (zero when unknown), and
+// for a termination, when the container instance started (zero when unknown).
 type counted struct {
-	total int64
-	began time.Time
+	total   int64
+	began   time.Time
+	started time.Time
 }
 
 // heldOccurrence is one occurrence a batch holds: what was counted of it, the namespace it came from (the
@@ -141,14 +146,21 @@ func combine(bs []*batch) *batch {
 	return out
 }
 
-// higher returns the record with the higher total, keeping a known begin time.
+// higher returns the record with the higher total, keeping a known begin time and pairing started only with
+// the begin time it belongs to (same observation, or two observations with equal begin time).
 func higher(a, b counted) counted {
 	out := a
 	if b.total > a.total {
 		out.total = b.total
 	}
-	if out.began.IsZero() {
-		out.began = b.began
+	switch {
+	case out.began.IsZero():
+		if !b.began.IsZero() {
+			out.began = b.began
+			out.started = b.started
+		}
+	case out.started.IsZero() && !b.started.IsZero() && out.began.Equal(b.began):
+		out.started = b.started
 	}
 	return out
 }
@@ -288,11 +300,11 @@ func mergeRecords(stored []remediationv1alpha1.OccurrenceRecord, through **metav
 	add map[string]counted) ([]remediationv1alpha1.OccurrenceRecord, []string) {
 	records := make(map[string]counted, len(stored)+len(add))
 	for _, r := range stored {
-		records[r.ID] = counted{total: r.Total, began: timeFrom(r.Began)}
+		records[r.ID] = counted{total: r.Total, began: timeFrom(r.Began), started: timeFrom(r.Started)}
 	}
 	for id, o := range add {
 		if occurrenceID.MatchString(id) {
-			records[id] = higher(records[id], counted{total: min(o.total, math.MaxInt32), began: o.began})
+			records[id] = higher(records[id], counted{total: min(o.total, math.MaxInt32), began: o.began, started: o.started})
 		}
 	}
 	ids := make([]string, 0, len(records))
@@ -310,9 +322,15 @@ func mergeRecords(stored []remediationv1alpha1.OccurrenceRecord, through **metav
 	out := make([]remediationv1alpha1.OccurrenceRecord, 0, len(keep))
 	for _, id := range keep {
 		r := records[id]
-		out = append(out, remediationv1alpha1.OccurrenceRecord{
+		rec := remediationv1alpha1.OccurrenceRecord{
 			ID: id, Total: max(r.total, 0), Began: timeOf(r.began),
-		})
+		}
+		if strings.HasPrefix(id, terminationOccurrencePrefix) && rec.Began != nil && !r.started.IsZero() {
+			if started := timeOf(r.started); started != nil && !started.After(rec.Began.Time) {
+				rec.Started = started
+			}
+		}
+		out = append(out, rec)
 	}
 	if len(dropped) > 0 {
 		*through = timeOf(latest(timeFrom(*through), beganOrNone(records[dropped[0]].began)))

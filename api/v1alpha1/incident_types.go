@@ -122,6 +122,8 @@ const MaxIncidentCount = 1000000
 const MaxOccurrenceRecords = 32
 
 // OccurrenceRecord is what an Incident counted of one occurrence (design 3.2). It holds no event text.
+// +kubebuilder:validation:XValidation:rule="!has(self.started) || self.id.startsWith('termination:')",message="started is allowed only on a termination record"
+// +kubebuilder:validation:XValidation:rule="!has(self.started) || (has(self.began) && timestamp(self.started) <= timestamp(self.began))",message="started requires began and cannot be after it"
 type OccurrenceRecord struct {
 	// id names the occurrence: "event:" and the Event UID, "termination:" and a hash of the pod UID, the
 	// container and the termination, "waiting:" and a hash of the pod UID, the container, the waiting reason
@@ -145,6 +147,14 @@ type OccurrenceRecord struct {
 	// first saw it, by its own clock. Absent when none is known.
 	// +optional
 	Began *metav1.Time `json:"began,omitempty"`
+
+	// started is when a terminated container instance started, from the same terminated state of the pod
+	// status that began (its finish time) comes from (ADR-0023, amendments of 2026-11-21 and 2026-11-26).
+	// Set only on a termination record in status.occurrences, never after began; absent for other occurrences
+	// (including status.absorbedOccurrences, which never carry started), for records written by an older
+	// version, or when the pod status lacked a usable start time.
+	// +optional
+	Started *metav1.Time `json:"started,omitempty"`
 }
 
 // MaxIncidentContainers is the most container names an Incident's status.containers keeps (ADR-0039 point 8).
@@ -225,7 +235,8 @@ type IncidentStatus struct {
 	Count int64 `json:"count,omitempty"`
 
 	// occurrences are the newest occurrences counted for this incident, newest first, at most 32: for each,
-	// the highest total the cluster reported that was counted, and when it began. After a restart the
+	// the highest total the cluster reported that was counted, when it began, and for a termination, when
+	// that container instance started. After a restart the
 	// analyzer reads them to count only what is new. Older ones are dropped.
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=32
@@ -275,7 +286,7 @@ type IncidentStatus struct {
 	// absorbedOccurrences are the newest occurrences counted in absorbed, newest first, at most 32, kept apart
 	// from occurrences so that an absorbed observation never makes the Incident due for analysis (ADR-0039 point
 	// 16). After a restart they keep an absorbed occurrence from being counted twice. Older ones are dropped.
-	// Allowed only when cause is true.
+	// Absorbed occurrences are consequence events and never carry started. Allowed only when cause is true.
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=32
 	// +optional

@@ -1,0 +1,20 @@
+# Synthetic: the oom scenario's triage reply (../../replies.yaml), unchanged: the OOM lifetime line adds one
+# line to the summary block (c1) and moves no block, so the evidence it quotes is where it was. The lifetime
+# line is not quotable, and the reply quotes none of it.
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 2300, outputTokens: 310}
+    content: |
+      {"summary": "The web container of Deployment demo/web was OOMKilled (exit code 137) and has restarted 3 times: it needs more memory than its limit. The working set peaks at 5.0135e+07 bytes, just under the 48Mi limit, which sets the size: 64Mi, the smallest value within the policy's bounds, leaves headroom above that peak and should stop the kills.",
+       "hypotheses": [{"description": "The memory working set climbs to just under the 48Mi limit after each start, then the container is killed."}],
+       "evidence": [{"source": "c1", "quote": "OOMKilled"},
+                    {"source": "c2", "quote": "OOMKilled"},
+                    {"source": "c4", "quote": "container_memory_working_set_bytes{container=web,pod=web-8d4c6b9f7-t5r9k} last 5.0135e+07"},
+                    {"source": "c4", "quote": "container_memory_limit_bytes{container=web,pod=web-8d4c6b9f7-t5r9k} 5.03316e+07"}],
+       "missingData": [],
+       "uncertainty": "The working set peaks at 5.0135e+07 bytes against a 5.03316e+07 byte limit, so the needed headroom above the limit is estimated from the peak, not measured.",
+       "proposal": {"action": {"type": "SetContainerMemoryLimit", "adjustKedaMaxReplicas": null,
+                               "setContainerMemoryLimit": {"container": "web", "previous": "48Mi", "desired": "64Mi"}},
+                    "expectedEffect": "The container stays under its limit and stops being OOMKilled.",
+                    "verificationChecks": []}}

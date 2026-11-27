@@ -55,6 +55,7 @@ type termination struct {
 	id        string
 	reason    string
 	exitCode  int32
+	started   time.Time
 	finished  time.Time
 	waiting   bool
 	image     string
@@ -93,7 +94,8 @@ func terminations(pod *corev1.Pod) []termination {
 					t.ExitCode, reason)
 			}
 			out = append(out, termination{
-				container: st.Name, id: id, reason: reason, exitCode: t.ExitCode, finished: t.FinishedAt.Time,
+				container: st.Name, id: id, reason: reason, exitCode: t.ExitCode,
+				started: t.StartedAt.Time, finished: t.FinishedAt.Time,
 			})
 		}
 	}
@@ -397,7 +399,16 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	for i := range ts {
 		// A finish time in the future would otherwise keep later terminations of other pods marked
 		// MayRepeat once this pod's state is dropped.
+		orig := ts[i].finished
 		ts[i].finished = r.c.notFuture(ts[i].finished)
+		// Keep started only on a termination whose finish time was not clamped, with both times set
+		// and start not after finish (in whole-second API precision), so any lifetime compares two
+		// timestamps from the same pod status and never mixes clocks.
+		if ts[i].waiting || ts[i].started.IsZero() || ts[i].finished.IsZero() ||
+			!ts[i].finished.Equal(orig) ||
+			ts[i].started.Truncate(time.Second).After(ts[i].finished.Truncate(time.Second)) {
+			ts[i].started = time.Time{}
+		}
 	}
 	now := r.c.now()
 	pending := r.c.pods.pending(req.NamespacedName, pod.UID, ts, start, now)
@@ -441,7 +452,7 @@ func (r *podReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		if t.image != "" {
 			obs.Fingerprint = waitingFingerprint(input, t.container, t.image)
 		}
-		obs.Occurrence, obs.Began, obs.Total, obs.MayRepeat = t.occurrence(pod.UID), t.finished, 1, t.mayRepeat
+		obs.Occurrence, obs.Began, obs.Started, obs.Total, obs.MayRepeat = t.occurrence(pod.UID), t.finished, t.started, 1, t.mayRepeat
 		// A waiting reason is never in immediateTerminationReasons: a wait is often short while an image is
 		// pulled (ADR-0039 point 4).
 		obs.Immediate = immediateTermination(t.reason)

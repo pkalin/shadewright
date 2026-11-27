@@ -654,7 +654,7 @@ func (c *Controller) load(ctx context.Context) error {
 func (c *Controller) remember(fp, name string, status *remediationv1alpha1.IncidentStatus) {
 	for _, r := range slices.Concat(status.Occurrences, status.AbsorbedOccurrences) {
 		cur := c.records[r.ID]
-		c.setRecord(r.ID, record{counted: higher(cur.counted, counted{total: r.Total, began: timeFrom(r.Began)}), incident: name})
+		c.setRecord(r.ID, record{counted: higher(cur.counted, counted{total: r.Total, began: timeFrom(r.Began), started: timeFrom(r.Started)}), incident: name})
 	}
 	c.droppedThrough = latest(c.droppedThrough, timeFrom(status.OccurrencesDroppedThrough))
 	if t := timeFrom(status.AbsorbedOccurrencesDroppedThrough); !t.IsZero() && fp != "" {
@@ -766,6 +766,7 @@ func (c *Controller) counted(occurrence string) (int64, bool) {
 // It reports whether the batch is due at once: the Incident has not been written by this process yet.
 func (c *Controller) consume(ctx context.Context, o collector.Observation) bool {
 	o.Began = o.Began.Truncate(time.Second)
+	o.Started = o.Started.Truncate(time.Second)
 	o.Container = containerName(ctx, o.Container)
 	if cause := pullCauseOf(o); cause != "" {
 		o.Fingerprint = fingerprint.Scoped(o.Fingerprint, o.Container, cause)
@@ -986,7 +987,7 @@ func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
 		consequence:    o.Class == collector.ClassConsequence,
 		nonConsequence: o.Class != collector.ClassConsequence,
 		occurrences: map[string]heldOccurrence{
-			o.Occurrence: {counted: counted{total: o.Total, began: o.Began}, source: o.Source},
+			o.Occurrence: {counted: counted{total: o.Total, began: o.Began, started: o.Started}, source: o.Source},
 		},
 	}
 	if o.Container != "" {
@@ -1004,7 +1005,7 @@ func (c *Controller) count(ctx context.Context, o collector.Observation) bool {
 	// ever drop its record from memory.
 	if occurrenceID.MatchString(o.Occurrence) {
 		cur := c.records[o.Occurrence]
-		c.setRecord(o.Occurrence, record{counted: higher(cur.counted, counted{total: o.Total, began: o.Began}), incident: name})
+		c.setRecord(o.Occurrence, record{counted: higher(cur.counted, counted{total: o.Total, began: o.Began, started: o.Started}), incident: name})
 	}
 	return !scheduled
 }
@@ -1592,7 +1593,7 @@ func (c *Controller) forget(fp, name string, gone []*batch, stored *remediationv
 	kept := map[string]counted{}
 	if stored != nil {
 		for _, r := range slices.Concat(stored.Occurrences, stored.AbsorbedOccurrences) {
-			kept[r.ID] = counted{total: r.Total, began: timeFrom(r.Began)}
+			kept[r.ID] = counted{total: r.Total, began: timeFrom(r.Began), started: timeFrom(r.Started)}
 		}
 	}
 	p := c.pending[fp]

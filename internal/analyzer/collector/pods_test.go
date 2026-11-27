@@ -455,3 +455,109 @@ func TestRolloutStopsOfOneDeploymentObserveNothing(t *testing.T) {
 		t.Fatalf("OOM kill during deletion: %+v", got)
 	}
 }
+
+// Issue #1005 (decision of 2026-11-21): a termination occurrence carries the container instance's start time
+// from the same terminated state of the pod status as its finish time, left zero when either time is missing,
+// when start is after finish, when finish was clamped to the collector's clock, or on waiting/event
+// observations.
+func TestTerminationRecordsStartedFromPodStatus(t *testing.T) {
+	started := t0.Add(-45 * time.Second)
+	cases := []struct {
+		name        string
+		reason      string
+		exitCode    int32
+		startedAt   time.Time
+		finishedAt  time.Time
+		current     bool
+		wantStarted time.Time
+	}{
+		{
+			name: "OOMKilled last state keeps start time", reason: ReasonOOMKilled, exitCode: 137,
+			startedAt: started, finishedAt: t0, wantStarted: started,
+		},
+		{
+			name: "OOMKilled current state keeps start time", reason: ReasonOOMKilled, exitCode: 137,
+			startedAt: started, finishedAt: t0, current: true, wantStarted: started,
+		},
+		{
+			name: "non-zero exit keeps start time", reason: reasonError, exitCode: 1,
+			startedAt: started, finishedAt: t0, wantStarted: started,
+		},
+		{
+			name: "same second start and finish keeps start time", reason: ReasonOOMKilled, exitCode: 137,
+			startedAt: t0, finishedAt: t0, wantStarted: t0,
+		},
+		{
+			name: "missing start time leaves started zero", reason: ReasonOOMKilled, exitCode: 137,
+			finishedAt: t0,
+		},
+		{
+			name: "missing finish time leaves started zero", reason: ReasonOOMKilled, exitCode: 137,
+			startedAt: started,
+		},
+		{
+			name: "start after finish leaves started zero", reason: ReasonOOMKilled, exitCode: 137,
+			startedAt: t0.Add(time.Second), finishedAt: t0,
+		},
+		{
+			name: "future finish clamped by collector leaves started zero", reason: ReasonOOMKilled, exitCode: 137,
+			startedAt: started, finishedAt: t0.Add(time.Minute),
+		},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, rs, pod := workload()
+			term := &corev1.ContainerStateTerminated{
+				ContainerID: fmt.Sprintf("containerd://case-%d", i),
+				Reason:      tc.reason,
+				ExitCode:    tc.exitCode,
+			}
+			if !tc.startedAt.IsZero() {
+				term.StartedAt = metav1.NewTime(tc.startedAt)
+			}
+			if !tc.finishedAt.IsZero() {
+				term.FinishedAt = metav1.NewTime(tc.finishedAt)
+			}
+			cs := corev1.ContainerStatus{Name: containerApp, RestartCount: 1}
+			if tc.current {
+				cs.State.Terminated = term
+			} else {
+				cs.LastTerminationState.Terminated = term
+			}
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{cs}
+			h := newHarness(t, Config{}, d, rs, pod)
+			h.reconcilePod(pod.Name)
+			got := h.one()
+			if !got.Started.Equal(tc.wantStarted) {
+				t.Fatalf("Started = %v, want %v (Began = %v)", got.Started, tc.wantStarted, got.Began)
+			}
+		})
+	}
+
+	// Waiting causes and events (BackOff, Killing) never set Started.
+	t.Run("waiting and events leave started zero", func(t *testing.T) {
+		d, rs, pod := workload()
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  containerApp,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+		}}
+		ev := warning("backoff-ev", 0)
+		const reasonKilling = "Killing"
+		killing := warning("killing-ev", 0)
+		killing.Reason = reasonKilling
+		h := newHarness(t, Config{}, d, rs, pod, ev, killing)
+		h.c.holdOff = true
+		h.reconcilePod(pod.Name)
+		if got := h.one(); !got.Started.IsZero() {
+			t.Errorf("waiting Started = %v, want zero", got.Started)
+		}
+		h.reconcileEvent(ev.Name)
+		if got := h.one(); !got.Started.IsZero() {
+			t.Errorf("BackOff event Started = %v, want zero", got.Started)
+		}
+		h.reconcileEvent(killing.Name)
+		if got := h.one(); !got.Started.IsZero() {
+			t.Errorf("Killing event Started = %v, want zero", got.Started)
+		}
+	})
+}

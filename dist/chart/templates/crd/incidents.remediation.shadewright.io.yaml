@@ -249,7 +249,7 @@ spec:
                   absorbedOccurrences are the newest occurrences counted in absorbed, newest first, at most 32, kept apart
                   from occurrences so that an absorbed observation never makes the Incident due for analysis (ADR-0039 point
                   16). After a restart they keep an absorbed occurrence from being counted twice. Older ones are dropped.
-                  Allowed only when cause is true.
+                  Absorbed occurrences are consequence events and never carry started. Allowed only when cause is true.
                 items:
                   description: OccurrenceRecord is what an Incident counted of one
                     occurrence (design 3.2). It holds no event text.
@@ -271,6 +271,15 @@ spec:
                       maxLength: 76
                       pattern: ^(event|termination|waiting|condition):[A-Za-z0-9-]{1,64}$
                       type: string
+                    started:
+                      description: |-
+                        started is when a terminated container instance started, from the same terminated state of the pod
+                        status that began (its finish time) comes from (ADR-0023, amendments of 2026-11-21 and 2026-11-26).
+                        Set only on a termination record in status.occurrences, never after began; absent for other occurrences
+                        (including status.absorbedOccurrences, which never carry started), for records written by an older
+                        version, or when the pod status lacked a usable start time.
+                      format: date-time
+                      type: string
                     total:
                       description: |-
                         total is the highest total of the occurrence counted: the event's series count, or 1 for a
@@ -283,6 +292,12 @@ spec:
                   - id
                   - total
                   type: object
+                  x-kubernetes-validations:
+                  - message: started is allowed only on a termination record
+                    rule: '!has(self.started) || self.id.startsWith(''termination:'')'
+                  - message: started requires began and cannot be after it
+                    rule: '!has(self.started) || (has(self.began) && timestamp(self.started)
+                      <= timestamp(self.began))'
                 maxItems: 32
                 type: array
                 x-kubernetes-list-type: atomic
@@ -483,7 +498,8 @@ spec:
               occurrences:
                 description: |-
                   occurrences are the newest occurrences counted for this incident, newest first, at most 32: for each,
-                  the highest total the cluster reported that was counted, and when it began. After a restart the
+                  the highest total the cluster reported that was counted, when it began, and for a termination, when
+                  that container instance started. After a restart the
                   analyzer reads them to count only what is new. Older ones are dropped.
                 items:
                   description: OccurrenceRecord is what an Incident counted of one
@@ -506,6 +522,15 @@ spec:
                       maxLength: 76
                       pattern: ^(event|termination|waiting|condition):[A-Za-z0-9-]{1,64}$
                       type: string
+                    started:
+                      description: |-
+                        started is when a terminated container instance started, from the same terminated state of the pod
+                        status that began (its finish time) comes from (ADR-0023, amendments of 2026-11-21 and 2026-11-26).
+                        Set only on a termination record in status.occurrences, never after began; absent for other occurrences
+                        (including status.absorbedOccurrences, which never carry started), for records written by an older
+                        version, or when the pod status lacked a usable start time.
+                      format: date-time
+                      type: string
                     total:
                       description: |-
                         total is the highest total of the occurrence counted: the event's series count, or 1 for a
@@ -518,6 +543,12 @@ spec:
                   - id
                   - total
                   type: object
+                  x-kubernetes-validations:
+                  - message: started is allowed only on a termination record
+                    rule: '!has(self.started) || self.id.startsWith(''termination:'')'
+                  - message: started requires began and cannot be after it
+                    rule: '!has(self.started) || (has(self.began) && timestamp(self.started)
+                      <= timestamp(self.began))'
                 maxItems: 32
                 type: array
                 x-kubernetes-list-type: atomic

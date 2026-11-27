@@ -1523,7 +1523,10 @@ var _ = Describe("Incident", func() {
 				s.Occurrences = append(s.Occurrences, record(fmt.Sprintf("event:0a1b2c3d-4e5f-4a6b-8c7d-%012d", i), 2147483647))
 			}
 			s.Occurrences[0] = record("termination:"+strings.Repeat("ab", 16), 1)
+			s.Occurrences[0].Started = &metav1.Time{Time: time.Unix(1699999940, 0)}
 			s.Occurrences[1] = record("waiting:"+strings.Repeat("cd", 16), 1)
+			s.Occurrences[2] = record("termination:"+strings.Repeat("ef", 16), 1)
+			s.Occurrences[2].Started = s.Occurrences[2].Began.DeepCopy() // zero duration: allowed by schema
 			s.OccurrencesDroppedThrough = &metav1.Time{Time: time.Unix(1700000000, 0)}
 			for i := range v1alpha1.MaxAnalysisRecords {
 				s.AnalysisRecords = append(s.AnalysisRecords, v1alpha1.RecordID(fmt.Sprintf("%d-", i)+strings.Repeat("a", 190)))
@@ -1575,6 +1578,68 @@ var _ = Describe("Incident", func() {
 				s.AnalysisRecords = append(s.AnalysisRecords, v1alpha1.RecordID(fmt.Sprintf("r%d", i)))
 			}
 		}, "status.analysisRecords"),
+		Entry("started on an event occurrence", func(s *v1alpha1.IncidentStatus) {
+			r := record("event:abc", 1)
+			r.Started = &metav1.Time{Time: time.Unix(1699999940, 0)}
+			s.Occurrences = []v1alpha1.OccurrenceRecord{r}
+		}, "started is allowed only on a termination record"),
+		Entry("started on a waiting occurrence", func(s *v1alpha1.IncidentStatus) {
+			r := record("waiting:abc", 1)
+			r.Started = &metav1.Time{Time: time.Unix(1699999940, 0)}
+			s.Occurrences = []v1alpha1.OccurrenceRecord{r}
+		}, "started is allowed only on a termination record"),
+		Entry("started on a condition occurrence", func(s *v1alpha1.IncidentStatus) {
+			r := record("condition:abc", 1)
+			r.Started = &metav1.Time{Time: time.Unix(1699999940, 0)}
+			s.Occurrences = []v1alpha1.OccurrenceRecord{r}
+		}, "started is allowed only on a termination record"),
+		Entry("started after began on a termination occurrence", func(s *v1alpha1.IncidentStatus) {
+			r := record("termination:abc", 1)
+			r.Started = &metav1.Time{Time: time.Unix(1700000001, 0)}
+			s.Occurrences = []v1alpha1.OccurrenceRecord{r}
+		}, "started requires began and cannot be after it"),
+		Entry("started without began on a termination occurrence", func(s *v1alpha1.IncidentStatus) {
+			s.Occurrences = []v1alpha1.OccurrenceRecord{{
+				ID: "termination:abc", Total: 1, Started: &metav1.Time{Time: time.Unix(1699999940, 0)},
+			}}
+		}, "started requires began and cannot be after it"),
+	)
+
+	It("accepts updating an Incident whose older termination record has no started", func() {
+		inc := fx.Incident("default", unique("inc-upgrade"))
+		Expect(k8sClient.Create(ctx, inc)).To(Succeed())
+		inc.Status.Phase = v1alpha1.IncidentOpen
+		inc.Status.Occurrences = []v1alpha1.OccurrenceRecord{
+			record("termination:"+strings.Repeat("11", 16), 1),
+		}
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+
+		newer := record("termination:"+strings.Repeat("22", 16), 1)
+		newer.Began = &metav1.Time{Time: time.Unix(1700000100, 0)}
+		newer.Started = &metav1.Time{Time: time.Unix(1700000040, 0)}
+		inc.Status.Occurrences = append([]v1alpha1.OccurrenceRecord{newer}, inc.Status.Occurrences...)
+		Expect(k8sClient.Status().Update(ctx, inc)).To(Succeed())
+	})
+
+	DescribeTable("checks started against began on termination occurrences",
+		func(started *metav1.Time, wantErr string) {
+			err := updateStatus(func(s *v1alpha1.IncidentStatus) {
+				r := record("termination:"+strings.Repeat("33", 16), 1)
+				r.Started = started
+				s.Occurrences = []v1alpha1.OccurrenceRecord{r}
+			})
+			if wantErr == "" {
+				Expect(err).NotTo(HaveOccurred())
+				return
+			}
+			Expect(err).To(HaveOccurred(), "the API server accepted an invalid termination started time")
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "unexpected error: %v", err)
+			Expect(err.Error()).To(ContainSubstring(wantErr))
+		},
+		Entry("started absent is accepted", nil, ""),
+		Entry("started before began is accepted", &metav1.Time{Time: time.Unix(1699999940, 0)}, ""),
+		Entry("started equal to began is accepted", &metav1.Time{Time: time.Unix(1700000000, 0)}, ""),
+		Entry("started after began is rejected", &metav1.Time{Time: time.Unix(1700000001, 0)}, "started requires began and cannot be after it"),
 	)
 })
 

@@ -113,6 +113,11 @@ type Observation struct {
 	// collector first saw the state, by its own clock. It orders occurrences for a consumer that keeps a bounded number
 	// of them.
 	Began time.Time
+	// Started is when a terminated container instance started, from the same terminated state of the pod
+	// status that Began (its finish time) comes from (ADR-0023, amendment of 2026-11-21). Zero for every other
+	// observation, and left zero when either time is missing, when the finish time was clamped to the
+	// collector's clock, or when Started is after Began.
+	Started time.Time
 	// Count is how many new occurrences this observation stands for: the increase of Total since this
 	// collector last handled it, at most MaxCount, never the total of a series the collector cannot account
 	// for. It is 0 exactly when MayRepeat is set.

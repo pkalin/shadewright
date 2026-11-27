@@ -303,6 +303,14 @@ func (s *sightings) holds(fingerprint string) bool {
 	return ok
 }
 
+// of returns the first sighting held for fingerprint, or nil. A first sighting that starts over is another one.
+func (s *sightings) of(fingerprint string) *sighting {
+	if e, ok := s.items[fingerprint]; ok {
+		return e.Value.(*sighting)
+	}
+	return nil
+}
+
 // len returns the number of fingerprints held.
 func (s *sightings) len() int {
 	return s.order.Len()

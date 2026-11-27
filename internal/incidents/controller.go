@@ -851,7 +851,16 @@ func (c *Controller) consumeLocked(ctx context.Context, o collector.Observation)
 	if o.Immediate || recurs(o) || c.refused.has(o.Fingerprint) {
 		open = append(c.sightings.take(o.Fingerprint), o)
 	} else {
+		was := c.sightings.of(o.Fingerprint)
 		open = c.sightings.admit(o, c.cfg.Now())
+		if h := c.sightings.of(o.Fingerprint); h != nil && h != was {
+			// A new first sighting holds the Incident back on purpose: said once per first sighting, so that an
+			// Incident not there yet is explained (#901). The subject and the reason only, nothing of the text.
+			s := o.Subject
+			logf.FromContext(ctx).Info("Held a first sighting; its Incident opens when the symptom is seen again",
+				"fingerprint", o.Fingerprint, "kind", s.Kind, "namespace", s.Namespace, "name", s.Name,
+				"reason", o.Reason, "recurAfter", RecurAfter, "recurWithin", RecurWithin)
+		}
 	}
 	due := false
 	for _, h := range open {

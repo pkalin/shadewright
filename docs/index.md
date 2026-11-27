@@ -43,7 +43,7 @@ For a container that keeps running out of memory, the executor opens a pull requ
 >
 > **Scope:** one value in `apps/demo/web-deployment.yaml` on `cluster/lab`. Nothing else in this pull request is part of the plan.
 >
-> **Size:** an increase of 34% of the previous value, within policy `demo-memory`. The policy bounds the step; it does not say the step is the right size.
+> **Size:** an increase of 33.4% of the previous value, within policy `demo-memory`. The policy bounds the step; it does not say the step is the right size.
 >
 > **Rollback:** revert this pull request; the GitOps controller applies the previous value.
 >

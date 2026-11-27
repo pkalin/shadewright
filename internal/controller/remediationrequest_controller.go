@@ -1163,6 +1163,16 @@ var buildTooLargeMessage = fmt.Sprintf("The build is over a limit of the render 
 	semdiff.MaxBuildBytes, semdiff.MaxBuildDocuments, semdiff.MaxVisits, semdiff.MaxFiles, semdiff.MaxFileBytes,
 	semdiff.MaxTransformBytes, semdiff.NodeBytes, semdiff.MaxMergedKeys)
 
+// errTargetChanged marks the retry unchanged asks for: the target moved while the policy check read it. It is an
+// expected step of the check: it is returned as an error like any other, and only its log line is at V(1)
+// (expectedRetryLogConstructor).
+var errTargetChanged = errors.New("the target changed")
+
+// errVerifyingConflict marks the conflict of the status write that moves a request to Verifying (enterVerifying):
+// another writer wrote the request first, and the next read sees what they wrote. It is an expected retry, returned
+// as an error like any other, and only its log line is at V(1) (expectedRetryLogConstructor).
+var errVerifyingConflict = errors.New("the request was written meanwhile")
+
 // unchanged reads the target again and returns nil when it is still live, with the UID and resourceVersion of
 // live, the object the check read first. Otherwise it returns an error, so the check starts over on the next
 // attempt with the object as it is now: a terminal answer is never given on an object that has changed since.
@@ -1173,8 +1183,8 @@ func (r *RemediationRequestReconciler) unchanged(ctx context.Context, ref remedi
 		return err
 	}
 	if !ok || again.GetUID() != live.GetUID() || again.GetResourceVersion() != live.GetResourceVersion() {
-		return fmt.Errorf("%s %s/%s changed during the policy check, checking again",
-			ref.Kind, ref.Namespace, ref.Name)
+		return fmt.Errorf("%s %s/%s changed during the policy check, checking again: %w",
+			ref.Kind, ref.Namespace, ref.Name, errTargetChanged)
 	}
 	return nil
 }
@@ -1275,7 +1285,9 @@ func (r *RemediationRequestReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		// The executor's writes of the render mark or of PullRequestNotClosed alone wake nothing: they would cut
 		// short the delay the reconcile that wrote them returned (#714, #797).
 		WithEventFilter(skipOwnMarks).
-		Named("remediationrequest").
+		Named(controllerName).
+		// An expected retry is still returned as an error; only its log line is at V(1) (#902).
+		WithLogConstructor(expectedRetryLogConstructor(mgr.GetLogger())).
 		Complete(countErrors{r})
 }
 

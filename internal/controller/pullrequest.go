@@ -2057,6 +2057,11 @@ func (r *RemediationRequestReconciler) stop(ctx context.Context, rr *remediation
 	status := metav1.ConditionFalse
 	if phase == remediationv1alpha1.PhaseMerged {
 		status = metav1.ConditionTrue
+		if c := meta.FindStatusCondition(rr.Status.Conditions, remediationv1alpha1.ConditionPROpened); c != nil &&
+			c.Reason == ReasonPullRequestOpened {
+			// A merge that no path marked: PullRequestOpened no longer says the pull request is open.
+			markClosed(rr, ReasonChangeRequestMerged, "was merged")
+		}
 	}
 	// Before a pull request is recorded the stop explains why none was opened; after, PullRequestOpened stays
 	// true and the outcome of the review is the Approved condition.
@@ -2939,7 +2944,7 @@ func changeWith(rr *remediationv1alpha1.RemediationRequest, value func(string) s
 }
 
 // stepSize says how large the planned step is relative to the previous value, from the request's validated
-// numbers only: "an increase of 33% of the previous value". It returns "" when there is no previous value to
+// numbers only: "an increase of 33.4% of the previous value". It returns "" when there is no previous value to
 // compare with.
 func stepSize(rr *remediationv1alpha1.RemediationRequest) string {
 	var prev, desired int64
@@ -2958,8 +2963,14 @@ func stepSize(rr *remediationv1alpha1.RemediationRequest) string {
 	if delta < 0 {
 		kind, delta = "a decrease", -delta
 	}
-	// Rounded up, so a step is never shown smaller than it is.
-	return fmt.Sprintf("%s of %d%% of the previous value", kind, (delta*100+prev-1)/prev)
+	// Rounded up to a tenth of a percent, so a step is never shown smaller than it is, and a step just below a
+	// policy maximum (33.3 percent against 34) is not shown as the maximum itself. A whole number has no decimal.
+	tenths := (delta*1000 + prev - 1) / prev
+	size := fmt.Sprintf("%d%%", tenths/10)
+	if tenths%10 != 0 {
+		size = fmt.Sprintf("%d.%d%%", tenths/10, tenths%10)
+	}
+	return fmt.Sprintf("%s of %s of the previous value", kind, size)
 }
 
 // commitTitle is the commit message and pull request title. It follows Conventional Commits, as the GitOps

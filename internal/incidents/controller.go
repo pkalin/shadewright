@@ -1416,8 +1416,8 @@ func (c *Controller) dropDeleted(ctx context.Context, fp, name string, batches [
 	}
 	droppedBatches.WithLabelValues(dropDeleted).Add(float64(len(batches)))
 	count, absorbed := counts(batches)
-	logf.FromContext(ctx).Error(deleted, "Dropped observations of a deleted Incident", "incident", name,
-		"latest", c.nameOf(fp), "count", count, "absorbed", absorbed)
+	logf.FromContext(ctx).Info("Dropped observations of a deleted Incident", "incident", name,
+		"reason", deleted.Error(), "latest", c.nameOf(fp), "count", count, "absorbed", absorbed)
 }
 
 // dropStale drops the batches of a write that was in flight when the informers reported the delete of its
@@ -1438,8 +1438,8 @@ func (c *Controller) dropStale(ctx context.Context, name string, batches []*batc
 	}
 	droppedBatches.WithLabelValues(dropDeleted).Add(float64(len(batches)))
 	count, absorbed := counts(batches)
-	logf.FromContext(ctx).Error(deleted, "Dropped observations of a deleted Incident", "incident", name,
-		"latest", name, "count", count, "absorbed", absorbed)
+	logf.FromContext(ctx).Info("Dropped observations of a deleted Incident", "incident", name,
+		"reason", deleted.Error(), "latest", name, "count", count, "absorbed", absorbed)
 }
 
 // forgetDeleted adds the occurrences of batches, dropped with a deleted Incident, to deletedOccurrences. The

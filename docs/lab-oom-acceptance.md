@@ -275,7 +275,7 @@ Expect:
   opening sentence and in the evidence. The executor shows the name only after reading that Incident back, so a
   redacted name means the read failed (the executor's log says so) or the request names no such Incident. The
   body also holds the change, scope, evidence (the request, its UID, the incident, the policy revision
-  `<policy name>/<generation>`, the plan digest), the size of the step (`an increase of 34% of the previous value`
+  `<policy name>/<generation>`, the plan digest), the size of the step (`an increase of 33.4% of the previous value`
   from 48Mi to 64Mi, within policy `demo-memory`; ADR-0026), expected effect, risk, rollback and `Approval required: yes`,
   and a last line `<!-- shadewright request-uid=... plan-digest=sha256:... -->` whose UID and digest match
   `.metadata.uid` and `.status.planDigest` of the request.

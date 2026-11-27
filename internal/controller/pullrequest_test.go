@@ -875,18 +875,23 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			live.Annotations = map[string]string{"flux.example/revision": "2"}
 			Expect(k8sClient.Update(ctx, live)).To(Succeed())
 		})
-		var errs []error
+		var lastRes reconcile.Result
+		var lastErr error
 		for range 5 {
 			if faulty.count(opReadFile) > 0 {
 				break
 			}
-			errs = append(errs, reconcileOnce())
+			lastRes, lastErr = reconcileResult()
 		}
 		Expect(faulty.count(opReadFile)).To(BeNumerically(">", 0), "the build was read")
-		Expect(errs[len(errs)-1]).To(MatchError(ContainSubstring("changed during the policy check")),
+		Expect(lastErr).To(MatchError(errTargetChanged),
+			"the reconcile that read the build retries as an expected retry")
+		Expect(lastErr).To(MatchError(ContainSubstring("changed during the policy check")),
 			"the reconcile that read the build retries")
-		Expect(fetch().Status.Phase).NotTo(Equal(remediationv1alpha1.PhaseNeedsIntervention),
-			"a build read for an object that changed does not end the request")
+		Expect(lastRes).To(Equal(reconcile.Result{}),
+			"the error path, not a fixed delay, drives the backoff")
+		Expect(fetch().Status.Phase).To(BeEmpty(),
+			"a build read for an object that changed does not decide or end the request")
 	})
 
 	It("does not commit on a branch that holds something else", func() {
@@ -8125,7 +8130,7 @@ var _ = Describe("Pull request body", func() {
 		m := rr.Spec.Action.SetContainerMemoryLimit
 		m.Previous, m.Desired = resource.MustParse("48Mi"), resource.MustParse("64Mi")
 		body := pullRequestBody(rr, "", nil)
-		Expect(body).To(ContainSubstring("**Size:** an increase of 34% of the previous value, within policy `" +
+		Expect(body).To(ContainSubstring("**Size:** an increase of 33.4% of the previous value, within policy `" +
 			string(rr.Spec.PolicyRef) + "`."))
 		Expect(body).To(ContainSubstring("The diagnosis, with the model's unverified reason for the size, is in the " +
 			"analysis record and the analyzer's log for this request's name, not in this pull request"))
@@ -8135,6 +8140,13 @@ var _ = Describe("Pull request body", func() {
 		rr.Spec.Action = remediationv1alpha1.Action{Type: remediationv1alpha1.ActionAdjustKedaMaxReplicas,
 			AdjustKedaMaxReplicas: &k}
 		Expect(stepSize(rr)).To(Equal("an increase of 50% of the previous value"))
+		// A step of 33.3 percent is not shown as 34, which would read as exactly a policy maximum of 34 (#902).
+		k.PreviousValue, k.DesiredValue = 3, 4
+		Expect(stepSize(rr)).To(Equal("an increase of 33.4% of the previous value"))
+		k.PreviousValue, k.DesiredValue = 8, 9
+		Expect(stepSize(rr)).To(Equal("an increase of 12.5% of the previous value"))
+		k.PreviousValue, k.DesiredValue = 1000, 1001
+		Expect(stepSize(rr)).To(Equal("an increase of 0.1% of the previous value"))
 		k.PreviousValue = 0
 		Expect(stepSize(rr)).To(BeEmpty())
 	})

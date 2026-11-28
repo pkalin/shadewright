@@ -6670,8 +6670,10 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				// Only the step's own deadline, or the Incident read's own deadline, counts as running out of time:
 				// any other failure ends the loop and fails the spec. This spec proves that the pull request is
 				// opened once, in the reconcile that times out and during adoption; it does not prove how long the
-				// write step takes. capWrite is only a hang guard that keeps the loop from growing the deadline
-				// without end, not a bound on the reconcile.
+				// write step takes. capWrite only bounds the retry loop between reconciles, so the deadline does
+				// not grow without end. A reconcile that never returns is not stopped by it: the attempt count and
+				// capWrite are checked only after reconcileOnce returns, so that hang ends at the package test
+				// timeout, not in this spec.
 				const shortWrite, capWrite = 200 * time.Millisecond, 16 * 200 * time.Millisecond
 				incidents := &deadlineIncidentReader{Reader: k8sClient}
 				apiReader = incidents

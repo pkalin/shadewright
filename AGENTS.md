@@ -126,7 +126,7 @@ Every issue names the ADRs it is tied to:
   that has `packages: write`. `make docker-build-images` builds all three for the host platform.
 - **CI scope.** `.github/workflows/ci.yml` is the one graph of a pull request and of a push to main. Its
   `changes` job runs `hack/ci-changed.sh` once on the files the pull request changes; the jobs that call the
-  workflows holding the checks (lint, test, e2e, govulncheck, image build, chart tests, docs check, CodeQL, workflow lint, secret scan) get
+  workflows holding the checks (lint, test, e2e, govulncheck, image build, chart tests, docs check, CodeQL, workflow lint) get
   `run: true|false` and skip when their paths did not change. A skipped job counts as passing. `ci-ok` needs
   all of them and is the single required CI check: it fails when `changes` failed or any job failed or was
   cancelled. The required checks are `ci-ok`, `Conventional PR title` and `Dependency review`. A new job goes

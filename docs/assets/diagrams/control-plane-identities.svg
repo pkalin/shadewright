@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 640" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Control plane identities and their writes</title>
-  <desc id="d">Identities of ADR-0038, proposed and not built. In each spoke, the analyzer, executor and verifier keep the writes that invariant 6 gives them today. The new spoke identity shadewright-reporter reads Incidents, RemediationRequests and VerificationReports in the operator namespace, plus get on remediationsettings, get on the kube-system Namespace by resource name and get on the non-resource URL /openid/v1/jwks. It also reads, by resource name, the one ConfigMap shadewright-cluster-registration. Its only write is update on that ConfigMap. The reporter has no Secrets, no Git identity and no model credential. Its egress is DNS, the API server and TCP 443 for the hub, whose host is pinned in its settings, because a NetworkPolicy cannot match host names. It sends reports over HTTPS to the hub intake service, the only line from spoke to hub. At the hub, intake reads Cluster objects and the hub settings, writes the reported kinds (incidents, requests, heartbeats) in the one hub namespace, takes the cluster for every write from the verified Cluster object, enforces per-cluster limits on count, size and rate in its code, and refuses a report the redactor would change. RBAC does not separate spokes: that guard is intake code, and it needs tests. Intake has no write on Cluster objects, no Git write, no model credential and makes no external call; network-level limits to the API server need an operator ipBlock or CNI rule. The fleet controller alone writes Cluster status, including the issuer keys it fetches for discovery clusters over DNS and port 443 behind the dial guard; it reads the reported kinds and deletes records of an earlier registration. It creates no Namespace or RoleBinding and holds no bind or escalate. The status page has its own identity in its own namespace with a default-deny NetworkPolicy, listens on 127.0.0.1 only, is reached by port-forward and only reads Cluster objects and the reported kinds. People who may merge in the hub GitOps repository approve each new spoke, which adds only its Cluster object, and revoke it by setting revoked to true. No hub identity is cluster-admin, and none has a model credential or a Git write identity in phase 1.</desc>
+  <desc id="d">Identities of ADR-0038, proposed and not built. In each spoke, the analyzer, executor and verifier keep the writes that invariant 6 gives them today. The new spoke identity shadewright-reporter reads Incidents and RemediationRequests in the operator namespace, plus get on remediationsettings and get on the kube-system Namespace by resource name. It writes nothing in the cluster, and has no Secrets, no Git identity and no model credential. Its egress is DNS, the API server and TCP 443 for the hub, whose host is pinned in its settings, because a NetworkPolicy cannot match host names. It sends one snapshot at a time over HTTPS to the hub intake service, the only line from spoke to hub. At the hub, intake reads Cluster objects and the hub settings, and creates or updates only the one snapshot object of the verified cluster in the hub namespace, in one write with a version check. It allows one request in flight per cluster, a report rate and a size cap, refuses a snapshot the redactor would change or cannot finish within its budget, and pauses when the hub settings are missing or invalid. RBAC does not separate spokes: that guard is intake code, and it needs tests. Intake terminates TLS itself, has no write on Cluster objects, no Git write, no model credential and makes no external call. The fleet controller alone writes Cluster status, including the issuer keys it fetches for discovery clusters over DNS and port 443 behind the dial guard; it reads the snapshots and deletes a snapshot of an earlier registration. It creates no Namespace or RoleBinding and holds no bind or escalate. The status page has its own identity in its own namespace with a default-deny NetworkPolicy, listens on 127.0.0.1 only, is reached by port-forward and only reads Cluster objects and snapshots. A person runs the registration command, which reads the spoke identity live, and people who may merge in the hub GitOps repository approve each new spoke, which adds only its Cluster object, and revoke it by setting revoked to true. No hub identity is cluster-admin, and none has a model credential or a Git write identity in phase 1.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -41,9 +41,9 @@
   <rect class="key" x="806" y="72" width="236" height="176" rx="12"/>
   <text class="h" x="822" y="100">Reporter (new, proposed)</text>
   <text class="s" x="822" y="122">reads: Incidents, requests,</text>
-  <text class="s" x="822" y="138">reports, settings, kube-system,</text>
-  <text class="s" x="822" y="154">its ConfigMap, /openid/v1/jwks</text>
-  <text class="s" x="822" y="170">writes: update on that ConfigMap</text>
+  <text class="s" x="822" y="138">settings, kube-system UID</text>
+  <text class="s" x="822" y="154">writes: nothing in the cluster</text>
+  <text class="s" x="822" y="170">sends: one snapshot at a time</text>
   <text class="no" x="822" y="190">never: Secrets, Git, model key</text>
   <text class="s" x="822" y="210">egress: DNS, API server, hub 443</text>
   <text class="s" x="822" y="228">token audience: this hub</text>
@@ -53,28 +53,28 @@
   <rect class="key" x="44" y="378" width="330" height="150" rx="12"/>
   <text class="h" x="60" y="406">Intake</text>
   <text class="s" x="60" y="428">reads: Cluster objects, hub settings</text>
-  <text class="s" x="60" y="444">writes: reported kinds in the hub namespace;</text>
-  <text class="s" x="60" y="460">cluster from the verified object, limits per</text>
-  <text class="s" x="60" y="476">cluster in code; refuses what redaction changes</text>
+  <text class="s" x="60" y="444">writes: the verified cluster's one snapshot,</text>
+  <text class="s" x="60" y="460">replaced whole; one in flight, rate, size cap</text>
+  <text class="s" x="60" y="476">per cluster; redaction refuses, fails closed</text>
   <text class="no" x="60" y="496">never: Cluster objects, Git, model, Secrets</text>
-  <text class="s" x="60" y="516">egress: no external call</text>
+  <text class="s" x="60" y="516">egress: no external call; TLS terminated here</text>
   <rect class="box" x="396" y="378" width="330" height="150" rx="12"/>
   <text class="h" x="412" y="406">Fleet controller</text>
   <text class="s" x="412" y="428">writes: Cluster status only (conditions,</text>
-  <text class="s" x="412" y="444">issuer keys); reads the reported kinds and</text>
-  <text class="s" x="412" y="460">deletes records of an earlier registration</text>
+  <text class="s" x="412" y="444">issuer keys); reads the snapshots and</text>
+  <text class="s" x="412" y="460">deletes one of an earlier registration</text>
   <text class="no" x="412" y="482">never: namespaces, RoleBindings, bind</text>
   <text class="s" x="412" y="506">egress: DNS, 443 for keys, dial guard</text>
   <rect class="box" x="748" y="378" width="328" height="80" rx="12"/>
   <text class="h" x="764" y="402">Status page (own namespace)</text>
-  <text class="s" x="764" y="422">reads Clusters and reported kinds only</text>
+  <text class="s" x="764" y="422">reads Clusters and snapshots only</text>
   <text class="s" x="764" y="440">default deny; 127.0.0.1, port-forward</text>
   <rect class="ext" x="748" y="468" width="328" height="60" rx="12"/>
   <text class="h" x="764" y="492">People who merge in the hub repo</text>
-  <text class="s" x="764" y="512">add one Cluster object per spoke</text>
+  <text class="s" x="764" y="512">registration command, one Cluster object</text>
   <path class="f" d="M924 248V300H209V378" marker-end="url(#a)"/>
-  <text class="lbl" x="300" y="292">report over HTTPS: the only line from spoke to hub</text>
-  <text class="s" x="44" y="558">One hub namespace holds every spoke's records; RBAC does not separate spokes, intake's code does. No hub identity is cluster-admin.</text>
+  <text class="lbl" x="300" y="292">snapshot over HTTPS: the only line from spoke to hub</text>
+  <text class="s" x="44" y="558">One hub namespace holds one snapshot per spoke; RBAC does not separate spokes, intake's code does. No hub identity is cluster-admin.</text>
   <text class="s" x="44" y="578">No hub component has a model credential or a Git write identity in phase 1. Limiting hub egress to the API server needs an operator ipBlock or CNI rule.</text>
   <text class="s" x="44" y="598">Each spoke has its own model credential (key: ADR-0037) and daily budget (ADR-0023).</text>
 </svg>

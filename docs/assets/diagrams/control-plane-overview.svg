@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 530" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
   <title id="t">Control plane mode: hub and reporting clusters</title>
-  <desc id="d">Overview of ADR-0038, proposed and not built. Each spoke keeps working when the hub is down. Two spoke clusters, each a standalone Shadewright install with its own analyzer, executor and verifier, plus a new reporter. Each spoke has its own GitOps repository, where its executor opens pull requests as today, and its own model credential and budget. Each reporter sends redacted summaries and a projected ServiceAccount token over HTTPS, to a path naming its cluster, to the intake service of the hub; the connection is outbound from the spoke and the answer is only accepted or refused. The hub is a Kubernetes cluster. Flux applies the Cluster objects from the hub GitOps repository, one per spoke and nothing else per spoke. The fleet controller writes Cluster status (issuer keys, readiness), reads the heartbeat records and deletes records of an earlier registration. Intake writes the records of every spoke into the one hub namespace, labelled with the cluster it verified, and enforces per-cluster limits in its code. The read-only status page runs in its own namespace, listens on 127.0.0.1 only, is reached by port-forward and reads the records. In the prototype, spoke A is the hub own cluster, so hub and spoke are not separate there. Evidence, prompts, transcripts, credentials and kubeconfigs never cross, and the hub never calls a spoke. Hub and spoke are clusters; the word fleet here is unrelated to the shadewright-fleet repository.</desc>
+  <desc id="d">Overview of ADR-0038, proposed and not built. Each spoke keeps working when the hub is down. Two spoke clusters, each a standalone Shadewright install with its own analyzer, executor and verifier, plus a new reporter that only reads Incidents and requests. Each spoke has its own GitOps repository, where its executor opens pull requests as today, and its own model credential and budget. Each reporter sends one bounded, redacted snapshot of its state and a projected ServiceAccount token over HTTPS, to a path naming its cluster, to the intake service of the hub; the connection is outbound from the spoke and the answer is only accepted or refused. The hub is a Kubernetes cluster. Flux applies the Cluster objects from the hub GitOps repository, one per spoke and nothing else per spoke. The fleet controller writes Cluster status (issuer keys, readiness), reads the snapshots and deletes a snapshot of an earlier registration. Intake verifies the token, enforces per-cluster limits, validates and redacts the whole snapshot, and replaces that cluster's one snapshot object in the hub namespace in a single write. The read-only status page runs in its own namespace, listens on 127.0.0.1 only, is reached by port-forward and reads the snapshots. In the prototype, spoke A is the hub own cluster, so hub and spoke are not separate there. Evidence, prompts, transcripts, credentials and kubeconfigs never cross, and the hub never calls a spoke. Hub and spoke are clusters; the word fleet here is unrelated to the shadewright-fleet repository.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#a879ff"/></marker>
     <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#7d7999"/></marker>
@@ -33,14 +33,14 @@
   <text class="s" x="284" y="172">own model credential</text>
   <rect class="key" x="266" y="208" width="388" height="60" rx="12"/>
   <text class="h" x="284" y="234">Reporter (new identity, proposed)</text>
-  <text class="s" x="284" y="254">reads Incidents, requests, reports</text>
+  <text class="s" x="284" y="254">reads Incidents and requests</text>
   <rect class="box" x="266" y="334" width="388" height="92" rx="12"/>
   <text class="h" x="284" y="360">Analyzer, executor, verifier</text>
   <text class="s" x="284" y="382">standalone install, unchanged</text>
   <text class="s" x="284" y="402">own model credential</text>
   <rect class="key" x="266" y="438" width="388" height="60" rx="12"/>
   <text class="h" x="284" y="464">Reporter (new identity, proposed)</text>
-  <text class="s" x="284" y="484">reads Incidents, requests, reports</text>
+  <text class="s" x="284" y="484">reads Incidents and requests</text>
   <text class="lanet" x="24" y="84">OUTSIDE</text>
   <rect class="ext" x="24" y="94" width="196" height="50" rx="12"/>
   <text class="h" x="38" y="115">Spoke A GitOps repo</text>
@@ -66,12 +66,12 @@
   <text class="s" x="856" y="202">Cluster status, issuer keys, readiness</text>
   <rect class="box" x="840" y="246" width="396" height="76" rx="12"/>
   <text class="h" x="856" y="270">Hub namespace (one for all spokes)</text>
-  <text class="s" x="856" y="290">reported incidents, requests, heartbeats</text>
-  <text class="s" x="856" y="308">each record labelled with its cluster</text>
+  <text class="s" x="856" y="290">one snapshot object per spoke</text>
+  <text class="s" x="856" y="308">replaced whole, size and count capped</text>
   <rect class="key" x="840" y="350" width="396" height="66" rx="12"/>
   <text class="h" x="856" y="374">Intake (stateless, N replicas)</text>
-  <text class="s" x="856" y="394">verify token, validate, per-cluster limits</text>
-  <text class="s" x="856" y="410">cluster taken from the verified object</text>
+  <text class="s" x="856" y="394">verify token, per-cluster limits</text>
+  <text class="s" x="856" y="410">validate and redact the whole snapshot</text>
   <rect class="box" x="840" y="436" width="396" height="56" rx="12"/>
   <text class="h" x="856" y="460">Status page (own namespace)</text>
   <text class="s" x="856" y="479">read-only, 127.0.0.1, port-forward only</text>
@@ -80,13 +80,13 @@
   <path class="f" d="M940 220V246" marker-end="url(#a)"/>
   <text class="lbl" x="950" y="237">reads, cleans up</text>
   <path class="f" d="M940 350V322" marker-end="url(#a)"/>
-  <text class="lbl" x="950" y="340">writes</text>
+  <text class="lbl" x="950" y="340">replaces</text>
   <path class="f" d="M1236 464H1248V284H1240" marker-end="url(#a)"/>
   <text class="lbl" x="1196" y="340">reads</text>
   <path class="f" d="M654 236H790V372H836" marker-start="url(#a)" marker-end="url(#a)"/>
   <path class="f" d="M654 468H806V398H836" marker-start="url(#a)" marker-end="url(#a)"/>
-  <text class="lbl" x="660" y="228">report + token</text>
+  <text class="lbl" x="660" y="228">snapshot + token</text>
   <text class="lbl" x="660" y="256">ok or refused</text>
-  <text class="lbl" x="660" y="460">report + token</text>
+  <text class="lbl" x="660" y="460">snapshot + token</text>
   <text class="lbl" x="660" y="488">ok or refused</text>
 </svg>

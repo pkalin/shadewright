@@ -254,7 +254,8 @@ func TestWriteInvalidSameTable(t *testing.T) {
 }
 
 // Text that is valid UTF-8 is decided exactly as before the shown view by every entry point, and text with
-// invalid bytes by the collector's short entry points (decision of 2026-11-23): each output is byte for byte the
+// invalid bytes by the collector's short entry points (decision of 2026-11-23), but valid text with an ESC or a C1
+// control, which the escapes view reads since #1223, outside the collector's entry points: each output is byte for byte the
 // one of the table, whose columns of the collector's shown text are as since that text is the printed text. Under
 // -race each entry point checks a seeded sample (redact.RaceKeeps).
 func TestShownViewLeavesValidTextAndTheCollectorAsBefore(t *testing.T) {
@@ -273,10 +274,19 @@ func TestShownViewLeavesValidTextAndTheCollectorAsBefore(t *testing.T) {
 		}
 	}
 	got := invalidSameRows(in, names, redact.RaceKeeps)
-	changed, ran, collector := map[string]int{}, 0, 0
+	changed, ran, collector, escapes := map[string]int{}, 0, 0, 0
 	for i, c := range in {
+		// Text with an escape sequence is read in the escapes view since #1223, which only adds to what is hidden
+		// (TestEscapesViewHidesAtLeastWhatMainHid); the collector's entry points read it as before.
+		escaped := !c.collector && holdsEscapeOrC1(c.text)
+		if escaped {
+			escapes++
+		}
 		for j, name := range names {
 			if got[i][j] == "" || got[i][j] == "-" {
+				continue
+			}
+			if escaped && !slices.Contains(invalidSameCollector, name) {
 				continue
 			}
 			ran++
@@ -299,5 +309,20 @@ func TestShownViewLeavesValidTextAndTheCollectorAsBefore(t *testing.T) {
 	if collector == 0 {
 		t.Fatal("no input with invalid bytes ran through the collector's entry points")
 	}
-	t.Logf("%d inputs, %d entry points, %d checks, %d of them the collector's on invalid bytes", len(in), len(names), ran, collector)
+	if escapes == 0 || escapes > len(in)/4 {
+		t.Fatalf("%d of %d inputs hold an ESC or a C1 control", escapes, len(in))
+	}
+	t.Logf("%d inputs, %d entry points, %d checks, %d of them the collector's on invalid bytes; %d inputs with an ESC "+
+		"or a C1 control checked at the collector's entry points only", len(in), len(names), ran, collector, escapes)
+}
+
+// holdsEscapeOrC1 reports whether s holds an ESC or a C1 control as UTF-8 (U+0080 to U+009F): text the escapes
+// view may read (#1223).
+func holdsEscapeOrC1(s string) bool {
+	for _, r := range s {
+		if r == 0x1b || (r >= 0x80 && r <= 0x9f) {
+			return true
+		}
+	}
+	return false
 }

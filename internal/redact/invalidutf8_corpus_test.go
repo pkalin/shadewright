@@ -102,7 +102,7 @@ func newInvalidCase(name, text string, at int, f string, vs, ve int) invalidCase
 // and a value, after a prefix. The invalid form goes at each boundary of the parts and inside each.
 var invalidKeyForms = struct{ prefixes, keys, seps, values []string }{
 	prefixes: []string{"", "\x80\xee \t"},
-	keys:     []string{signalAPIKey, fieldsKey, redact.KindToken, "Authorization"},
+	keys:     []string{signalAPIKey, fieldsKey, redact.KindToken, authorizationKey},
 	seps:     []string{"=", ": ", ":\t", "\n:", " :", " \t:"},
 	values:   []string{"sigQz22589xK9wAbc", "Bearer Zq7Kp2Vx9Lm4Wt8R"},
 }
@@ -240,8 +240,8 @@ func invalidEntries() map[string]func(c invalidCase) []string {
 			ex := providers.LogExcerpt{Text: c.text, CollectedAt: time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)}
 			return []string{incidentcontext.RenderLog(r, false, "log", ex, nil, 4096, 8192).Text}
 		},
-		"redact.Pieces": pieces(func(ps []redact.Piece, _ int) []string { return r.Pieces(ps) }),
-		"redact.PiecesWithin": pieces(func(ps []redact.Piece, n int) []string {
+		entryPieces: pieces(func(ps []redact.Piece, _ int) []string { return r.Pieces(ps) }),
+		entryPiecesWithin: pieces(func(ps []redact.Piece, n int) []string {
 			got, _ := r.PiecesWithin(ps, n)
 			return got
 		}),

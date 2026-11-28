@@ -24,7 +24,7 @@ import (
 	"testing"
 )
 
-// controlsWorkShapes are the shapes the work of the controls view (#852) and the shown view is measured on: text without a control,
+// controlsWorkShapes are the shapes the work of the controls view (#852), the shown view and the escapes view is measured on: text without a control,
 // on which it only scans, control-dense text, a secret form split by controls, and the shape on which the second
 // reading of the layout write of the first build of #852 was superlinear ("--password x" and a control).
 var controlsWorkShapes = []struct{ name, unit string }{
@@ -40,6 +40,14 @@ var controlsWorkShapes = []struct{ name, unit string }{
 	{"lone surrogates", "ab\xed\xa0\x80"},
 	{"split by invalid bytes", "pass\xffword:Hunter2Secret9x\n"},
 	{"invalid bytes and controls", "a\xff\x00b\xc0\x1b"},
+	// The escapes view (#1223): keys and values in colours, sequences alone, control strings with and without their
+	// terminator (a search for one that finds none is not run again), short escapes, and a CSI that is never ended.
+	{"coloured keys", "\x1b[36mpwd\x1b[0m=\x1b[32ma\x1b[0m\n"},
+	{"colour sequences", "\x1b[m"},
+	{"control strings", "\x1b]0;t\x07x"},
+	{"unterminated control strings", "\x1b]a\u009da"},
+	{"short escapes", "\x1b7a\x1b(B"},
+	{"open CSIs", "\x1b[1;"},
 }
 
 // controlsWorkSizes are the sizes measured: from 4 KiB to the largest object (about 1.5 MiB).

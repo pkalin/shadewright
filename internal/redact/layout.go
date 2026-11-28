@@ -279,6 +279,16 @@ func (r *Redactor) piecesWithin(wm *meter.Meter, ps []Piece, limit int, joined b
 			add(start, end, rule)
 		})
 	})
+	// The views of the values (#1223): a match the lists already hold whole, as found and as ended, is not held a
+	// second time.
+	r.addValuesViews(wm, ps, l, func(start, end int) bool {
+		return reading2.covers(wm, start, ended(start, end)) && (whole == nil || whole.covers(wm, start, end))
+	}, func() {
+		reading2.merge(wm)
+		if whole != nil {
+			whole.merge(wm)
+		}
+	}, add)
 	widen := func(i int, sp span) span { return l.w(i).widen(wm, sp) }
 	text := func(i int) string { return l.w(i).text }
 	if joined {
@@ -1118,3 +1128,104 @@ func Pieces(ps []Piece) []string { return defaultRedactor.Pieces(ps) }
 // Written returns s as the answer writes it in form f, with nothing redacted: what a redactor that takes no
 // decision on pieces writes after it redacted the value alone.
 func Written(f Form, s string) string { return write(nil, Piece{Text: s, Data: true, Form: f}).text }
+
+// eachValuesViewMatch calls add with each match, in bytes of the answer of l, of the reading of the answer with each
+// data piece written in another form than AsIs for which view returns a view (of the value as it was read) written
+// as that view instead of in its form, in no order (#1223). A match is carried to the answer from the value bytes
+// its first and last bytes are (controlsView.orig, origEnd, then written.carry); it may span pieces. It does nothing
+// when view returns no view of any value. The work and the heap are linear in the length of the answer.
+func (r *Redactor) eachValuesViewMatch(wm *meter.Meter, ps []Piece, l *answerLayout,
+	view func(s string) (controlsView, bool), add func(start, end, rule int)) {
+	var views map[int]controlsView
+	for i, p := range ps {
+		tick(wm, 1)
+		if !p.Data || p.Form == AsIs {
+			continue // a value written as it is keeps its sequences: the added views of the answer read them
+		}
+		if v, ok := view(p.Text); ok {
+			if views == nil {
+				views = make(map[int]controlsView)
+			}
+			views[i] = v
+		}
+	}
+	if views == nil {
+		return
+	}
+	var b strings.Builder
+	b.Grow(len(l.answer))
+	starts := make([]int32, len(ps)+1)
+	for i := range ps {
+		tick(wm, 1)
+		starts[i] = int32(b.Len()) // #nosec G115 -- an answer is at most MaxEntry bytes
+		if v, ok := views[i]; ok {
+			b.WriteString(v.text)
+		} else {
+			b.WriteString(l.w(i).text)
+		}
+	}
+	starts[len(ps)] = int32(b.Len()) // #nosec G115 -- an answer is at most MaxEntry bytes
+	text := b.String()
+	// piece returns the piece that byte k of text is in.
+	piece := func(k int) int {
+		lo, hi := 0, len(ps)
+		for lo < hi {
+			tick(wm, 1)
+			m := int(uint(lo+hi) >> 1)
+			if int(starts[m+1]) <= k {
+				lo = m + 1
+			} else {
+				hi = m
+			}
+		}
+		return lo
+	}
+	r.eachRuleMatch(wm, text, &windowIDs{}, func(start, end, rule int) {
+		tick(wm, 1)
+		if end <= start {
+			return
+		}
+		i, j := piece(start), piece(end-1)
+		as, ae := int(l.off[i])+start-int(starts[i]), int(l.off[j])+end-int(starts[j])
+		if v, ok := views[i]; ok {
+			vs := v.orig(wm, start-int(starts[i]))
+			as = int(l.off[i]) + l.w(i).carry(wm, span{start: vs, end: vs + 1}).start
+		}
+		if v, ok := views[j]; ok {
+			ve := v.origEnd(wm, end-int(starts[j]))
+			ae = int(l.off[j]) + l.w(j).carry(wm, span{start: ve - 1, end: ve}).end
+		}
+		add(as, ae, rule)
+	})
+}
+
+// addValuesViews adds to the readings of the answer of l (add) the matches of the views of its values that covers
+// does not report held, merging the readings (merge) before the first of each view (#1223). A value written in
+// another form than AsIs loses the ESC of its escape sequences (a space, or "\u001b"), so no view of the answer sees
+// them. The answer is read once more with each value that holds a complete sequence in its escapes view, and once
+// more with each value that holds an ESC or a C1 control in its controls view: an ESC the escapes view reads as the
+// start of a sequence ("pass" ESC "word", where ESC "w" is complete) may be a lone one.
+func (r *Redactor) addValuesViews(wm *meter.Meter, ps []Piece, l *answerLayout, covers func(start, end int) bool,
+	merge func(), add func(start, end, rule int)) {
+	for _, view := range []func(s string) (controlsView, bool){
+		func(s string) (controlsView, bool) { return escapesViewOf(wm, s) },
+		func(s string) (controlsView, bool) {
+			if !holdsEscape(wm, s) {
+				return controlsView{}, false
+			}
+			return controlsViewOf(wm, s)
+		},
+	} {
+		tick(wm, 1)
+		merged := false
+		r.eachValuesViewMatch(wm, ps, l, view, func(start, end, rule int) {
+			if !merged {
+				merged = true
+				merge()
+			}
+			if !covers(start, end) {
+				add(start, end, rule)
+			}
+		})
+	}
+}

@@ -59,6 +59,16 @@ import (
 // starts at a "?" starts at its run and one that ends with it ends after its run (controlsView.origEnd). Valid
 // UTF-8 is not read again, and the collector's short entry points read neither view. Its heap is the view's text
 // (at most the bytes of the text) and one gap for each run of controls or of invalid bytes.
+//
+// The escapes view (#1223, decision of 2026-11-28). The controls view drops the ESC of a colour code and keeps the
+// rest ("password" ESC "[0m=V" reads "password[0m=V"), so a key in colours or a token a colour code splits is not
+// read as one. Text that holds a complete escape sequence (escapeLen) is therefore read once more as a terminal
+// prints it: each complete sequence removed whole, every other control removed, each run of invalid bytes one "?"
+// (escapesViewOf). Its matches are added after those of the shown view, by the same callers, and carried back the
+// same way. An answer of pieces is also read with each value written in another form than AsIs that holds an ESC
+// or a C1 control in its escapes view and in its controls view (eachValuesViewMatch, layout.go): written on a line
+// or as JSON, a value loses the ESC of its sequences, and no view of the answer can see them. The collector's short
+// entry points read neither. Its heap is the view's text and one gap for each run removed.
 
 // Control reports whether r is a code point the controls view leaves out, and that model text is stored without:
 // Unicode category Cc (U+0000 to U+001F, U+007F to U+009F) except newline and tab.
@@ -149,15 +159,21 @@ func shownViewOf(wm *meter.Meter, s string) (controlsView, bool) {
 // viewOf returns s without its controls, and with each run of invalid bytes written as one "?" when repair is
 // set.
 func viewOf(wm *meter.Meter, s string, repair bool) controlsView {
+	return viewWithout(wm, s, repair, func(i int) int { return controlLen(wm, s, i) })
+}
+
+// viewWithout returns s without the runs removed reports a length for at their first byte, and with each run of
+// invalid bytes written as one "?" when repair is set. removed returns 0 at a byte that is kept.
+func viewWithout(wm *meter.Meter, s string, repair bool, removed func(i int) int) controlsView {
 	var b strings.Builder
 	b.Grow(len(s))
 	var v controlsView
 	for i := 0; i < len(s); {
 		tick(wm, 1)
-		if n := controlLen(wm, s, i); n > 0 {
+		if n := removed(i); n > 0 {
 			for i += n; i < len(s); i += n {
 				tick(wm, 1)
-				if n = controlLen(wm, s, i); n == 0 {
+				if n = removed(i); n == 0 {
 					break
 				}
 			}
@@ -186,14 +202,123 @@ func viewOf(wm *meter.Meter, s string, repair bool) controlsView {
 }
 
 // eachAddedView calls f with each added view of s: its controls view when s holds a code point of [Control], then
-// its shown view when s is not valid UTF-8. Text that is valid UTF-8 without a control has neither.
+// its shown view when s is not valid UTF-8, then its escapes view when s holds a complete escape sequence. Text
+// that is valid UTF-8 without a control has none.
 func eachAddedView(wm *meter.Meter, s string, f func(v controlsView)) {
-	if v, ok := controlsViewOf(wm, s); ok {
+	v, controls := controlsViewOf(wm, s)
+	if controls {
 		f(v)
 	}
 	if v, ok := shownViewOf(wm, s); ok {
 		f(v)
 	}
+	if !controls {
+		return // an escape sequence starts with a control: ESC or a C1 control
+	}
+	if v, ok := escapesViewOf(wm, s); ok {
+		f(v)
+	}
+}
+
+// escapesViewOf returns the escapes view of s (#1223), and false when s holds no complete escape sequence
+// (escapeLen): s as a terminal prints it, with each complete escape sequence removed whole, every other code point
+// of [Control] removed (a lone ESC, an escape that is not complete, a C1 control) and each run of invalid bytes
+// written as one "?". A run of sequences and controls is one gap. The work is linear in the length of s: each byte
+// is read a bounded number of times (escapeLen).
+func escapesViewOf(wm *meter.Meter, s string) (controlsView, bool) {
+	noEnd := len(s) + 1
+	found := false
+	for i := 0; i < len(s) && !found; i++ {
+		tick(wm, 1)
+		if s[i] == 0x1b || s[i] == 0xc2 {
+			found = escapeLen(wm, s, i, &noEnd) > 0
+		}
+	}
+	if !found {
+		return controlsView{}, false
+	}
+	noEnd = len(s) + 1
+	return viewWithout(wm, s, true, func(i int) int {
+		if n := escapeLen(wm, s, i, &noEnd); n > 0 {
+			return n
+		}
+		return controlLen(wm, s, i)
+	}), true
+}
+
+// holdsEscape reports whether s holds an ESC or a C1 control (U+0080 to U+009F as UTF-8): a byte that may start an
+// escape sequence.
+func holdsEscape(wm *meter.Meter, s string) bool {
+	for i := range len(s) {
+		tick(wm, 1)
+		if s[i] == 0x1b || (s[i] == 0xc2 && i+1 < len(s) && s[i+1] >= 0x80 && s[i+1] <= 0x9f) {
+			return true
+		}
+	}
+	return false
+}
+
+// escapeLen returns the length of the complete escape sequence that starts at s[i], or 0 when none does (ECMA-48,
+// in its ESC and its C1 forms, the C1 forms as UTF-8):
+//
+//   - a CSI (ESC "[" or U+009B), as printed.go reads it (csiAt): parameter bytes, intermediate bytes, one final byte;
+//   - a control string (OSC: ESC "]" or U+009D; DCS: ESC "P" or U+0090; SOS: ESC "X" or U+0098; PM: ESC "^" or
+//     U+009E; APC: ESC "_" or U+009F) and its terminator: BEL, ST as ESC "\" or as U+009C;
+//   - any other escape: ESC, at most one intermediate byte 0x23 to 0x2F, one final byte 0x30 to 0x7E ("ESC ( B",
+//     "ESC # 8", "ESC 7"). A space, "!" or a quote after ESC is no intermediate byte here: "ESC" SP '"' and a value
+//     would otherwise take the quote and the value's first character, and the view would read the value unquoted.
+//
+// A sequence that is not complete before the end of s is not one: its ESC or C1 control is a control like any
+// other. noEnd is shared by the calls on one text: the first byte from which no control string has a terminator,
+// once a search found none (len(s)+1 before), so no byte is searched for a terminator twice and the work stays
+// linear in the length of s.
+func escapeLen(wm *meter.Meter, s string, i int, noEnd *int) int {
+	if i+1 >= len(s) {
+		return 0
+	}
+	var intro byte
+	switch c := s[i]; {
+	case c == 0x1b:
+		intro = s[i+1]
+	case c == 0xc2 && s[i+1] >= 0x80 && s[i+1] <= 0x9f:
+		intro = s[i+1] - 0x40 // the C1 control's 7-bit form: U+009B is ESC "["
+	default:
+		return 0
+	}
+	j := i + 2
+	switch intro {
+	case '[':
+		if n, _, ok := csiAt(wm, s, i, j); ok {
+			return n
+		}
+		return 0
+	case ']', 'P', 'X', '^', '_':
+		if j >= *noEnd {
+			return 0
+		}
+		for k := j; k < len(s); k++ {
+			tick(wm, 1)
+			switch {
+			case s[k] == 0x07:
+				return k + 1 - i
+			case (s[k] == 0x1b && k+1 < len(s) && s[k+1] == '\\') || (s[k] == 0xc2 && k+1 < len(s) && s[k+1] == 0x9c):
+				return k + 2 - i
+			}
+		}
+		*noEnd = j
+		return 0
+	}
+	if s[i] != 0x1b {
+		return 0 // any other C1 control is one control (controlLen)
+	}
+	j = i + 1
+	if s[j] >= 0x23 && s[j] <= 0x2f {
+		j++ // one intermediate byte: "ESC ( B", "ESC # 8"
+	}
+	if j < len(s) && s[j] >= 0x30 && s[j] <= 0x7e {
+		return j + 1 - i
+	}
+	return 0
 }
 
 // after returns the index of the first gap of v after byte i of the view.

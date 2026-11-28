@@ -136,6 +136,14 @@ var heapShapes = []heapShape{
 	{name: "addresses and invalid byte", text: func(n int) string { return repeatTo("ab"+"@"+"cd.ef\xff", n) },
 		overAt: pieces}, // as "addresses and control": PiecesFitting takes the largest entry too since #1106
 	{name: "keys split by invalid bytes", text: func(n int) string { return repeatTo("pass\xffword:a\n", n) }},
+	// Shapes of the escapes view (controls.go, #1223): one complete escape sequence makes the whole text be read
+	// again without its sequences. Keys and values in colours on every line, colour sequences alone, and addresses
+	// each followed by a colour sequence. Measured on 2026-11-28 at the largest object through PiecesWithin and
+	// PiecesFitting: colour sequences 71.8 MiB and addresses and colour 88.3 MiB with the escapes views, 71.8 and
+	// 90.5 MiB with them turned off, so the entry points of overAt are over the bound of one entry before them too.
+	{name: "coloured keys", text: func(n int) string { return repeatTo("\x1b[36mpwd\x1b[0m=a\n", n) }},
+	{name: "colour sequences", text: func(n int) string { return repeatTo("\x1b[m", n) }, overAt: pieces},
+	{name: "addresses and colour", text: func(n int) string { return repeatTo("ab"+"@"+"cd.ef\x1b[m", n) }, overAt: pieces},
 }
 
 // heapEntryPoint is an entry point of the package, with the largest entry it can get.

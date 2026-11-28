@@ -29,6 +29,7 @@ import (
 	"runtime/metrics"
 	"runtime/trace"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -167,6 +168,15 @@ func (b HeapBounds) String() string {
 // the test of a machine so busy that the sampler never runs in time.
 var starveSampler bool
 
+// afterFReturned, when set, is called after the marker that follows f is logged and before the trace stops: the
+// test of work that follows f runs that work there, so it starts after the marker on every schedule.
+var afterFReturned func()
+
+// stwMu serializes PeakLiveHeapSTW. One execution trace runs at a time, and a measurement sets GOMAXPROCS and GOGC
+// for its length: an overlapping one would save the first one's settings and restore them after the first one
+// restored the originals.
+var stwMu sync.Mutex
+
 // Markers PeakLiveHeapSTW logs in the execution trace around f.
 const (
 	traceCategory = "redacttest"
@@ -213,7 +223,7 @@ const gcRange = "GC concurrent mark phase"
 // collection finds at least Base and Upper can miss the freed amount. So the caller must know that f frees nothing
 // that was live before it (TestHeapOfAShortEntry says why a short entry does not), and that nothing else allocates
 // or frees during f, since the readings cover the whole process. A sync.Pool is empty after the two
-// collections before f.
+// collections before f. Calls from several goroutines run one after another.
 func PeakLiveHeapSTW(f func()) HeapBounds {
 	if !InSTWProcess() {
 		panic("redacttest: PeakLiveHeapSTW runs only in the process RunInSTWProcess starts")
@@ -235,8 +245,11 @@ func PeakLiveHeapSTW(f func()) HeapBounds {
 }
 
 // peakLiveHeapSTW runs f, tracing to w. The trace and the sampler stop on every return, also when f panics or
-// exits its goroutine.
+// exits its goroutine. It holds stwMu throughout, so the process settings it saves are the ones no other
+// measurement changed, and it restores them before another starts.
 func peakLiveHeapSTW(f func(), w io.Writer) error {
+	stwMu.Lock()
+	defer stwMu.Unlock()
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(HeapProcs))
 	defer debug.SetGCPercent(debug.SetGCPercent(stwGOGC))
 	// The trace starts before the collections, so what starting it allocates is in the heap before f, and the
@@ -291,6 +304,9 @@ func peakLiveHeapSTW(f func(), w io.Writer) error {
 	trace.Log(ctx, traceCategory, traceStart)
 	f()
 	trace.Log(ctx, traceCategory, traceEnd)
+	if afterFReturned != nil {
+		afterFReturned()
+	}
 	return nil
 }
 

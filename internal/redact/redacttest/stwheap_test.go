@@ -19,6 +19,7 @@ package redacttest
 import (
 	"fmt"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -253,10 +254,11 @@ var spinSink atomic.Uint64
 // live before f started (TestPeakLiveHeapSTWFreeingWhatWasLiveIsNotWithin).
 var heldAfter []byte
 
-// A collection after f returned is not f's (#1204): f releases a goroutine that, a millisecond later, allocates and
-// keeps 2 MiB and runs a collection. f itself holds nothing, so the reading is within 1 MiB and Lower stays under
-// 64 KiB. Before, the last reading after f returned took any collection newer than the ones before f into Lower and
-// read over.
+// A collection after f returned is not f's (#1204): once the marker after f is logged, and while the trace still
+// runs, a goroutine allocates and keeps 2 MiB and runs a collection. It waits for the marker (afterFReturned), so
+// its work follows f on every schedule, also when the measuring goroutine pauses between f's return and the
+// marker. f itself holds nothing, so the reading is within 1 MiB and Lower stays under 64 KiB. Before, the last
+// reading after f returned took any collection newer than the ones before f into Lower and read over.
 func TestPeakLiveHeapSTWIgnoresWhatFollowsF(t *testing.T) {
 	if RaceDetector {
 		t.Skip("measures the heap of the product build")
@@ -266,12 +268,12 @@ func TestPeakLiveHeapSTWIgnoresWhatFollowsF(t *testing.T) {
 		return
 	}
 	const oneMiB = 1 << 20
+	defer func() { afterFReturned = nil }()
 	for run := range 5 {
 		release, done := make(chan struct{}), make(chan struct{})
 		go func() {
 			defer close(done)
 			<-release
-			time.Sleep(time.Millisecond)
 			b := make([]byte, 2*oneMiB)
 			for i := range b {
 				b[i] = 1
@@ -279,13 +281,60 @@ func TestPeakLiveHeapSTWIgnoresWhatFollowsF(t *testing.T) {
 			heldAfter = b
 			runtime.GC()
 		}()
-		b := PeakLiveHeapSTW(func() { close(release) })
-		<-done
+		afterFReturned = func() {
+			close(release)
+			<-done
+		}
+		b := PeakLiveHeapSTW(func() {})
 		heldAfter = nil
 		t.Logf("run %d: %v", run+1, b)
 		if b.Verdict(oneMiB) != HeapWithin || b.Lower >= 64<<10 {
 			t.Errorf("run %d: f holds nothing, read %v: %v against 1.00 MiB", run+1, b, b.Verdict(oneMiB))
 		}
+	}
+}
+
+// Measurements from two goroutines at once run one after another (#1204): the second starts while the first's f
+// runs, both measure, and GOMAXPROCS and GOGC are what they were before either. Overlapping, the second would find
+// the execution trace running and could save the first one's settings and restore them last.
+func TestPeakLiveHeapSTWConcurrentCallsRestoreSettings(t *testing.T) {
+	if RaceDetector {
+		t.Skip("measures the heap of the product build")
+	}
+	if !InSTWProcess() {
+		RunInSTWProcess(t, "TestPeakLiveHeapSTWConcurrentCallsRestoreSettings")
+		return
+	}
+	const procs, gogc = HeapProcs + 1, 137
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(procs))
+	defer debug.SetGCPercent(debug.SetGCPercent(gogc))
+	measure := func(f func()) (failure any) {
+		defer func() { failure = recover() }()
+		PeakLiveHeapSTW(f)
+		return nil
+	}
+	firstRuns := make(chan struct{})
+	var wg sync.WaitGroup
+	var first, second any
+	wg.Go(func() {
+		first = measure(func() {
+			close(firstRuns)
+			time.Sleep(20 * time.Millisecond)
+		})
+	})
+	wg.Go(func() {
+		<-firstRuns
+		second = measure(func() {})
+	})
+	wg.Wait()
+	if first != nil || second != nil {
+		t.Errorf("two measurements at once: first %v, second %v", first, second)
+	}
+	if got := runtime.GOMAXPROCS(0); got != procs {
+		t.Errorf("GOMAXPROCS %d after two measurements, want %d", got, procs)
+	}
+	if got := debug.SetGCPercent(gogc); got != gogc {
+		t.Errorf("GOGC %d after two measurements, want %d", got, gogc)
 	}
 }
 

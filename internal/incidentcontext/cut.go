@@ -19,6 +19,7 @@ package incidentcontext
 import (
 	"strings"
 
+	"github.com/shadewright-labs/shadewright/internal/logcut"
 	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
@@ -45,31 +46,47 @@ func keepHead(s string, n int) (string, bool) {
 // log source's cut to its byte bound and by the API server's tailLines, so such a line may be the value of a
 // secret whose key line ("password: |", "- name: TOKEN") was left out, and the redactor does not recognise it
 // alone. It reports whether it dropped anything. An excerpt whose every line is indented is dropped whole:
-// the builder cannot tell where its first entry starts.
+// the builder cannot tell where its first entry starts, unless the source read that entry's first line and
+// redacted the excerpt with it (providers.LogExcerpt.HeaderLeftOut), which RenderLog checks.
 func dropLeadingContinuation(s string) (string, bool) {
 	start := providers.LeadingContinuation(s)
 	return s[start:], start > 0
 }
 
-// keepTail returns the longest suffix of s made of whole lines that fits in n bytes, and whether anything was
-// cut. A line is whole when it starts s or follows a newline. It only ever removes text, and is applied to
-// redacted text only.
-func keepTail(s string, n int) (string, bool) {
-	if len(s) <= n {
-		return s, false
+// cutLog is the one cut of a log excerpt in bytes ([logcut.Tail]) on redacted text a reader has already read:
+// the newest whole lines of s within n bytes from a line a reader keeps, the first line of an entry ahead of its
+// newest continuation lines, or, when no non-blank whole line fits, the tail of the last non-blank line. It
+// reports whether anything was left out. It only ever removes text.
+func cutLog(s string, n int) (string, bool) {
+	out, c := cutLogKind(s, n)
+	return out, c.Cut()
+}
+
+// cutLogKind is [cutLog] that returns what the cut kept.
+func cutLogKind(s string, n int) (string, logcut.Cut) {
+	c := logcut.Tail(s, n, nil)
+	return c.Text(s), c
+}
+
+// lastNLines returns the suffix of s holding its last n lines (each ended by a newline, plus any trailing
+// line without one). It only ever removes whole lines from the start of already-redacted text.
+func lastNLines(s string, n int) string {
+	if n <= 0 || s == "" {
+		return ""
 	}
-	if n <= 0 {
-		return "", s != ""
+	i := len(s)
+	if s[i-1] == '\n' {
+		i--
 	}
-	start := len(s) - n
-	if s[start-1] != '\n' {
-		i := strings.IndexByte(s[start:], '\n')
-		if i < 0 {
-			return "", true
+	for seen := 0; i > 0; i-- {
+		if s[i-1] == '\n' {
+			seen++
+			if seen == n {
+				return s[i:]
+			}
 		}
-		start += i + 1
 	}
-	return s[start:], true
+	return s
 }
 
 // KeepHead is keepHead for other packages that bound redacted text the same way (internal/tools).

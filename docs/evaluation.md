@@ -23,8 +23,8 @@ For each scenario in `test/eval/testdata/scenarios/` and each escalation scenari
    namespace `demo`, the built-in redaction rules) and runs the real analysis loop (`internal/analysis`) with the
    real read tools. A scenario with recorded metrics gives the builder and the `query_metrics` tool the same
    `MetricsSource` (below); one without them has no metrics source, so its metrics section says "not available: no
-   metrics source is configured", as an analyzer without `--prometheus-url`. Likewise a scenario with recorded logs
-   (`logs.yaml`, only escalation scenarios so far) gives the builder and `get_pod_logs` the same `LogSource`, a
+   metrics source is configured", as an analyzer without `--prometheus-url`. Likewise a scenario or variant with recorded logs
+   (`logs.yaml`, the `oom/crashloop-excerpt` variant and the escalation scenarios `cut-context` and `oom-config-key`) gives the builder and `get_pod_logs` the same `LogSource`, a
    replay for the harness only; one without them has no log source, so its log section says "not available: no log
    source is configured" and `get_pod_logs` is not offered. An escalation scenario may also set the total bound of
    the context or have a metrics source that is down ([below](#the-escalation-scenarios)). The
@@ -234,8 +234,8 @@ Before the first run, the maintainer sets up:
 The identity of step 1 is in `shadewright-azure` (`foundation/evaluation.tf`): a user-assigned identity with the
 federated credential for the `evaluation` environment and the inference role on the Foundry resource.
 
-A run of the ten scenarios, their variants (five so far, `oom/rollout`, `oom/absorbed`, `oom/lifetimes`, `keda-at-ceiling/wide-policy`
-and `unschedulable/over-bound`) and the five escalation scenarios is twenty analyses per repeat. The real-model
+A run of the ten scenarios, their variants (six so far, `oom/rollout`, `oom/absorbed`, `oom/lifetimes`, `oom/crashloop-excerpt`, `keda-at-ceiling/wide-policy`
+and `unschedulable/over-bound`) and the five escalation scenarios is twenty-one analyses per repeat. The real-model
 run for [#841](https://github.com/shadewright-labs/shadewright/issues/841), before the v0.6.0 release, is a run of all of them,
 so it includes both `oom/absorbed` and `unschedulable/over-bound`. The escalation scenarios need an escalation
 model: on Foundry `EVAL_ESCALATION_DEPLOYMENT` with `EVAL_ESCALATION_MODEL` (the deployment alone is refused
@@ -410,18 +410,19 @@ Each directory under `test/eval/testdata/scenarios/` holds:
 | `incident.yaml` | The Incident as the analyzer would have it; its reason and subject must match `expected.yaml` |
 | `objects.yaml` | The objects the context builder and the read tools read: Deployments, StatefulSets, ReplicaSets, Pods, Events, and the KEDA ScaledObject of `broken-keda-trigger` and `keda-at-ceiling` (spec from the fleet's scenario file, synthetic status; decoded as unstructured JSON, as the analyzer reads it) |
 | `metrics.yaml` | Optional. What the scenario's Prometheus holds: for every approved query template, the series it answers (labels and timed samples). Only `oom`, `statefulset-oom` and `keda-at-ceiling` have one (and the `oom/rollout` variant, below) |
-| `logs.yaml` | Optional. What the scenario's pod logs hold: `source`, the `namespace` (the Incident's), and per container instance (`pod`, `container`, `previous`, the instance's `podUID`, `containerID` and `restartCount`) its whole log as `text`, oldest line first. The replay answers as the API server does: the newest whole lines within the asked bytes, marked truncated when older lines are left out, a refused request for an instance the pod does not have, not found for another pod. No fleet scenario has one; the escalation scenarios `cut-context` and `oom-config-key` do |
+| `logs.yaml` | Optional. What the scenario's pod logs hold: `source`, the `namespace` (the Incident's), and per container instance (`pod`, `container`, `previous`, the instance's `podUID`, `containerID` and `restartCount`) its whole log as `text`, oldest line first. The replay answers as the API server does: the newest whole lines within the asked bytes, marked truncated when older lines are left out, a refused request for an instance the pod does not have, not found for another pod. No base fleet scenario has one; the `oom/crashloop-excerpt` variant and the escalation scenarios `cut-context` and `oom-config-key` do |
 | `policy.yaml` | The RemediationPolicies of the scenario's cluster (#493): the lab's `demo-memory`, its spec copied from the fleet repository (the file names the commit), and a synthetic `demo-keda` (the lab has no KEDA policy yet). The context shows their bounds and a plan they refuse fails |
 | `replies.yaml` | The model replies the fake model replays, in order, and their `source` |
 | `grouping.yaml` | Optional. The kubelet events of the scenario's fault that the grouping case adds to `objects.yaml` ([below](#the-grouping-cases)). Only `oom` has one. The analysis does not read it |
 | `variants/<name>/` | Optional. Variants of the scenario, below |
 
 **Variants.** A variant is a state of a fleet scenario that the lab met and the scenario's own recording does not
-show. It is scored against the scenario's `expected.yaml` and `rubric.yaml`, unchanged, with the scenario's
+show. By default it is scored against the scenario's `expected.yaml` and `rubric.yaml`, unchanged, with the scenario's
 Incident, and is reported as `<scenario>/<name>`. Its directory holds `variant.yaml` (`about`: what it changes and
-why, required), its own `replies.yaml`, and an `incident.yaml`, `objects.yaml`, `metrics.yaml` or `policy.yaml` when
-its Incident, objects, series or policies differ (otherwise the scenario's are used; a variant's Incident must match
-`expected.yaml` as the scenario's does). The evaluation manifest hashes its files with the scenario files. `oom/rollout` is the
+why, required), its own `replies.yaml`, and an `incident.yaml`, `objects.yaml`, `metrics.yaml`, `logs.yaml` or
+`policy.yaml` when those differ (otherwise the scenario's are used; a variant's Incident must match `expected.yaml` as
+the scenario's does). A variant may also provide its own `expected.yaml` and `rubric.yaml` together when its outcome or
+diagnosis facts depend on what it changes. The evaluation manifest hashes its files with the scenario and rubric files. `oom/rollout` is the
 `oom` scenario during a rollout, as the lab met it on 2026-11-07
 ([#494](https://github.com/shadewright-labs/shadewright/issues/494)): the pod template sets 48Mi while the old ReplicaSet's
 pod still runs with 64Mi, and the reply takes a value from a running pod (the new pod's working set, copied from
@@ -455,6 +456,18 @@ fixed, non-quotable line (`age at kill (last 5, mixed across pods and revisions,
 context block; everything else and its reply stay the scenario's, since the line moves no block ID and nothing quotes
 it. `TestPromptShowsTheOOMLifetimes` replays it and checks that it passes, that the line is non-quotable, and that the
 prompt holds the rendered line, and `TestPromptGolden` pins its prompt digest.
+
+`oom/crashloop-excerpt` is the `oom` crash loop with a `logs.yaml` for the previous instance of `web`
+([#1055](https://github.com/shadewright-labs/shadewright/issues/1055)) and ConfigMap `web-config` mounted at
+`/etc/web`. Its previous-instance log is a single 24,500-byte line (under the 24 KiB query limit so the log source
+returns it whole, but over the remaining log-section budget once the 191-byte header is counted) with a 400-byte run
+of `*` spanning the cut offset before the deciding cause: `ConfigMap web-config mounted at /etc/web has no key
+cache.yaml; item cache has no size bound`. Whole-line tail cutting drops that line and leaves an empty body;
+the one cut of a log excerpt (`internal/logcut`) skips past the `*` run and keeps the tail intact inside block `c3` on the triage path without triggering
+escalation. Its own `expected.yaml` and `rubric.yaml` expect a refusal and score `cache` and `cache.yaml` from that
+line. `TestPromptShowsTheCrashLoopLastLine` replays it on triage and checks that it passes, that the cause appears only
+in the log block and is quotable, that whole-line cutting would leave an empty body, and that a reply without the cause
+or proposing a memory increase fails; `TestPromptGolden` pins its prompt digest.
 
 `unschedulable/over-bound` is the case for the other half of #796: a summary over its bound with no tally, whose
 lines all stay while its values are shortened with a "(N bytes cut)" note. Its Incident is `unschedulable` in a
@@ -511,7 +524,8 @@ known by construction get it under every small change.
 **The prompt of a scenario without a tally.** `TestPromptGolden` keeps, in `test/eval/testdata/prompt.golden`, the
 SHA-256 of the first model request (the system prompt and the context) of every scenario whose Incident has an empty
 `status.absorbed`, computed by the code before the tally block (`unschedulable/over-bound` pins its shortened summary at
-the default bound, and `oom/lifetimes` pins its OOM lifetime line). Each must stay the same byte for byte; a change meant
+the default bound, `oom/lifetimes` pins its OOM lifetime line, and `oom/crashloop-excerpt` pins its previous-instance
+log tail). Each must stay the same byte for byte; a change meant
 to alter every prompt writes them again with `SHADEWRIGHT_UPDATE_GOLDEN=1 go test -run TestPromptGolden ./test/eval/`.
 
 **Recorded metrics.** `metrics.yaml` is replayed through the `providers.MetricsSource` interface, the one the
@@ -661,6 +675,32 @@ real-model results recorded before it no longer match. No passing result is stor
 the real-model result for the new manifest digest is recorded on the pull request. Every other scenario without
 termination start times keeps the same prompt bytes (`TestPromptGolden`), and in CI the fake model replays every
 scenario, `oom/lifetimes` included, and passes.
+
+**Crash-loop log excerpts and the digest.** The crash-loop log excerpt changes ([#1055](https://github.com/shadewright-labs/shadewright/issues/1055))
+modify `internal/incidentcontext` and add the `oom/crashloop-excerpt` variant, so `contextBuilder.source`, `scenarios`, `rubric.files` and every manifest digest change. What the model
+sees changes in five cases: a container waiting in `CrashLoopBackOff` whose `lastState.terminated.finishedAt` is
+absent or older than the window (or whose `lastState.terminated` is absent while `restartCount > 0`) now reads
+its previous instance first; a container whose current instance has terminated reserves 2 KiB (at most half its
+share) for the previous instance; a log excerpt whose final non-blank line alone exceeds its remaining budget (even when followed by trailing blank
+lines) now keeps that line's valid UTF-8 suffix on a rune boundary outside redaction markers (marked cut, after
+redaction of the full line) instead of an empty or whitespace-only body, and when even that would be empty (a run of `*`
+longer than the budget at the end of the line) keeps the tail of the line within the budget above the floor (43 bytes raw, 46 bytes rendered; below that a trailing marker may leave the header alone), cut inside the run; a total context cut keeps the final 10 lines of a previous-instance excerpt (capped to what fits
+alongside earlier log headers) ahead of earlier log noise; and a second read skipped on the section time budget
+or failing with little room left now prints `could not fetch`. The `oom/crashloop-excerpt` variant shows the
+over-budget final-line fix on the triage path (`TestPromptShowsTheCrashLoopLastLine`, pinned in `prompt.golden`), while
+every other scenario keeps the same prompt bytes. The exact cause of the field report in #1055 is
+not proven by these tests alone (a container waiting in `CrashLoopBackOff` with a recent `finishedAt` and a
+normal-length last line already read the previous instance first with no window before this change); the change
+removes the five failure modes above. Under ADR-0025 a real-model evaluation run after this change is needed for
+the new digest, while CI replay tests keep passing on recorded replies.
+
+A real-model run on 2026-11-27 (triage `claude-sonnet-5-5`, five repeats of all twenty-one analyses per arm) compared
+this change with the same tree using main's excerpt cut. On `oom/crashloop-excerpt` the change found all three
+diagnosis facts in five of five runs and named the missing `cache.yaml` key as the cause; main's cut found one of
+three and never named the key. The outcome failed in both arms (zero of five): the model proposed a memory increase
+instead of the expected refusal, on this change as a mitigation next to the named cause. That proposal behaviour is
+tracked separately. Whole-run totals were 65 of 105 with the change and 67 of 105 without; every other scenario sees
+the same prompt bytes, so the difference there is run-to-run variation.
 
 The analyzer cannot yet compute the same digest at run time (it does not know the rubric, the threshold or the
 repeats, which ADR-0025 checks when the list of passing results is built); that check is the planned follow-up.

@@ -38,7 +38,7 @@ func TestKeepTailRenderedKeepsLongestFittingSuffix(t *testing.T) {
 	if n := len(renderBody(head + want)); n > budget {
 		t.Fatalf("fixture renders to %d bytes, budget %d", n, budget)
 	}
-	if got := keepTailRendered(head, rest, budget); got != want {
+	if got := cutRendered(head, rest, budget); got != want {
 		t.Errorf("kept suffix %q, want it to start with the certificate error", got)
 	}
 }

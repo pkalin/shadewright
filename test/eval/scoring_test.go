@@ -348,6 +348,9 @@ func TestManifestDigestCoversRunLimitsAndScenarioFiles(t *testing.T) {
 		filepath.Join(scnOOM, metricsFile), filepath.Join(scnOOM, "replies.yaml"), filepath.Join(scnOOM, policyFile),
 		filepath.Join(scnOOM, variantsDir, "rollout", "objects.yaml"),
 		filepath.Join(scnOOM, variantsDir, "rollout", "variant.yaml"),
+		filepath.Join(scnOOM, variantsDir, "crashloop-excerpt", logsFile),
+		filepath.Join(scnOOM, variantsDir, "crashloop-excerpt", "expected.yaml"),
+		filepath.Join(scnOOM, variantsDir, "crashloop-excerpt", "rubric.yaml"),
 		filepath.Join(esc, "probe-path", "objects.yaml"), filepath.Join(esc, "probe-path", "replies.yaml"),
 		filepath.Join(esc, "probe-path", escalationFile), filepath.Join(esc, "probe-path", "rubric.yaml"),
 		filepath.Join(esc, "probe-path", "expected.yaml"), filepath.Join(esc, "unschedulable", escalationFile),
@@ -581,6 +584,16 @@ func TestVariantsShareTheScenarioRubric(t *testing.T) {
 	}
 	if _, err := loadVariants(scheme, dir, base); err == nil {
 		t.Error("a variant that does not say what it changes was loaded")
+	}
+	dir2 := t.TempDir()
+	if err := os.CopyFS(dir2, os.DirFS(filepath.Join(scenariosDir, scnOOM))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir2, variantsDir, "crashloop-excerpt", "rubric.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadVariants(scheme, dir2, base); err == nil || !strings.Contains(err.Error(), "provided together") {
+		t.Errorf("variant with expected.yaml alone: got %v, want paired rubric error", err)
 	}
 }
 

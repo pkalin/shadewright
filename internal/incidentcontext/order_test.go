@@ -134,9 +134,15 @@ func oneReadPerContainer(plan map[string][2]outcome, previousFirst bool) ([]prov
 	calls := make([]providers.LogQuery, 0, 2)
 	var excerpts []string
 	failed := false
+	share := DefaultLogBytes / MaxLogExcerpts
+	firstMax := share
+	if !previousFirst {
+		// An exited container with a previous instance reserves previousReserve from its share for that read.
+		firstMax -= previousReserve(share)
+	}
 	for _, p := range []string{crashPod, secondPod} {
 		q := providers.LogQuery{
-			Namespace: "shop", Pod: p, Container: appName, Previous: previousFirst, MaxBytes: DefaultLogBytes / MaxLogExcerpts,
+			Namespace: "shop", Pod: p, Container: appName, Previous: previousFirst, MaxBytes: int64(firstMax),
 		}
 		o := plan[p][0]
 		if previousFirst {

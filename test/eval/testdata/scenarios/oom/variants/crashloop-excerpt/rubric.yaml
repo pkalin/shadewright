@@ -1,0 +1,10 @@
+# How the diagnosis of oom/crashloop-excerpt is scored: each fact of expected.yaml, verbatim, with the terms
+# the result's summary, hypotheses or evidence quotes must contain (case ignored). The last two facts depend
+# on the previous instance's over-budget final log line kept by #1055.
+facts:
+  - fact: the web container is OOMKilled and restarts
+    all: ["OOMKilled"]
+  - fact: the item cache has no size bound and grows until the container is killed
+    all: ["cache"]
+  - fact: the ConfigMap web-config has no key cache.yaml
+    all: ["cache.yaml"]

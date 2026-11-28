@@ -103,9 +103,7 @@ func (l *instanceLogs) Logs(_ context.Context, q providers.LogQuery) (providers.
 		l.answered = append(l.answered, 0)
 		return providers.LogExcerpt{}, err
 	}
-	if int64(len(text)) > q.MaxBytes {
-		text = text[int64(len(text))-q.MaxBytes:]
-	}
+	text, _ = sourceCut(text, q.MaxBytes)
 	l.answered = append(l.answered, len(text))
 	return providers.LogExcerpt{Text: text, CollectedAt: testNow}, nil
 }
@@ -207,13 +205,19 @@ func TestTerminatedCurrentAndPreviousBothRead(t *testing.T) {
 	checkBounded(t, c, l)
 }
 
-// A terminated current instance whose excerpt fills the budget leaves no room for a second read.
+// A terminated current instance whose log exceeds the container's share leaves the reserved budget for its
+// previous instance, so both excerpts stay within the bound and the previous instance's tail is still read.
 func TestNoSecondReadWithoutBudget(t *testing.T) {
 	l := &instanceLogs{current: strings.Repeat("a line of the log that keeps going\n", 4000), previous: "older\n"}
 	c := buildWith(t, exited, l)
-	if len(l.asked) != 1 || len(blocks(c, SectionLogs)) != 1 {
-		t.Fatalf("reads %+v", l.asked)
+	bs := blocks(c, SectionLogs)
+	if len(l.asked) != 2 || len(bs) != 2 {
+		t.Fatalf("reads %+v, %d blocks", l.asked, len(bs))
 	}
+	if !strings.HasSuffix(bs[1].Text, "older\n") {
+		t.Errorf("previous instance tail missing:\n%s", bs[1].Text)
+	}
+	checkBounded(t, c, l)
 }
 
 // A container that runs again after a termination inside the window is read in its previous instance, and

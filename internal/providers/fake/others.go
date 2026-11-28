@@ -29,7 +29,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shadewright-labs/shadewright/internal/logcut"
 	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/redact"
 )
 
 var (
@@ -261,7 +263,8 @@ func (l *Logs) Set(k LogKey, text string) {
 	l.logs[k] = text
 }
 
-// Logs returns the most recent MaxBytes of the registered logs.
+// Logs returns the most recent MaxBytes of the registered logs, cut as the production log source cuts them
+// (internal/logcut): the newest whole lines, or the tail of a longer last line.
 func (l *Logs) Logs(ctx context.Context, q providers.LogQuery) (providers.LogExcerpt, error) {
 	if err := l.before("Logs"); err != nil {
 		return providers.LogExcerpt{}, err
@@ -295,11 +298,44 @@ func (l *Logs) Logs(ctx context.Context, q providers.LogQuery) (providers.LogExc
 		CollectedAt:       now().UTC(),
 		InstanceUncertain: !ok || inst.uncertain,
 	}
-	if int64(len(t)) > limit {
-		e.Text, e.Truncated = t[int64(len(t))-limit:], true
+	cut, err := CutLog(t, int(limit))
+	if err != nil {
+		return providers.LogExcerpt{}, err
 	}
+	e.Text, e.Truncated, e.HeaderKept, e.HeaderLeftOut, e.LeadingDropped = cut.Text, cut.Truncated, cut.HeaderKept,
+		cut.HeaderLeftOut, cut.LeadingDropped
 	return e, nil
 }
+
+// CutLog cuts text, a log as a fake source holds it, to limit bytes by the cut the production source makes
+// ([logcut.Read]) and returns the excerpt with its marks. A cut that keeps text as it is (all of it, or the newest
+// whole lines, which a reader drops when they are continuation lines) returns that text unredacted, for the
+// reader to redact, as before. Any
+// other cut (the tail of a line, the first line of an entry ahead of its newest lines, lines whose first line was
+// left out) is redacted by the production source's step, [logcut.Redact], with the built-in rules: as in
+// production, no part of the log is cut away from what it belongs to before redaction has read the whole log.
+func CutLog(text string, limit int) (providers.LogExcerpt, error) {
+	c := logcut.Read(text, limit)
+	switch c.Kind {
+	case logcut.Whole, logcut.Lines, logcut.NoHeader, logcut.Dropped:
+		return providers.LogExcerpt{Text: c.Text(text), Truncated: c.Cut(), LeadingDropped: c.Kind == logcut.Dropped}, nil
+	}
+	out, ok := logcut.Redact(builtinRedactor, text, c)
+	if !ok {
+		return providers.LogExcerpt{}, fmt.Errorf("the log excerpt: %w", providers.ErrWithheld)
+	}
+	return providers.LogExcerpt{Text: out, Truncated: c.Cut(), HeaderKept: c.Kind == logcut.HeaderKept,
+		HeaderLeftOut: c.Kind == logcut.HeaderLeftOut}, nil
+}
+
+// builtinRedactor has the built-in rules of package redact only.
+var builtinRedactor = func() *redact.Redactor {
+	r, err := redact.New()
+	if err != nil {
+		panic(err)
+	}
+	return r
+}()
 
 // Notifier keeps one thread per key; notifying again replaces its title and body.
 type Notifier struct {

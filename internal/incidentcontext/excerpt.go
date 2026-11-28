@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/shadewright-labs/shadewright/internal/logcut"
 	"github.com/shadewright-labs/shadewright/internal/providers"
 )
 
@@ -144,8 +145,14 @@ type LogView struct {
 	HeadLen int
 	// Read says how the read ended.
 	Read LogRead
-	// LeadingDropped: leading continuation lines were dropped before redaction.
+	// LeadingDropped: leading continuation lines were dropped before redaction, here or by the source.
 	LeadingDropped bool
+	// HeaderKept: the excerpt keeps the first line of its newest entry ahead of that entry's newest continuation
+	// lines, and the lines between were left out, by the source or by a cut here (logcut.HeaderKept).
+	HeaderKept bool
+	// HeaderLeftOut: the excerpt is continuation lines whose first line did not fit, by the source or by a cut
+	// here (logcut.HeaderLeftOut).
+	HeaderLeftOut bool
 	// Truncated, EndMissing and InstanceUncertain repeat the source's marks.
 	Truncated, EndMissing, InstanceUncertain bool
 	// Cut: the excerpt was cut to the budget.
@@ -156,7 +163,10 @@ type LogView struct {
 // values already passed through [Value]. asked is the byte bound asked of the source, which also bounds the
 // excerpt; budget bounds the whole text, header included. The header is redacted and budgeted first, then
 // the excerpt keeps its newest lines in what is left. Leading continuation lines are dropped before
-// redaction, so a secret value whose key line was cut never reaches the redactor alone.
+// redaction, so a secret value whose key line was cut never reaches the redactor alone; an answer the source marks
+// HeaderLeftOut (continuation lines whose entry's first line it read and redacted with them) is kept instead of
+// dropped whole, so a log with a line a reader keeps never gives an empty excerpt (decision of 2026-11-28 on
+// #1055).
 //
 // Each text is redacted with [Twice] of red, as the release before #845 redacted it twice. refit is set by a
 // caller that bounds the text again after this (get_pod_logs, FitLog), where that release redacted the header
@@ -206,13 +216,21 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 		}
 		h.add("instance: pod uid %s, container id %s, restarts %d, read at %s", podUID, containerID,
 			in.RestartCount, ex.CollectedAt.UTC().Format(time.RFC3339))
-		if ex.Text == "" {
+		if ex.Text == "" && !ex.LeadingDropped {
 			v.Read = LogReadEmpty
 			h.add(logEmpty)
 			break
 		}
 		body, v.LeadingDropped = dropLeadingContinuation(ex.Text)
+		if body == "" && ex.HeaderLeftOut {
+			// The source read the first line of these lines' entry and redacted them with it (#840): they are
+			// not lines whose first line was never read, and the excerpt keeps them rather than nothing
+			// (decision of 2026-11-28 on #1055).
+			body, v.LeadingDropped = ex.Text, false
+		}
+		v.LeadingDropped = v.LeadingDropped || ex.LeadingDropped
 		v.Truncated, v.EndMissing, v.InstanceUncertain = ex.Truncated, ex.EndMissing, ex.InstanceUncertain
+		v.HeaderKept, v.HeaderLeftOut = ex.HeaderKept, ex.HeaderLeftOut
 	}
 	_, ok := red.(twicer)
 	if !refit || !ok {
@@ -230,8 +248,9 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 			return v
 		}
 		head, _ := keepHead(header, budget)
-		tail, cut := keepTail(redacted, min(asked, budget-len(head)))
-		v.Text, v.HeadLen, v.Cut = head+tail, len(head), cut
+		tail, c := cutLogKind(redacted, min(asked, budget-len(head)))
+		v.Text, v.HeadLen = head+tail, len(head)
+		v.markCut(c)
 		return v
 	}
 	header, okHeader := checkedTwice(red, h.String(), func(string) int { return 0 })
@@ -240,26 +259,39 @@ func RenderLog(red Redactor, refit bool, title string, ex providers.LogExcerpt, 
 	}
 	head, _ := keepHead(strings.ToValidUTF8(header, "?"), budget)
 	n := min(asked, budget-len(head))
-	// The release before cut its excerpt to its newest lines in n bytes, then redacted what it kept again.
-	newest := func(t string) int {
-		kept, _ := keepTail(t, n)
-		return len(t) - len(kept)
-	}
+	// The release before cut its excerpt to its newest lines in n bytes, then redacted what it kept again. The
+	// second redaction runs from where the one cut ([logcut.Tail]) starts, so it covers all the excerpt shows.
+	newest := func(t string) int { return logcut.Tail(t, n, nil).First() }
 	redacted, okBody := checkedTwice(red, body, newest)
 	if v.Read != LogReadWithheld && !okBody {
 		return RenderLog(red, refit, title, providers.LogExcerpt{}, providers.ErrWithheld, asked, budget)
 	}
-	tail, cut := keepTail(strings.ToValidUTF8(redacted, "?"), n)
-	v.Text, v.HeadLen, v.Cut = head+tail, len(head), cut
+	tail, c := cutLogKind(strings.ToValidUTF8(redacted, "?"), n)
+	v.Text, v.HeadLen = head+tail, len(head)
+	v.markCut(c)
 	return v
 }
 
+// markCut records in v what the cut c of its excerpt left out.
+func (v *LogView) markCut(c logcut.Cut) {
+	v.Cut = c.Cut()
+	v.HeaderKept = v.HeaderKept || c.Kind == logcut.HeaderKept
+	v.HeaderLeftOut = v.HeaderLeftOut || c.Kind == logcut.HeaderLeftOut
+}
+
 // FitLog bounds a rendered log text again: the first headLen bytes are the header, kept from its start; the
-// rest is the excerpt, cut to its newest lines in what the header leaves of n. The text was redacted when it
+// rest is the excerpt, cut to its newest lines in what the header leaves of n by the one cut ([logcut.Tail]). The text was redacted when it
 // was rendered and is not redacted again (#845). It returns the text, the new header length and whether
 // anything was cut.
 func FitLog(text string, headLen, n int) (string, int, bool) {
+	out, head, cut, _ := FitLogCut(text, headLen, n)
+	return out, head, cut
+}
+
+// FitLogCut is [FitLog] that also returns what the cut of the excerpt kept (logcut.Kind), for a caller that
+// labels it.
+func FitLogCut(text string, headLen, n int) (string, int, bool, logcut.Kind) {
 	head, headCut := keepHead(text[:headLen], n)
-	tail, tailCut := keepTail(text[headLen:], n-len(head))
-	return head + tail, len(head), headCut || tailCut
+	tail, c := cutLogKind(text[headLen:], n-len(head))
+	return head + tail, len(head), headCut || c.Cut(), c.Kind
 }

@@ -124,6 +124,17 @@ type LogExcerpt struct {
 	Text string
 	// Truncated means older lines were cut from the front of the excerpt to fit MaxBytes.
 	Truncated bool
+	// HeaderLeftOut means the excerpt is lines that may continue an entry (indented, "- " items: the frames of a
+	// stack trace, say) whose first line the source read and redacted with them but could not fit within
+	// MaxBytes (logcut.HeaderLeftOut). A reader keeps such an excerpt instead of dropping it as leading
+	// continuation lines; the source sets it only on text it redacted whole, as read.
+	HeaderLeftOut bool
+	// HeaderKept means the source kept the first line of the newest entry ahead of its newest continuation lines
+	// and left out the lines between (logcut.HeaderKept).
+	HeaderKept bool
+	// LeadingDropped means the source kept nothing because all it could keep was the tail of a continuation line
+	// with no line before it that a reader keeps, which a reader drops whole (logcut.Dropped).
+	LeadingDropped bool
 	// EndMissing means the newest lines could not be read within the adapter's read bound, so the excerpt
 	// ends before the end of the log.
 	EndMissing bool

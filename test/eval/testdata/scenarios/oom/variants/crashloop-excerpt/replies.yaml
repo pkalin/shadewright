@@ -1,0 +1,15 @@
+# Synthetic: a triage reply written by hand to the output schema for the oom/crashloop-excerpt variant (#1055).
+# It quotes the deciding cause from the previous instance's over-budget final log line in c3 and refuses a
+# memory increase because adding the missing ConfigMap key is not in the action catalog.
+source: synthetic
+replies:
+  - model: eval-fake-1
+    usage: {inputTokens: 7800, outputTokens: 320}
+    content: |
+      {"summary": "The web container of Deployment demo/web is OOMKilled (exit code 137) and restarts in CrashLoopBackOff, but raising the 48Mi memory limit would only delay the next kill: the previous instance's log shows ConfigMap web-config mounted at /etc/web has no key cache.yaml, so the item cache has no size bound and grows until OOMKilled. Adding a ConfigMap key is not in the action catalog, so no change is proposed.",
+       "hypotheses": [{"description": "Missing key cache.yaml in ConfigMap web-config leaves the item cache unbounded, causing repeated OOM kills."}],
+       "evidence": [{"source": "c2", "quote": "OOMKilled"},
+                    {"source": "c3", "quote": "ConfigMap web-config mounted at /etc/web has no key cache.yaml; item cache has no size bound"}],
+       "missingData": [],
+       "uncertainty": "",
+       "proposal": null}

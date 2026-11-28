@@ -24,7 +24,8 @@ limitations under the License.
 // escalation model with the read tools from its first call, forced by the harness or through the product's own
 // signal (a context cut to its total bound, a metrics source that is down), and some have the logs of their pods
 // (logs.yaml, replayed through the LogSource interface for the harness only; escalation_scenarios_test.go,
-// logs_test.go).
+// logs_test.go). Variants under testdata/scenarios/<name>/variants/ may also carry logs.yaml (and their own
+// expected.yaml and rubric.yaml together), so triage runs exercise container log excerpts too.
 //
 // A run builds each scenario's context with the real context builder (package incidentcontext) over a fake
 // client that holds the recorded objects, and runs the real analysis loop (package analysis) with the real

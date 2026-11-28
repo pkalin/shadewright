@@ -346,19 +346,20 @@ func TestKeepHeadAndTail(t *testing.T) {
 		head, tail string
 	}{
 		{100, s, s}, {len(s), s, s}, {13, "one\ntwo\n", "two\nthree\n"}, {8, "one\ntwo\n", "three\n"},
-		{6, "one\n", "three\n"}, {3, "", ""}, {0, "", ""}, {-1, "", ""},
+		{6, "one\n", "three\n"}, {3, "", "ee\n"}, {0, "", ""}, {-1, "", ""},
 	} {
 		if h, _ := keepHead(s, tc.n); h != tc.head {
 			t.Errorf("keepHead(%d) = %q, want %q", tc.n, h, tc.head)
 		}
-		if tl, _ := keepTail(s, tc.n); tl != tc.tail {
-			t.Errorf("keepTail(%d) = %q, want %q", tc.n, tl, tc.tail)
+		if tl, _ := cutLog(s, tc.n); tl != tc.tail {
+			t.Errorf("cutLog(%d) = %q, want %q", tc.n, tl, tc.tail)
 		}
 	}
-	if tl, cut := keepTail("partial\nlast", 3); tl != "" || !cut {
-		t.Errorf("keepTail kept a partial line: %q", tl)
+	// The last-line rule: a last line longer than the bound gives its tail, never nothing (#1055).
+	if tl, cut := cutLog("partial\nlast", 3); tl != "ast" || !cut {
+		t.Errorf("cutLog = %q, want the tail of the last line", tl)
 	}
-	if tl, _ := keepTail("a\nlast", 4); tl != "last" {
-		t.Errorf("keepTail = %q", tl)
+	if tl, _ := cutLog("a\nlast", 4); tl != "last" {
+		t.Errorf("cutLog = %q", tl)
 	}
 }

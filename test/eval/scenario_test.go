@@ -376,9 +376,10 @@ func loadScenarioFiles(scheme *runtime.Scheme, dataDir, ownDir, name, expectedNa
 const variantsDir = "variants"
 
 // variant is a variant.yaml: a state of a fleet scenario the lab met that its own recording does not show,
-// such as a rollout in progress. A variant is scored against the scenario's expected.yaml and rubric.yaml,
-// unchanged; its directory holds its own replies.yaml, and an incident.yaml, objects.yaml, metrics.yaml or
-// policy.yaml when its Incident, objects, series or policies differ from the scenario's.
+// such as a rollout in progress. By default a variant is scored against the scenario's expected.yaml and
+// rubric.yaml, unchanged; its directory holds its own replies.yaml, and an incident.yaml, objects.yaml,
+// metrics.yaml, logs.yaml or policy.yaml when those differ from the scenario's, and may hold its own
+// expected.yaml and rubric.yaml together when its outcome or diagnosis facts depend on what it changes.
 type variant struct {
 	// About says what the variant changes and why, in a sentence or two.
 	About string `json:"about"`
@@ -399,18 +400,19 @@ func loadVariants(scheme *runtime.Scheme, dir string, base *scenario) ([]*scenar
 		if !e.IsDir() {
 			continue
 		}
-		v, err := loadVariant(scheme, filepath.Join(dir, variantsDir, e.Name()), base)
+		name := base.name + "/" + e.Name()
+		v, err := loadVariant(scheme, filepath.Join(dir, variantsDir, e.Name()), base, name)
 		if err != nil {
 			return nil, fmt.Errorf("variant %s: %w", e.Name(), err)
 		}
-		v.name = base.name + "/" + e.Name()
+		v.name = name
 		out = append(out, v)
 	}
 	return out, nil
 }
 
 // loadVariant loads the variant in dir over a copy of base.
-func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario, error) {
+func loadVariant(scheme *runtime.Scheme, dir string, base *scenario, name string) (*scenario, error) {
 	var v variant
 	if err := readStrict(filepath.Join(dir, "variant.yaml"), &v); err != nil {
 		return nil, err
@@ -419,7 +421,39 @@ func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario,
 		return nil, errors.New("variant.yaml: about is required")
 	}
 	s := &scenario{expected: base.expected, rubric: base.rubric, incident: base.incident.DeepCopy(),
-		metrics: base.metrics, policies: base.policies}
+		metrics: base.metrics, logs: base.logs, policies: base.policies}
+	hasExpected, err := exists(filepath.Join(dir, "expected.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	hasRubric, err := exists(filepath.Join(dir, "rubric.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	if hasExpected != hasRubric {
+		return nil, errors.New("variant expected.yaml and rubric.yaml must be provided together")
+	}
+	if hasExpected {
+		raw, err := os.ReadFile(filepath.Join(dir, "expected.yaml"))
+		if err != nil {
+			return nil, err
+		}
+		s.expected = expected{}
+		if err := yaml.Unmarshal(raw, &s.expected); err != nil {
+			return nil, fmt.Errorf("expected.yaml: %w", err)
+		}
+		if s.expected.APIVersion != "scenarios.shadewright.io/v1alpha1" || s.expected.Name != name {
+			return nil, fmt.Errorf("expected.yaml: apiVersion %q and name %q do not match variant %q",
+				s.expected.APIVersion, s.expected.Name, name)
+		}
+		s.rubric = rubric{}
+		if err := readStrict(filepath.Join(dir, "rubric.yaml"), &s.rubric); err != nil {
+			return nil, err
+		}
+		if err := s.checkRubric(); err != nil {
+			return nil, err
+		}
+	}
 	if err := readStrict(filepath.Join(dir, "replies.yaml"), &s.recording); err != nil {
 		return nil, err
 	}
@@ -431,13 +465,16 @@ func loadVariant(scheme *runtime.Scheme, dir string, base *scenario) (*scenario,
 		if s.incident, err = readIncident(decoder, filepath.Join(dir, "incident.yaml")); err != nil {
 			return nil, err
 		}
-		if err := s.checkIncident(); err != nil {
-			return nil, err
-		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	// After the variant's own Incident, whose subject namespace the reads are checked against.
+	if err := s.checkIncident(); err != nil {
+		return nil, err
+	}
+	if err := s.loadLogs(dir); err != nil {
+		return nil, err
+	}
+	// After the variant's own Incident and logs, which checkReads validates against.
 	if err := s.checkReads(); err != nil {
 		return nil, err
 	}

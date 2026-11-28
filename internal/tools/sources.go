@@ -155,6 +155,7 @@ func (s *Set) podLogs(ctx context.Context, a podLogsArgs, r *Result) error {
 	}{
 		{v.LeadingDropped, LabelLeadingLinesDropped}, {v.Truncated, LabelLogTruncated},
 		{v.EndMissing, LabelLogEndMissing}, {v.InstanceUncertain, LabelLogInstanceUncertain}, {v.Cut, LabelCut},
+		{v.HeaderKept, LabelLogHeaderKept}, {v.HeaderLeftOut, LabelLogHeaderLeftOut},
 	} {
 		if m.on {
 			r.addLabel(m.l)

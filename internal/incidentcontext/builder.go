@@ -27,6 +27,7 @@ import (
 
 	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
 	"github.com/shadewright-labs/shadewright/internal/incidents/causereason"
+	"github.com/shadewright-labs/shadewright/internal/logcut"
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/redact"
 )
@@ -457,6 +458,34 @@ func (c *Context) fitTotal(limit int) bool {
 	}
 	c.Truncated = true
 	for _, sec := range cutOrder {
+		if sec == SectionLogs {
+			// Pass 1 trims log blocks while preserving the final previousTailLines lines of any terminated
+			// previous instance so earlier noisy lines (such as a current instance's excerpt) are trimmed first.
+			// Pass 2 runs only if the context still exceeds limit, trimming without that floor so the hard
+			// total bound always holds.
+			for _, minTail := range []int{previousTailLines, 0} {
+				for i := len(c.Blocks) - 1; i >= 0 && total > limit; i-- {
+					blk := &c.Blocks[i]
+					if blk.Section != SectionLogs || blk.Text == blk.requiredText {
+						continue
+					}
+					others := total - rendered[i]
+					wrapper := blockWrapperLenWithCutLabel(i, *blk)
+					budget := limit - others - wrapper
+					floorBudget := budget
+					if minTail > 0 && blk.previous {
+						floorBudget += reclaimableLogBody(c.Blocks[:i], rendered[:i], blk.container)
+					}
+					if !trimLogBlock(i, blk, rendered[i], budget, floorBudget, minTail) {
+						continue
+					}
+					next := renderedBlockLen(i, *blk)
+					total += next - rendered[i]
+					rendered[i] = next
+				}
+			}
+			continue
+		}
 		for i := len(c.Blocks) - 1; i >= 0 && total > limit; i-- {
 			blk := &c.Blocks[i]
 			if blk.Section != sec || blk.Text == blk.requiredText {
@@ -466,28 +495,16 @@ func (c *Context) fitTotal(limit int) bool {
 			others := total - rendered[i]
 			wrapper := blockWrapperLenWithCutLabel(i, *blk)
 			budget := limit - others - wrapper
-			if sec == SectionLogs {
-				head := blk.Text[:blk.headLen]
-				if budget <= 0 || len(renderBody(head)) > budget {
-					blk.Text = blk.requiredText
-					blk.headLen = len(blk.Text)
-				} else {
-					body := keepTailRendered(head, blk.Text[blk.headLen:], budget)
-					blk.Text = head + body
-					blk.headLen = len(head)
+			blk.Text = keepHeadRendered(blk.Text, budget)
+			// A cut that leaves part of the unit at the end removes all of it.
+			if blk.unitAt > 0 && len(blk.Text) > blk.unitAt && len(blk.Text) < before {
+				blk.Text = blk.Text[:blk.unitAt]
+				if len(renderBody(blk.Text)) > budget {
+					blk.Text = keepHeadRendered(blk.Text, budget)
 				}
-			} else {
-				blk.Text = keepHeadRendered(blk.Text, budget)
-				// A cut that leaves part of the unit at the end removes all of it.
-				if blk.unitAt > 0 && len(blk.Text) > blk.unitAt && len(blk.Text) < before {
-					blk.Text = blk.Text[:blk.unitAt]
-					if len(renderBody(blk.Text)) > budget {
-						blk.Text = keepHeadRendered(blk.Text, budget)
-					}
-				}
-				if blk.unitAt >= len(blk.Text) {
-					blk.unitAt = 0
-				}
+			}
+			if blk.unitAt >= len(blk.Text) {
+				blk.unitAt = 0
 			}
 			blk.addLabel(LabelContextCut)
 			next := renderedBlockLen(i, *blk)
@@ -496,6 +513,79 @@ func (c *Context) fitTotal(limit int) bool {
 		}
 	}
 	return total <= limit
+}
+
+// reclaimableLogBody returns how many rendered bytes the earlier log blocks in blocks of the same container
+// (container, see [Block]) that hold a current instance can shed while keeping their headers (or requiredText
+// when a block has no header). It never counts a block of another container, which comes earlier because it
+// ranks higher, nor a previous instance's block: a later block's floor never cuts an earlier, higher-priority
+// excerpt (decision of 2026-11-28 on #1055).
+func reclaimableLogBody(blocks []Block, rendered []int, container int) int {
+	reclaimable := 0
+	for j, b := range blocks {
+		if b.Section != SectionLogs || b.Text == b.requiredText || container == 0 || b.container != container || b.previous {
+			continue
+		}
+		minText := b.requiredText
+		if b.headLen > len(minText) {
+			minText = b.Text[:b.headLen]
+		}
+		minRendered := blockWrapperLenWithCutLabel(j, b) + len(renderBody(minText))
+		if rendered[j] > minRendered {
+			reclaimable += rendered[j] - minRendered
+		}
+	}
+	return reclaimable
+}
+
+// trimLogBlock cuts a log block to fit within budget bytes (after escaping and wrapping). When minTail > 0 and
+// blk is a previous-instance excerpt, it keeps at least the final minTail lines of the already-redacted body
+// capped to floorBudget (what fits alongside earlier log headers), and skips the block if doing so would not
+// reduce its rendered size.
+func trimLogBlock(i int, blk *Block, currentRendered, budget, floorBudget, minTail int) bool {
+	head := blk.Text[:blk.headLen]
+	body := blk.Text[blk.headLen:]
+	var next string
+	var nextHead int
+	var kind logcut.Kind
+	if budget <= 0 || len(renderBody(head)) > budget {
+		next, nextHead = blk.requiredText, len(blk.requiredText)
+	} else {
+		kept, c := cutRenderedKind(head, body, budget)
+		next, nextHead, kind = head+kept, len(head), c.Kind
+	}
+	if minTail > 0 && blk.previous && body != "" && floorBudget > 0 && len(renderBody(head)) <= floorBudget {
+		floor := lastNLines(body[:logcut.NonBlankEnd(body)], minTail)
+		floorKind := logcut.Lines
+		if len(renderBody(head+floor)) > floorBudget {
+			var c logcut.Cut
+			floor, c = cutRenderedKind(head, floor, floorBudget)
+			floorKind = c.Kind
+		}
+		keptBody := ""
+		if nextHead == len(head) && len(next) >= nextHead {
+			keptBody = next[nextHead:]
+		}
+		// The floor ends at the last non-blank line, so the kept body is measured without its trailing blank
+		// lines: blank lines are no part of the final lines the floor keeps.
+		if len(keptBody[:logcut.NonBlankEnd(keptBody)]) < len(floor) {
+			if len(floor) == len(body) {
+				return false
+			}
+			candidate := *blk
+			candidate.Text, candidate.headLen = head+floor, len(head)
+			candidate.addLabel(LabelContextCut)
+			addCutLabels(&candidate, floorKind)
+			if renderedBlockLen(i, candidate) >= currentRendered {
+				return false
+			}
+			next, nextHead, kind = candidate.Text, candidate.headLen, floorKind
+		}
+	}
+	blk.Text, blk.headLen = next, nextHead
+	blk.addLabel(LabelContextCut)
+	addCutLabels(blk, kind)
+	return true
 }
 
 // tallyShown reports whether the summary of an Incident of reason shows its absorbed tally (ADR-0039 point 18,
@@ -507,4 +597,14 @@ func (b *Builder) tallyShown(reason string) bool {
 		return b.showsTally(reason)
 	}
 	return causereason.ShowsTally(reason)
+}
+
+// addCutLabels labels blk with what a cut of its excerpt left out around the first line of its newest entry.
+func addCutLabels(blk *Block, kind logcut.Kind) {
+	switch kind {
+	case logcut.HeaderKept:
+		blk.addLabel(LabelLogHeaderKept)
+	case logcut.HeaderLeftOut:
+		blk.addLabel(LabelLogHeaderLeftOut)
+	}
 }

@@ -46,7 +46,10 @@ limitations under the License.
 // fixed text and never echoes an argument. Results are cluster data, untrusted too: every piece of text goes through
 // the [Redactor] before any cut; in an answer written as lines, a value longer than 1 KiB once decided is left out
 // whole and its control characters become spaces, and only whole lines are cut from redacted text (get_resource
-// bounds its JSON instead, by leaveOut below); the assembled text is not redacted again (#845). A
+// bounds its JSON instead, by leaveOut below), except that a log excerpt whose last line alone is longer than what
+// is left keeps the tail of that line, and that a log excerpt keeps the first line of an entry ahead of its newest
+// continuation lines with the lines between left out (package logcut); the assembled text is not redacted again
+// (#845). A
 // log excerpt is rendered by package incidentcontext's RenderLog, as in the context: it first loses the leading
 // lines that may continue an entry whose first line the source left out, before redaction, its header is budgeted
 // first, and every cut keeps the header and the newest lines. get_resource leaves out annotations, managed fields,

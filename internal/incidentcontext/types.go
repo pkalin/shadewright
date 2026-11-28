@@ -160,6 +160,12 @@ const (
 	// LabelLeadingLinesDropped means the builder dropped lines at the start of a log excerpt that may continue
 	// an entry whose first line the source left out (indented lines, YAML sequence entries, blank lines).
 	LabelLeadingLinesDropped Label = "leading continuation lines dropped"
+	// LabelLogHeaderKept means the newest lines of a log excerpt continue an entry (indented, "- " items: the frames of
+	// a stack trace); the first line of that entry is kept ahead of them and the lines between were left out.
+	LabelLogHeaderKept Label = "first line of the log entry kept, lines between left out"
+	// LabelLogHeaderLeftOut means the newest lines of a log excerpt continue an entry whose first line did not fit
+	// with them and was left out.
+	LabelLogHeaderLeftOut Label = "first line of the log entry left out"
 	// LabelWithheld means redaction withheld what the block would hold, whole (its work ran out of its budget, or
 	// the text was longer than redact.LargestEntry, the largest entry the build passes; package redact): the block's
 	// source counts as failed.
@@ -200,6 +206,13 @@ type Block struct {
 	Values []string
 	// headLen is the length of the header lines at the start of Text that a cut keeps (log blocks).
 	headLen int
+	// previous marks a log block holding a terminated previous instance's excerpt, so the total context cut
+	// preserves its final previousTailLines lines ahead of earlier log noise.
+	previous bool
+	// container is the 1-based place of the log block's container in the order the builder read them (0 for a
+	// block that is not a log excerpt): the cut of the whole context reclaims room for a previous instance's
+	// floor only from a current-instance block of the same container.
+	container int
 	// requiredText is the redacted title, if any, and notice that survive a cut when redaction withheld a read.
 	requiredText string
 	// unitAt, when not zero, is where the unit at the end of Text that a cut removes whole starts: the

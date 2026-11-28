@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/shadewright-labs/shadewright/internal/providers"
+	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 )
 
 // sourceSynthetic is the source of a recording written by hand.
@@ -140,10 +141,13 @@ func (l replayLogs) Logs(ctx context.Context, q providers.LogQuery) (providers.L
 		if limit <= 0 {
 			limit = providers.DefaultLogBytes
 		}
-		text, truncated := newestLines(e.Text, int(limit))
-		return providers.LogExcerpt{Text: text, Truncated: truncated, CollectedAt: fixtureNow,
-			Instance: providers.LogInstance{PodUID: e.PodUID, ContainerID: e.ContainerID,
-				RestartCount: e.RestartCount}}, nil
+		ex, err := fake.CutLog(e.Text, int(limit))
+		if err != nil {
+			return providers.LogExcerpt{}, err
+		}
+		ex.CollectedAt = fixtureNow
+		ex.Instance = providers.LogInstance{PodUID: e.PodUID, ContainerID: e.ContainerID, RestartCount: e.RestartCount}
+		return ex, nil
 	}
 	if known {
 		return providers.LogExcerpt{}, fmt.Errorf("logs of %s/%s/%s: %w", q.Namespace, q.Pod, q.Container,
@@ -152,7 +156,8 @@ func (l replayLogs) Logs(ctx context.Context, q providers.LogQuery) (providers.L
 	return providers.LogExcerpt{}, fmt.Errorf("logs of pod %s/%s: %w", q.Namespace, q.Pod, providers.ErrNotFound)
 }
 
-// newestLines keeps the newest whole lines of text within n bytes, and reports whether any were left out.
+// newestLines keeps the newest whole lines of text within n bytes, and reports whether any were left out: the
+// whole-line cut that the log source and the context builder made before #1055, kept to show what it dropped.
 func newestLines(text string, n int) (string, bool) {
 	if len(text) <= n {
 		return text, false
@@ -177,8 +182,9 @@ func (s *scenario) logSource() providers.LogSource {
 	return replayLogs{rec: s.logs}
 }
 
-// The replayed log source answers as the API server does: newest whole lines within the bound, truncated when
-// older ones are left out, a refused request for an instance the pod does not have, not found for another pod.
+// The replayed log source answers as the production log source cuts what the API server sent (internal/logcut):
+// newest whole lines within the bound, or the tail of a longer last line, truncated when older ones are left
+// out, a refused request for an instance the pod does not have, not found for another pod.
 func TestReplayLogs(t *testing.T) {
 	rec := &logsRecording{Source: sourceSynthetic, Namespace: nsDemo, Excerpts: []recordedLog{
 		{Pod: "p", Container: "c", Previous: true, PodUID: "u", ContainerID: "id", RestartCount: 2,

@@ -454,8 +454,10 @@ func TestLogOfExactlyMaxReadBytes(t *testing.T) {
 	}
 }
 
-// A line longer than the excerpt is never returned in part.
-func TestOneHugeLineGivesAnEmptyExcerpt(t *testing.T) {
+// A last line longer than the excerpt gives its tail, redacted as part of the whole line, never an empty
+// excerpt (decision of 2026-11-28 on #1055). A line longer than a read has no end: the read cut it, so it is
+// dropped as before.
+func TestOneHugeLineKeepsItsTail(t *testing.T) {
 	largeLog(t)
 	for name, n := range map[string]int{"longer than the excerpt": DefaultBytes, "longer than a read": MaxReadBytes} {
 		l := newLogServer("token " + strings.Repeat("a1", n) + "\n")
@@ -463,12 +465,25 @@ func TestOneHugeLineGivesAnEmptyExcerpt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Text != "" || got.Truncated == got.EndMissing {
+		if got.Truncated == got.EndMissing || len(got.Text) > DefaultBytes || strings.Contains(got.Text, "a1a1") {
 			t.Errorf("%s: %d bytes, truncated %v, end missing %v", name, len(got.Text), got.Truncated, got.EndMissing)
 		}
-		if n == MaxReadBytes && (len(l.opts) != 2 || *l.opts[1].TailLines != 1) {
-			t.Errorf("%s: requests %d", name, len(l.opts))
+		if n == MaxReadBytes && (got.Text != "" || len(l.opts) != 2 || *l.opts[1].TailLines != 1) {
+			t.Errorf("%s: %d bytes, requests %d", name, len(got.Text), len(l.opts))
 		}
+		if n == DefaultBytes && strings.TrimSpace(got.Text) == "" {
+			t.Errorf("%s: empty excerpt for a non-blank last line", name)
+		}
+	}
+	// Unredacted text: the tail itself, ending with the line.
+	l := newLogServer("start\n" + strings.Repeat("word ", DefaultBytes/4) + "exit 2\n")
+	got, err := l.source(t).Logs(context.Background(), query())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Truncated || len(got.Text) > DefaultBytes || len(got.Text) < DefaultBytes-8 || !strings.HasSuffix(got.Text, "word exit 2\n") ||
+		strings.HasPrefix(got.Text, " ") {
+		t.Errorf("long last line: %d bytes, truncated %v, ends %q", len(got.Text), got.Truncated, got.Text[max(0, len(got.Text)-20):])
 	}
 }
 
@@ -1245,5 +1260,65 @@ func TestFallbackRedactorReportsDecisions(t *testing.T) {
 				t.Errorf("size counter increased by %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// The cut of the source is placed on the bytes as read, before redaction, but redaction reads every byte that
+// was read: a secret that the cut boundary splits is matched whole, and the part kept is a marker, never a
+// fragment of the secret. Every keep from the whole line down to one byte is tried, so the boundary falls on
+// each byte of each secret, on the whole-line path and on the tail of a last line longer than keep (#1055).
+func TestRawCutInsideASecretShowsNoFragment(t *testing.T) {
+	r, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PSR5wHnYp3qk"
+	pat := "ghp_" + strings.Repeat("Q7", 18)
+	for name, tc := range map[string]struct{ line, secret string }{
+		"bearer":     {"Authorization: Bearer " + jwt, jwt},
+		"github pat": {"using token " + pat + " for the clone", pat},
+		"password":   {"Server=db;Database=app;User Id=admin;Password=S3cr3tPassw0rd;", "S3cr3tPassw0rd"},
+	} {
+		for _, data := range []string{tc.line + "\n", "starting\n" + tc.line + "\n", "starting\n" + tc.line + "\nready\n"} {
+			for keep := 1; keep <= len(data); keep++ {
+				got, _, err := Excerpt(r, []byte(data), false, keep)
+				if err != nil {
+					t.Fatalf("%s keep %d: %v", name, keep, err)
+				}
+				for i := 0; i+6 <= len(tc.secret); i++ {
+					if strings.Contains(got, tc.secret[i:i+6]) {
+						t.Fatalf("%s keep %d: fragment %q of the secret in %q", name, keep, tc.secret[i:i+6], got)
+					}
+				}
+			}
+		}
+	}
+}
+
+// An indented last line with no line before it that a reader keeps is dropped whole by the reader, so its tail
+// is not kept either: a tail that starts after the indentation would no longer be dropped, and could be the
+// value of a secret whose key line was not read (finding of 2026-11-28 on #1055). With a line before it that a
+// reader keeps, its tail is kept as before.
+func TestOrphanedContinuationTailIsDropped(t *testing.T) {
+	r, err := redact.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphan := strings.Repeat(" ", 80) + "sample\n"
+	for _, keep := range []int{64, 1024} {
+		ex, err := ExcerptOf(r, []byte(orphan), false, keep)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ex.Text[providers.LeadingContinuation(ex.Text):]; got != "" {
+			t.Errorf("keep %d: a reader keeps %q of an orphaned continuation line", keep, got)
+		}
+	}
+	ex, err := ExcerptOf(r, []byte("starting\n"+orphan), false, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.Text != "sample\n" || ex.LeadingDropped {
+		t.Errorf("with a line a reader keeps before it: %q", ex.Text)
 	}
 }

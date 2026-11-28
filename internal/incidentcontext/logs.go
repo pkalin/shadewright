@@ -39,9 +39,25 @@ const MaxLogExcerpts = 2
 // per container. The first reads take at most one call timeout each; the second reads share what is left.
 const logBudgetCalls = MaxLogExcerpts
 
-// minSecondRead is the least of a container's share of the log bound that must be left after the excerpt of
-// its terminated current instance for the builder to read its previous instance as well.
-const minSecondRead = 1 << 10
+// previousTailLines is the number of final lines of a terminated previous instance kept ahead of other log
+// lines when the total context bound trims the log section: enough for an unmarked exit message and a short
+// usage or panic tail without crowding out the rest of the context.
+const previousTailLines = 10
+
+// minSecondRead is the share of a container's log budget reserved for its previous instance when its current
+// instance has also terminated (capped at half the share for small bounds). Two KiB leaves room for the
+// instance header and the trailing lines of a crash log (or the rune-boundary tail of an over-budget last
+// line) so a noisy current instance cannot crowd out the previous instance's ending.
+const minSecondRead = 2 << 10
+
+// crashLoopBackOffReason is the kubelet waiting reason for a container in a crash loop.
+const crashLoopBackOffReason = "CrashLoopBackOff"
+
+// previousReserve returns the bytes reserved from a container's log share for reading its previous instance
+// when the current instance has also terminated.
+func previousReserve(share int) int {
+	return min(minSecondRead, share/2)
+}
 
 // logPick is one container whose logs the builder reads.
 type logPick struct {
@@ -80,15 +96,19 @@ func logPicks(t *target, w window) []logPick {
 				currentDead: cs.State.Terminated != nil,
 			}
 			switch {
-			case last != nil && last.FinishedAt.After(w.start):
+			case last != nil && (last.FinishedAt.After(w.start) ||
+				(cs.State.Waiting != nil && cs.State.Waiting.Reason == crashLoopBackOffReason)):
 				pick.score, pick.previous = 3, !pick.currentDead || shutdown(p, cs)
+			case cs.State.Waiting != nil && cs.State.Waiting.Reason == crashLoopBackOffReason && cs.RestartCount > 0:
+				pick.score, pick.previous = 3, true
 			case cs.State.Waiting != nil && cs.State.Waiting.Reason != "",
 				cs.State.Terminated != nil && !settled(p, cs):
 				pick.score = 2
 			case !cs.Ready && !settled(p, cs):
 				pick.score = 1
 			}
-			// The current instance always exists; a previous one only after a termination.
+			// The current instance always exists; a previous one only when chosen first (such as CrashLoopBackOff
+			// with restarts) or after a recorded termination.
 			pick.other = pick.previous || last != nil
 			all = append(all, pick)
 		}
@@ -135,7 +155,7 @@ func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, 
 	since := w.end.Sub(w.start).Round(time.Second)
 	reads := make([]containerReads, len(picks))
 	for i, pick := range picks {
-		reads[i] = containerReads{pick: pick, left: budget}
+		reads[i] = containerReads{pick: pick, budget: budget, left: budget, askLeft: budget}
 		if err := b.readInstance(ctx, &reads[i], pick.previous, since); err != nil {
 			return nil, false, err
 		}
@@ -145,7 +165,8 @@ func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, 
 			continue
 		}
 		if outOfTime(second) {
-			break
+			b.recordRead(ctx, &reads[i], !reads[i].pick.previous, providers.LogExcerpt{}, errBuildDeadline, reads[i].left)
+			continue
 		}
 		if err := b.readInstance(second, &reads[i], !reads[i].pick.previous, since); err != nil {
 			return nil, false, err
@@ -158,6 +179,7 @@ func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, 
 		failed = failed || reads[i].failed
 		for j := range blks {
 			b.podLabels(&blks[j], t)
+			blks[j].container = i + 1
 		}
 		blocks = append(blocks, blks...)
 	}
@@ -168,8 +190,10 @@ func (b *Builder) logBlocks(ctx context.Context, t *target, w window) ([]Block, 
 // bound in all.
 type containerReads struct {
 	pick logPick
-	// reads counts the reads made, left is what is left of the container's share of the bound.
-	reads, left int
+	// budget is this container's full share of the log bound; reads counts the reads made; left is what is left
+	// of the rendered block share; askLeft is what is left of the share after the raw bytes answered so far, so
+	// the queries together never ask for more than the share even when the cut drops a partial leading line.
+	budget, reads, left, askLeft int
 	// out are the excerpts, in the order read; notes the header lines of the reads that gave no lines.
 	out   []Block
 	notes strings.Builder
@@ -181,13 +205,32 @@ type containerReads struct {
 	withheld string
 }
 
+// share returns the container's share of the log bound, falling back to what is already accounted for in tests
+// that construct containerReads directly.
+func (r *containerReads) share() int {
+	if r.budget > 0 {
+		return r.budget
+	}
+	return r.left + r.notes.Len()
+}
+
+// queryBudget returns the maximum bytes the next query may ask of the log source without exceeding either the
+// rendered share or the raw bytes remaining in the container's share.
+func (r *containerReads) queryBudget() int {
+	if r.budget == 0 && r.askLeft == 0 {
+		return r.left
+	}
+	return min(r.left, r.askLeft)
+}
+
 // wantsSecond reports whether the container's other instance is read after its first read: the other
 // instance exists, the first read did not fail (a failing source costs one call per container), bytes are
 // left, and the first read gave no lines (collected, refused for that instance, pod not found or empty) or
-// it gave the excerpt of a terminated current instance and at least minSecondRead bytes are left.
+// it gave the excerpt of a terminated current instance and at least previousReserve bytes are left.
 func (r *containerReads) wantsSecond() bool {
-	return r.reads == 1 && r.pick.other && !r.failed && r.left > 0 &&
-		(len(r.out) == 0 || r.pick.currentDead && r.left >= minSecondRead)
+	qb := r.queryBudget()
+	return r.reads == 1 && r.pick.other && !r.failed && qb > 0 &&
+		(len(r.out) == 0 || r.pick.currentDead && qb >= previousReserve(r.share()))
 }
 
 // blocks returns the container's blocks: each excerpt in a block whose header names its instance, the header
@@ -218,13 +261,17 @@ func (r *containerReads) blocks() []Block {
 }
 
 // readInstance reads one instance of r's container, the previous one when previous is set, asking for no
-// more than what is left of its share, and records the answer in r. It returns an error only when ctx is
-// done.
+// more than what is left of its share (leaving previousReserve when a terminated current instance also has a
+// previous instance to read), and records the answer in r. It returns an error only when ctx is done.
 func (b *Builder) readInstance(ctx context.Context, r *containerReads, previous bool, since time.Duration) error {
 	pick := r.pick
+	ask := r.queryBudget()
+	if r.reads == 0 && pick.currentDead && pick.other && !previous {
+		ask -= previousReserve(r.share())
+	}
 	q := providers.LogQuery{
 		Namespace: pick.namespace, Pod: pick.pod, Container: pick.container, Previous: previous,
-		MaxBytes: int64(r.left),
+		MaxBytes: int64(ask),
 	}
 	if !previous {
 		// The previous instance stopped at some time in the past: no window for it.
@@ -241,22 +288,40 @@ func (b *Builder) readInstance(ctx context.Context, r *containerReads, previous 
 			return a
 		}
 	}
+	b.recordRead(ctx, r, previous, ex, err, ask)
+	return nil
+}
+
+// recordRead renders one log answer (or a skipped second read's deadline error) into r within its share.
+func (b *Builder) recordRead(ctx context.Context, r *containerReads, previous bool, ex providers.LogExcerpt, err error, ask int) {
+	pick := r.pick
 	r.reads++
 	read := pick
 	read.previous = previous
-	blk, v := b.renderBlock(read, ex, err, r.left)
+	blk, v := b.renderBlock(read, ex, err, ask)
 	if v.Read == LogReadWithheld && len(blk.Text) > r.left {
-		// A first read with no excerpt can leave too little room for the second read's notice.
-		// Reclaim room from those earlier notes to keep the withheld title and notice together.
-		notes, _ := keepHead(r.notes.String(), r.notes.Len()+r.left-len(blk.Text))
-		r.left += r.notes.Len() - len(notes)
-		r.notes.Reset()
-		r.notes.WriteString(notes)
+		fitWithheld(r, &blk)
+	}
+	if r.reads > 1 && v.Read == LogReadFailed {
+		// A failed second read keeps its "could not fetch" notice: the room comes from the earlier notes and the
+		// first excerpt, never by cutting the notice to its title.
+		if full, fullV := b.renderBlock(read, providers.LogExcerpt{}, err, r.share()); len(full.Text) > len(blk.Text) &&
+			makeRoom(r, len(full.Text)) {
+			blk, v = full, fullV
+		}
 	}
 	r.left -= len(blk.Text)
+	if r.budget > 0 {
+		spent := len(blk.Text)
+		if err == nil && len(ex.Text) > spent {
+			spent = len(ex.Text)
+		}
+		r.askLeft = max(0, r.askLeft-spent)
+	}
 	if v.Read == LogReadOK {
+		blk.previous = previous
 		r.out = append(r.out, blk)
-		return nil
+		return
 	}
 	reason := logReadReasons[noLinesReason(v.Read, err)]
 	logReadsWithoutLines.WithLabelValues(reason).Inc()
@@ -272,7 +337,75 @@ func (b *Builder) readInstance(ctx context.Context, r *containerReads, previous 
 		// it for every caller of the log source.
 		r.failed, r.withheld = true, blk.Text
 	}
-	return nil
+}
+
+// reclaimFromNotes trims earlier no-line notes from r so that need bytes fit in r.left.
+func reclaimFromNotes(r *containerReads, need int) {
+	if r.notes.Len() == 0 || need <= r.left {
+		return
+	}
+	notes, _ := keepHead(r.notes.String(), r.notes.Len()+r.left-need)
+	r.left += r.notes.Len() - len(notes)
+	r.notes.Reset()
+	r.notes.WriteString(notes)
+}
+
+// fitWithheld makes room in r for blk, the title and notice of a read redaction withheld whole, so the container
+// stays within its share and the section within its bound (decision of 2026-11-28 on #1055), in this order: the
+// earlier notes and the body of a current instance's first excerpt ([makeRoom]); that first excerpt whole, when
+// only its header is left; the notice alone, without its title. A previous instance's excerpt is never cut for it
+// (decision of 2026-11-26: the previous instance's tail is kept first). The notice alone fits then: a share is at
+// least half of MinSectionBytes, and a second read after a first excerpt starts with at least previousReserve of
+// it left. Should it not (a case the reads do not reach), the previous instance's body gives the room, since the
+// section never exceeds its bound.
+func fitWithheld(r *containerReads, blk *Block) {
+	if makeRoom(r, len(blk.Text)) {
+		return
+	}
+	if len(r.out) > 0 && !r.out[0].previous {
+		r.left += len(r.out[0].Text)
+		r.out = r.out[1:]
+		if makeRoom(r, len(blk.Text)) {
+			return
+		}
+	}
+	blk.Text = withheldText
+	if !makeRoom(r, len(blk.Text)) && len(r.out) > 0 {
+		first := &r.out[0]
+		body := first.Text[first.headLen:]
+		kept, c := cutLogKind(body, max(len(body)+r.left-len(blk.Text), 0))
+		r.left += len(body) - len(kept)
+		first.Text = first.Text[:first.headLen] + kept
+		first.addLabel(LabelSectionCut)
+		addCutLabels(first, c.Kind)
+	}
+}
+
+// makeRoom frees room in r for need bytes, first from the earlier no-line notes, then from the body of the
+// first excerpt when it is a current instance's, and reports whether need now fits in what is left of r's share.
+func makeRoom(r *containerReads, need int) bool {
+	reclaimFromNotes(r, need)
+	reclaimFromFirstExcerpt(r, need)
+	return need <= r.left
+}
+
+// reclaimFromFirstExcerpt shortens the already-redacted body of r.out[0] with the one cut ([cutLog]) so that need
+// bytes fit in r.left, down to no body at all; the excerpt's header is kept whole. A previous instance's excerpt
+// is not cut: it ranks above the later read that needs the room (decision of 2026-11-26).
+func reclaimFromFirstExcerpt(r *containerReads, need int) {
+	if len(r.out) == 0 || need <= r.left || r.out[0].previous {
+		return
+	}
+	first := &r.out[0]
+	head, body := first.Text[:first.headLen], first.Text[first.headLen:]
+	if body == "" {
+		return
+	}
+	kept, c := cutLogKind(body, max(len(body)+r.left-need, 0))
+	r.left += len(body) - len(kept)
+	first.Text = head + kept
+	first.addLabel(LabelSectionCut)
+	addCutLabels(first, c.Kind)
 }
 
 // instanceName names an instance in a block header and in the log.
@@ -314,6 +447,7 @@ func (b *Builder) renderBlock(pick logPick, ex providers.LogExcerpt, err error, 
 	}{
 		{v.LeadingDropped, LabelLeadingLinesDropped}, {v.Truncated, LabelLogTruncated},
 		{v.EndMissing, LabelLogEndMissing}, {v.InstanceUncertain, LabelLogInstanceUncertain}, {v.Cut, LabelSectionCut},
+		{v.HeaderKept, LabelLogHeaderKept}, {v.HeaderLeftOut, LabelLogHeaderLeftOut},
 	} {
 		if m.on {
 			blk.addLabel(m.l)

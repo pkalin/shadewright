@@ -1,0 +1,6 @@
+about: >-
+  The oom crash loop with a recorded log for the previous instance of container web whose final line exceeds the
+  remaining 24 KiB log-section budget (after its header) and has a long run of * spanning the cut offset before
+  the deciding cause: ConfigMap web-config mounted at /etc/web has no key cache.yaml, leaving the item cache
+  unbounded (#1055). On whole-line tail cutting that line was dropped and left an empty excerpt; keepLogTail
+  keeps its tail past the * run so triage sees the cause and refuses a memory increase.

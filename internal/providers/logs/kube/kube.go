@@ -32,6 +32,7 @@ import (
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 
+	"github.com/shadewright-labs/shadewright/internal/logcut"
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/redact"
 	"github.com/shadewright-labs/shadewright/internal/redactadapter"
@@ -197,20 +198,17 @@ func (s *Source) Logs(ctx context.Context, q providers.LogQuery) (providers.LogE
 		// instance checked before.
 		after = instance{}
 	}
-	text, truncated, err := Excerpt(s.redactor.WithContext(ctx), data, over, keep)
+	ex, err := ExcerptOf(s.redactor.WithContext(ctx), data, over, keep)
 	if err != nil {
 		// Redaction withheld the excerpt whole (its work budget ran out): nothing of the log is returned, and the
 		// caller shows the read as failed.
 		return providers.LogExcerpt{}, err
 	}
-	return providers.LogExcerpt{
-		Text:              text,
-		Truncated:         truncated,
-		EndMissing:        over,
-		Instance:          before.LogInstance,
-		CollectedAt:       collected,
-		InstanceUncertain: !before.known || after != before,
-	}, nil
+	ex.EndMissing = over
+	ex.Instance = before.LogInstance
+	ex.CollectedAt = collected
+	ex.InstanceUncertain = !before.known || after != before
+	return ex, nil
 }
 
 // instance is the pod and container instance a query names, as the pod's status gives it. known is false
@@ -384,76 +382,57 @@ func fewerLines(data []byte) int64 {
 	return min(max(n, 1), TailLines-1)
 }
 
-// Excerpt returns the redacted text of an excerpt from data, the bytes a logs request answered, and whether
-// older lines were dropped: the newest whole lines that fit in keep bytes of data ([cut]), valid UTF-8.
-// Redaction runs first, on data as it was read (#840): a match that starts in a line the cut drops, such as a
-// block scalar under a key whose line is dropped, is still redacted in the lines kept, by the marker of the
-// part kept, which is never longer than that part. Invalid bytes are replaced after that; the excerpt is not
-// redacted again, since what to redact is decided once, on the text as it was read (#845). The decision also
-// holds what the release before #845 hid here, which redacted all of data, cut it and redacted the excerpt again
-// with its own markers in place (redact.Redactor.ReplaceFrom, thirteenth decision of 2026-11-18). The cut is
-// counted in bytes of data, as before redaction, so the excerpt never holds more lines than when it was redacted
-// after the cut. The reads bound data by MaxReadBytes (1 MiB). The rules of this package add work linear in its
-// size, at most about 720 steps per byte on the most costly input known; the reading of the release before cost
-// about 710 more on that input before #873 and 28 since, and is linear since #873 (on lines each indented one
-// more than the last under a secret key it cost about 1,950 steps per byte at 1 MiB before, 36 now), so a read
-// costs at most a few seconds (TestExcerptWorkIsBoundedOnTheLargestInput, TestCanonStairWorkIsLinear in package redact).
-// Whatever the input, the decision stops at the work budget of package redact (#873): the excerpt is then
-// withheld: Excerpt returns no text and an error that wraps providers.ErrWithheld, told by the flag of
-// redact.Redactor.ReplaceFrom and never by the text, so a log that spells the marker is a log like any other.
-// It is the step [Source.Logs] takes after its reads, exported so that tests outside the package run the same
-// code.
+// Excerpt is [ExcerptOf], returning the text and whether anything of data was left out.
 func Excerpt(r *redact.Redactor, data []byte, endMissing bool, keep int) (text string, truncated bool, err error) {
-	if endMissing {
-		data = data[:bytes.LastIndexByte(data, '\n')+1]
-	}
-	kept, truncated := cut(data, false, keep)
-	from := len(data) - len(kept)
-	pos := 0
-	// part returns the part of the n bytes at pos that the cut keeps, through f, and moves pos past them.
-	part := func(n int, f func(start int) string) string {
-		start := pos
-		pos += n
-		if pos <= from {
-			return ""
-		}
-		return f(max(from-start, 0))
-	}
-	text, ok := r.ReplaceFrom(string(data), from, providers.LeadingContinuation,
-		func(kind, m string) string {
-			return part(len(m), func(skip int) string {
-				if skip == 0 {
-					return redact.Marker(kind, len(m))
-				}
-				return redact.Marker(kind, len(m)-skip)
-			})
-		},
-		func(seg string) string { return part(len(seg), func(skip int) string { return seg[skip:] }) })
-	if !ok {
-		return "", false, fmt.Errorf("the log excerpt: %w", providers.ErrWithheld)
-	}
-	return strings.ToValidUTF8(text, "?"), truncated, nil
+	ex, err := ExcerptOf(r, data, endMissing, keep)
+	return ex.Text, ex.Truncated, err
 }
 
-// cut returns the newest whole lines of data that fit in keep bytes. When endMissing, the last line, which
-// the read cut, is dropped. When older bytes are dropped, the first line is dropped too unless it starts
-// right after a newline, so that no cut line reaches the redactor; truncated reports that.
-func cut(data []byte, endMissing bool, keep int) (string, bool) {
+// ExcerptOf returns the redacted excerpt of data, the bytes a logs request answered, valid UTF-8, with its marks
+// (Text, Truncated, HeaderKept, HeaderLeftOut, LeadingDropped; the caller sets the others). The cut is the one cut
+// of a log excerpt for a log as read ([logcut.Read]): the newest whole lines that fit in keep bytes of data,
+// starting at a line a reader keeps; for the frames of a stack trace, the first line of their entry ahead of the
+// newest frames that fit with it; or the tail of a last line longer than keep, never nothing for a non-blank last
+// line that a reader keeps. Whole continuation lines at the start of what is kept stay, for the reader to drop
+// as before; the tail of a continuation line with no line before it that a reader keeps is left out
+// (LeadingDropped), so it never loses the indentation that has the reader drop it.
+//
+// The cut is placed on the bytes as read, but nothing is cut before redaction: redaction runs first, on all of
+// data as it was read (#840), and the cut keeps parts of what it wrote. A match that starts in a line the cut
+// drops, such as a block scalar under a key whose line is dropped, or a secret that the cut boundary splits
+// inside a line, is still redacted in the part kept, by the marker of that part, which is never longer than the
+// part (TestRawCutInsideASecretShowsNoFragment). Invalid bytes are replaced after that; the excerpt is not
+// redacted again, since what to redact is decided once, on the text as it was read (#845). The decision also
+// holds what the release before #845 hid here, which redacted all of data, cut it and redacted the excerpt again
+// with its own markers in place (redact.Redactor.ReplaceFrom, thirteenth decision of 2026-11-18): from the
+// first byte kept on, after the leading continuation lines a reader drops, or from that byte when the source
+// keeps them (HeaderLeftOut). The cut is counted in bytes of data, as before redaction, so the excerpt never
+// holds more lines than when it was redacted after the cut. The reads bound data by MaxReadBytes (1 MiB). The
+// rules of this package add work linear in its size, at most about 720 steps per byte on the most costly input
+// known; the reading of the release before cost about 710 more on that input before #873 and 28 since, and is
+// linear since #873 (on lines each indented one more than the last under a secret key it cost about 1,950 steps
+// per byte at 1 MiB before, 36 now), so a read costs at most a few seconds
+// (TestExcerptWorkIsBoundedOnTheLargestInput, TestCanonStairWorkIsLinear in package redact). Whatever the input,
+// the decision stops at the work budget of package redact (#873): the excerpt is then withheld: ExcerptOf
+// returns no text and an error that wraps providers.ErrWithheld, told by the flag of redact.Redactor.ReplaceFrom
+// and never by the text, so a log that spells the marker is a log like any other. It is the step [Source.Logs]
+// takes after its reads, exported so that tests outside the package run the same code.
+func ExcerptOf(r *redact.Redactor, data []byte, endMissing bool, keep int) (providers.LogExcerpt, error) {
 	if endMissing {
 		data = data[:bytes.LastIndexByte(data, '\n')+1]
 	}
-	if len(data) <= keep {
-		return string(data), false
+	c := logcut.Read(string(data), keep)
+	text, ok := logcut.Redact(r, string(data), c)
+	if !ok {
+		return providers.LogExcerpt{}, fmt.Errorf("the log excerpt: %w", providers.ErrWithheld)
 	}
-	from := len(data) - keep
-	if data[from-1] != '\n' {
-		i := bytes.IndexByte(data[from:], '\n')
-		if i < 0 {
-			return "", true
-		}
-		from += i + 1
-	}
-	return string(data[from:]), true
+	return providers.LogExcerpt{
+		Text:           text,
+		Truncated:      c.Cut(),
+		HeaderKept:     c.Kind == logcut.HeaderKept,
+		HeaderLeftOut:  c.Kind == logcut.HeaderLeftOut,
+		LeadingDropped: c.Kind == logcut.Dropped,
+	}, nil
 }
 
 // options checks q and returns the request options and the bytes to keep. Errors never repeat a value.

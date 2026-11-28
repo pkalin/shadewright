@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
+	"github.com/shadewright-labs/shadewright/internal/logcut"
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/redact"
 )
@@ -182,14 +183,23 @@ type Label string
 
 // Labels.
 const (
-	// LabelCut: the result was cut to the tool's byte bound, in whole lines; or, for get_resource, values (then
-	// map keys) were left out, each replaced by a note of its size, to keep the answer valid JSON within the bound.
+	// LabelCut: the result was cut to the tool's byte bound, in whole lines; for a log excerpt whose last line alone
+	// is longer than what is left, the tail of that line is kept instead (package logcut); or, for get_resource,
+	// values (then map keys) were left out, each replaced by a note of its size, to keep the answer valid JSON
+	// within the bound.
 	LabelCut Label = "cut to the result bound"
 	// LabelTimedOut: a read ran out of the tool's timeout.
 	LabelTimedOut Label = "timed out"
 	// LabelLeadingLinesDropped: lines at the start of a log excerpt that may continue an entry whose first
 	// line is missing were dropped.
 	LabelLeadingLinesDropped Label = "leading continuation lines dropped"
+	// LabelLogHeaderKept: the newest lines of a log excerpt continue an entry (the frames of a stack trace, say);
+	// the first line of that entry is kept ahead of them and the lines between were left out. Same text as the
+	// context's label.
+	LabelLogHeaderKept Label = Label(incidentcontext.LabelLogHeaderKept)
+	// LabelLogHeaderLeftOut: the newest lines of a log excerpt continue an entry whose first line did not fit with
+	// them and was left out. Same text as the context's label.
+	LabelLogHeaderLeftOut Label = Label(incidentcontext.LabelLogHeaderLeftOut)
 	// LabelLogTruncated: the log source cut older lines from the excerpt.
 	LabelLogTruncated Label = "log excerpt truncated by the source"
 	// LabelLogEndMissing: the log source could not read the newest lines.
@@ -422,7 +432,14 @@ func (s *Set) Call(ctx context.Context, call providers.ToolCall) (Result, error)
 	var cut bool
 	head := 0
 	if r.headLen > 0 {
-		text, head, cut = incidentcontext.FitLog(r.Text, r.headLen, t.maxBytes)
+		var kind logcut.Kind
+		text, head, cut, kind = incidentcontext.FitLogCut(r.Text, r.headLen, t.maxBytes)
+		switch kind {
+		case logcut.HeaderKept:
+			r.addLabel(LabelLogHeaderKept)
+		case logcut.HeaderLeftOut:
+			r.addLabel(LabelLogHeaderLeftOut)
+		}
 	} else {
 		text, cut = incidentcontext.KeepHead(r.Text, t.maxBytes)
 	}

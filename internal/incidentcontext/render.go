@@ -17,10 +17,14 @@ limitations under the License.
 package incidentcontext
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/shadewright-labs/shadewright/internal/logcut"
 )
 
 // ContextPreamble opens the user message that carries the context.
@@ -48,7 +52,6 @@ const neutralisedDelimiter = "context_block"
 var (
 	blockDelimiterPattern = regexp.MustCompile(`(?i)context` + blockSeparator + `block`)
 	blockStartAtEnd       = regexp.MustCompile(`(?i)context` + blockSeparator + `$`)
-	blockEndPattern       = regexp.MustCompile(`(?i)` + blockSeparator + `block`)
 )
 
 // angleEscaper escapes every character a reader could take for an angle bracket, so no text can open or
@@ -173,59 +176,76 @@ func keepHeadRendered(s string, budget int) string {
 	return s[:ends[lo]]
 }
 
-// keepTailRendered returns the longest whole-line suffix of rest such that head + suffix renders within
-// budget bytes. The header ends at a line boundary. Callers must check len(renderBody(head)) <= budget first.
-func keepTailRendered(head, rest string, budget int) string {
-	if rest == "" {
-		return ""
-	}
-	// A delimiter can span multiple lines and collapse when rendered. Cutting inside it exposes the
-	// remaining lines, so suffix sizes are not monotone. Count each replacement once as we walk the lines.
-	escaped := EscapeAngles(rest)
-	headEscaped := EscapeAngles(head)
-	matches := blockDelimiterPattern.FindAllStringIndex(escaped, -1)
-	replacementDelta := func(match []int) int { return len(neutralisedDelimiter) - (match[1] - match[0]) }
-	size := len(blockDelimiterPattern.ReplaceAllString(headEscaped, neutralisedDelimiter)) + len(escaped)
-	if !strings.HasSuffix(rest, "\n") {
-		size++
-	}
-	for _, match := range matches {
-		size += replacementDelta(match)
-	}
+// cutRendered is the one cut of a log excerpt ([logcut.TailJoined]) where the bound counts rendered bytes: the
+// part of rest, cut as [cutLog] cuts it, such that head and that part render within budget bytes
+// ([renderBody]). An excerpt of two parts (the first line of an entry and its newest lines) is measured by
+// rendering it, since a spelling of the delimiter may run across the lines left out. The header ends at a line
+// boundary. Callers check len(renderBody(head)) <= budget first.
+func cutRendered(head, rest string, budget int) string {
+	out, _ := cutRenderedKind(head, rest, budget)
+	return out
+}
 
-	// Splicing a suffix onto the header can also complete a delimiter across the join.
-	var endings [][]int
-	var openLen int
-	if start := blockStartAtEnd.FindStringIndex(headEscaped); start != nil {
-		openLen = len(headEscaped) - start[0]
-		endings = blockEndPattern.FindAllStringIndex(escaped, -1)
-	}
+// cutRenderedKind is [cutRendered] that returns what the cut kept.
+func cutRenderedKind(head, rest string, budget int) (string, logcut.Cut) {
+	joined := func(hs, he, start, end int) int { return len(renderBody(head + rest[hs:he] + rest[start:end])) }
+	c := logcut.TailJoined(rest, budget, renderedSize(head, rest), joined)
+	return c.Text(rest), c
+}
 
-	for rawAt, at := 0, 0; rawAt < len(rest); {
-		joinedSize := size
-		for len(endings) > 0 && endings[0][1] <= at {
-			endings = endings[1:]
-		}
-		if len(endings) > 0 && endings[0][0] <= at {
-			joinedSize += len(neutralisedDelimiter) - openLen - (endings[0][1] - at)
-		}
-		if joinedSize <= budget {
-			return rest[rawAt:]
-		}
-		end := strings.IndexByte(rest[rawAt:], '\n')
-		if end < 0 {
-			break
-		}
-		rawAt += end + 1
-		lineBytes := strings.IndexByte(escaped[at:], '\n') + 1
-		at += lineBytes
-		size -= lineBytes
-		for len(matches) > 0 && matches[0][0] < at {
-			size -= replacementDelta(matches[0])
-			matches = matches[1:]
-		}
+// renderedSize returns the [logcut.Size] of head followed by a part of rest, as rendered: len(renderBody(head +
+// rest[start:end])), in constant time after a pass over rest. Escaping is per rune. Neutralising replaces
+// each spelling of the delimiter by neutralisedDelimiter, which can be shorter or longer than the spelling,
+// so the size does not grow with the part: a part that starts inside a spelling renders it escaped only. A
+// spelling starts with "context" and nothing after its first byte can start another, so the spellings in a
+// part are those of rest that lie wholly inside it. A header that is not whole lines, or whose end could begin
+// a spelling the part ends, is measured by rendering.
+func renderedSize(head, rest string) logcut.Size {
+	if head != "" && (!strings.HasSuffix(head, "\n") || blockStartAtEnd.MatchString(EscapeAngles(head))) {
+		return func(start, end int) int { return len(renderBody(head + rest[start:end])) }
 	}
-	return ""
+	headSize := len(renderBody(head))
+	// off[i] is where byte i of rest starts in EscapeAngles(rest).
+	off := make([]int, len(rest)+1)
+	at := 0
+	for i := 0; i < len(rest); {
+		r, n := utf8.DecodeRuneInString(rest[i:])
+		esc := n
+		switch {
+		case r == '<' || r == '>':
+			esc = len("&lt;")
+		case r >= utf8.RuneSelf && r != utf8.RuneError:
+			esc = len(angleEscaper.Replace(rest[i : i+n]))
+		}
+		for k := range n {
+			off[i+k] = at
+		}
+		at += esc
+		i += n
+	}
+	off[len(rest)] = at
+	spellings := blockDelimiterPattern.FindAllStringIndex(EscapeAngles(rest), -1)
+	// saved[k] is what the spellings before k save when neutralised.
+	saved := make([]int, len(spellings)+1)
+	for k, m := range spellings {
+		saved[k+1] = saved[k] + (m[1] - m[0]) - len(neutralisedDelimiter)
+	}
+	return func(start, end int) int {
+		if start >= end {
+			return headSize
+		}
+		from, to := off[start], off[end]
+		first, _ := slices.BinarySearchFunc(spellings, from, func(m []int, at int) int { return cmp.Compare(m[0], at) })
+		last, _ := slices.BinarySearchFunc(spellings, to+1, func(m []int, at int) int { return cmp.Compare(m[1], at) })
+		size := headSize + to - from
+		if last > first {
+			size -= saved[last] - saved[first]
+		}
+		if rest[end-1] != '\n' {
+			size++
+		}
+		return size
+	}
 }
 
 func lineEnds(s string) []int {

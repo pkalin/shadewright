@@ -30,13 +30,16 @@ limitations under the License.
 //     subject, the allow-listed fields of that one object, read with one get (ADR-0036), and the object itself
 //     as [Context.ScaledObject] for the analysis loop to decide from;
 //   - log excerpt: excerpts from a [providers.LogSource] of at most two containers, those that look most
-//     relevant (a terminated instance first, then a waiting or unready container), at most two excerpts
-//     (one per instance) within each container's equal share of the bound; every container's first read comes
-//     before any second read, each with one call timeout, and only a first read that failed makes the section
-//     a failed source; the second reads run in what is left of a time budget of two call timeouts for the
-//     section, and none starts once it is up. That budget is the worst case; an exited container whose
-//     current instance hangs, and a fallback read that hangs, take longer than one read of the previous
-//     instance (design 3.3, "Known limits of the log section");
+//     relevant (a terminated instance or a container waiting in CrashLoopBackOff first, then another waiting or
+//     unready container), at most two excerpts (one per instance) within each container's equal share of the
+//     bound; an exited container with a previous instance reserves room from its share for that previous
+//     instance, and a total context cut tries to keep the final lines of a previous instance ahead of earlier
+//     log noise; every container's first read comes before any second read, each with one call timeout, and only a
+//     first read that failed makes the section a failed source; the second reads run in what is left of a time
+//     budget of two call timeouts for the section, and any second read skipped when time is up is still noted
+//     as "could not fetch". That budget is the worst case; an exited container whose current instance hangs,
+//     and a fallback read that hangs, take longer than one read of the previous instance (design 3.3, "Known
+//     limits of the log section");
 //   - metrics: the approved metric templates for the target's pods from a [providers.MetricsSource];
 //   - Git: always "not available" for now: the analyzer has no Git identity (invariant 6, #373);
 //   - policy bounds (#493): for each catalog action that can change the subject, the bounds of the
@@ -73,11 +76,30 @@ limitations under the License.
 // redaction withholds a section, a log header or a log excerpt whole (its work budget ran out, #873), the
 // block says "could not fetch: withheld by redaction" (a log block under its title), with [LabelWithheld] and
 // no values, and its section counts as a failed source, which escalates. [FitLog], which bounds a rendered log
-// text again, does not redact: the text was redacted when it was rendered. After that, the builder only
-// removes whole lines of redacted text, which cannot reveal anything that was not already there; the fixed
-// labels and availability values are code, never cluster data, and the error text of a failed source never
-// enters a block. A value longer than 1 KiB once redacted is left out whole, never cut. Redaction never makes
-// text longer (package redact), so a bound checked before a cut holds after it.
+// text again, does not redact: the text was redacted when it was rendered. After that, the builder removes
+// whole lines of redacted text, with two exceptions that still operate only on already-redacted text: the
+// summary shortens long values with a byte-count note instead of dropping lines, and when a log excerpt's
+// final non-blank line alone is longer than its remaining budget (even when followed by trailing blank lines)
+// the builder keeps the longest valid UTF-8 suffix of that already-redacted line on a rune boundary and
+// outside any redaction marker (marked cut to the section or context bound) instead of leaving an empty or
+// whitespace-only body. Every cut of a log excerpt (RenderLog with and without refit, [FitLog], the room a
+// second read takes from the first excerpt and the total cut) calls the one cut of internal/logcut, which the
+// log source uses too, and the rules here live only there (decision of 2026-11-28 on #1055); the total cut
+// measures each candidate's rendered size exactly ([renderedSize]). A non-blank last line never yields an empty excerpt: when that cut would leave nothing
+// (a run of "*" longer than the budget reaching the end of the line, or a tail of only whitespace), the
+// builder keeps the tail of the line within the budget, cutting inside a run of more than three "*" if it
+// must (the redactor writes at most three, and every part of such a run is only "*"), never inside another
+// marker, and only when the text after the run does not fit without it. The rule holds from a cap of 43 bytes
+// (the longest marker shape) for the cut of an excerpt and from 46 bytes after the header for the cut of the
+// rendered context (plus the newline rendering adds and two bytes for "contextblock" twice in a marker kind);
+// below that a last line that ends in a marker may leave the header alone. Real configuration can reach below
+// either floor: RemediationSettings maxContextBytes (4 KiB to 48 KiB) can leave fewer than 46 bytes after a
+// log header during the total cut, and [Limits.Validate] accepts section bounds down to 1 KiB, where long
+// headers or reclaiming room for a failed second read can leave fewer than 43 bytes for the excerpt. Neither
+// can reveal anything that was not already there; the fixed labels and
+// availability values are code, never cluster data, and the error text of a failed source never enters a
+// block. A value longer than 1 KiB once redacted is left out whole, never cut. Redaction never makes text
+// longer (package redact), so a bound checked before a cut holds after it.
 //
 // What a cut keeps: the summary, status and metrics sections are written most relevant first (the target,
 // then the pods with the most trouble, then the metric templates that explain a crash) and keep their head;

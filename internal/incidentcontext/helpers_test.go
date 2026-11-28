@@ -34,6 +34,7 @@ import (
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	remediationv1alpha1 "github.com/shadewright-labs/shadewright/api/v1alpha1"
+	"github.com/shadewright-labs/shadewright/internal/logcut"
 	"github.com/shadewright-labs/shadewright/internal/providers"
 	"github.com/shadewright-labs/shadewright/internal/providers/fake"
 	"github.com/shadewright-labs/shadewright/internal/redact"
@@ -271,3 +272,11 @@ func sectionSize(c *Context, s Section) int {
 	}
 	return n
 }
+
+// nonBlankPart is s without its trailing blank lines (logcut.NonBlankEnd).
+func nonBlankPart(s string) string { return s[:logcut.NonBlankEnd(s)] }
+
+// sourceCut is what a log source that honours the read size answers for text, as the production source cuts
+// it (internal/providers/logs/kube, the one cut of internal/logcut): the newest whole lines within maxBytes, or
+// the tail of a longer last line. A fake that answers more, or cuts otherwise, hides what the cut does (#1055).
+func sourceCut(text string, maxBytes int64) (string, bool) { return logcut.String(text, int(maxBytes)) }

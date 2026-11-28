@@ -30,6 +30,9 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/runtime"
+
+	"github.com/shadewright-labs/shadewright/internal/analysis"
 	"github.com/shadewright-labs/shadewright/internal/incidentcontext"
 	"github.com/shadewright-labs/shadewright/internal/providers"
 )
@@ -37,9 +40,10 @@ import (
 // promptGolden holds, per scenario whose Incident has an empty absorbed tally, the SHA-256 of the first model
 // request's messages (the system prompt and the context, by role): the prompt as the model gets it. The values
 // were computed by the code before the absorbed tally block (#796), so a scenario with an empty tally must
-// still get the same prompt, byte for byte; unschedulable/over-bound (#841) pins its shortened summary, and
-// oom/lifetimes (#1005) pins its OOM lifetime summary line. A change that is meant to change the prompt of
-// every Incident writes them again: SHADEWRIGHT_UPDATE_GOLDEN=1 go test -run TestPromptGolden ./test/eval/
+// still get the same prompt, byte for byte; unschedulable/over-bound (#841) pins its shortened summary,
+// oom/lifetimes (#1005) pins its OOM lifetime summary line, and oom/crashloop-excerpt (#1055) pins its
+// previous-instance log tail. A change that is meant to change the prompt of every Incident writes them again:
+// SHADEWRIGHT_UPDATE_GOLDEN=1 go test -run TestPromptGolden ./test/eval/
 var promptGolden = filepath.Join("testdata", "prompt.golden")
 
 // promptDigest hashes messages: each one's role and content, length-prefixed so no two lists hash alike.
@@ -224,5 +228,126 @@ func TestPromptShowsTheOOMLifetimes(t *testing.T) {
 	renderedLine := incidentcontext.Neutralise(wantLine)
 	if strings.Count(prompt.String(), renderedLine) != 1 {
 		t.Errorf("%s: the prompt does not hold %q once:\n%s", found.name, renderedLine, prompt.String())
+	}
+}
+
+// TestPromptShowsTheCrashLoopLastLine checks that oom/crashloop-excerpt exercises the crash-loop last-line
+// preservation of #1055 on the triage path: the previous instance's log holds a single >24 KiB line with a
+// run of "*" spanning the cut offset before the deciding cause. Whole-line tail cutting (origin/main's
+// keepTail) drops that line and leaves an empty body; the one cut (internal/logcut) skips past the "*" run
+// and keeps the tail
+// with the cause quotable in the log block and present in the first prompt sent to triage, while the variant's
+// refusal reply passes and a reply that misses the cause or proposes a memory increase fails.
+func TestPromptShowsTheCrashLoopLastLine(t *testing.T) {
+	const wantCause = "ConfigMap web-config mounted at /etc/web has no key cache.yaml; item cache has no size bound"
+	scheme, found := loadCrashLoopExcerptVariant(t)
+	checkCrashLoopLogBlock(t, found, wantCause)
+
+	spy := &roleSpy{}
+	ctx, cancel := context.WithTimeout(t.Context(), scenarioTimeout)
+	res, err := runScenario(ctx, scheme, found, spy)
+	cancel()
+	if err != nil {
+		t.Fatalf("%s: %v", found.name, err)
+	}
+	if !res.Pass || res.Escalated || len(spy.roles) != 1 || spy.roles[0] != analysis.RoleTriage {
+		t.Fatalf("%s: pass %t, escalated %t, roles %v, outcome %+v, diagnosis %+v",
+			found.name, res.Pass, res.Escalated, spy.roles, res.Outcome, res.Diagnosis)
+	}
+	var prompt strings.Builder
+	for _, m := range res.prompt {
+		prompt.WriteString(m.Content)
+	}
+	if strings.Count(prompt.String(), incidentcontext.Neutralise(wantCause)) != 1 {
+		t.Errorf("%s: the first prompt does not hold %q once", found.name, wantCause)
+	}
+	// A reply without the log-derived fact fails diagnosis, and a memory proposal fails outcome.
+	noLogReply := `{"summary":"The web container of Deployment demo/web is OOMKilled (exit code 137) ` +
+		`and restarts in CrashLoopBackOff; logs are empty so the cause is unknown.",` +
+		`"hypotheses":[{"description":"Memory exhaustion without log evidence."}],` +
+		`"evidence":[{"source":"c2","quote":"OOMKilled"}],` +
+		`"missingData":["Previous container log lines."],` +
+		`"uncertainty":"No log lines were shown.","proposal":null}`
+	noLogRes := run(t, scheme, withFinalReply(found, noLogReply))
+	if noLogRes.Pass || noLogRes.Diagnosis.Pass {
+		t.Errorf("%s: reply without the log cause passed: pass %t, diagnosis %+v",
+			found.name, noLogRes.Pass, noLogRes.Diagnosis)
+	}
+	memPropRes := run(t, scheme, withFinalReply(found, memoryProposal(t, found, "48Mi", "64Mi")))
+	if memPropRes.Pass || memPropRes.Outcome.Pass {
+		t.Errorf("%s: memory proposal passed: pass %t, outcome %+v", found.name, memPropRes.Pass, memPropRes.Outcome)
+	}
+}
+
+func loadCrashLoopExcerptVariant(t *testing.T) (*runtime.Scheme, *scenario) {
+	t.Helper()
+	scheme, err := newScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios, err := loadScenarios(scheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range scenarios {
+		if s.name == scnOOM+"/crashloop-excerpt" {
+			return scheme, s
+		}
+	}
+	t.Fatalf("no scenario %s/crashloop-excerpt", scnOOM)
+	return nil, nil
+}
+
+func checkCrashLoopLogBlock(t *testing.T, found *scenario, wantCause string) {
+	t.Helper()
+	if found.logs == nil || len(found.logs.Excerpts) != 1 {
+		t.Fatalf("%s: expected 1 recorded log excerpt, got %+v", found.name, found.logs)
+	}
+	rawLog := found.logs.Excerpts[0].Text
+	def := incidentcontext.DefaultLimits()
+	blocks := contextOf(t, found, def)
+	var logBlk *incidentcontext.Block
+	for i := range blocks {
+		b := &blocks[i]
+		if b.Section == incidentcontext.SectionLogs {
+			logBlk = b
+			continue
+		}
+		if strings.Contains(b.Text, "cache.yaml") || strings.Contains(b.Text, wantCause) {
+			t.Errorf("%s: non-log section %q unexpectedly carries the deciding log cause", found.name, b.Section)
+		}
+	}
+	if logBlk == nil {
+		t.Fatalf("%s: context has no log block", found.name)
+	}
+	if logBlk.Availability != incidentcontext.Available {
+		t.Fatalf("%s: log block availability %q, want %q", found.name, logBlk.Availability, incidentcontext.Available)
+	}
+	if !slices.Contains(logBlk.Labels, incidentcontext.LabelSectionCut) ||
+		slices.Contains(logBlk.Labels, incidentcontext.LabelContextCut) {
+		t.Errorf("%s: log block labels %v, want %q and not %q", found.name, logBlk.Labels,
+			incidentcontext.LabelSectionCut, incidentcontext.LabelContextCut)
+	}
+	parts := logBlk.Data()
+	if len(parts) != 1 {
+		t.Fatalf("%s: log block has %d quotable parts, want 1", found.name, len(parts))
+	}
+	body := parts[0]
+	if !strings.Contains(body, wantCause) {
+		t.Errorf("%s: log block data does not hold %q", found.name, wantCause)
+	}
+	if strings.HasPrefix(body, "*") {
+		t.Errorf("%s: log block tail starts inside the '*' run: %.40q", found.name, body)
+	}
+	// Prove whole-line tail cutting (origin/main's keepTail on the same body budget) dropped the line whole.
+	headLen := len(logBlk.Text) - len(body)
+	bodyBudget := def.Logs - headLen
+	if len(rawLog) > def.Logs || len(rawLog) <= bodyBudget {
+		t.Fatalf("%s: raw log length %d must be in (%d, %d] so replay returns it whole and section cut triggers",
+			found.name, len(rawLog), bodyBudget, def.Logs)
+	}
+	if oldTail, oldCut := newestLines(rawLog, bodyBudget); !oldCut || oldTail != "" {
+		t.Errorf("%s: whole-line tail cut on budget %d = (%d bytes, cut %t), want empty so origin/main drops the line",
+			found.name, bodyBudget, len(oldTail), oldCut)
 	}
 }

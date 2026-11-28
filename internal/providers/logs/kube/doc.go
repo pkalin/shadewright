@@ -63,9 +63,18 @@ limitations under the License.
 // memory. Lines the server leaves out because of TailLines or Since are not reported.
 //
 // The excerpt is the newest [providers.LogQuery.MaxBytes] of the read ([DefaultBytes] when zero, at most
-// [MaxBytes]), in whole lines: when older bytes are dropped, the first line is dropped too unless it starts
-// right after a newline, and Truncated is set; when the read was cut, its last, partial line is dropped. So a
-// cut never leaves half of a secret for the redactor to miss. The stream is never followed, and timestamps
+// [MaxBytes]), cut by the one cut of a log excerpt (internal/logcut): the newest whole lines when one that is
+// not blank fits, from a line that is not a continuation line, and Truncated is set when older bytes are
+// dropped. When the newest lines are all continuation lines (stack frames), the first line of their entry is
+// kept ahead of the newest of them that fit, the lines between left out (HeaderKept); when it does not fit with
+// one, the newest of them are kept without it and the excerpt says so (HeaderLeftOut), so the reader keeps
+// them. The tail of a continuation line with no line before it that a reader keeps is left out (LeadingDropped):
+// the reader drops such a line whole. When the
+// last non-blank line alone is longer than the bound, its tail is kept, cut on a rune boundary and never starting
+// on a blank or a "- " a reader would drop as a continuation, so a non-blank last line a reader keeps never gives
+// an empty excerpt. When the read
+// was cut, its last, partial line is dropped. Redaction runs on the whole read before the cut, so a cut never
+// leaves half of a secret for the redactor to miss. The stream is never followed, and timestamps
 // are not asked for. Each query has a deadline ([Config.Timeout] or the caller's, whichever is sooner); a
 // stream that makes no progress for 100 reads in a row fails as cut short.
 //

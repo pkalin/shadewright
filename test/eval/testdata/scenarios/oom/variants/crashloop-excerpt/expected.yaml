@@ -1,0 +1,29 @@
+# Synthetic, not from the fleet repository: the expectation of the oom/crashloop-excerpt variant (#1055), in
+# the fleet's scenario schema. No lab run has observed it.
+apiVersion: scenarios.shadewright.io/v1alpha1
+kind: Scenario
+name: oom/crashloop-excerpt
+summary: The web container is OOMKilled in a crash loop because ConfigMap web-config has no key cache.yaml, leaving its item cache unbounded; the previous instance's long final log line holds that cause.
+incident:
+  reason: OOMKilled
+  status: synthetic
+  source: Same OOMKilled Incident as the base oom scenario, with the previous instance's log carrying the deciding cause in an over-budget final line.
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    namespace: demo
+    name: web
+diagnosis:
+  status: synthetic
+  evidence:
+    - fact: the web container is OOMKilled and restarts
+      source: the pod's container status in the context
+    - fact: the item cache has no size bound and grows until the container is killed
+      source: the previous instance's log excerpt in the context
+    - fact: the ConfigMap web-config has no key cache.yaml
+      source: the final line of the previous instance's log excerpt in the context
+outcome:
+  type: refusal
+  status: synthetic
+  reason: The cause is a missing ConfigMap key that leaves the item cache unbounded, which no catalog action sets; a higher memory limit would only delay the kill. A person is notified.
+  phase: NeedsIntervention

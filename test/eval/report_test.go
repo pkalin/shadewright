@@ -482,7 +482,7 @@ func buildManifestIn(dir, escDir string, src source, models modelSource, defs []
 			Limits: manifestLimits{Total: l.Total, Summary: l.Summary, Status: l.Status, Logs: l.Logs,
 				Metrics: l.Metrics, Git: l.Git, Policy: l.Policy},
 			// Recorded metrics: the metrics.yaml of the scenarios that have one, replayed (metrics_test.go).
-			// Recorded logs: the logs.yaml of the escalation scenarios that have one, replayed (logs_test.go).
+			// Recorded logs: logs.yaml of scenarios, variants and escalation scenarios that have one (logs_test.go).
 			// Policies: each scenario's policy.yaml, for the policy bounds section (#493).
 			Sources: []string{"pods", "objects", "recorded metrics", "recorded logs", "policies"},
 		},
@@ -519,10 +519,13 @@ func buildManifestIn(dir, escDir string, src source, models modelSource, defs []
 	if m.Redaction.BuiltInRules, err = hashFiles("../../internal/redact/*.go"); err != nil {
 		return m, err
 	}
-	// An escalation scenario's expected.yaml (a synthetic one's) and rubric.yaml are the rubric; its other files,
-	// scenario.yaml included, what the model is shown and how the run is made.
+	// Every scenario's, variant's and escalation scenario's expected.yaml and rubric.yaml are the rubric;
+	// their other files, scenario.yaml included, are what the model is shown and how the run is made.
 	if m.Rubric.Files, err = hashFiles(filepath.Join(dir, "*", "expected.yaml"),
-		filepath.Join(dir, "*", "rubric.yaml"), filepath.Join(escDir, "*", "expected.yaml"),
+		filepath.Join(dir, "*", "rubric.yaml"),
+		filepath.Join(dir, "*", variantsDir, "*", "expected.yaml"),
+		filepath.Join(dir, "*", variantsDir, "*", "rubric.yaml"),
+		filepath.Join(escDir, "*", "expected.yaml"),
 		filepath.Join(escDir, "*", "rubric.yaml")); err != nil {
 		return m, err
 	}

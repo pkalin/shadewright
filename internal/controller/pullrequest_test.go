@@ -6663,14 +6663,27 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			})
 
 			It("treats a response that never arrives as a timeout, then adopts the pull request it opened", func() {
-				writeTimeout = 200 * time.Millisecond
+				// Only the open blocks, so the step's deadline runs out while GitHub has the open request. That
+				// deadline is wall-clock time and covers every call of the step, though: on a loaded machine the calls
+				// before the open can use it up (#1212). A reconcile that times out before it sent the open runs again
+				// with the deadline doubled, up to eight times; the timeout checked is the one of the reconcile that
+				// sent it.
+				const shortWrite = 200 * time.Millisecond
+				writeTimeout = shortWrite
 				faulty.blockAfter(opOpen)
 				var err error
-				for range 10 {
-					if err = reconcileOnce(); err != nil {
+				for range 20 {
+					err = reconcileOnce()
+					if faulty.count(opOpen) > 0 || (err != nil && !errors.Is(err, ErrTimeout)) {
 						break
 					}
+					if err != nil && writeTimeout < 8*shortWrite {
+						GinkgoWriter.Printf("the step ran out of %v before the open: running it again with twice the deadline\n",
+							writeTimeout)
+						writeTimeout *= 2
+					}
 				}
+				Expect(faulty.count(opOpen)).To(Equal(1), "GitHub got the open request before the deadline: %v", err)
 				Expect(errors.Is(err, ErrTimeout)).To(BeTrue(), "the step's own deadline is a retryable timeout: %v", err)
 				Expect(openRequests()).To(HaveLen(1))
 				waiting()

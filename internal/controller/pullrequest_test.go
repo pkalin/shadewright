@@ -6665,34 +6665,36 @@ var _ = Describe("RemediationRequest pull request step", func() {
 			It("treats a response that never arrives as a timeout, then adopts the pull request it opened", func() {
 				// Only the open blocks, so the step's deadline runs out while GitHub has the open request. That
 				// deadline is wall-clock time and covers every call of the step, though: on a loaded machine the calls
-				// before the open can use it up (#1212). A reconcile that times out before it sent the open runs again
-				// with the deadline doubled, up to eight times; the timeout checked is the one of the reconcile that
-				// sent it.
+				// before the open can use it up (#1212), and so can the write checks inside the open call before GitHub
+				// takes the request. A reconcile that ran out of time before GitHub took the open runs again with the
+				// deadline doubled, up to eight times its first value; the timeout checked is the one of the reconcile
+				// whose open GitHub took. What decides it is the pull request GitHub holds, not a call counted on entry.
 				const shortWrite = 200 * time.Millisecond
 				writeTimeout = shortWrite
 				faulty.blockAfter(opOpen)
 				var err error
 				for range 20 {
 					err = reconcileOnce()
-					if faulty.count(opOpen) > 0 || (err != nil && !errors.Is(err, ErrTimeout)) {
+					if len(openRequests()) > 0 || (err != nil && !ranOutOfTime(err)) {
 						break
 					}
 					if err != nil && writeTimeout < 8*shortWrite {
-						GinkgoWriter.Printf("the step ran out of %v before the open: running it again with twice the deadline\n",
-							writeTimeout)
+						GinkgoWriter.Printf("the step ran out of %v before GitHub took the open (%v): "+
+							"running it again with twice the deadline\n", writeTimeout, err)
 						writeTimeout *= 2
 					}
 				}
-				Expect(faulty.count(opOpen)).To(Equal(1), "GitHub got the open request before the deadline: %v", err)
+				Expect(openRequests()).To(HaveLen(1), "GitHub took the open request before the deadline: %v", err)
 				Expect(errors.Is(err, ErrTimeout)).To(BeTrue(), "the step's own deadline is a retryable timeout: %v", err)
-				Expect(openRequests()).To(HaveLen(1))
+				opened := faulty.count(opOpen)
 				waiting()
 
 				faulty.blockAfter("")
 				writeTimeout = 0 // the later steps get the default deadline again
 				got := drive(remediationv1alpha1.PhaseAwaitingApproval)
 				Expect(got.Status.Phase).To(Equal(remediationv1alpha1.PhaseAwaitingApproval))
-				Expect(faulty.count(opOpen)).To(Equal(1))
+				Expect(faulty.count(opOpen)).To(Equal(opened), "the pull request is adopted, not opened again")
+				Expect(openRequests()).To(HaveLen(1))
 			})
 
 			It("retries a conflict on the commit and lets the branch decide the outcome", func() {
@@ -7945,6 +7947,14 @@ func (f *faultyGit) creations() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls[opCreateBranch] + f.calls[opCommit] + f.calls[opOpen]
+}
+
+// ranOutOfTime reports whether err is a step that ran out of its deadline: the step's own timeout, or the live
+// read of the Incident before the open, whose own deadline is half of what the step has left
+// (incidentReadTimeout), so it can end first.
+func ranOutOfTime(err error) bool {
+	return errors.Is(err, ErrTimeout) ||
+		errors.Is(err, errIncidentUnread) && strings.HasSuffix(err.Error(), ": "+string(metav1.StatusReasonTimeout))
 }
 
 func (f *faultyGit) enter(op, arg string) error {

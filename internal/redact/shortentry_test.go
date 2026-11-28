@@ -18,7 +18,9 @@ package redact
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -83,44 +85,75 @@ func TestShortEntryRefusesLongText(t *testing.T) {
 	}
 }
 
+// shortEntryPoints are the short entry points the heap tests measure.
+var shortEntryPoints = []struct {
+	name string
+	run  func(s string, repl func(kind, text string) string, between func(string) string) (string, bool)
+}{{"ReplaceCheckedShort", ReplaceCheckedShort}, {shownAndReadEntry,
+	func(s string, repl func(kind, text string) string, between func(string) string) (string, bool) {
+		out, _, ok := ReplaceCheckedShortShownAndRead(s, repl, between)
+		return out, ok
+	}}}
+
+// warmShortEntryPoints runs one-time process initialization (released.exprs compiles each kept rule's meter.Expr
+// lazily on first use), so that no measurement charges package setup to its first shape.
+func warmShortEntryPoints() {
+	for _, e := range shortEntryPoints {
+		e.run("password=hunter2\x01\xff", keep, same)
+	}
+}
+
+// checkShortEntryHeap fails t unless b is within ShortEntryHeap. Over (a collection found more live) and
+// undecided (none did, but the runtime counted more) both fail: in the stop-the-world process the upper reading is
+// over the live peak by at most about 2% of the process's heap (about 0.15 MiB over the 7.3 MiB of this test's
+// process) however busy the machine is, so an undecided reading is an entry within that gap of the bound, which has
+// lost its margin (#1204), or one during which a collection found less live than before it (Shrank), when the
+// readings of the process's heap do not bound the entry's own.
+func checkShortEntryHeap(t interface {
+	Helper()
+	Errorf(format string, args ...any)
+}, what string, b redacttest.HeapBounds) {
+	t.Helper()
+	switch b.Verdict(ShortEntryHeap) {
+	case redacttest.HeapOver:
+		t.Errorf("%s: a short entry of %d bytes held over ShortEntryHeap (%.2f MiB): %v", what, MaxShortEntry,
+			mib(ShortEntryHeap), b)
+	case redacttest.HeapUndecided:
+		if b.Shrank {
+			t.Errorf("%s: undecided, a collection during the entry found less live than before it, so the readings "+
+				"do not bound what it held: %v", what, b)
+			return
+		}
+		t.Errorf("%s: undecided, a short entry of %d bytes is within the readings' gap of ShortEntryHeap "+
+			"(%.2f MiB), a margin lost: %v", what, MaxShortEntry, mib(ShortEntryHeap), b)
+	}
+}
+
 // The heap one short entry holds, at each short entry point and on every shape known at MaxShortEntry, is at most
 // ShortEntryHeap: the figure the room next to the heap limit counts for each of its slots. No shape is withheld for
 // its work: the shown short entry point withholds some shapes for what they hold (a control after a token, keys
-// invalid bytes split), after its readings ran, and its work on every shape stays within the budget.
+// invalid bytes split), after its readings ran, and its work on every shape stays within the budget. The heap is
+// measured in a process whose collections stop the world (redacttest.PeakLiveHeapSTW), so garbage the collector has
+// not reached on a busy machine cannot be read as held (#1204). Its readings are of the process's heap, which bound
+// the entry's own because a short entry frees nothing that was live before it: package redact frees nothing it kept
+// from an earlier call, and the pools of the regexp package are empty after the two collections before the entry.
 func TestHeapOfAShortEntry(t *testing.T) {
 	if raceDetector {
 		t.Skip("measures the heap of the product build")
 	}
-	worst := uint64(0)
-	entries := []struct {
-		name string
-		run  func(s string, repl func(kind, text string) string, between func(string) string) (string, bool)
-	}{{"ReplaceCheckedShort", ReplaceCheckedShort}, {shownAndReadEntry,
-		func(s string, repl func(kind, text string) string, between func(string) string) (string, bool) {
-			out, _, ok := ReplaceCheckedShortShownAndRead(s, repl, between)
-			return out, ok
-		}}}
-	// Warm up one-time process initialization (released.exprs compiles each kept rule's meter.Expr lazily on first
-	// use) so standalone runs of this test do not charge package setup to the first shape.
-	for _, e := range entries {
-		e.run("password=hunter2\x01\xff", keep, same)
+	if !redacttest.InSTWProcess() {
+		redacttest.RunInSTWProcess(t, "TestHeapOfAShortEntry")
+		return
 	}
-	for _, e := range entries {
+	worst := uint64(0)
+	warmShortEntryPoints()
+	for _, e := range shortEntryPoints {
 		for _, sh := range heapShapes {
 			s := sh.text(MaxShortEntry)
 			var ok bool
-			peak, runs := redacttest.SmallestPeakTightRuns(func() { _, ok = e.run(s, keep, same) }, func(p uint64) bool {
-				return p > ShortEntryHeap
-			})
-			if len(runs) >= 2 {
-				diff := max(runs[0], runs[1]) - min(runs[0], runs[1])
-				if diff > 256<<10 {
-					t.Logf("%-32s %-32s run 1 (%.3f MiB) and run 2 (%.3f MiB) differed by %.3f MiB",
-						e.name, sh.name, mib(runs[0]), mib(runs[1]), mib(diff))
-				}
-			}
-			t.Logf("%-32s %-32s peak %.3f MiB", e.name, sh.name, mib(peak))
-			worst = max(worst, peak)
+			b := redacttest.PeakLiveHeapSTW(func() { _, ok = e.run(s, keep, same) })
+			t.Logf("%-32s %-32s %v", e.name, sh.name, b)
+			worst = max(worst, b.Upper)
 			if !ok && e.name != shownAndReadEntry {
 				t.Errorf("%s on %s: a short entry was withheld", e.name, sh.name)
 			}
@@ -131,12 +164,69 @@ func TestHeapOfAShortEntry(t *testing.T) {
 					t.Errorf("%s on %s: %d steps, over the budget of %d", e.name, sh.name, wm.Spent(), budgetOf(len(s)))
 				}
 			}
-			if peak > ShortEntryHeap {
-				t.Errorf("%s on %s: a short entry of %d bytes held %.2f MiB, over ShortEntryHeap (%.2f MiB)", e.name,
-					sh.name, MaxShortEntry, mib(peak), mib(ShortEntryHeap))
-			}
+			checkShortEntryHeap(t, e.name+" on "+sh.name, b)
 		}
 	}
-	t.Logf("the heaviest short entry of %d bytes held %.3f MiB; %d slots hold at most %.1f MiB", MaxShortEntry,
-		mib(worst), shortEntrySlots, mib(shortEntrySlots*ShortEntryHeap))
+	t.Logf("the heaviest short entry of %d bytes held at most %.3f MiB; %d slots hold at most %.1f MiB",
+		MaxShortEntry, mib(worst), shortEntrySlots, mib(shortEntrySlots*ShortEntryHeap))
+}
+
+// The measurement of TestHeapOfAShortEntry catches an entry that holds more than ShortEntryHeap: one of the
+// heaviest shapes (dense secrets) at each short entry point, run while a buffer is held that takes the entry 64 KiB
+// past the bound by its own lower reading, is never within the bound, and checkShortEntryHeap fails it. It is over
+// when a collection runs at the entry's peak while the buffer is held, which a busy machine can move (undecided in 3
+// of 20 runs beside one or two busy loops per core on 2026-11-28): the upper reading, from the execution trace, is what
+// makes it fail every time.
+func TestHeapOfAShortEntryCatchesAHold(t *testing.T) {
+	if raceDetector {
+		t.Skip("measures the heap of the product build")
+	}
+	if !redacttest.InSTWProcess() {
+		redacttest.RunInSTWProcess(t, "TestHeapOfAShortEntryCatchesAHold")
+		return
+	}
+	warmShortEntryPoints()
+	var text string
+	for _, sh := range heapShapes {
+		if sh.name == shapeDenseSecrets {
+			text = sh.text(MaxShortEntry)
+		}
+	}
+	if text == "" {
+		t.Fatal("no shape dense secrets in heapShapes")
+	}
+	for _, e := range shortEntryPoints {
+		heaviest := redacttest.PeakLiveHeapSTW(func() { e.run(text, keep, same) })
+		if heaviest.Lower >= ShortEntryHeap {
+			t.Fatalf("%s on dense secrets alone: %v, over ShortEntryHeap", e.name, heaviest)
+		}
+		hold := int(ShortEntryHeap-heaviest.Lower) + 64<<10 // #nosec G115 -- under ShortEntryHeap, checked above
+		var sink byte
+		b := redacttest.PeakLiveHeapSTW(func() {
+			held := make([]byte, hold)
+			for i := range held {
+				held[i] = 1
+			}
+			e.run(text, keep, same)
+			sink ^= held[len(held)-1]
+			runtime.KeepAlive(held)
+		})
+		t.Logf("%s, heaviest alone %v; with %.3f MiB held %v (%d)", e.name, heaviest, mib(uint64(hold)), b, sink)
+		if v := b.Verdict(ShortEntryHeap); v == redacttest.HeapWithin {
+			t.Errorf("%s with %.3f MiB held: %v, want over or undecided (%v)", e.name, mib(uint64(hold)), v, b)
+		}
+		var failed errorRecorder
+		if checkShortEntryHeap(&failed, e.name, b); len(failed) != 1 {
+			t.Errorf("%s with %.3f MiB held: the check reported %q, want one failure", e.name, mib(uint64(hold)), failed)
+		}
+	}
+}
+
+// errorRecorder keeps what checkShortEntryHeap reports.
+type errorRecorder []string
+
+func (*errorRecorder) Helper() {}
+
+func (r *errorRecorder) Errorf(format string, args ...any) {
+	*r = append(*r, fmt.Sprintf(format, args...))
 }

@@ -60,6 +60,9 @@ func repeatTo(unit string, n int) string { return strings.Repeat(unit, n/len(uni
 // in characters JSON escapes hold the most.
 var pieces = []string{epPiecesWithin, epPiecesFitting}
 
+// shapeDenseSecrets names one of the heaviest shapes of heapShapes.
+const shapeDenseSecrets = "dense secrets"
+
 // heapShapes are every shape known to hold much heap for its bytes: the heap tests measure each at every entry
 // point.
 var heapShapes = []heapShape{
@@ -87,7 +90,7 @@ var heapShapes = []heapShape{
 	{name: "key lines with a word", text: func(n int) string { return repeatTo("password=hunter2 abc\n", n) }},
 	// The densest secrets found (#1087): a short secret key and a value of one character, every six bytes, on
 	// lines, on one line, and as a query string.
-	{name: "dense secrets", text: func(n int) string { return repeatTo("pwd=a\n", n) },
+	{name: shapeDenseSecrets, text: func(n int) string { return repeatTo("pwd=a\n", n) },
 		overAt: append([]string{epString, epStringTwice, epStringKeeping, epReplaceFrom}, pieces...)},
 	{name: "dense secrets on a line", text: func(n int) string { return repeatTo("pwd=a ", n) }},
 	{name: "query", text: func(n int) string { return repeatTo("key=1&", n) },

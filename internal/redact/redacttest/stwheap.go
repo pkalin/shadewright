@@ -96,10 +96,13 @@ func withoutGODEBUG(env []string) []string {
 
 // HeapBounds are the two readings of PeakLiveHeapSTW, in bytes over the heap before f.
 type HeapBounds struct {
-	// Lower is the most heap a collection that ended during f found live: f held at least this much at once.
+	// Lower is the most heap a collection that ended during f found live. The readings cover the whole process's
+	// heap: they bound what f itself held (f held at least this much at once) only when nothing else allocates or
+	// frees during f, as in the short entry's child process.
 	Lower uint64
 	// Upper is the most heap the collector counted during f, as the execution trace recorded it: f held at most
-	// this much at once, unless f freed heap that was live before it (see Shrank). It is at least Lower, and over the
+	// this much at once, unless f freed heap that was live before it (see Shrank, which catches only part of that:
+	// otherwise Upper can miss the freed amount). It is at least Lower, and over the
 	// live peak by at most about 2% of the process's heap (stwGOGC).
 	Upper uint64
 	// Cycles is the number of collections that ended during f.
@@ -108,7 +111,8 @@ type HeapBounds struct {
 	Base uint64
 	// Shrank is a collection during f that found less live than Base: something live before f was freed during
 	// it, and the readings, which are of the whole process's heap, do not bound what f itself held. The verdict is
-	// then never within.
+	// then never within. It is set only when the freed amount exceeds what f holds at that collection; when f holds
+	// more than it freed, the collection finds at least Base, Shrank stays false and Upper can miss the freed amount.
 	Shrank bool
 }
 
@@ -118,7 +122,8 @@ type HeapVerdict int
 const (
 	// HeapWithin is an upper reading not over the bound.
 	HeapWithin HeapVerdict = iota
-	// HeapOver is a lower reading over the bound: f really held more.
+	// HeapOver is a lower reading over the bound: the process's heap held more, which is f's own only when nothing
+	// else allocates during f.
 	HeapOver
 	// HeapUndecided is a lower reading not over the bound and an upper one over it: f's peak is within the
 	// readings' gap of the bound.
@@ -203,9 +208,11 @@ const gcRange = "GC concurrent mark phase"
 //
 // The readings are of the whole process's heap over Base. They bound what f holds only when f frees nothing that
 // was live before it: f could drop a cache, collect and allocate as much again without the count ever passing
-// Base. A collection that finds less live than Base shows that (Shrank, and the verdict is never within), but a
-// collection that runs only after f allocated again does not, so the caller must know that f frees nothing that
-// was live before it (TestHeapOfAShortEntry says why a short entry does not). A sync.Pool is empty after the two
+// Base. A collection that finds less live than Base shows that (Shrank, and the verdict is never within), but only
+// when the freed amount exceeds what f holds at that collection: if f already holds more than it freed, the
+// collection finds at least Base and Upper can miss the freed amount. So the caller must know that f frees nothing
+// that was live before it (TestHeapOfAShortEntry says why a short entry does not), and that nothing else allocates
+// or frees during f, since the readings cover the whole process. A sync.Pool is empty after the two
 // collections before f.
 func PeakLiveHeapSTW(f func()) HeapBounds {
 	if !InSTWProcess() {

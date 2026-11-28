@@ -99,13 +99,17 @@ type HeapBounds struct {
 	// Lower is the most heap a collection that ended during f found live: f held at least this much at once.
 	Lower uint64
 	// Upper is the most heap the collector counted during f, as the execution trace recorded it: f held at most
-	// this much at once. It is at least Lower, and over the live peak by at most about 2% of the process's heap
-	// (stwGOGC).
+	// this much at once, unless f freed heap that was live before it (see Shrank). It is at least Lower, and over the
+	// live peak by at most about 2% of the process's heap (stwGOGC).
 	Upper uint64
-	// Cycles is the number of collections that ran during f.
+	// Cycles is the number of collections that ended during f.
 	Cycles uint64
 	// Base is the heap before f (what the last collection before it found live), which the readings are over.
 	Base uint64
+	// Shrank is a collection during f that found less live than Base: something live before f was freed during
+	// it, and the readings, which are of the whole process's heap, do not bound what f itself held. The verdict is
+	// then never within.
+	Shrank bool
 }
 
 // HeapVerdict is what HeapBounds say about a bound.
@@ -132,13 +136,13 @@ func (v HeapVerdict) String() string {
 	}
 }
 
-// Verdict compares b with bound: over when the lower reading is over it, within when the upper reading is not,
-// undecided otherwise.
+// Verdict compares b with bound: over when the lower reading is over it, within when the upper reading is not and
+// no collection during f found less live than before it (Shrank), undecided otherwise.
 func (b HeapBounds) Verdict(bound uint64) HeapVerdict {
 	switch {
 	case b.Lower > bound:
 		return HeapOver
-	case b.Upper <= bound:
+	case b.Upper <= bound && !b.Shrank:
 		return HeapWithin
 	default:
 		return HeapUndecided
@@ -146,8 +150,12 @@ func (b HeapBounds) Verdict(bound uint64) HeapVerdict {
 }
 
 func (b HeapBounds) String() string {
-	return fmt.Sprintf("live at least %.3f MiB, at most %.3f MiB (%d collections over %.2f MiB)",
-		float64(b.Lower)/(1<<20), float64(b.Upper)/(1<<20), b.Cycles, float64(b.Base)/(1<<20))
+	shrank := ""
+	if b.Shrank {
+		shrank = "; a collection found less live than before f"
+	}
+	return fmt.Sprintf("live at least %.3f MiB, at most %.3f MiB (%d collections over %.2f MiB%s)",
+		float64(b.Lower)/(1<<20), float64(b.Upper)/(1<<20), b.Cycles, float64(b.Base)/(1<<20), shrank)
 }
 
 // starveSampler keeps the sampler of PeakLiveHeapSTW from reading anything or running a collection until f returns:
@@ -173,19 +181,32 @@ const gcRange = "GC concurrent mark phase"
 // and GOMAXPROCS HeapProcs with the execution trace on, while a goroutine samples every 50 microseconds the heap of
 // objects and the heap the last collection found live; when the heap of objects is more than stwForceStep above
 // both the most any collection found live and the reading of the last collection it started, the goroutine runs
-// one itself.
+// one itself. When f panics or exits its goroutine (t.Fatal), the trace and that goroutine are stopped before the
+// panic or the exit goes on.
 //
-// Neither reading depends on the sampler running in time for its soundness (#1204); a busy machine can only widen
-// the gap between them. In that process a collection stops the program for its mark and its sweep, so the heap it
-// finds live is exactly what is reachable at that instant (no allocation during a mark is counted live): Lower, the
-// most any collection that ended during f found live, as the trace or the sampler read it, never counts garbage. It
+// Every reading comes from the execution trace, between the markers logged just before f is called and just after
+// it returns, so a collection after f returned is not f's; none depends on the sampler running in time for its
+// soundness (#1204); a busy machine can only widen the gap between them. In that process a collection stops the
+// program for its mark and its sweep, so the heap it finds live, the count the runtime sets when its mark ends and
+// the last value before the collection's end, is exactly what is reachable at that instant: Base is that of the last
+// collection before f, and Lower, the most any collection that ended during f found live, never counts garbage. It
 // reads below the live peak for a peak no collection ran during, and a peak held without allocating gets a
-// collection only from the sampler. Upper is the highest value the runtime gave its heap count while f ran, and the
-// trace records every change of that count as it happens, so none is missed. Everything live is counted there (an
+// collection only from the sampler. Upper is the highest value the runtime gave its heap count from the end of the
+// last collection before f until f returned. Each processor records the value its own change gave the count, after
+// the change, so a value can be recorded after a later one of another processor: the count when f starts is not
+// the value recorded last before it, but none recorded since that collection is above it and the count's latest
+// value is recorded by the processor that set it, before or after f starts. Everything live is counted there (an
 // object is live only if the last collection found it live or it was handed out since, and a span is counted whole
-// when a processor takes it), so f never holds more than Upper. Upper counts garbage too, but a collection starts
-// once the count passes its trigger, about 2% over what the last one found live: Upper is the live peak plus at most
-// that.
+// when a processor takes it, which records the change before handing out any of it), so f never holds more than
+// Upper. Upper counts garbage too, but a collection starts once the count passes its trigger, about 2% over what the
+// last one found live: Upper is the live peak plus at most that.
+//
+// The readings are of the whole process's heap over Base. They bound what f holds only when f frees nothing that
+// was live before it: f could drop a cache, collect and allocate as much again without the count ever passing
+// Base. A collection that finds less live than Base shows that (Shrank, and the verdict is never within), but a
+// collection that runs only after f allocated again does not, so the caller must know that f frees nothing that
+// was live before it (TestHeapOfAShortEntry says why a short entry does not). A sync.Pool is empty after the two
+// collections before f.
 func PeakLiveHeapSTW(f func()) HeapBounds {
 	if !InSTWProcess() {
 		panic("redacttest: PeakLiveHeapSTW runs only in the process RunInSTWProcess starts")
@@ -196,132 +217,179 @@ func PeakLiveHeapSTW(f func()) HeapBounds {
 	}
 	defer func() { _ = os.Remove(tf.Name()) }()
 	defer func() { _ = tf.Close() }()
-	b, err := peakLiveHeapSTW(f, tf)
-	var lower, upper uint64
-	if err == nil {
-		lower, upper, err = traceReadings(tf)
+	if err := peakLiveHeapSTW(f, tf); err != nil {
+		panic(fmt.Sprintf("redacttest: %v", err))
 	}
+	b, err := traceReadings(tf)
 	if err != nil {
 		panic(fmt.Sprintf("redacttest: %v", err))
 	}
-	b.Lower = max(b.Lower, lower-min(b.Base, lower))
-	b.Upper = max(upper-min(b.Base, upper), b.Lower)
 	return b
 }
 
-// peakLiveHeapSTW runs f, tracing to w, and returns the bounds with Upper not yet set.
-func peakLiveHeapSTW(f func(), w io.Writer) (HeapBounds, error) {
+// peakLiveHeapSTW runs f, tracing to w. The trace and the sampler stop on every return, also when f panics or
+// exits its goroutine.
+func peakLiveHeapSTW(f func(), w io.Writer) error {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(HeapProcs))
 	defer debug.SetGCPercent(debug.SetGCPercent(stwGOGC))
-	// The trace starts before the collections, so what starting it allocates is in the heap before f.
+	// The trace starts before the collections, so what starting it allocates is in the heap before f, and the
+	// collections are in the trace: the last one sets Base.
 	if err := trace.Start(w); err != nil {
-		return HeapBounds{}, fmt.Errorf("starting the execution trace: %w", err)
+		return fmt.Errorf("starting the execution trace: %w", err)
 	}
-	s := []metrics.Sample{{Name: heapSample}, {Name: "/gc/heap/live:bytes"}, {Name: "/gc/cycles/total:gc-cycles"}}
+	defer trace.Stop()
 	runtime.GC()
 	runtime.GC()
-	metrics.Read(s)
-	base, cycles0 := s[1].Value.Uint64(), s[2].Value.Uint64()
 	var (
-		stop           atomic.Bool
-		objects, lower uint64
-		started        = make(chan struct{})
-		done           = make(chan struct{})
-		readings       = func(x []metrics.Sample) {
+		stop    atomic.Bool
+		started = make(chan struct{})
+		done    = make(chan struct{})
+	)
+	go func() {
+		defer close(done)
+		x := []metrics.Sample{{Name: heapSample}, {Name: "/gc/heap/live:bytes"}, {Name: "/gc/cycles/total:gc-cycles"}}
+		metrics.Read(x)
+		cycles0 := x[2].Value.Uint64()
+		var objects, lower, forcedAt uint64
+		read := func() {
 			metrics.Read(x)
 			objects = max(objects, x[0].Value.Uint64())
 			if x[2].Value.Uint64() > cycles0 {
 				lower = max(lower, x[1].Value.Uint64())
 			}
 		}
-	)
-	go func() {
-		defer close(done)
-		x := []metrics.Sample{{Name: heapSample}, {Name: "/gc/heap/live:bytes"}, {Name: "/gc/cycles/total:gc-cycles"}}
 		close(started)
-		forcedAt := uint64(0)
 		for !stop.Load() {
 			if !starveSampler {
-				readings(x)
+				read()
 				if objects > max(lower, forcedAt)+stwForceStep {
 					// A new high the last collection did not see: collect now, so that a peak f holds without
-					// allocating (when no collection would start) is on Lower too.
+					// allocating (when no collection would start) is on Lower too. What it finds live is read from
+					// the trace; these readings only decide when to collect.
 					forcedAt = objects
 					runtime.GC()
-					readings(x)
+					read()
 				}
 			}
 			time.Sleep(50 * time.Microsecond)
 		}
+	}()
+	// Runs before trace.Stop (deferred first), on every return.
+	defer func() {
+		stop.Store(true)
+		<-done
 	}()
 	<-started
 	ctx := context.Background()
 	trace.Log(ctx, traceCategory, traceStart)
 	f()
 	trace.Log(ctx, traceCategory, traceEnd)
-	stop.Store(true)
-	<-done
-	trace.Stop()
-	readings(s)
-	return HeapBounds{Lower: lower - min(base, lower), Cycles: s[2].Value.Uint64() - cycles0, Base: base}, nil
+	return nil
 }
 
-// traceReadings reads the execution trace in r from its start. upper is the highest heap count of the runtime
-// between the markers around f, counting the value the count had when f started. lower is the most heap a
-// collection that ended between them found live: the count a collection sets when its mark ends (what it found
-// live), which is the last before the end of its range, since in a stop-the-world process nothing allocates
-// between the two. Both are absolute, not over the heap before f.
-func traceReadings(r io.ReadSeeker) (lower, upper uint64, err error) {
+// heapTrace takes the events of the execution trace that PeakLiveHeapSTW reads, in the trace's order, and makes
+// the readings of them.
+type heapTrace struct {
+	// last is the heap count recorded last; sinceGC the highest recorded since the last collection ended.
+	last, sinceGC  uint64
+	collected      bool
+	inside, closed bool
+	b              HeapBounds
+	upper, lower   uint64
+}
+
+// count takes a value of the runtime's heap count.
+func (h *heapTrace) count(v uint64) {
+	h.last, h.sinceGC = v, max(h.sinceGC, v)
+	if h.inside {
+		h.upper = max(h.upper, v)
+	}
+}
+
+// gcEnd takes the end of a collection. The value recorded last is what its mark found live: in a stop-the-world
+// process nothing allocates between the two, and no processor can have changed the count without recording it.
+func (h *heapTrace) gcEnd() {
+	switch {
+	case h.inside:
+		h.lower = max(h.lower, h.last)
+		h.b.Cycles++
+		h.b.Shrank = h.b.Shrank || h.last < h.b.Base
+	case !h.closed:
+		h.collected, h.b.Base, h.sinceGC = true, h.last, h.last
+	}
+}
+
+// fStarts takes the marker before f. The count then is at most the highest value recorded since the last
+// collection ended, or a value recorded after the marker.
+func (h *heapTrace) fStarts() error {
+	if h.inside || h.closed {
+		return nil
+	}
+	if !h.collected {
+		return errors.New("the execution trace has no collection before f")
+	}
+	h.inside, h.upper = true, h.sinceGC
+	return nil
+}
+
+// fReturned takes the marker after f.
+func (h *heapTrace) fReturned() {
+	if h.inside {
+		h.inside, h.closed = false, true
+	}
+}
+
+// readings returns the bounds over Base.
+func (h *heapTrace) readings() (HeapBounds, error) {
+	if !h.closed {
+		return HeapBounds{}, errors.New("the execution trace does not hold f's start and return")
+	}
+	b := h.b
+	b.Lower = h.lower - min(b.Base, h.lower)
+	b.Upper = max(h.upper-min(b.Base, h.upper), b.Lower)
+	return b, nil
+}
+
+// traceReadings reads the execution trace in r from its start: the heap count of the runtime at each change, the
+// end of each collection and the markers around f (heapTrace).
+func traceReadings(r io.ReadSeeker) (HeapBounds, error) {
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
-		return 0, 0, fmt.Errorf("reading the execution trace: %w", err)
+		return HeapBounds{}, fmt.Errorf("reading the execution trace: %w", err)
 	}
 	tr, err := xtrace.NewReader(bufio.NewReader(r))
 	if err != nil {
-		return 0, 0, fmt.Errorf("reading the execution trace: %w", err)
+		return HeapBounds{}, fmt.Errorf("reading the execution trace: %w", err)
 	}
-	var (
-		last           uint64
-		counted        bool
-		inside, closed bool
-	)
+	var h heapTrace
 	for {
 		ev, err := tr.ReadEvent()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return 0, 0, fmt.Errorf("reading the execution trace: %w", err)
+			return HeapBounds{}, fmt.Errorf("reading the execution trace: %w", err)
 		}
 		switch ev.Kind() {
 		case xtrace.EventRangeEnd:
-			if inside && ev.Range().Name == gcRange {
-				lower = max(lower, last)
+			if ev.Range().Name == gcRange {
+				h.gcEnd()
 			}
 		case xtrace.EventMetric:
 			if m := ev.Metric(); m.Name == heapLiveMetric {
-				last, counted = m.Value.Uint64(), true
-				if inside {
-					upper = max(upper, last)
-				}
+				h.count(m.Value.Uint64())
 			}
 		case xtrace.EventLog:
 			l := ev.Log()
-			if l.Category != traceCategory {
-				continue
-			}
 			switch {
-			case l.Message == traceStart && !inside && !closed:
-				if !counted {
-					return 0, 0, errors.New("the execution trace has no heap count before f")
+			case l.Category != traceCategory:
+			case l.Message == traceStart:
+				if err := h.fStarts(); err != nil {
+					return HeapBounds{}, err
 				}
-				inside, upper = true, last
-			case l.Message == traceEnd && inside:
-				inside, closed = false, true
+			case l.Message == traceEnd:
+				h.fReturned()
 			}
 		}
 	}
-	if !closed {
-		return 0, 0, errors.New("the execution trace does not hold f's start and return")
-	}
-	return lower, upper, nil
+	return h.readings()
 }

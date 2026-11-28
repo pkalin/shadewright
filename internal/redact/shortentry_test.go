@@ -107,7 +107,8 @@ func warmShortEntryPoints() {
 // undecided (none did, but the runtime counted more) both fail: in the stop-the-world process the upper reading is
 // over the live peak by at most about 2% of the process's heap (about 0.15 MiB over the 7.3 MiB of this test's
 // process) however busy the machine is, so an undecided reading is an entry within that gap of the bound, which has
-// lost its margin (#1204).
+// lost its margin (#1204), or one during which a collection found less live than before it (Shrank), when the
+// readings of the process's heap do not bound the entry's own.
 func checkShortEntryHeap(t interface {
 	Helper()
 	Errorf(format string, args ...any)
@@ -118,6 +119,11 @@ func checkShortEntryHeap(t interface {
 		t.Errorf("%s: a short entry of %d bytes held over ShortEntryHeap (%.2f MiB): %v", what, MaxShortEntry,
 			mib(ShortEntryHeap), b)
 	case redacttest.HeapUndecided:
+		if b.Shrank {
+			t.Errorf("%s: undecided, a collection during the entry found less live than before it, so the readings "+
+				"do not bound what it held: %v", what, b)
+			return
+		}
 		t.Errorf("%s: undecided, a short entry of %d bytes is within the readings' gap of ShortEntryHeap "+
 			"(%.2f MiB), a margin lost: %v", what, MaxShortEntry, mib(ShortEntryHeap), b)
 	}
@@ -128,7 +134,9 @@ func checkShortEntryHeap(t interface {
 // its work: the shown short entry point withholds some shapes for what they hold (a control after a token, keys
 // invalid bytes split), after its readings ran, and its work on every shape stays within the budget. The heap is
 // measured in a process whose collections stop the world (redacttest.PeakLiveHeapSTW), so garbage the collector has
-// not reached on a busy machine cannot be read as held (#1204).
+// not reached on a busy machine cannot be read as held (#1204). Its readings are of the process's heap, which bound
+// the entry's own because a short entry frees nothing that was live before it: package redact frees nothing it kept
+// from an earlier call, and the pools of the regexp package are empty after the two collections before the entry.
 func TestHeapOfAShortEntry(t *testing.T) {
 	if raceDetector {
 		t.Skip("measures the heap of the product build")

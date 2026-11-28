@@ -36,10 +36,70 @@ func TestHeapBoundsVerdict(t *testing.T) {
 		{HeapBounds{Lower: 900, Upper: 1001}, HeapUndecided},
 		{HeapBounds{Lower: 1000, Upper: 1200}, HeapUndecided},
 		{HeapBounds{Lower: 1001, Upper: 1200}, HeapOver},
+		{HeapBounds{Lower: 100, Upper: 200, Shrank: true}, HeapUndecided},
+		{HeapBounds{Lower: 1001, Upper: 1200, Shrank: true}, HeapOver},
 	} {
 		if got := tc.b.Verdict(1000); got != tc.want {
 			t.Errorf("%+v against 1000: %v, want %v", tc.b, got, tc.want)
 		}
+	}
+}
+
+// The count when f starts is not the value recorded last before it (#1204): each processor records the value its
+// own change gave the runtime's heap count, after the change, so one that charged 768 KiB and was delayed records
+// its value after another processor recorded the 1.25 MiB of its later change. f then holds up to 1.25 MiB in
+// spans counted before it, allocating nothing that changes the count; Upper is at least that. Base and the readings
+// come from the trace: Lower is what a collection during f found live, and one that found less than Base is
+// Shrank.
+func TestHeapTraceCountsTheHighestValueSinceTheLastCollection(t *testing.T) {
+	const kib = 1 << 10
+	var h heapTrace
+	h.count(9000 * kib) // before the last collection
+	h.gcEnd()
+	h.count(2000 * kib) // what the last collection before f found live
+	h.gcEnd()
+	h.count(3280 * kib) // a second processor's later change, recorded first
+	h.count(2768 * kib) // the first processor's earlier change, recorded late
+	if err := h.fStarts(); err != nil {
+		t.Fatal(err)
+	}
+	h.fReturned()
+	h.count(5000 * kib) // after f
+	h.gcEnd()
+	b, err := h.readings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Base != 2000*kib || b.Upper != 1280*kib || b.Lower != 0 || b.Cycles != 0 || b.Shrank {
+		t.Errorf("readings %+v, want Base 2000 KiB, Upper 1280 KiB and no collection during f", b)
+	}
+	if v := b.Verdict(1024 * kib); v == HeapWithin {
+		t.Errorf("1.25 MiB counted when f starts: %v against 1.00 MiB", v)
+	}
+
+	h = heapTrace{}
+	h.count(2000 * kib)
+	h.gcEnd()
+	if err := h.fStarts(); err != nil {
+		t.Fatal(err)
+	}
+	h.count(2600 * kib)
+	h.count(2100 * kib) // what a collection during f found live
+	h.gcEnd()
+	h.count(1900 * kib)
+	h.gcEnd() // found less than Base
+	h.fReturned()
+	if b, err = h.readings(); err != nil {
+		t.Fatal(err)
+	}
+	if b.Base != 2000*kib || b.Upper != 600*kib || b.Lower != 100*kib || b.Cycles != 2 || !b.Shrank {
+		t.Errorf("readings %+v, want Upper 600 KiB, Lower 100 KiB, two collections, shrank", b)
+	}
+
+	h = heapTrace{}
+	h.count(2000 * kib)
+	if err := h.fStarts(); err == nil {
+		t.Error("f's start with no collection before it is read")
 	}
 }
 
@@ -188,3 +248,112 @@ func TestPeakLiveHeapSTWNeverWithinOverBound(t *testing.T) {
 
 // spinSink keeps the busy loops of TestPeakLiveHeapSTWNeverWithinOverBound from being optimized away.
 var spinSink atomic.Uint64
+
+// heldAfter keeps what a goroutine allocates after f returned (TestPeakLiveHeapSTWIgnoresWhatFollowsF) or what was
+// live before f started (TestPeakLiveHeapSTWFreeingWhatWasLiveIsNotWithin).
+var heldAfter []byte
+
+// A collection after f returned is not f's (#1204): f releases a goroutine that, a millisecond later, allocates and
+// keeps 2 MiB and runs a collection. f itself holds nothing, so the reading is within 1 MiB and Lower stays under
+// 64 KiB. Before, the last reading after f returned took any collection newer than the ones before f into Lower and
+// read over.
+func TestPeakLiveHeapSTWIgnoresWhatFollowsF(t *testing.T) {
+	if RaceDetector {
+		t.Skip("measures the heap of the product build")
+	}
+	if !InSTWProcess() {
+		RunInSTWProcess(t, "TestPeakLiveHeapSTWIgnoresWhatFollowsF")
+		return
+	}
+	const oneMiB = 1 << 20
+	for run := range 5 {
+		release, done := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(done)
+			<-release
+			time.Sleep(time.Millisecond)
+			b := make([]byte, 2*oneMiB)
+			for i := range b {
+				b[i] = 1
+			}
+			heldAfter = b
+			runtime.GC()
+		}()
+		b := PeakLiveHeapSTW(func() { close(release) })
+		<-done
+		heldAfter = nil
+		t.Logf("run %d: %v", run+1, b)
+		if b.Verdict(oneMiB) != HeapWithin || b.Lower >= 64<<10 {
+			t.Errorf("run %d: f holds nothing, read %v: %v against 1.00 MiB", run+1, b, b.Verdict(oneMiB))
+		}
+	}
+}
+
+// f's failure does not leave the execution trace or the sampler running (#1204): after f panics (recovered by the
+// caller) and after f exits its goroutine (as t.Fatal does), the next measurement works, and the panic reaches the
+// caller unchanged.
+func TestPeakLiveHeapSTWAfterFFails(t *testing.T) {
+	if RaceDetector {
+		t.Skip("measures the heap of the product build")
+	}
+	if !InSTWProcess() {
+		RunInSTWProcess(t, "TestPeakLiveHeapSTWAfterFFails")
+		return
+	}
+	measures := func(what string) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("a measurement after %s: %v", what, r)
+			}
+		}()
+		PeakLiveHeapSTW(func() {})
+	}
+	func() {
+		defer func() {
+			if r := recover(); r != "f failed" {
+				t.Errorf("recovered %v, want f's panic", r)
+			}
+		}()
+		PeakLiveHeapSTW(func() { panic("f failed") })
+	}()
+	measures("a panic in f")
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		PeakLiveHeapSTW(runtime.Goexit)
+	}()
+	<-exited
+	measures("f exited its goroutine")
+}
+
+// The readings are of the process's heap over what it held before f, so they cannot tell f's own heap when f frees
+// something that was live before it (#1204): f drops a cache of 2 MiB live before it, runs a collection, then
+// allocates and holds 1.25 MiB, under the process's heap before f all along. A collection that finds less live
+// than before f shows it, and the reading is then not within.
+func TestPeakLiveHeapSTWFreeingWhatWasLiveIsNotWithin(t *testing.T) {
+	if RaceDetector {
+		t.Skip("measures the heap of the product build")
+	}
+	if !InSTWProcess() {
+		RunInSTWProcess(t, "TestPeakLiveHeapSTWFreeingWhatWasLiveIsNotWithin")
+		return
+	}
+	const oneMiB = 1 << 20
+	for run := range 3 {
+		heldAfter = make([]byte, 2*oneMiB)
+		b := PeakLiveHeapSTW(func() {
+			heldAfter = nil
+			runtime.GC()
+			h := make([]byte, oneMiB+oneMiB/4)
+			for i := range h {
+				h[i] = 1
+			}
+			runtime.GC()
+			runtime.KeepAlive(h)
+		})
+		t.Logf("run %d: %v", run+1, b)
+		if v := b.Verdict(oneMiB); v == HeapWithin {
+			t.Errorf("run %d: 1.25 MiB held after freeing 2 MiB, read %v: within 1.00 MiB", run+1, b)
+		}
+	}
+}

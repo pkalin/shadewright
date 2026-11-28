@@ -104,9 +104,10 @@ func warmShortEntryPoints() {
 }
 
 // checkShortEntryHeap fails t unless b is within ShortEntryHeap. Over (a collection found more live) and
-// undecided (none did, but a sample read more) both fail: in the stop-the-world process the gap between the two
-// readings is about 2% of the process's heap (about 0.1 MiB over the 5 MiB of this test's process) however busy the
-// machine is, so an undecided reading is an entry within that gap of the bound, which has lost its margin (#1204).
+// undecided (none did, but the runtime counted more) both fail: in the stop-the-world process the upper reading is
+// over the live peak by at most about 2% of the process's heap (about 0.15 MiB over the 7.3 MiB of this test's
+// process) however busy the machine is, so an undecided reading is an entry within that gap of the bound, which has
+// lost its margin (#1204).
 func checkShortEntryHeap(t interface {
 	Helper()
 	Errorf(format string, args ...any)
@@ -164,7 +165,10 @@ func TestHeapOfAShortEntry(t *testing.T) {
 
 // The measurement of TestHeapOfAShortEntry catches an entry that holds more than ShortEntryHeap: one of the
 // heaviest shapes (dense secrets) at each short entry point, run while a buffer is held that takes the entry 64 KiB
-// past the bound by its own lower reading, is over the bound, not undecided, and checkShortEntryHeap fails it.
+// past the bound by its own lower reading, is never within the bound, and checkShortEntryHeap fails it. It is over
+// when a collection runs at the entry's peak while the buffer is held, which a busy machine can move (undecided in 3
+// of 20 runs beside one or two busy loops per core on 2026-11-28): the upper reading, from the execution trace, is what
+// makes it fail every time.
 func TestHeapOfAShortEntryCatchesAHold(t *testing.T) {
 	if raceDetector {
 		t.Skip("measures the heap of the product build")
@@ -200,8 +204,8 @@ func TestHeapOfAShortEntryCatchesAHold(t *testing.T) {
 			runtime.KeepAlive(held)
 		})
 		t.Logf("%s, heaviest alone %v; with %.3f MiB held %v (%d)", e.name, heaviest, mib(uint64(hold)), b, sink)
-		if v := b.Verdict(ShortEntryHeap); v != redacttest.HeapOver {
-			t.Errorf("%s with %.3f MiB held: %v, want over (%v)", e.name, mib(uint64(hold)), v, b)
+		if v := b.Verdict(ShortEntryHeap); v == redacttest.HeapWithin {
+			t.Errorf("%s with %.3f MiB held: %v, want over or undecided (%v)", e.name, mib(uint64(hold)), v, b)
 		}
 		var failed errorRecorder
 		if checkShortEntryHeap(&failed, e.name, b); len(failed) != 1 {

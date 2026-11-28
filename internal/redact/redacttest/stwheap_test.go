@@ -17,7 +17,10 @@ limitations under the License.
 package redacttest
 
 import (
+	"fmt"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -53,14 +56,15 @@ func TestPeakLiveHeapSTWRefusesAnOrdinaryProcess(t *testing.T) {
 	PeakLiveHeapSTW(func() {})
 }
 
-// In a stop-the-world process the readings do not depend on how busy the machine is (#1204). The stress case of
-// the sampling probe before it, 4 MiB of short-lived 4 KiB slices under a 20 MiB baseline, which read 1.345 MiB as
-// the smallest of 15 readings under two heavy jobs on 2026-11-27, is within 1 MiB on its upper reading. A real hold
-// over 1 MiB is never within. It is over when a collection runs while it is held, which an allocation of 2% of the
+// In a stop-the-world process the readings do not depend on how busy the machine is for their soundness (#1204). The
+// stress case of the sampling probe before it, 4 MiB of short-lived 4 KiB slices under a 20 MiB baseline, which read
+// 1.345 MiB as the smallest of 15 readings under two heavy jobs on 2026-11-27, is within 1 MiB on its upper reading. A
+// real hold over 1 MiB is never within: the upper reading comes from the execution trace, which records every value
+// of the runtime's heap count. It is over when a collection runs while it is held, which an allocation of 2% of the
 // heap during the hold guarantees (one buffer of 1.20 MiB). Small objects held without allocating, until f returns
 // or for MinSTWPeakDuration, are seen by a collection only if the sampler starts one in time, which a busy machine
-// can delay (a 3 ms hold read undecided in 9 of 30 runs beside two loads of one busy loop per core, 2026-11-28): undecided is
-// accepted there, and a bound test fails it as well.
+// can delay: undecided is accepted there, and a bound test fails it as well. Before the trace, the upper reading was
+// sampled too, and the brief hold read within in 27 of 40 runs beside one or two busy loops per core (2026-11-28).
 func TestPeakLiveHeapSTW(t *testing.T) {
 	if RaceDetector {
 		t.Skip("measures the heap of the product build")
@@ -124,3 +128,63 @@ func TestPeakLiveHeapSTW(t *testing.T) {
 	}
 	_ = sink
 }
+
+// A peak over the bound is never read within, however busy the machine is (#1204): 1.08 MiB of 64-byte nodes,
+// dropped at once and followed by 512 KiB of garbage, is never within 1 MiB, and its upper reading is never below
+// what it held. It is read with the sampler kept from running until f returns (the machine at its busiest; before
+// the upper reading came from the execution trace, every such run read within), then beside one busy loop per
+// processor of the measurement, which delay the sampler.
+func TestPeakLiveHeapSTWNeverWithinOverBound(t *testing.T) {
+	if RaceDetector {
+		t.Skip("measures the heap of the product build")
+	}
+	if !InSTWProcess() {
+		RunInSTWProcess(t, "TestPeakLiveHeapSTWNeverWithinOverBound")
+		return
+	}
+	const oneMiB = 1 << 20
+	var sink byte
+	probe := func() {
+		head := allocSmallPtrList(17695)
+		for n := head; n != nil; n = n.next {
+			sink ^= n.pad[0]
+		}
+		runtime.KeepAlive(head)
+		for range 128 {
+			g := make([]byte, 4<<10)
+			g[0] = sink
+			heapGarbageSink = g
+		}
+		heapGarbageSink = nil
+	}
+	const held = 17695 * 64
+	check := func(what string, b HeapBounds) {
+		t.Logf("%s: %v", what, b)
+		if b.Verdict(oneMiB) == HeapWithin || b.Upper < held {
+			t.Errorf("%s: %.3f MiB held, read %v: %v against 1.00 MiB", what, float64(held)/oneMiB, b, b.Verdict(oneMiB))
+		}
+	}
+	starveSampler = true
+	for run := range 3 {
+		check(fmt.Sprintf("sampler starved, run %d", run+1), PeakLiveHeapSTW(probe))
+	}
+	starveSampler = false
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	for range HeapProcs {
+		wg.Go(func() {
+			for n := 0; !stop.Load(); n++ {
+				spinSink.Add(uint64(n & 1))
+			}
+		})
+	}
+	defer wg.Wait()
+	defer stop.Store(true)
+	for run := range 5 {
+		check(fmt.Sprintf("beside busy loops, run %d", run+1), PeakLiveHeapSTW(probe))
+	}
+	_ = sink
+}
+
+// spinSink keeps the busy loops of TestPeakLiveHeapSTWNeverWithinOverBound from being optimized away.
+var spinSink atomic.Uint64

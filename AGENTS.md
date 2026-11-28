@@ -130,7 +130,7 @@ Every issue names the ADRs it is tied to:
   `run: true|false` and skip when their paths did not change. A skipped job counts as passing. `ci-ok` needs
   all of them and is the single required CI check: it fails when `changes` failed or any job failed or was
   cancelled. The required checks are `ci-ok`, `Conventional PR title` and `Dependency review`. A new job goes
-  into the `needs` of `ci-ok`. `secret-scan.yml` always runs (gitleaks over the full history, config in `.gitleaks.toml`; locally `gitleaks git . --redact --no-banner`) and so gates through `ci-ok`. Never add trigger-level `paths` to `ci.yml`: a workflow that never starts leaves
+  into the `needs` of `ci-ok`. `secret-scan.yml` always runs (gitleaks over the commits a pull request brings, and over the full history of the checked-out ref on `main`; config in `.gitleaks.toml`; locally `gitleaks git . --redact --no-banner --log-opts="--full-history HEAD"`) and so gates through `ci-ok`. Never add trigger-level `paths` to `ci.yml`: a workflow that never starts leaves
   its required check pending forever. A path a job depends on that is missing from the script's groups lets a
   change skip its check, so extend the groups and `hack/ci-changed_test.sh` when a job starts reading a new
   directory. Concurrency (cancel a superseded pull request run) lives in `ci.yml` only. Called workflows

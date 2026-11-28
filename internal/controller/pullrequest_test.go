@@ -6667,25 +6667,51 @@ var _ = Describe("RemediationRequest pull request step", func() {
 				// deadline is wall-clock time and covers every call of the step, though: on a loaded machine the calls
 				// before the open can use it up (#1212), and so can the write checks inside the open call before GitHub
 				// takes the request. A reconcile that ran out of time before GitHub took the open runs again with the
-				// deadline doubled, up to eight times its first value; the timeout checked is the one of the reconcile
-				// whose open GitHub took. What decides it is the pull request GitHub holds, not a call counted on entry.
-				const shortWrite = 200 * time.Millisecond
+				// deadline doubled, up to sixteen times its first value; the timeout checked is the one of the
+				// reconcile whose open GitHub took. What decides it is the pull request GitHub holds, not a call
+				// counted on entry. Only the step's own deadline, or the Incident read's own deadline, counts as
+				// running out of time: any other failure ends the loop and fails the spec.
+				const shortWrite, capWrite = 200 * time.Millisecond, 16 * 200 * time.Millisecond
+				incidents := &deadlineIncidentReader{Reader: k8sClient}
+				apiReader = incidents
 				writeTimeout = shortWrite
 				faulty.blockAfter(opOpen)
-				var err error
+				var (
+					err         error
+					start       time.Time
+					opensBefore int
+					attempts    int
+				)
 				for range 20 {
+					attempts++
+					opensBefore, start = faulty.count(opOpen), time.Now()
 					err = reconcileOnce()
-					if len(openRequests()) > 0 || (err != nil && !ranOutOfTime(err)) {
+					if len(openRequests()) > 0 || (err != nil && !ranOutOfTime(err, incidents)) {
 						break
 					}
-					if err != nil && writeTimeout < 8*shortWrite {
+					if err != nil && writeTimeout < capWrite {
 						GinkgoWriter.Printf("the step ran out of %v before GitHub took the open (%v): "+
 							"running it again with twice the deadline\n", writeTimeout, err)
 						writeTimeout *= 2
 					}
 				}
+				if len(openRequests()) == 0 && err != nil && ranOutOfTime(err, incidents) {
+					Fail(fmt.Sprintf("the step ran out of time before GitHub took the open in all %d reconciles, "+
+						"the last ones with the deadline at its cap of %v: %v", attempts, writeTimeout, err))
+				}
 				Expect(openRequests()).To(HaveLen(1), "GitHub took the open request before the deadline: %v", err)
 				Expect(errors.Is(err, ErrTimeout)).To(BeTrue(), "the step's own deadline is a retryable timeout: %v", err)
+				// The configured deadline is what cut the open: the step's context was made after the reconcile
+				// started (so its deadline is at least writeTimeout after that) and before the open was called (so
+				// at most writeTimeout after the open's start). Both bounds follow from the order of the calls on one
+				// monotonic clock, so no margin is needed.
+				entered, deadline, ok := faulty.lastOpen()
+				Expect(ok).To(BeTrue(), "the open had a deadline")
+				Expect(deadline.Sub(start)).To(BeNumerically(">=", writeTimeout),
+					"the open's deadline is no shorter than the configured %v", writeTimeout)
+				Expect(deadline.Sub(entered)).To(BeNumerically("<=", writeTimeout),
+					"the open's deadline is no longer than the configured %v", writeTimeout)
+				Expect(faulty.count(opOpen)-opensBefore).To(Equal(1), "the reconcile that timed out opened once")
 				opened := faulty.count(opOpen)
 				waiting()
 
@@ -7887,6 +7913,9 @@ type faultyGit struct {
 	before map[string]func()
 	// stale, per number, is the state GetChangeRequest answers instead of the host's, as a lagging read.
 	stale map[int64]providers.ChangeRequestState
+	// openEntered and openDeadline are the start of the last OpenChangeRequest call and its context's deadline.
+	openEntered, openDeadline time.Time
+	openHasDeadline           bool
 }
 
 func newFaultyGit(g *fakegit.Git) *faultyGit {
@@ -7951,10 +7980,19 @@ func (f *faultyGit) creations() int {
 
 // ranOutOfTime reports whether err is a step that ran out of its deadline: the step's own timeout, or the live
 // read of the Incident before the open, whose own deadline is half of what the step has left
-// (incidentReadTimeout), so it can end first.
-func ranOutOfTime(err error) bool {
+// (incidentReadTimeout), so it can end first. The second case is decided by the context that read used, not by
+// the error text: an API server answer with reason Timeout while both deadlines are live is no such case.
+func ranOutOfTime(err error, incidents *deadlineIncidentReader) bool {
 	return errors.Is(err, ErrTimeout) ||
-		errors.Is(err, errIncidentUnread) && strings.HasSuffix(err.Error(), ": "+string(metav1.StatusReasonTimeout))
+		errors.Is(err, errIncidentUnread) && strings.HasSuffix(err.Error(), ": "+string(metav1.StatusReasonTimeout)) &&
+			incidents.lastRanOut()
+}
+
+// lastOpen returns when the last OpenChangeRequest call started and the deadline of its context.
+func (f *faultyGit) lastOpen() (entered, deadline time.Time, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.openEntered, f.openDeadline, f.openHasDeadline
 }
 
 func (f *faultyGit) enter(op, arg string) error {
@@ -8047,6 +8085,11 @@ func (f *faultyGit) CommitFile(ctx context.Context, branch, expectedHead string,
 }
 
 func (f *faultyGit) OpenChangeRequest(ctx context.Context, req providers.NewChangeRequest) (providers.ChangeRequest, error) {
+	entered := time.Now()
+	deadline, hasDeadline := ctx.Deadline()
+	f.mu.Lock()
+	f.openEntered, f.openDeadline, f.openHasDeadline = entered, deadline, hasDeadline
+	f.mu.Unlock()
 	if err := f.enter(opOpen, req.HeadBranch); err != nil {
 		return providers.ChangeRequest{}, err
 	}
@@ -8366,6 +8409,32 @@ func (h hangingIncidentReader) Get(ctx context.Context, key client.ObjectKey, ob
 		return ctx.Err()
 	}
 	return h.Reader.Get(ctx, key, obj, opts...)
+}
+
+// deadlineIncidentReader records, for the last read of an Incident, whether it failed because its own context ran
+// out of time; every read goes to Reader.
+type deadlineIncidentReader struct {
+	client.Reader
+	mu     sync.Mutex
+	ranOut bool
+}
+
+func (d *deadlineIncidentReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object,
+	opts ...client.GetOption) error {
+	err := d.Reader.Get(ctx, key, obj, opts...)
+	if _, ok := obj.(*remediationv1alpha1.Incident); ok {
+		d.mu.Lock()
+		d.ranOut = err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)
+		d.mu.Unlock()
+	}
+	return err
+}
+
+// lastRanOut reports whether the last Incident read failed on its own context's deadline.
+func (d *deadlineIncidentReader) lastRanOut() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.ranOut
 }
 
 // switchedRequestReader is a reader whose get of the RemediationRequest called name fails with a server error

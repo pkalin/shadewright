@@ -1,0 +1,91 @@
+/*
+ * Diagram overlay (docs/javascripts/diagram-zoom.js), the same file on the Shadewright, Sablecourt and Armory
+ * docs sites. The three share one dark palette, so the colours are literals; the focus ring follows the site's
+ * link colour (--md-typeset-a-color). Contrast: button text #EFE9DC on #14111C 15.41:1, on hover #24202F 13.12:1.
+ */
+[data-sw-zoom] {
+  cursor: zoom-in;
+}
+div.mermaid[data-sw-zoom]:focus-visible,
+img[data-sw-zoom]:focus-visible,
+a[data-sw-zoom]:focus-visible {
+  outline: 2px solid var(--md-typeset-a-color);
+  outline-offset: 4px;
+}
+html.sw-zoom-open {
+  overflow: hidden;
+}
+.sw-zoom {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(8, 6, 14, 0.72);
+}
+.sw-zoom__stage {
+  position: absolute;
+  inset: 5vh 5vw;
+  overflow: hidden;
+  border: 1px solid #373040;
+  border-radius: 0.5rem;
+  box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.5);
+  background: #08060e;
+  cursor: grab;
+  touch-action: none;
+}
+.sw-zoom__stage:active {
+  cursor: grabbing;
+}
+.sw-zoom__content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  opacity: 0;
+}
+.sw-zoom--ready .sw-zoom__content {
+  opacity: 1;
+}
+.sw-zoom__content img,
+.sw-zoom__content svg {
+  display: block;
+  max-width: none;
+  user-select: none;
+}
+.sw-zoom__bar {
+  position: absolute;
+  top: calc(5vh + 0.6rem);
+  right: calc(5vw + 0.6rem);
+  display: flex;
+  gap: 0.4rem;
+}
+.sw-zoom__btn {
+  min-width: 2.4rem;
+  height: 2.4rem;
+  padding: 0 0.6rem;
+  border: 1px solid #373040;
+  border-radius: 0.3rem;
+  background: #14111c;
+  color: #efe9dc;
+  font: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+}
+.sw-zoom__btn:hover {
+  background: #24202f;
+}
+.sw-zoom__btn:focus-visible {
+  outline: 2px solid var(--md-typeset-a-color);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .sw-zoom {
+    animation: sw-zoom-in 0.15s ease-out;
+  }
+  .sw-zoom__content {
+    transition: opacity 0.15s;
+  }
+}
+@keyframes sw-zoom-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

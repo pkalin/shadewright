@@ -13,6 +13,7 @@ extra_css = [
   "stylesheets/brand.css",
   "stylesheets/hero-bg.css",
   "stylesheets/labs-switcher.css",
+  "stylesheets/diagram-zoom.css",
 ]
 # Pinned, self-hosted Mermaid; without it Zensical fetches mermaid@12 from unpkg (see README.txt next to it).
 extra_javascript = [

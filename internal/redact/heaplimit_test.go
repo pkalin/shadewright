@@ -88,7 +88,7 @@ type heavyAtOnce struct {
 func heavyEntries(scale int) []heavyAtOnce {
 	heavy := []struct{ ep, shape string }{
 		{epPiecesWithin, "letter and control"}, {epPiecesFitting, "quoted pairs"}, {epPiecesWithin, "addresses"},
-		{epPiecesFitting, "query"}, {epStringTwice, "dense secrets"}, {epPiecesWithin, "letter and next line"},
+		{epPiecesFitting, "query"}, {epStringTwice, shapeDenseSecrets}, {epPiecesWithin, "letter and next line"},
 	}
 	var out []heavyAtOnce
 	add := func(n, size int) {

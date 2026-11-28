@@ -4,8 +4,12 @@
  * Two kinds of diagram are enlargeable:
  *   - Mermaid blocks. The theme renders them into a closed shadow root, so the root is recorded by wrapping
  *     attachShadow before the render finishes (this script loads right after the pinned Mermaid file).
- *   - Images of the hand-written SVGs, wrapped in a link to themselves. Without this script the link still
+ *   - Images of the hand-written SVGs, wrapped in a link to an SVG. Without this script the link still
  *     opens the full-size file (the no-JS fallback), so the link is kept and only its click is taken over.
+ *     An SVG image under a diagrams folder with no link around it is made keyboard reachable the same way.
+ *
+ * The same file is used by the Shadewright, Sablecourt and Armory docs sites (the Mermaid part only matters on
+ * the first). The overlay is labelled with the diagram's alt text.
  *
  * Controls: click or Enter on the diagram; in the overlay the buttons, the wheel (zoom at the pointer), pinch,
  * drag to pan, + - 0 and the arrow keys; Esc, the close button or a click outside the window closes it and
@@ -42,6 +46,14 @@
       hosts[i].setAttribute("aria-label", LABEL);
       hosts[i].setAttribute("title", LABEL);
     }
+    var bare = document.querySelectorAll('.md-typeset img[src*="diagrams/"][src$=".svg"]:not([data-sw-zoom])');
+    for (var b = 0; b < bare.length; b++) {
+      if (bare[b].closest("a")) continue;
+      bare[b].setAttribute("data-sw-zoom", "bare");
+      bare[b].setAttribute("tabindex", "0");
+      bare[b].setAttribute("role", "button");
+      bare[b].setAttribute("title", LABEL);
+    }
     var links = document.querySelectorAll('.md-typeset a[href$=".svg"]:not([data-sw-zoom])');
     for (var j = 0; j < links.length; j++) {
       if (!links[j].querySelector("img")) continue;
@@ -63,7 +75,14 @@
   });
   document.addEventListener("keydown", function (e) {
     var el = targetOf(e.target);
-    if (el && el.getAttribute("data-sw-zoom") === "mermaid" && (e.key === "Enter" || e.key === " ")) {
+    if (!el) return;
+    if (el.getAttribute("data-sw-zoom") !== "image") {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open(el);
+      }
+    } else if (e.key === " " && !e.defaultPrevented && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+      // A link opens on Enter by itself (through the click handler); Space needs to be handled here.
       e.preventDefault();
       open(el);
     }
@@ -89,8 +108,10 @@
     var w = 0;
     var h = 0;
     var ready = null;
+    var kind = source.getAttribute("data-sw-zoom");
+    var label = "Diagram, enlarged";
 
-    if (source.getAttribute("data-sw-zoom") === "mermaid") {
+    if (kind === "mermaid") {
       var svg = mermaidSvg(source);
       if (!svg) return;
       var vb = svg.viewBox && svg.viewBox.baseVal;
@@ -103,10 +124,11 @@
       clone.setAttribute("height", h);
       content.appendChild(clone);
     } else {
-      var src = source.querySelector("img");
+      var src = kind === "bare" ? source : source.querySelector("img");
       var img = document.createElement("img");
-      img.src = source.href;
+      img.src = kind === "bare" ? source.currentSrc || source.src : source.href;
       img.alt = src.alt;
+      if (src.alt) label = src.alt;
       img.draggable = false;
       content.appendChild(img);
       ready = new Promise(function (resolve) {
@@ -125,7 +147,7 @@
     overlay.className = "sw-zoom";
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
-    overlay.setAttribute("aria-label", "Diagram, enlarged");
+    overlay.setAttribute("aria-label", label);
     var stage = document.createElement("div");
     stage.className = "sw-zoom__stage";
     stage.appendChild(content);
@@ -213,8 +235,15 @@
       release(e);
     });
     // The diagram opens in a window over the page; a click outside the window (on the dimmed page) closes it.
+    // Only a press that starts on the backdrop dismisses: a toolbar press released there does not.
+    var pressOnBackdrop = false;
+    overlay.addEventListener("pointerdown", function (e) {
+      pressOnBackdrop = e.target === overlay;
+    });
     overlay.addEventListener("click", function (e) {
-      if (e.target === overlay) close();
+      var started = pressOnBackdrop;
+      pressOnBackdrop = false;
+      if (e.target === overlay && started) close();
     });
     stage.addEventListener("pointercancel", release);
 

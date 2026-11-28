@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.7.0](https://github.com/shadewright-labs/shadewright/compare/v0.6.0...v0.7.0) (2026-11-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* images and the Helm chart are published under ghcr.io/shadewright-labs from the next release on, and the Go module path is now github.com/shadewright-labs/shadewright. Releases up to v0.6.0 stay under ghcr.io/pkalin, signed by the workflows of github.com/pkalin/shadewright.
+
+### Features
+
+* **analyzer:** add the Vertex AI generateContent model adapter ([#1178](https://github.com/shadewright-labs/shadewright/issues/1178)) ([6a779bb](https://github.com/shadewright-labs/shadewright/commit/6a779bb2a8e061318e8aa8874c1510478b9a97fe))
+* **analyzer:** exchange projected ServiceAccount tokens at Google STS ([#1177](https://github.com/shadewright-labs/shadewright/issues/1177)) ([c780be7](https://github.com/shadewright-labs/shadewright/commit/c780be7ea0b903ad57448bcd7d73282c3d86b571))
+* **analyzer:** show container lifetimes before OOM kills in the incident summary ([#1206](https://github.com/shadewright-labs/shadewright/issues/1206)) ([80fb7ab](https://github.com/shadewright-labs/shadewright/commit/80fb7abc2044cd36036cf7d6bf38571793b106bb))
+* **api:** add VertexAI model provider to RemediationSettings ([#1179](https://github.com/shadewright-labs/shadewright/issues/1179)) ([4838b33](https://github.com/shadewright-labs/shadewright/commit/4838b330a19ad033e5904943c6b5bfdeadbfd967))
+* **integrations:** encode the redacted code escalation snapshot ([#1163](https://github.com/shadewright-labs/shadewright/issues/1163)) ([72f49cd](https://github.com/shadewright-labs/shadewright/commit/72f49cd43eb000043486ac1076b894a2d0b35bc9))
+
+
+### Bug fixes
+
+* **analyzer:** bound the context message as it is sent, not its raw text ([#1175](https://github.com/shadewright-labs/shadewright/issues/1175)) ([d509326](https://github.com/shadewright-labs/shadewright/commit/d509326a6e18342593189ab9d2446b334810939d))
+* **analyzer:** keep a reply's model name out of telemetry unless it is the configured one ([#1182](https://github.com/shadewright-labs/shadewright/issues/1182)) ([24cd00a](https://github.com/shadewright-labs/shadewright/commit/24cd00a6703db5f50e656699d67494125a198faf))
+* **analyzer:** link a crash loop and an eviction to one Incident ([#971](https://github.com/shadewright-labs/shadewright/issues/971)) ([cb7abe6](https://github.com/shadewright-labs/shadewright/commit/cb7abe67d6eadbd3d6accf773f7a471cf6f574bb))
+* **analyzer:** one Incident for a container that cannot pull its image ([#1174](https://github.com/shadewright-labs/shadewright/issues/1174)) ([a922435](https://github.com/shadewright-labs/shadewright/commit/a922435d2ff99dbca9764bbb0d8adc00e80a14b8))
+* **analyzer:** withhold a stored symptom that would show more than its redacted reading ([#1189](https://github.com/shadewright-labs/shadewright/issues/1189)) ([4b07b54](https://github.com/shadewright-labs/shadewright/commit/4b07b548a044cdb1f716b14695cb57664c5f5a78))
+* **ci:** run the weekly govulncheck on its schedule ([#1185](https://github.com/shadewright-labs/shadewright/issues/1185)) ([199e004](https://github.com/shadewright-labs/shadewright/commit/199e0045ebf9ad850116b018dc57e0734b4e56a3))
+* **controller:** small items from the v0.6.0-rc.1 lab run ([f8ecdd3](https://github.com/shadewright-labs/shadewright/commit/f8ecdd38c7c95fd758e206d9cc0643747ff6447d))
+* **gitops:** keep a deleted request's target locked while its repository is missing from the settings ([#1173](https://github.com/shadewright-labs/shadewright/issues/1173)) ([39e00c5](https://github.com/shadewright-labs/shadewright/commit/39e00c52a32aa678c360fa5785091187dceb1fd9))
+* **gitops:** write a stop exception's failed check only where its step says it may ([#1084](https://github.com/shadewright-labs/shadewright/issues/1084)) ([011250f](https://github.com/shadewright-labs/shadewright/commit/011250f67d54ec507447a49db8627ea077afc848))
+* **incidents:** log a first sighting that is held back ([c36a5c0](https://github.com/shadewright-labs/shadewright/commit/c36a5c01e0a5a88b587a7010fec19803754b8532))
+* keep a canceled token exchange from replacing a newer cached token ([#1202](https://github.com/shadewright-labs/shadewright/issues/1202)) ([662048f](https://github.com/shadewright-labs/shadewright/commit/662048f2821dd7d26ff86be34c762ffefab10d0f))
+* keep secrets out of formatted holders and caller trace hooks ([#1196](https://github.com/shadewright-labs/shadewright/issues/1196)) ([78e8946](https://github.com/shadewright-labs/shadewright/commit/78e89460d1016f5b2792ff7fd9814f2713b2867e))
+* log a first sighting that is held back ([#1208](https://github.com/shadewright-labs/shadewright/issues/1208)) ([c36a5c0](https://github.com/shadewright-labs/shadewright/commit/c36a5c01e0a5a88b587a7010fec19803754b8532))
+* small items from the v0.6.0-rc.1 lab run ([#1207](https://github.com/shadewright-labs/shadewright/issues/1207)) ([f8ecdd3](https://github.com/shadewright-labs/shadewright/commit/f8ecdd38c7c95fd758e206d9cc0643747ff6447d))
+
+
+### Build
+
+* move the module, images and chart to the shadewright-labs organisation ([#1128](https://github.com/shadewright-labs/shadewright/issues/1128)) ([6977bb5](https://github.com/shadewright-labs/shadewright/commit/6977bb5878f78f0269e114fa8710898b3be03e9f)), closes [#1126](https://github.com/shadewright-labs/shadewright/issues/1126)
+
 ## [0.6.0](https://github.com/pkalin/shadewright/compare/v0.5.2...v0.6.0) (2026-11-23)
 
 

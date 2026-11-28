@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -255,7 +256,8 @@ var spinSink atomic.Uint64
 var heldAfter []byte
 
 // A collection after f returned is not f's (#1204): once the marker after f is logged, and while the trace still
-// runs, a goroutine allocates and keeps 2 MiB and runs a collection. It waits for the marker (afterFReturned), so
+// runs, a goroutine allocates and keeps 2 MiB and runs a collection. It waits for the marker (afterFReturned, set
+// by f, so under the measurement's lock), so
 // its work follows f on every schedule, also when the measuring goroutine pauses between f's return and the
 // marker. f itself holds nothing, so the reading is within 1 MiB and Lower stays under 64 KiB. Before, the last
 // reading after f returned took any collection newer than the ones before f into Lower and read over.
@@ -268,7 +270,6 @@ func TestPeakLiveHeapSTWIgnoresWhatFollowsF(t *testing.T) {
 		return
 	}
 	const oneMiB = 1 << 20
-	defer func() { afterFReturned = nil }()
 	for run := range 5 {
 		release, done := make(chan struct{}), make(chan struct{})
 		go func() {
@@ -281,11 +282,11 @@ func TestPeakLiveHeapSTWIgnoresWhatFollowsF(t *testing.T) {
 			heldAfter = b
 			runtime.GC()
 		}()
-		afterFReturned = func() {
+		hook := func() {
 			close(release)
 			<-done
 		}
-		b := PeakLiveHeapSTW(func() {})
+		b := PeakLiveHeapSTW(func() { afterFReturned = hook })
 		heldAfter = nil
 		t.Logf("run %d: %v", run+1, b)
 		if b.Verdict(oneMiB) != HeapWithin || b.Lower >= 64<<10 {
@@ -294,9 +295,9 @@ func TestPeakLiveHeapSTWIgnoresWhatFollowsF(t *testing.T) {
 	}
 }
 
-// Measurements from two goroutines at once run one after another (#1204): the second starts while the first's f
-// runs, both measure, and GOMAXPROCS and GOGC are what they were before either. Overlapping, the second would find
-// the execution trace running and could save the first one's settings and restore them last.
+// Measurements from two goroutines at once run one after another (#1204): the first's f does not return until the
+// second call has started and either waits in the lock or has returned, both measure, and GOMAXPROCS and GOGC are
+// what they were before either. Overlapping, the second finds the execution trace running and fails.
 func TestPeakLiveHeapSTWConcurrentCallsRestoreSettings(t *testing.T) {
 	if RaceDetector {
 		t.Skip("measures the heap of the product build")
@@ -313,22 +314,38 @@ func TestPeakLiveHeapSTWConcurrentCallsRestoreSettings(t *testing.T) {
 		PeakLiveHeapSTW(f)
 		return nil
 	}
-	firstRuns := make(chan struct{})
+	firstRuns, secondStarts, secondDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var wg sync.WaitGroup
 	var first, second any
+	var waited bool
 	wg.Go(func() {
 		first = measure(func() {
 			close(firstRuns)
-			time.Sleep(20 * time.Millisecond)
+			<-secondStarts
+			// The second call has started: hold f until it waits in the lock, or has returned (without the lock).
+			for {
+				select {
+				case <-secondDone:
+					return
+				default:
+				}
+				if secondWaitsInLock() {
+					waited = true
+					return
+				}
+				runtime.Gosched()
+			}
 		})
 	})
 	wg.Go(func() {
+		defer close(secondDone)
 		<-firstRuns
+		close(secondStarts)
 		second = measure(func() {})
 	})
 	wg.Wait()
-	if first != nil || second != nil {
-		t.Errorf("two measurements at once: first %v, second %v", first, second)
+	if first != nil || second != nil || !waited {
+		t.Errorf("two measurements at once: first %v, second %v, second waited for the first: %t", first, second, waited)
 	}
 	if got := runtime.GOMAXPROCS(0); got != procs {
 		t.Errorf("GOMAXPROCS %d after two measurements, want %d", got, procs)
@@ -336,6 +353,19 @@ func TestPeakLiveHeapSTWConcurrentCallsRestoreSettings(t *testing.T) {
 	if got := debug.SetGCPercent(gogc); got != gogc {
 		t.Errorf("GOGC %d after two measurements, want %d", got, gogc)
 	}
+}
+
+// secondWaitsInLock reports whether a goroutine other than the caller is in PeakLiveHeapSTW and in a sync.Mutex
+// method, that is waiting for stwMu (the caller holds it).
+func secondWaitsInLock() bool {
+	buf := make([]byte, 1<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	for g := range strings.SplitSeq(string(buf), "\n\n") {
+		if strings.Contains(g, "redacttest.PeakLiveHeapSTW(") && strings.Contains(g, "sync.(*Mutex).") {
+			return true
+		}
+	}
+	return false
 }
 
 // f's failure does not leave the execution trace or the sampler running (#1204): after f panics (recovered by the

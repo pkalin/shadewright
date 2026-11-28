@@ -169,12 +169,15 @@ func (b HeapBounds) String() string {
 var starveSampler bool
 
 // afterFReturned, when set, is called after the marker that follows f is logged and before the trace stops: the
-// test of work that follows f runs that work there, so it starts after the marker on every schedule.
+// test of work that follows f runs that work there, so it starts after the marker on every schedule. It is guarded
+// by stwMu: only f sets it (f runs with stwMu held by its measurement), and that measurement reads and clears it
+// before it releases stwMu, on every return, so the hook runs at most once and only in the measurement whose f set it.
 var afterFReturned func()
 
-// stwMu serializes PeakLiveHeapSTW. One execution trace runs at a time, and a measurement sets GOMAXPROCS and GOGC
-// for its length: an overlapping one would save the first one's settings and restore them after the first one
-// restored the originals.
+// stwMu serializes PeakLiveHeapSTW, held from before the trace file is created until after it is removed. One
+// execution trace runs at a time, a measurement sets GOMAXPROCS and GOGC for its length (an overlapping one would
+// save the first one's settings and restore them after the first one restored the originals), and the readings
+// cover the whole process's heap, so another measurement's file handling or trace parsing during f would count.
 var stwMu sync.Mutex
 
 // Markers PeakLiveHeapSTW logs in the execution trace around f.
@@ -223,11 +226,19 @@ const gcRange = "GC concurrent mark phase"
 // collection finds at least Base and Upper can miss the freed amount. So the caller must know that f frees nothing
 // that was live before it (TestHeapOfAShortEntry says why a short entry does not), and that nothing else allocates
 // or frees during f, since the readings cover the whole process. A sync.Pool is empty after the two
-// collections before f. Calls from several goroutines run one after another.
+// collections before f.
+//
+// One measurement runs at a time: the call holds a lock for its whole length, from creating the trace file to
+// removing it, so calls from several goroutines run one after another, and the readings are sound only in a process
+// where nothing else allocates or frees during f. f must not call PeakLiveHeapSTW, nor wait on a goroutine that
+// does: that call waits for the lock, which is released only after f returns, so both block for good.
 func PeakLiveHeapSTW(f func()) HeapBounds {
 	if !InSTWProcess() {
 		panic("redacttest: PeakLiveHeapSTW runs only in the process RunInSTWProcess starts")
 	}
+	stwMu.Lock()
+	// Deferred first, so it runs last: after the file is closed and removed.
+	defer stwMu.Unlock()
 	tf, err := os.CreateTemp("", "redacttest-stw-*.trace")
 	if err != nil {
 		panic(fmt.Sprintf("redacttest: a file for the execution trace: %v", err))
@@ -245,11 +256,11 @@ func PeakLiveHeapSTW(f func()) HeapBounds {
 }
 
 // peakLiveHeapSTW runs f, tracing to w. The trace and the sampler stop on every return, also when f panics or
-// exits its goroutine. It holds stwMu throughout, so the process settings it saves are the ones no other
-// measurement changed, and it restores them before another starts.
+// exits its goroutine. Its caller holds stwMu, so the process settings it saves are the ones no other measurement
+// changed, and it restores them before another starts.
 func peakLiveHeapSTW(f func(), w io.Writer) error {
-	stwMu.Lock()
-	defer stwMu.Unlock()
+	// Clears a hook f set, also when f panics or exits its goroutine; stwMu is still held.
+	defer func() { afterFReturned = nil }()
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(HeapProcs))
 	defer debug.SetGCPercent(debug.SetGCPercent(stwGOGC))
 	// The trace starts before the collections, so what starting it allocates is in the heap before f, and the
@@ -304,8 +315,9 @@ func peakLiveHeapSTW(f func(), w io.Writer) error {
 	trace.Log(ctx, traceCategory, traceStart)
 	f()
 	trace.Log(ctx, traceCategory, traceEnd)
-	if afterFReturned != nil {
-		afterFReturned()
+	if hook := afterFReturned; hook != nil {
+		afterFReturned = nil
+		hook()
 	}
 	return nil
 }

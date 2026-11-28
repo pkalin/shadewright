@@ -126,11 +126,11 @@ Every issue names the ADRs it is tied to:
   that has `packages: write`. `make docker-build-images` builds all three for the host platform.
 - **CI scope.** `.github/workflows/ci.yml` is the one graph of a pull request and of a push to main. Its
   `changes` job runs `hack/ci-changed.sh` once on the files the pull request changes; the jobs that call the
-  workflows holding the checks (lint, test, e2e, govulncheck, image build, chart tests, docs check, CodeQL, workflow lint, secret scan) get
+  workflows holding the checks (lint, test, e2e, govulncheck, image build, chart tests, docs check, CodeQL, workflow lint) get
   `run: true|false` and skip when their paths did not change. A skipped job counts as passing. `ci-ok` needs
   all of them and is the single required CI check: it fails when `changes` failed or any job failed or was
   cancelled. The required checks are `ci-ok`, `Conventional PR title` and `Dependency review`. A new job goes
-  into the `needs` of `ci-ok`. `secret-scan.yml` always runs (gitleaks over the full history, config in `.gitleaks.toml`; locally `gitleaks git . --redact --no-banner`) and so gates through `ci-ok`. Never add trigger-level `paths` to `ci.yml`: a workflow that never starts leaves
+  into the `needs` of `ci-ok`. `secret-scan.yml` always runs (gitleaks over the commits a pull request brings, and over the full history of the checked-out ref on `main`; config in `.gitleaks.toml`; locally `gitleaks git . --redact --no-banner --log-opts="--full-history HEAD"`) and so gates through `ci-ok`. Never add trigger-level `paths` to `ci.yml`: a workflow that never starts leaves
   its required check pending forever. A path a job depends on that is missing from the script's groups lets a
   change skip its check, so extend the groups and `hack/ci-changed_test.sh` when a job starts reading a new
   directory. Concurrency (cancel a superseded pull request run) lives in `ci.yml` only. Called workflows

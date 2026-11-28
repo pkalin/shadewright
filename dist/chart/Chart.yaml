@@ -10,8 +10,8 @@ sources:
 
 # Both versions follow the release (release-please bumps them with the tag); the chart is published only on a
 # release tag, so what a tag publishes is the chart of that tag.
-version: 0.6.0  # x-release-please-version
-appVersion: "0.6.0"  # x-release-please-version
+version: 0.7.0  # x-release-please-version
+appVersion: "0.7.0"  # x-release-please-version
 
 keywords:
   - kubernetes
@@ -36,11 +36,11 @@ annotations:
       url: https://github.com/shadewright-labs/shadewright
   artifacthub.io/images: |
     - name: executor
-      image: ghcr.io/shadewright-labs/shadewright-executor:0.6.0 # x-release-please-version
+      image: ghcr.io/shadewright-labs/shadewright-executor:0.7.0 # x-release-please-version
     - name: analyzer
-      image: ghcr.io/shadewright-labs/shadewright-analyzer:0.6.0 # x-release-please-version
+      image: ghcr.io/shadewright-labs/shadewright-analyzer:0.7.0 # x-release-please-version
     - name: verifier
-      image: ghcr.io/shadewright-labs/shadewright-verifier:0.6.0 # x-release-please-version
+      image: ghcr.io/shadewright-labs/shadewright-verifier:0.7.0 # x-release-please-version
   artifacthub.io/crds: |
     - kind: Incident
       version: v1alpha1

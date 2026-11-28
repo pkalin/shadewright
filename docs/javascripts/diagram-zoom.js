@@ -75,7 +75,14 @@
   });
   document.addEventListener("keydown", function (e) {
     var el = targetOf(e.target);
-    if (el && el.getAttribute("data-sw-zoom") !== "image" && (e.key === "Enter" || e.key === " ")) {
+    if (!el) return;
+    if (el.getAttribute("data-sw-zoom") !== "image") {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open(el);
+      }
+    } else if (e.key === " " && !e.defaultPrevented && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+      // A link opens on Enter by itself (through the click handler); Space needs to be handled here.
       e.preventDefault();
       open(el);
     }
@@ -228,8 +235,15 @@
       release(e);
     });
     // The diagram opens in a window over the page; a click outside the window (on the dimmed page) closes it.
+    // Only a press that starts on the backdrop dismisses: a toolbar press released there does not.
+    var pressOnBackdrop = false;
+    overlay.addEventListener("pointerdown", function (e) {
+      pressOnBackdrop = e.target === overlay;
+    });
     overlay.addEventListener("click", function (e) {
-      if (e.target === overlay) close();
+      var started = pressOnBackdrop;
+      pressOnBackdrop = false;
+      if (e.target === overlay && started) close();
     });
     stage.addEventListener("pointercancel", release);
 

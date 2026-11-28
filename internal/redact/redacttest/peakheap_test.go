@@ -66,66 +66,10 @@ func TestSmallestPeakKeepsAHeapOverTheLineInEveryRun(t *testing.T) {
 	}
 }
 
-// heapGarbageSink forces short-lived allocations in TestPeakLiveHeapTightExcludesGarbageUnderLargeBaseline onto
-// the heap while keeping only the latest slice reachable.
+// heapGarbageSink keeps only the latest slice of the churn of TestPeakLiveHeapSTW reachable.
 var heapGarbageSink []byte
 
-// Short-lived garbage allocated while the test binary holds a large unrelated baseline heap can inflate a
-// PeakLiveHeapTight reading on a slow or busy machine. The probe does not promise to exclude it: under two heavy
-// jobs on one machine all TightPeakRuns readings of this churn stayed over 1 MiB (1.345 MiB, 2026-11-27). So the
-// churn reading is logged, not asserted. What the probe does promise is asserted: a real live hold above 1 MiB is
-// read above 1 MiB in every run, here and in TestSmallestPeakTightDoesNotUnderRead.
-func TestPeakLiveHeapTightExcludesGarbageUnderLargeBaseline(t *testing.T) {
-	if RaceDetector {
-		t.Skip("measures the heap of the product build")
-	}
-	ballast := make([][]byte, 2048)
-	for i := range ballast {
-		ballast[i] = make([]byte, 10<<10)
-		ballast[i][0] = byte(i)
-	}
-	defer runtime.KeepAlive(ballast)
-
-	const oneMiB = 1 << 20
-	churn := func() {
-		// Allocate 4 MiB of 4 KiB slices over ~30 ms (~130 MiB/s, faster than redaction's ~55 MiB/s) so the
-		// collector can pace under PeakLiveHeapTight. Under GOGC 10 on a 20 MiB baseline, 2+ MiB of garbage
-		// accumulates before collection; SmallestPeakTight keeps the estimate below 1 MiB.
-		var acc byte
-		for range 1024 {
-			b := make([]byte, 4<<10)
-			for range 16 {
-				for i := range b {
-					acc ^= b[i] + byte(i)
-				}
-			}
-			b[0] = acc
-			heapGarbageSink = b
-		}
-		heapGarbageSink = nil
-	}
-	peak, runs := SmallestPeakTightRuns(churn, func(p uint64) bool { return p > oneMiB })
-	t.Logf("churn under 20 MiB baseline: SmallestPeakTight=%.3f MiB (%d/%d runs)", float64(peak)/mb, len(runs), TightPeakRuns)
-	if peak > oneMiB {
-		t.Logf("4 MiB of 4 KiB garbage under a 20 MiB baseline read %.3f MiB across %d runs: the machine is too busy "+
-			"for the collector to keep up, and a bound measured now could fail for garbage alone",
-			float64(peak)/mb, len(runs))
-	}
-
-	holdOver := func() {
-		b := make([]byte, oneMiB+200<<10)
-		for i := range b {
-			b[i] = 1
-		}
-		runtime.KeepAlive(b)
-	}
-	held, heldRuns := SmallestPeakTightRuns(holdOver, func(p uint64) bool { return p > oneMiB })
-	if held <= oneMiB {
-		t.Errorf("holding 1.20 MiB live read %.3f MiB across %d runs, want > 1.00 MiB", float64(held)/mb, len(heldRuns))
-	}
-}
-
-// smallPtrNode is a 64-byte pointer-bearing heap object used to verify that PeakLiveHeapTight
+// smallPtrNode is a 64-byte pointer-bearing heap object used to verify that PeakLiveHeapSTW
 // cannot under-read small scanned allocations.
 type smallPtrNode struct {
 	next *smallPtrNode
@@ -156,88 +100,4 @@ func holdSmallPtrList(count int, hold time.Duration) byte {
 	}
 	runtime.KeepAlive(head)
 	return sum
-}
-
-// PeakLiveHeapTight and SmallestPeakTight must not under-read a function that holds about 1.1 MiB of
-// small pointer-containing objects live, whether kept for the whole run or only briefly at its peak.
-func TestSmallestPeakTightDoesNotUnderRead(t *testing.T) {
-	if RaceDetector {
-		t.Skip("measures the heap of the product build")
-	}
-	const (
-		oneMiB = 1 << 20
-		// 18,048 x 64-byte pointer-bearing nodes = 1.102 MiB live.
-		nodes = 18048
-		reps  = 10
-		brief = MinTightPeakDuration
-	)
-	var sink byte
-	cases := []struct {
-		name string
-		fn   func()
-	}{
-		{
-			name: "whole_run",
-			fn: func() {
-				sink ^= holdSmallPtrList(nodes, 0)
-			},
-		},
-		{
-			name: "brief_peak",
-			fn: func() {
-				sink ^= holdSmallPtrList(nodes, brief)
-				// Force collection before returning so only an in-flight sample can observe the peak.
-				runtime.GC()
-				runtime.GC()
-			},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			minRep := ^uint64(0)
-			for i := range reps {
-				got := PeakLiveHeapTight(tc.fn)
-				minRep = min(minRep, got)
-				if got < oneMiB {
-					t.Errorf("repetition %d/%d read %.3f MiB, want >= 1.000 MiB", i+1, reps, float64(got)/mb)
-				}
-			}
-			var calls int
-			got := SmallestPeakTight(func() {
-				calls++
-				tc.fn()
-			}, func(p uint64) bool {
-				return p >= oneMiB
-			})
-			t.Logf("%s: min of %d reps = %.3f MiB, SmallestPeakTight (%d runs) = %.3f MiB (sink=%d)",
-				tc.name, reps, float64(minRep)/mb, calls, float64(got)/mb, sink)
-			if got < oneMiB {
-				t.Errorf("SmallestPeakTight read %.3f MiB after %d runs, want >= 1.000 MiB", float64(got)/mb, calls)
-			}
-			if calls != TightPeakRuns {
-				t.Errorf("SmallestPeakTight ran %d times, want %d", calls, TightPeakRuns)
-			}
-		})
-	}
-}
-
-// SmallestPeakTightRuns reports each run's reading so callers can notice large first-run drops.
-func TestSmallestPeakTightRunsReportsEachRun(t *testing.T) {
-	if RaceDetector {
-		t.Skip("measures the heap of the product build")
-	}
-	const oneMiB = 1 << 20
-	f, calls := holding(2*mb, 256<<10)
-	peak, runs := SmallestPeakTightRuns(f, func(p uint64) bool { return p > oneMiB })
-	if *calls != 2 || len(runs) != 2 {
-		t.Fatalf("got %d calls and %d runs, want 2", *calls, len(runs))
-	}
-	if runs[0] <= oneMiB || runs[1] > oneMiB {
-		t.Errorf("runs = [%.3f MiB, %.3f MiB], want run 1 > 1.00 MiB and run 2 <= 1.00 MiB",
-			float64(runs[0])/mb, float64(runs[1])/mb)
-	}
-	if peak != min(runs[0], runs[1]) {
-		t.Errorf("peak %.3f MiB != min(runs) %.3f MiB", float64(peak)/mb, float64(min(runs[0], runs[1]))/mb)
-	}
 }
